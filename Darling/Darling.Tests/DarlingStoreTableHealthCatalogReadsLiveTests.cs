@@ -421,19 +421,19 @@ ANALYZE;";
         Assert.True(condition(), "the condition was not met within 60 seconds");
     }
 
-    [Fact]
-    public async Task ACold_TablesRead_AndIndexesRead_StartedTogether_NeverHoldMoreThanTheSizeReadLimit_AndMainGoesFirst()
+    /// <summary>A cold tables read and a cold indexes read started together on a store of many relations, every size-pass read held
+    /// long enough for the others to overlap it. Returns the grants in the order they were handed out, the most held at once and the
+    /// number held at the end.</summary>
+    private static async Task<(DarlingStoreTableHealthReader.SizePassPart[] Granted, int Peak, int HeldAtEnd)> ReadTablesAndIndexesTogetherAsync(
+        System.Threading.CancellationToken ct)
     {
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9364 live tests.");
-        var ct = TestContext.Current.CancellationToken;
 
         var (scratch, listed) = await SeedManyRelationsAsync(baseCs!, ct);
         await using var scratchOwner = scratch;
-        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
         await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        // Every read holds its grant long enough for the others to overlap it, and the grants are recorded in the order they were handed out.
         var granted = new System.Collections.Concurrent.ConcurrentQueue<DarlingStoreTableHealthReader.SizePassPart>();
         DarlingStoreTableHealthReader.OnSizePassGrantOn(store, async part =>
         {
@@ -448,16 +448,27 @@ ANALYZE;";
 
         Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(store));
         Assert.Equal(listed, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(store));
-        var peak = DarlingStoreTableHealthReader.PeakSizeConnectionsHeldOn(store);
-        Assert.InRange(peak, 1, 4);
-        Assert.Equal(0, DarlingStoreTableHealthReader.SizeConnectionsHeldOn(store));
+        return (granted.ToArray(), DarlingStoreTableHealthReader.PeakSizeConnectionsHeldOn(store), DarlingStoreTableHealthReader.SizeConnectionsHeldOn(store));
+    }
 
-        // The main pass's slices all got the limit before the first slice of the extras pass did.
-        var order = granted.ToArray();
-        var lastMain = Array.FindLastIndex(order, p => p == DarlingStoreTableHealthReader.SizePassPart.Main);
-        var firstExtras = Array.FindIndex(order, p => p == DarlingStoreTableHealthReader.SizePassPart.Extras);
+    [Fact]
+    public async Task ACold_TablesRead_AndIndexesRead_StartedTogether_NeverHoldMoreThanTheSizeReadLimit()
+    {
+        var (_, peak, heldAtEnd) = await ReadTablesAndIndexesTogetherAsync(TestContext.Current.CancellationToken);
+
+        Assert.InRange(peak, 1, 4);
+        Assert.Equal(0, heldAtEnd);
+    }
+
+    [Fact]
+    public async Task ACold_TablesRead_GrantsEveryMainSliceBeforeAnyExtrasSlice()
+    {
+        var (granted, _, _) = await ReadTablesAndIndexesTogetherAsync(TestContext.Current.CancellationToken);
+
+        var lastMain = Array.FindLastIndex(granted, p => p == DarlingStoreTableHealthReader.SizePassPart.Main);
+        var firstExtras = Array.FindIndex(granted, p => p == DarlingStoreTableHealthReader.SizePassPart.Extras);
         Assert.True(lastMain >= 0 && firstExtras >= 0, "both passes took grants");
-        Assert.True(lastMain < firstExtras, "a main slice was granted after an extras slice: " + string.Join(",", order));
+        Assert.True(lastMain < firstExtras, "a main slice was granted after an extras slice: " + string.Join(",", granted));
     }
 
     [Fact]
