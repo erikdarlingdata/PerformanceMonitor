@@ -50,7 +50,13 @@ catch (Exception ex) when (ex is ConfigException or CredentialException)
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"Export failed: {ex.Message}");
+    // The whole exception (its type, every inner exception and the stack) goes to stdout, which the scheduler keeps in the
+    // run's log, so a failure names the layer that raised it: a bare "The operation has timed out" can come from a
+    // connection open, a read or an upload. stderr stays one line, because the scheduler records it as the family's last
+    // error and the stale alert quotes it, so the line only gains the exception types.
+    Console.Out.WriteLine(ex.ToString());
+    var types = ex.GetType().Name + (ex.InnerException is { } inner ? " <- " + inner.GetType().Name : "");
+    Console.Error.WriteLine($"Export failed: {ex.Message} ({types})");
     return 1;
 }
 
