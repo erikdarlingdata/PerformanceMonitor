@@ -298,15 +298,17 @@ VALUES ($1,$2,$3,1,$4,$5,'dbo','T',false)",
         await DarlingMcpTestData.ExecAsync(connection, ct, "ANALYZE collect.object_usage_runs");
         await using var tx = await connection.BeginTransactionAsync(ct);
         var sql = "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) " + DarlingRetention.OpenRunsOfDeadPairsDeleteSql.Replace("$1", "'" + t.Floor.ToString("yyyy-MM-dd") + "'::timestamp");
+        var plan = new List<string>();
         await using (var command = new NpgsqlCommand(sql, connection, tx))
         await using (var reader = await command.ExecuteReaderAsync(ct))
         {
             while (await reader.ReadAsync(ct))
             {
-                Console.WriteLine("PLAN9350: " + reader.GetString(0));
+                plan.Add(reader.GetString(0));
             }
         }
 
         await tx.RollbackAsync(ct);
+        Assert.Fail("PLAN9350 " + string.Join(" || ", plan));
     }
 }
