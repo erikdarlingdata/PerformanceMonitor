@@ -1642,7 +1642,7 @@ SELECT
     /* V298 (#9304) adds the payload dimension tables' stamp tables, plain tables on every store and never dropped. Found by catalog, as the V297 line above is. */
     to_regclass('collect.query_text_dim_seen') IS NOT NULL AND to_regclass('collect.query_plan_dim_seen') IS NOT NULL,
     /* V299 (#9349) adds the object usage chain's three tables, plain tables or hypertables, never dropped. Found by catalog, as the V298 line above is. */
-    to_regclass('collect.object_usage_snapshots') IS NOT NULL AND to_regclass('collect.object_usage_deltas') IS NOT NULL AND to_regclass('collect.object_usage_runs') IS NOT NULL",
+    to_regclass('collect.object_usage_snapshots') IS NOT NULL AND to_regclass('collect.object_usage_deltas') IS NOT NULL AND to_regclass('collect.object_usage_runs') IS NOT NULL,
     /* V301 (#9374) adds the last measured relation sizes and the time they were measured, plain tables on every store and never dropped. Found by catalog, as the V299 line above is. */
     to_regclass('collect.store_relation_sizes_latest') IS NOT NULL AND to_regclass('collect.store_relation_sizes_measured') IS NOT NULL";
 
