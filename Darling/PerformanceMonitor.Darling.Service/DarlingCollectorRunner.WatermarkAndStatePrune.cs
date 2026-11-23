@@ -115,22 +115,120 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// Best-effort: a lost record means a lost backfill opportunity, never wrong data — the live
     /// path's own WARNING already disclosed the hole.
     /// </summary>
-    private async Task RecordQueryStoreBackfillHoleAsync(
+    internal async Task RecordQueryStoreBackfillHoleAsync(
         int serverId, string databaseName, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
     {
         try
         {
+            /* #9359: read, merge and save in ONE transaction, reading the key FOR UPDATE. The backfill slice locks the same row
+               while it retires a dug range, so the two serialize: a plain read here saw the value from before the slice, and the
+               save that followed put the serviced range back for the backfill to walk (and copy) again. With no row yet there is
+               nothing to lock and nothing for a slice to have changed, so the upsert alone is right. */
             var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
-            var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
-            var added = QueryStoreBackfillState.AddHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
-            await SaveCollectorStateAsync(
-                serverId, QueryStoreBackfillState.StateCollectorName,
-                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = added },
-                cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            string? encoded;
+            using (var read = new NpgsqlCommand(
+                "SELECT state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3 FOR UPDATE", connection, transaction))
+            {
+                read.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                read.Parameters.AddWithValue(serverId);
+                read.Parameters.AddWithValue(QueryStoreBackfillState.StateCollectorName);
+                read.Parameters.AddWithValue(key);
+                encoded = await read.ExecuteScalarAsync(cancellationToken) as string;
+            }
+
+            var added = QueryStoreBackfillState.AddHole(encoded, fromUtc, toUtc);
+            using (var save = new NpgsqlCommand(
+                "INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES ($1, $2, $3, $4, $5) "
+                + "ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at",
+                connection, transaction))
+            {
+                save.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                save.Parameters.AddWithValue(serverId);
+                save.Parameters.AddWithValue(QueryStoreBackfillState.StateCollectorName);
+                save.Parameters.AddWithValue(key);
+                save.Parameters.AddWithValue(added);
+                /* Naive UTC, Kind-Unspecified: updated_at is timestamp WITHOUT time zone (see SaveCollectorStateRowsAsync). */
+                save.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified) });
+                await save.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
         }
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Recording query_store backfill hole for [{Database}] failed; the live WARNING remains the disclosure", databaseName);
+        }
+    }
+
+    /// <summary>Loads the clamp entries a previous process stored for the server (#9359), once per server, before the cycle's
+    /// first clamp decision. A failed read returns no rows, which is the memory-only behaviour: one possible re-walk after a restart.</summary>
+    private async Task SeedQueryStoreClampReportsAsync(int serverId, CancellationToken cancellationToken)
+    {
+        if (_queryStoreClampReports.IsSeeded(serverId))
+        {
+            return;
+        }
+
+        _queryStoreClampReports.Seed(
+            serverId, await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken));
+    }
+
+    /// <summary>Keeps the stored clamp entries current (#9359): the upsert for each clamped landed cycle and the delete for each
+    /// first one that no longer clamps, all of a server's cycle in ONE transaction. Best-effort like
+    /// <see cref="RecordQueryStoreBackfillHoleAsync"/>: a failed write costs one possible re-walk after a restart, never wrong data,
+    /// and its deletes are not confirmed, so the next cycle that does not clamp returns them again.</summary>
+    internal async Task PersistQueryStoreLandedAsync(int serverId, IReadOnlyList<QueryStoreLandedChange> changes, CancellationToken cancellationToken)
+    {
+        if (changes.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var upserts = changes.Where(change => change.Value is not null).ToList();
+            var deletes = changes.Where(change => change.Value is null).Select(change => change.Key).ToArray();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            if (upserts.Count > 0)
+            {
+                using var upsert = new NpgsqlCommand(@"
+INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at)
+SELECT $1, $2, u.state_key, u.state_value, $5
+FROM unnest($3::text[], $4::text[]) AS u(state_key, state_value)
+ON CONFLICT (server_id, collector_name, state_key)
+DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at", connection, transaction);
+                upsert.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                upsert.Parameters.AddWithValue(serverId);
+                upsert.Parameters.AddWithValue(QueryStoreBackfillState.StateCollectorName);
+                upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = upserts.Select(change => change.Key).ToArray() });
+                upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = upserts.Select(change => change.Value!).ToArray() });
+                /* Naive UTC, Kind-Unspecified: updated_at is timestamp WITHOUT time zone (see SaveCollectorStateRowsAsync). */
+                upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified) });
+                await upsert.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (deletes.Length > 0)
+            {
+                using var delete = new NpgsqlCommand(
+                    "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = ANY($3::text[])", connection, transaction);
+                delete.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                delete.Parameters.AddWithValue(serverId);
+                delete.Parameters.AddWithValue(QueryStoreBackfillState.StateCollectorName);
+                delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = deletes });
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            _queryStoreClampReports.Confirm(serverId, changes);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Storing the query_store clamp entries for server {ServerId} failed; a restart may re-walk a database once", serverId);
         }
     }
 

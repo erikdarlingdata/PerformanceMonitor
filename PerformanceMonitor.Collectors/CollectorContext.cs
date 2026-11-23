@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Text;
 using PerformanceMonitor.Common;
 
@@ -1225,6 +1226,14 @@ public sealed class CollectorContext
     /// WARNING.
     /// </summary>
     public DateTime? PerItemShippedBoundary { get; set; }
+
+    /// <summary>
+    /// #9359: a write the Darling store runs on the batch's own connection and transaction, after the rows and every side write and
+    /// just before the commit. Set by the Query Store backfill so a slice's state commits with its rows; a fault in it rolls the rows
+    /// back. Null for every other caller, where it changes nothing. Typed on the provider-neutral base classes so this project does
+    /// not reference the store driver.
+    /// </summary>
+    public Func<DbConnection, DbTransaction, System.Threading.CancellationToken, System.Threading.Tasks.Task>? StoreTransactionWrite { get; set; }
 
     /// <summary>
     /// Catch-up signal (#1836): set by a definition whose cutoff computation floored a stale watermark

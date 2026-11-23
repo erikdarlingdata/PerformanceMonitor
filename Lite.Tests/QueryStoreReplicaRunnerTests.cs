@@ -416,12 +416,181 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         Assert.Equal(afterRecovery, await ReadHoleAsync(f, Sales));
     }
 
+    /* ---- #9359: the last landed clamped read survives a restart ---- */
+
+    /// <summary>A second service over the same store, as after a restart: it shares the DuckDB file and the readers but none of the
+    /// first one's memory.</summary>
+    private void Restart(Fixture f, int engineEdition = 3)
+    {
+        var service = new RemoteCollectorService(f.DuckDb, f.ServerManager, new ScheduleManager(_configDir), new CapturingLogger(f.Logged));
+        service.ServerReaderOverrideForTests = plan => Answer(f, plan, replica: false);
+        service.ReplicaReaderOverrideForTests = plan => Answer(f, plan, replica: true);
+        if (engineEdition == 5)
+        {
+            service.AzureDatabaseListOverrideForTests = (_, _) => Task.FromResult(new List<string> { Sales });
+            service.AzureDatabaseReaderOverrideForTests = (database, plan) => Answer(f, plan, replica: false, database);
+        }
+
+        f.Service = service;
+    }
+
+    private static async Task<string?> ReadStateAsync(Fixture f, string key)
+    {
+        using var connection = f.DuckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3";
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = f.ServerId });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = QueryStoreBackfillState.StateCollectorName });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = key });
+        return await command.ExecuteScalarAsync() as string;
+    }
+
+    private static async Task WriteStateAsync(Fixture f, string key, string? value)
+    {
+        using var connection = f.DuckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = value is null
+            ? "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3"
+            : "INSERT OR REPLACE INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES ($1, $2, $3, $4, $5)";
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = f.ServerId });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = QueryStoreBackfillState.StateCollectorName });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = key });
+        if (value is not null)
+        {
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = value });
+            command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = DateTime.UtcNow });
+        }
+
+        await command.ExecuteNonQueryAsync();
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(5)]
+    public async Task AnIdleDatabaseAfterARestart_OpensNoHole_AndWarnsNothing(int engineEdition)
+    {
+        var f = await IdleDatabaseWithStaleWatermarkAsync(WatermarkPolicy.MaxCatchup + TimeSpan.FromMinutes(30), engineEdition);
+        await RunAsync(f);
+        Assert.Equal(1, ClampWarnings(f));
+        Assert.NotNull(await ReadStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Sales));
+
+        /* The backfill worker digs that hole and retires it. The range after it was read live and holds nothing. */
+        await WriteStateAsync(f, QueryStoreBackfillState.HoleKeyPrefix + Sales, null);
+        f.Logged.Clear();
+        Restart(f, engineEdition);
+
+        await RunAsync(f);
+
+        /* The restart forgot nothing: the same raw watermark is already reported and read, so there is no warning and no new hole
+           for the backfill to dig over a span that holds nothing. */
+        Assert.Equal(0, ClampWarnings(f));
+        Assert.Null(await ReadHoleAsync(f, Sales));
+    }
+
+    [Fact]
+    public async Task ARealGapAfterARestart_OpensItsHoleAtWhatTheLastCycleRead()
+    {
+        var f = await BuildAsync(replica: null);
+        var now = Truncate(DateTime.UtcNow);
+        f.PrimaryRows = [Row(queryId: 1, lastExecution: now.AddMinutes(-30))];
+        await RunAsync(f);
+
+        /* The stored watermark is 3 hours old, and the cycle that clamped it before the restart read up to 90 minutes ago. */
+        var watermark = now.AddHours(-3);
+        var readThrough = now.AddMinutes(-90);
+        await SetWatermarkAsync(f, watermark);
+        await WriteStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Sales, QueryStoreBackfillState.EncodeLanded(watermark, readThrough));
+        f.PrimaryRows = [];
+        Restart(f);
+
+        await RunAsync(f);
+
+        /* The new floor (collection time minus an hour) lies past what that cycle read, so the span between is a real gap, and the
+           hole starts where the read stopped. Without the stored entry it started at the raw watermark. */
+        var hole = await ReadHoleAsync(f, Sales);
+        Assert.NotNull(hole);
+        Assert.Equal(readThrough, hole!.Value.From);
+    }
+
+    [Fact]
+    public async Task ADatabaseThatStopsClamping_RetiresItsStoredEntryOnce()
+    {
+        var f = await IdleDatabaseWithStaleWatermarkAsync(WatermarkPolicy.MaxCatchup + TimeSpan.FromMinutes(30));
+        await RunAsync(f);
+        var landedKey = QueryStoreBackfillState.LandedKeyPrefix + Sales;
+        Assert.NotNull(await ReadStateAsync(f, landedKey));
+
+        /* New rows arrive. That cycle still read the stale watermark, so it clamps and keeps the entry. The next one sees the
+           fresh watermark, clamps nothing, and the stored entry is gone. */
+        f.PrimaryRows = [Row(queryId: 2, lastExecution: DateTime.UtcNow.AddMinutes(-20))];
+        await RunAsync(f);
+        Assert.NotNull(await ReadStateAsync(f, landedKey));
+        await RunAsync(f);
+        Assert.Null(await ReadStateAsync(f, landedKey));
+    }
+
+    [Fact]
+    public async Task EveryClampingDatabaseOfTheServer_StoresItsEntry_AndEveryOneThatStopsHasItRetired()
+    {
+        var f = await BuildAsync(replica: null);
+        f.Databases.Add(Orders);
+        f.PrimaryRowsByDb[Sales] = [Row(queryId: 1, lastExecution: DateTime.UtcNow.AddMinutes(-30))];
+        f.PrimaryRowsByDb[Orders] = [Row(queryId: 10, lastExecution: DateTime.UtcNow.AddMinutes(-30))];
+        await RunAsync(f);
+        f.PrimaryRowsByDb[Sales] = [];
+        f.PrimaryRowsByDb[Orders] = [];
+        await SetWatermarkAsync(f, Truncate(DateTime.UtcNow - WatermarkPolicy.MaxCatchup - TimeSpan.FromMinutes(30)));
+
+        await RunAsync(f);
+
+        Assert.NotNull(await ReadStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Sales));
+        Assert.NotNull(await ReadStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Orders));
+
+        /* New rows arrive for both. The first cycle still reads the stale watermark and keeps both entries; the next clamps
+           nothing and retires both in its one write. */
+        f.PrimaryRowsByDb[Sales] = [Row(queryId: 2, lastExecution: DateTime.UtcNow.AddMinutes(-20))];
+        f.PrimaryRowsByDb[Orders] = [Row(queryId: 20, lastExecution: DateTime.UtcNow.AddMinutes(-20))];
+        await RunAsync(f);
+        await RunAsync(f);
+
+        Assert.Null(await ReadStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Sales));
+        Assert.Null(await ReadStateAsync(f, QueryStoreBackfillState.LandedKeyPrefix + Orders));
+    }
+
+    [Fact]
+    public async Task AFailedDeleteOfTheStoredEntry_IsReturnedAgainNextCycle_AndOnceItLandsNothingMoreIs()
+    {
+        var f = await IdleDatabaseWithStaleWatermarkAsync(WatermarkPolicy.MaxCatchup + TimeSpan.FromMinutes(30));
+        await RunAsync(f);
+        var landedKey = QueryStoreBackfillState.LandedKeyPrefix + Sales;
+        Assert.NotNull(await ReadStateAsync(f, landedKey));
+        var reports = f.Service.QueryStoreClampReportsForTests;
+
+        /* The first cycle that stops clamping asks for a delete, and the write fails (a cancelled token fails it before it opens). */
+        var failed = reports.Land(f.ServerId, Sales, null, DateTime.UtcNow);
+        Assert.NotNull(failed);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await f.Service.PersistQueryStoreLandedAsync(f.ServerId, [failed!.Value], cancelled.Token);
+        Assert.NotNull(await ReadStateAsync(f, landedKey));
+
+        /* The next cycle asks again, the write lands, and the cycle after that has nothing to delete. */
+        var again = reports.Land(f.ServerId, Sales, null, DateTime.UtcNow);
+        Assert.NotNull(again);
+        await f.Service.PersistQueryStoreLandedAsync(f.ServerId, [again!.Value], CancellationToken.None);
+        Assert.Null(await ReadStateAsync(f, landedKey));
+        Assert.Null(reports.Land(f.ServerId, Sales, null, DateTime.UtcNow));
+    }
+
     private static DateTime Truncate(DateTime value) =>
         new(value.Ticks - (value.Ticks % TimeSpan.TicksPerSecond), DateTimeKind.Utc);
 
     private sealed class Fixture
     {
-        public required RemoteCollectorService Service { get; init; }
+        public required RemoteCollectorService Service { get; set; }
+        public required ServerManager ServerManager { get; init; }
         public required ServerConnection Server { get; init; }
         public required int ServerId { get; init; }
         public required DuckDbInitializer DuckDb { get; init; }
@@ -478,6 +647,7 @@ public sealed class QueryStoreReplicaRunnerTests : IDisposable
         var fixture = new Fixture
         {
             Service = service,
+            ServerManager = serverManager,
             Server = server,
             ServerId = RemoteCollectorService.GetServerId(server),
             DuckDb = duckDb,
