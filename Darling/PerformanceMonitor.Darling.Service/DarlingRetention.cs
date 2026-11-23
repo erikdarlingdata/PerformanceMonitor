@@ -637,6 +637,16 @@ public static class DarlingRetention
                 }
             }
 
+            /* #9349: the object usage chain tables are derived from index_object_stats and follow ITS horizon, the one the loop above
+               resolved for it (a per-collector override included), so a derived row never outlives the raw rows it was computed from.
+               collect.object_usage_runs is not here: the chain builder purges it. */
+            var objectUsageChain = await PurgeObjectUsageChainAsync(
+                postgres, timescaleAvailable, retentionDaysFor, utcNow, logger, cancellationToken, walPacer);
+            tablesPurged += objectUsageChain.TablesPurged;
+            totalRowsDeleted += objectUsageChain.RowsDeleted;
+            totalChunksDropped += objectUsageChain.ChunksDropped;
+            tablesFailed += objectUsageChain.TablesFailed;
+
             /* #1767 payload dimensions. query_text_dim / query_plan_dim are plain tables holding one copy
                of each distinct query text / plan XML; the fact rows carry only a digest. They must be
                bounded or they re-create the very problem they solve — ~23 MB/hour of distinct plans on the
@@ -1773,6 +1783,73 @@ public static class DarlingRetention
         => customRetentionDays is int days
             ? $"Manual purge (purge_now, custom retention {CountText.Plural(days, "day")})"
             : "Manual purge (purge_now)";
+
+    /// <summary>
+    /// The retention horizon of the object usage chain tables (#9349): the one <see cref="PurgeWithPacerAsync"/> resolves for
+    /// <c>index_object_stats</c>, from the same per-collector retention and the same clamp, so the chain never keeps a day the raw table
+    /// has dropped. A store whose collector set has no <c>index_object_stats</c> schedule gets the clamp floor, which keeps no derived day
+    /// beyond a day the source could not have either.
+    /// </summary>
+    internal static int ObjectUsageChainRetentionDays(Func<string, int>? retentionDaysFor)
+    {
+        var source = ObjectUsageChain.SourceCollector;
+        var configured = retentionDaysFor?.Invoke(source)
+            ?? (CollectorScheduleDefaults.All.TryGetValue(source, out var schedule) ? schedule.RetentionDays : 1);
+        return EffectivePurgeRetentionDays(source, configured);
+    }
+
+    /// <summary>
+    /// Purges <c>collect.object_usage_snapshots</c> and <c>collect.object_usage_deltas</c> at <see cref="ObjectUsageChainRetentionDays"/> (#9349):
+    /// <c>drop_chunks</c> where the table is a hypertable on a TimescaleDB store (the chunk width is the one <c>index_object_stats</c> has, so the same
+    /// days go), and the time-sliced DELETE of a plain table otherwise, or where the drop failed. A table that is not there yet (a store behind V299)
+    /// fails its statement, is warned about by the helper it runs through, and counts as failed for the pass.
+    /// </summary>
+    internal static async Task<(int TablesPurged, int RowsDeleted, int ChunksDropped, int TablesFailed)> PurgeObjectUsageChainAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, Func<string, int>? retentionDaysFor, DateTime utcNow, ILogger? logger,
+        CancellationToken cancellationToken, RetentionWalPacer? walPacer = null)
+    {
+        var retentionDays = ObjectUsageChainRetentionDays(retentionDaysFor);
+        var tablesPurged = 0;
+        var rowsDeleted = 0;
+        var chunksDropped = 0;
+        var tablesFailed = 0;
+        foreach (var bare in ObjectUsageChain.PerSnapshotTables)
+        {
+            var table = "collect." + bare;
+            if (timescaleAvailable)
+            {
+                var (outcome, dropped) = await DropChunksOneAsync(postgres, table, retentionDays, logger, cancellationToken);
+                if (outcome == DropChunksOutcome.Dropped)
+                {
+                    tablesPurged++;
+                    chunksDropped += dropped;
+                    continue;
+                }
+
+                if (outcome == DropChunksOutcome.GaveWay)
+                {
+                    continue;
+                }
+
+                /* drop_chunks failed (warned): the table is most likely still plain, so the DELETE below keeps its horizon. */
+            }
+
+            var deleted = await PurgeOneAsync(
+                postgres, table, TimeSlicedDeleteSql(table, ObjectUsageChain.TimeColumn),
+                utcNow.AddDays(-retentionDays), logger, cancellationToken, pacer: walPacer);
+            if (deleted is null)
+            {
+                tablesFailed++;
+            }
+            else
+            {
+                tablesPurged++;
+                rowsDeleted += deleted.Value;
+            }
+        }
+
+        return (tablesPurged, rowsDeleted, chunksDropped, tablesFailed);
+    }
 
     /// <summary>
     /// The batched purge statement for one collector table — deletes expired rows one time slice at a time

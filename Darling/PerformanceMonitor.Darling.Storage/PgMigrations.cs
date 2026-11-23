@@ -3568,6 +3568,19 @@ END $$;";
     /// </summary>
     private static readonly string V298Sql = PayloadDimensionSeen.RungSql(MigrationCommandTimeoutSeconds - 20);
 
+    /// <summary>
+    /// V299 (#9349): the persisted object usage chain. <c>collect.object_usage_snapshots</c> (one row per snapshot of a database: the chain step's facts),
+    /// <c>collect.object_usage_deltas</c> (one row per index the step contributed to or moved) and <c>collect.object_usage_runs</c> (index presence and
+    /// identity), as <see cref="ObjectUsageChain.CreateSql"/> has them. Created empty, so no data moves and the rung scans nothing. Every statement is
+    /// idempotent. Plain tables here on every store: the service turns the two per-snapshot tables into compressed hypertables on a TimescaleDB store after
+    /// the extension exists (<see cref="TimescaleSupport.EnsureObjectUsageHypertablesAsync"/>), and the retention pass purges them at the horizon of
+    /// <c>index_object_stats</c>, which they derive from. No GRANT: the <c>collect</c> schema's blanket SELECT covers them.
+    ///
+    /// <para><b>An older build against this store.</b> It does not know the tables: it neither reads, fills nor purges them, and every read it makes names
+    /// its own columns. Nothing it reads changes.</para>
+    /// </summary>
+    private const string V299Sql = ObjectUsageChain.CreateSql;
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -3979,6 +3992,9 @@ END $$;";
            refresh no longer rewrites a text or plan row. Per dimension: the table, the insert trigger, the backfill, the two constraints and the
            index, then the drop of the dimension's own last_seen index. */
         new Migration(298, "payload-dimension-seen", V298Sql),
+        /* V299 (#9349): the persisted object usage chain, three tables created empty (snapshots, deltas, runs). The two per-snapshot tables become compressed
+           hypertables on a TimescaleDB store at service start, and are purged with index_object_stats. */
+        new Migration(ObjectUsageChain.Version, "object-usage-chain", V299Sql),
     };
 
     /// <summary>
