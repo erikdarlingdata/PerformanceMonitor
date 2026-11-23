@@ -150,6 +150,7 @@ FROM collect.store_relation_sizes_latest AS l";
 
         await using (var stamp = new NpgsqlCommand(StampSql, connection, transaction))
         {
+            stamp.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
             stamp.Parameters.Add(new NpgsqlParameter
             {
                 Value = DateTime.SpecifyKind(measured.MeasuredAtUtc, DateTimeKind.Unspecified),
@@ -186,6 +187,7 @@ FROM collect.store_relation_sizes_latest AS l";
             DateTime measuredAt;
             await using (var stamp = new NpgsqlCommand(ReadStampSql, connection, transaction))
             {
+                stamp.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
                 var value = await stamp.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
                 if (value is not DateTime stored)
                 {
