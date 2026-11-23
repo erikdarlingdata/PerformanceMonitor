@@ -167,6 +167,10 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         Query(10, "SELECT 10 FROM dbo.coldonly", null, 280_000, hotDigest: false);
         /* 9: no regression: the newest plan costs what the cheap one does. */
         Query(9, "SELECT 9", "SELECT 9", 20_000);
+        /* 11: an interval whose newest snapshot holds a LOWER count than an older one (a counter that restarted): the newest row wins,
+           not the biggest count. Collection time ranks before the count. */
+        Query(11, "SELECT 11 FROM dbo.newest", "SELECT 11 FROM dbo.newest", 290_000, hotDigest: false);
+        _statements.Add(Row(11, 112, "0xCOSTLY112", 11, Recent.AddMinutes(3), Recent, 25, 120_000, text: "SELECT 11 FROM dbo.newest"));
 
         var dims = new[] { "SELECT 1 FROM dbo.tie1", "SELECT 3 FROM dbo.replica", "SELECT 4 FROM dbo.forced", "SELECT 5 FROM dbo.samehash", "EXEC sp_flush_commit_table_on_demand 1000", "SELECT 9" };
         Execute(dims.Select(DimRow).ToArray());
@@ -202,7 +206,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         /* The comparison is not vacuous: every regressed query is there, with the text its rows hold, and nothing else. */
         var byKey = reference.ToDictionary(c => (c.DatabaseName, c.QueryId));
         Assert.Equal(
-            new[] { ("Db1", 1L), ("Db1", 2L), ("Db1", 3L), ("Db1", 4L), ("Db1", 5L), ("Db1", 6L), ("Db1", 8L), ("Db1", 10L), ("Db2", 8L) }.OrderBy(k => k),
+            new[] { ("Db1", 1L), ("Db1", 2L), ("Db1", 3L), ("Db1", 4L), ("Db1", 5L), ("Db1", 6L), ("Db1", 8L), ("Db1", 10L), ("Db1", 11L), ("Db2", 8L) }.OrderBy(k => k),
             byKey.Keys.OrderBy(k => k));
         Assert.Equal("SELECT 1 FROM dbo.tie1", byKey[("Db1", 1)].QueryText);
         Assert.Equal("SELECT 2 FROM dbo.nullcount", byKey[("Db1", 2)].QueryText);
