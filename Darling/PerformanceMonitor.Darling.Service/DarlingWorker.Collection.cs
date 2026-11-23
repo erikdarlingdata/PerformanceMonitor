@@ -2280,6 +2280,10 @@ public sealed partial class DarlingWorker
         {
             /* Shutdown (a body-internal await observed the token) — quiet and expected. */
         }
+        catch (Exception ex) when (IsStopping(ex, stoppingToken))
+        {
+            /* #9392: a dependency the host disposed while this body was still using it, once the service is stopping. */
+        }
         catch (OperationCanceledException ex)
         {
             /* #5642: a cancellation that is NOT the service stopping (an inner timeout token that escaped) used to be

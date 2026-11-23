@@ -40,7 +40,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// of WAL, and an abandoned slot keeps all of it. The slot check covers the whole server, not this database, because any slot holds WAL
 /// for the cluster. An active slot, or a small one, is listed and is not a reason.</item>
 /// <item><b>A TimescaleDB background job crashing</b> (<see cref="DarlingStoreJobCrashReader"/>, <c>consecutive_crashes</c> above
-/// zero): a crashed job backs off, and maintenance on top of it hides whether the cause was the maintenance.</item>
+/// zero, not counting the provisional crash a running job carries, #9391): a crashed job backs off, and maintenance on top of it hides whether the cause was the maintenance.</item>
 /// <item><b>A check that could not run</b> (a refused read), named, never counted as clear.</item>
 /// </list>
 ///

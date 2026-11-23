@@ -30,28 +30,60 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class DarlingStoreJobCrashReader
 {
-    /// <summary>The read. One row per job TimescaleDB has run at least once (a job that never ran has no stat row).</summary>
+    /// <summary>
+    /// The read. One row per job TimescaleDB has run at least once (a job that never ran has no stat row).
+    ///
+    /// <para><c>running</c> is true when a backend in this database carries the job's <c>application_name</c> (#9391). It is not read from
+    /// <c>timescaledb_information.job_stats</c>: that view matches the job's backend in <c>pg_stat_activity</c> on <c>state</c>, a column
+    /// PostgreSQL hides from a role that is neither a member of the backend's role nor of <c>pg_read_all_stats</c>, and the store's
+    /// <c>mcp</c> and <c>viewer</c> roles are neither, so for them the view never says a job runs. <c>datid</c> and <c>application_name</c>
+    /// are shown to every role, and a TimescaleDB job worker sets its <c>application_name</c> to the job's <c>jobs.application_name</c>.</para>
+    /// </summary>
     public const string Sql = @"
 SELECT s.job_id, j.proc_name, j.hypertable_name, s.consecutive_crashes, s.total_crashes, s.consecutive_failures,
        CASE WHEN pg_catalog.isfinite(s.next_start) THEN s.next_start END AS next_start,
-       (s.next_start = '-infinity' AND s.consecutive_crashes > 0) AS crash_backoff
+       (s.next_start = '-infinity' AND s.consecutive_crashes > 0) AS crash_backoff,
+       EXISTS (SELECT 1
+               FROM pg_catalog.pg_stat_activity AS a
+               WHERE a.datid = (SELECT d.oid FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database())
+               AND   a.application_name = j.application_name) AS running
 FROM _timescaledb_internal.bgw_job_stat AS s
-JOIN timescaledb_information.jobs AS j USING (job_id)
-ORDER BY s.consecutive_crashes DESC, s.total_crashes DESC, s.job_id";
+JOIN timescaledb_information.jobs AS j USING (job_id)";
 
     /// <summary>One job's crash counters (<see cref="Sql"/>).</summary>
     /// <param name="JobId">TimescaleDB's job id.</param>
     /// <param name="ProcName">The job's procedure, for example <c>policy_compression</c>.</param>
     /// <param name="HypertableName">The hypertable or continuous aggregate the job serves, null for a job with none.</param>
-    /// <param name="ConsecutiveCrashes">Crashes since the job last finished a run. Above zero the job is backing off.</param>
-    /// <param name="TotalCrashes">Crashes over the job's life.</param>
+    /// <param name="ConsecutiveCrashes">Crashes since the job last finished a run, not counting the provisional crash of a run in progress
+    /// (#9391). Above zero the job is backing off.</param>
+    /// <param name="TotalCrashes">Crashes over the job's life, not counting the provisional crash of a run in progress.</param>
     /// <param name="ConsecutiveFailures">Failures (error returns) since the job last succeeded.</param>
     /// <param name="NextStart">When TimescaleDB will start the job next (UTC). Null when none is scheduled, and null for an infinite
     /// value, which Npgsql would otherwise turn into the year 0001.</param>
     /// <param name="CrashBackoff">True when <c>next_start</c> is <c>-infinity</c> and the job has crashed since it last finished a run.
-    /// That is a crash backoff: the scheduler sets the next start itself, so the job is not lost.</param>
+    /// That is a crash backoff: the scheduler sets the next start itself, so the job is not lost. Always false while the job runs.</param>
+    /// <param name="Running">True when the job has a live backend (#9391). TimescaleDB counts a crash when a run starts and takes it back
+    /// when the run finishes cleanly, so a running job's stored counters are one too high. <see cref="Adjust"/> takes that one out.</param>
     public sealed record StoreJobCrash(
-        int JobId, string ProcName, string? HypertableName, int ConsecutiveCrashes, long TotalCrashes, int ConsecutiveFailures, DateTime? NextStart, bool CrashBackoff);
+        int JobId, string ProcName, string? HypertableName, int ConsecutiveCrashes, long TotalCrashes, int ConsecutiveFailures, DateTime? NextStart, bool CrashBackoff,
+        bool Running = false);
+
+    /// <summary>
+    /// The crash counters of a job as TimescaleDB stored them, turned into the real ones (#9391). While a run is in progress the stored
+    /// counters include the one provisional crash the run's start added (<c>consecutive_crashes</c> and <c>total_crashes</c> up by one,
+    /// <c>next_start</c> set to <c>-infinity</c>), so a running job reads one crash lower, never below zero, and is not in a crash
+    /// backoff. A job that died mid-run has no live backend, reads as not running, and keeps its crash.
+    /// </summary>
+    public static StoreJobCrash Adjust(StoreJobCrash stored, bool running)
+        => running
+            ? stored with
+            {
+                ConsecutiveCrashes = Math.Max(0, stored.ConsecutiveCrashes - 1),
+                TotalCrashes = Math.Max(0L, stored.TotalCrashes - 1),
+                CrashBackoff = false,
+                Running = true,
+            }
+            : stored with { Running = false };
 
     /// <summary>The result of <see cref="ReadAsync"/>.</summary>
     /// <param name="Available">True when the counters were read (a store without TimescaleDB reads as available with no jobs).</param>
@@ -75,6 +107,42 @@ ORDER BY s.consecutive_crashes DESC, s.total_crashes DESC, s.job_id";
         }
     }
 
+    private static async Task<IReadOnlyList<StoreJobCrash>> ReadJobsAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    {
+        var jobs = new List<StoreJobCrash>();
+        await using var command = postgres.CreateCommand(Sql);
+        command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            jobs.Add(Adjust(
+                new StoreJobCrash(
+                    JobId: reader.GetInt32(0),
+                    ProcName: reader.GetString(1),
+                    HypertableName: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    ConsecutiveCrashes: reader.GetInt32(3),
+                    TotalCrashes: reader.GetInt64(4),
+                    ConsecutiveFailures: reader.GetInt32(5),
+                    NextStart: reader.IsDBNull(6) ? null : DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Utc),
+                    CrashBackoff: reader.GetBoolean(7)),
+                running: reader.GetBoolean(8)));
+        }
+
+        /* Most crashes first, by the real counts. */
+        jobs.Sort(static (x, y) =>
+        {
+            var byConsecutive = y.ConsecutiveCrashes.CompareTo(x.ConsecutiveCrashes);
+            if (byConsecutive != 0)
+            {
+                return byConsecutive;
+            }
+
+            var byTotal = y.TotalCrashes.CompareTo(x.TotalCrashes);
+            return byTotal != 0 ? byTotal : x.JobId.CompareTo(y.JobId);
+        });
+        return jobs;
+    }
+
     /// <summary>Reads the counters. Never throws for a missing view, a missing column or a refused role: it says why in the result.</summary>
     public static async Task<StoreJobCrashRead> ReadAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
@@ -91,24 +159,7 @@ ORDER BY s.consecutive_crashes DESC, s.total_crashes DESC, s.job_id";
                 }
             }
 
-            var jobs = new List<StoreJobCrash>();
-            await using var command = postgres.CreateCommand(Sql);
-            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                jobs.Add(new StoreJobCrash(
-                    JobId: reader.GetInt32(0),
-                    ProcName: reader.GetString(1),
-                    HypertableName: reader.IsDBNull(2) ? null : reader.GetString(2),
-                    ConsecutiveCrashes: reader.GetInt32(3),
-                    TotalCrashes: reader.GetInt64(4),
-                    ConsecutiveFailures: reader.GetInt32(5),
-                    NextStart: reader.IsDBNull(6) ? null : DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Utc),
-                    CrashBackoff: reader.GetBoolean(7)));
-            }
-
-            return new StoreJobCrashRead(true, null, jobs);
+            return new StoreJobCrashRead(true, null, await ReadJobsAsync(postgres, cancellationToken));
         }
         catch (PostgresException ex) when (ex.SqlState is "42P01" or "42703" or "42501" or "3F000" or "42883")
         {
