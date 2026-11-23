@@ -114,11 +114,13 @@ public static class ObjectUsageChainBuilder
         AND   last_time IS NULL
         """;
 
-    private const string DeletePairSql = """
-        DELETE FROM collect.object_usage_deltas WHERE server_id = $1 AND database_name = $2;
-        DELETE FROM collect.object_usage_runs WHERE server_id = $1 AND database_name = $2;
-        DELETE FROM collect.object_usage_snapshots WHERE server_id = $1 AND database_name = $2;
-        """;
+    /// <summary>The pair's rows in each table, one statement each (a parameterised statement is a single command). $1 server_id, $2 database_name.</summary>
+    private static readonly string[] DeletePairSql =
+    [
+        "DELETE FROM collect.object_usage_deltas WHERE server_id = $1 AND database_name = $2",
+        "DELETE FROM collect.object_usage_runs WHERE server_id = $1 AND database_name = $2",
+        "DELETE FROM collect.object_usage_snapshots WHERE server_id = $1 AND database_name = $2",
+    ];
 
     private const string InsertSnapshotSql = """
         INSERT INTO collect.object_usage_snapshots
@@ -195,7 +197,13 @@ public static class ObjectUsageChainBuilder
 
         if (rebuild)
         {
-            await ExecuteAsync(connection, null, DeletePairSql, [serverId, databaseName], cancellationToken);
+            await using var delete = await connection.BeginTransactionAsync(cancellationToken);
+            foreach (var statement in DeletePairSql)
+            {
+                await ExecuteAsync(connection, delete, statement, [serverId, databaseName], cancellationToken);
+            }
+
+            await delete.CommitAsync(cancellationToken);
         }
         else
         {
