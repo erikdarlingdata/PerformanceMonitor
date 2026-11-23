@@ -77,16 +77,18 @@ public class MonitorOwnBlockingFactTests : IClassFixture<SharedDuckDbFixture>, I
        first, so a filter applied after the cap would keep only these). Each is a distinct wait: blocked spid 1000 + i, blocked by spid 60. */
     private const int PastTheCap = 5100;
 
-    private async Task SeedMonitorOnlyFloodAsync(bool snapshots)
+    /* With floodDatabase set the flood is user blocking inside that database (as a database monitored as its own target would have), not the monitor's own. */
+    private async Task SeedMonitorOnlyFloodAsync(bool snapshots, string? floodDatabase = null)
     {
+        var apps = floodDatabase is null ? "'PerformanceMonitorDarling', 'PerformanceMonitorDarling'" : "'OrderEntry', 'OrderEntry'";
         var sql = snapshots
-            ? @"INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, event_time, server_id, server_name, wait_time_ms, blocked_spid, blocking_spid, blocked_client_app, blocking_client_app, monitor_loop)
-                SELECT -1000000 - i, $1::TIMESTAMP + to_seconds(i), $1::TIMESTAMP + to_seconds(i), $2, 'TestServer', 12000, 1000 + i, 60, 'PerformanceMonitorDarling', 'PerformanceMonitorDarling', 1
+            ? $@"INSERT INTO dmv_blocking_snapshots (collection_id, collection_time, event_time, server_id, server_name, wait_time_ms, blocked_spid, blocking_spid, blocked_client_app, blocking_client_app, monitor_loop, database_name)
+                SELECT -1000000 - i, $1::TIMESTAMP + to_seconds(i), $1::TIMESTAMP + to_seconds(i), $2, 'TestServer', 12000, 1000 + i, 60, {apps}, 1, $4
                 FROM range($3) AS t(i)"
-            : @"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, wait_time_ms, blocked_spid, blocking_spid, blocked_client_app, blocking_client_app)
-                SELECT -1000000 - i, $1::TIMESTAMP + to_seconds(i), $1::TIMESTAMP + to_seconds(i), $2, 'TestServer', 12000, 1000 + i, 60, 'PerformanceMonitorDarling', 'PerformanceMonitorDarling'
+            : $@"INSERT INTO blocked_process_reports (blocked_report_id, collection_time, event_time, server_id, server_name, wait_time_ms, blocked_spid, blocking_spid, blocked_client_app, blocking_client_app, database_name)
+                SELECT -1000000 - i, $1::TIMESTAMP + to_seconds(i), $1::TIMESTAMP + to_seconds(i), $2, 'TestServer', 12000, 1000 + i, 60, {apps}, $4
                 FROM range($3) AS t(i)";
-        await ExecAsync(sql, WindowStart.AddMinutes(60), ServerId, PastTheCap);
+        await ExecAsync(sql, WindowStart.AddMinutes(60), ServerId, PastTheCap, floodDatabase);
     }
 
     private async Task<List<Fact>> FactsAsync() =>
@@ -156,12 +158,51 @@ public class MonitorOwnBlockingFactTests : IClassFixture<SharedDuckDbFixture>, I
         Assert.Equal(1.0, facts.Single(f => f.Key == "BLOCKING_CHAIN").Metadata["worst_chain_victim_count"]);
     }
 
-    private async Task<AnalysisFinding> DrillDownAsync(string pathKey)
+    private const string SeparateDatabase = "ShardDb";
+
+    /* #9346: a master target leaves out the pairs of a database monitored as its own target. 5,100 newer pairs of that database must not push
+       the master's own pair (no database recorded) out of either read, so the chain still forms and the drill-down shows it. */
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MoreSeparatelyMonitoredPairsThanTheRowCap_DoNotPushTheMastersChainOutOfTheFact(bool snapshots)
+    {
+        await SeedObservedWindowAsync();
+        if (snapshots) await SeedSnapshotPairAsync(1, "OrderEntry", "OrderEntry");
+        else await SeedPairAsync(1, "OrderEntry", "OrderEntry");
+        await SeedMonitorOnlyFloodAsync(snapshots, SeparateDatabase);
+
+        var facts = await new DuckDbFactCollector(_duckDb).CollectFactsAsync(new AnalysisContext
+        {
+            ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = WindowStart, TimeRangeEnd = WindowEnd,
+            SeparatelyMonitoredDatabases = [SeparateDatabase.ToLowerInvariant()]
+        });
+
+        Assert.Equal(1.0, facts.Single(f => f.Key == "BLOCKING_CHAIN").Metadata["worst_chain_victim_count"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MoreSeparatelyMonitoredPairsThanTheRowCap_DoNotPushTheMastersChainOutOfTheDrillDown(bool snapshots)
+    {
+        if (snapshots) await SeedSnapshotPairAsync(1, "OrderEntry", "OrderEntry");
+        else await SeedPairAsync(1, "OrderEntry", "OrderEntry");
+        await SeedMonitorOnlyFloodAsync(snapshots, SeparateDatabase);
+
+        var finding = await DrillDownAsync("BLOCKING_CHAIN", [SeparateDatabase.ToLowerInvariant()]);
+
+        var apexes = Section(finding, "reconstructed_blocking_chains").Select(c => c!["apex_spid"]!.GetValue<int>()).ToArray();
+        Assert.Equal([50], apexes);
+    }
+
+    private async Task<AnalysisFinding> DrillDownAsync(string pathKey, IReadOnlyList<string>? separatelyMonitored = null)
     {
         var finding = new AnalysisFinding { RootFactKey = pathKey, StoryPath = pathKey, PathKeys = [pathKey], Severity = 1.0 };
         await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], new AnalysisContext
         {
             ServerId = ServerId, ServerName = "TestServer", TimeRangeStart = WindowStart, TimeRangeEnd = WindowEnd,
+            SeparatelyMonitoredDatabases = separatelyMonitored
         });
         return finding;
     }
