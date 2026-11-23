@@ -192,7 +192,17 @@ LIMIT 5";
     // PgBlockingPairRowQuery.BprChainLevelTextSql / DmvChainLevelTextSql then read the whole text of only the
     // levels shown, by event key; the drill-down payload judges it and cuts it in C# (#5320). The shared reader
     // mapping is unaffected (same column order, empty text in the two text columns).
-    public const string ReconstructedChainsSql = $@"
+    public const string ReconstructedChainsSql = $@"{ReconstructedChainsHead}
+ORDER BY event_time DESC
+LIMIT 5000";
+
+    /// <summary>#9346: <see cref="ReconstructedChainsSql"/> with a master target's separately monitored databases cut before the cap too; the list is $5.</summary>
+    public const string ReconstructedChainsSkippingSeparateSql = $@"{ReconstructedChainsHead}
+{PgBlockingPairRowQuery.SeparateDatabasesBprFilter}
+ORDER BY event_time DESC
+LIMIT 5000";
+
+    private const string ReconstructedChainsHead = $@"
 SELECT
     {PgBlockingPairRowQuery.LeadingColumns},
     ''::text AS blocked_sql,
@@ -204,9 +214,7 @@ FROM v_blocked_process_reports
 WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
 AND   collection_time >= $4
 {PgBlockingPairRowQuery.SpidFilter}
-{PgBlockingPairRowQuery.NotMonitorOnlyPairFilter}
-ORDER BY event_time DESC
-LIMIT 5000";
+{PgBlockingPairRowQuery.NotMonitorOnlyPairFilter}";
 
     /// <summary>
     /// Reconstructs blocking chains (same logic as the collector) and surfaces the top 3
@@ -217,11 +225,14 @@ LIMIT 5000";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
-        using var cmd = new NpgsqlCommand(ReconstructedChainsSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
+        /* #9346: a master target leaves out the pairs of databases monitored as their own targets, cut inside both reads before their 5,000-row cap. */
+        var separate = context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
+        using var cmd = new NpgsqlCommand(separate is null ? ReconstructedChainsSql : ReconstructedChainsSkippingSeparateSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
         cmd.Parameters.AddWithValue(PerformanceMonitor.Darling.Storage.EventWindowFloor.For(context.TimeRangeStart));
+        if (separate is not null) cmd.Parameters.AddWithValue(separate);
 
         var rows = new List<BlockingPairRow>();
         using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
@@ -253,17 +264,14 @@ LIMIT 5000";
                 return dmvCommand;
             },
             rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-            context.CancellationToken, includeText: false, excludeMonitorOnlyPairs: true);
+            context.CancellationToken, includeText: false, excludeMonitorOnlyPairs: true, separateDatabases: separate);
 
         /* #5361: the merge appends every DMV row after the report
            rows, so every row past the report count is DMV-sourced: the source of each level's text read below. */
         var dmvKeys = rows.Skip(bprRowCount).Select(r => r.Key).ToHashSet();
 
-        /* A master target leaves out the pairs of databases monitored as their own targets, and both reads above leave out a pair
-           whose two sessions are both the monitor's own (#9340), the same rules the BLOCKING_CHAIN fact applies, so the evidence does not show chains the other targets own. */
-        if (context.SeparatelyMonitoredDatabases is { Count: > 0 } separateDatabases)
-            rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
-                && separateDatabases.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
+        /* Both reads above leave out the pairs of databases monitored as their own targets (#9346) and a pair whose two sessions are both
+           the monitor's own (#9340), inside the query before the cap: the same rules the BLOCKING_CHAIN fact applies, so the evidence does not show chains the other targets own. */
 
         if (rows.Count == 0) return;
 

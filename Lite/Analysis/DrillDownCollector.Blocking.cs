@@ -172,6 +172,8 @@ LIMIT 5").Replace("{SCOPE}", SeparatelyMonitoredScope.BprFilter(context.Separate
         await connection.OpenAsync(context.CancellationToken);
 
         using var cmd = connection.CreateCommand();
+        /* #9346: a master target leaves out the pairs of databases monitored as their own targets, cut inside both reads before their 5,000-row cap. */
+        var separate = context.SeparatelyMonitoredDatabases is { Count: > 0 } scopedList ? scopedList : null;
         // SpidFilter keeps Lite's drill-down, fact collector, and viewer fetch in lockstep on the apex
         // (Lite maps a missing blocker to spid 0 — see BlockingPairRowQuery). #9340: like the BLOCKING_CHAIN fact, both reads cut a pair
         // whose two sessions are both the monitor's own, before the cap, so the evidence never shows the monitor's own chain.
@@ -189,13 +191,14 @@ SELECT
     {BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {BlockingPairRowQuery.TrailingIdentityColumns}
-FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter + " " + BlockingPairRowQuery.NotMonitorOnlyPairFilter)} AS ev
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + BlockingPairRowQuery.SpidFilter + " " + BlockingPairRowQuery.NotMonitorOnlyPairFilter + SeparatelyMonitoredScope.BprFilter(separate, 4))} AS ev
 ORDER BY event_time DESC
 LIMIT 5000";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        SeparatelyMonitoredScope.AddParameters(cmd, separate);
 
         var rows = new List<BlockingPairRow>();
         using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
@@ -210,15 +213,11 @@ LIMIT 5000";
         // (blocked-process-report unavailable, e.g. AWS RDS) still reconstructs.
         await BlockingPairRowQuery.AppendDmvSnapshotRowsAsync(
             connection.CreateCommand, rows, context.ServerId, context.TimeRangeStart, context.TimeRangeEnd,
-            context.CancellationToken, includeText: false, plan, excludeMonitorOnlyPairs: true);
+            context.CancellationToken, includeText: false, plan, excludeMonitorOnlyPairs: true, separateDatabases: separate);
 
         /* #5361: the merge appends every DMV row after the report
            rows, so every row past the report count is DMV-sourced: the source of each level's text read below. */
         var dmvKeys = rows.Skip(bprRowCount).Select(r => r.Key).ToHashSet();
-
-        if (context.SeparatelyMonitoredDatabases is { Count: > 0 } scopeList)
-            rows.RemoveAll(r => !string.IsNullOrEmpty(r.DatabaseName)
-                && scopeList.Contains(r.DatabaseName, StringComparer.OrdinalIgnoreCase));
 
         if (rows.Count == 0) return;
 

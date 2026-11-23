@@ -45,7 +45,8 @@ public sealed class MonitorOwnBlockingFactLiveTests
 
     /// <summary>Plants the pairs (and <paramref name="flood"/> monitor-only pairs, each NEWER than every listed pair), then runs <paramref name="read"/>
     /// against the product's collector over the window.</summary>
-    private static async Task<T> RunAsync<T>(bool bpr, Pair[] pairs, int flood, Func<NpgsqlDataSource, AnalysisContext, Task<T>> read)
+    private static async Task<T> RunAsync<T>(bool bpr, Pair[] pairs, int flood, Func<NpgsqlDataSource, AnalysisContext, Task<T>> read,
+        string? floodDatabase = null, IReadOnlyList<string>? separatelyMonitored = null)
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live test.");
@@ -90,15 +91,16 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
                 var table = bpr ? "blocked_process_reports" : "dmv_blocking_snapshots";
                 var idColumn = bpr ? "blocked_report_id" : "collection_id";
                 await Exec(connection,
-                    $"INSERT INTO {table} ({idColumn}, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, blocked_client_app, blocking_client_app) " +
-                    "SELECT -939000000 - g, $1 + g * interval '1 second', $2, $3, $1 + g * interval '1 second', 12000, 61, 1000 + g, 'sleeping', 'PerformanceMonitorDarling', 'PerformanceMonitorDarling' FROM generate_series(0, $4 - 1) AS g",
-                    ct, start.AddMinutes(60), ServerId, ServerName, flood);
+                    $"INSERT INTO {table} ({idColumn}, collection_time, server_id, server_name, event_time, wait_time_ms, blocking_spid, blocked_spid, blocking_status, blocked_client_app, blocking_client_app, database_name) " +
+                    "SELECT -939000000 - g, $1 + g * interval '1 second', $2, $3, $1 + g * interval '1 second', 12000, 61, 1000 + g, 'sleeping', " +
+                    "CASE WHEN $5::text IS NULL THEN 'PerformanceMonitorDarling' ELSE 'OrderEntry' END, CASE WHEN $5::text IS NULL THEN 'PerformanceMonitorDarling' ELSE 'OrderEntry' END, $5::text FROM generate_series(0, $4 - 1) AS g",
+                    ct, start.AddMinutes(60), ServerId, ServerName, flood, (object?)floodDatabase ?? DBNull.Value);
             }
 
             var context = new AnalysisContext
             {
                 ServerId = ServerId, ServerName = ServerName, TimeRangeStart = start, TimeRangeEnd = end,
-                ServerUtcOffset = TimeSpan.Zero, CancellationToken = ct
+                ServerUtcOffset = TimeSpan.Zero, CancellationToken = ct, SeparatelyMonitoredDatabases = separatelyMonitored
             };
             var result = await read(postgres, context);
             bodySucceeded = true;
@@ -160,6 +162,34 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             (postgres, context) => new PgFactCollector(postgres).CollectFactsAsync(context));
 
         Assert.Equal(1.0, Assert.Single(facts, f => f.Key == "BLOCKING_CHAIN").Metadata["worst_chain_victim_count"]);
+    }
+
+    private const string SeparateDatabase = "ShardDb";
+
+    /* #9346: a master target leaves out the pairs of a database monitored as its own target. 5,100 newer pairs of that database must not push
+       the master's own pair (no database recorded) out of either read, so the chain still forms and the drill-down shows it. */
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MoreSeparatelyMonitoredPairsThanTheRowCap_DoNotPushTheMastersChainOutOfTheFact(bool bpr)
+    {
+        var facts = await RunAsync(bpr, [new Pair("OrderEntry", "OrderEntry")], PastTheCap,
+            (postgres, context) => new PgFactCollector(postgres).CollectFactsAsync(context),
+            SeparateDatabase, [SeparateDatabase.ToLowerInvariant()]);
+
+        Assert.Equal(1.0, Assert.Single(facts, f => f.Key == "BLOCKING_CHAIN").Metadata["worst_chain_victim_count"]);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task MoreSeparatelyMonitoredPairsThanTheRowCap_DoNotPushTheMastersChainOutOfTheDrillDown(bool bpr)
+    {
+        var apexes = await RunAsync(bpr, [new Pair("OrderEntry", "OrderEntry")], PastTheCap,
+            (postgres, context) => DrillDownIntsAsync(postgres, context, "BLOCKING_CHAIN", "reconstructed_blocking_chains", "apex_spid"),
+            SeparateDatabase, [SeparateDatabase.ToLowerInvariant()]);
+
+        Assert.Equal([60], apexes);
     }
 
     private static async Task<List<int>> DrillDownIntsAsync(NpgsqlDataSource postgres, AnalysisContext context, string pathKey, string section, string field)
