@@ -43,8 +43,8 @@ public sealed class McpDatabaseNameResolutionTests : IClassFixture<SharedDuckDbF
 
     /// <summary>The lookup deadline these hosts run with (#9375). The DuckDB lock is one lock for the whole test process, and other
     /// classes hold it exclusively for seconds, so under the host's own 3 s a lookup queued behind such a hold expired and the call ran
-    /// as given, which is how the two-case-twins refusal was once missed in CI. This is long enough to wait out any hold in the suite.</summary>
-    private static readonly TimeSpan LookupDeadline = TimeSpan.FromMinutes(2);
+    /// as given, which is how the two-case-twins refusal was once missed in CI. Thirty seconds waits out the holds the suite makes (WriteLockBudgetTests sums them against the host budget).</summary>
+    private static readonly TimeSpan LookupDeadline = TimeSpan.FromSeconds(30);
 
     /// <summary>The Lite tools that take a <c>database_name</c> and no <c>server_name</c>: <c>find_database</c> searches every
     /// server and already ignores case, and the two query-tag writes compare object names ignoring case.</summary>
