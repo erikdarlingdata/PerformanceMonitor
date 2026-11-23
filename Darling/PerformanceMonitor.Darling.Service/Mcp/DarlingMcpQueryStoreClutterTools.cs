@@ -106,28 +106,30 @@ public sealed class DarlingMcpQueryStoreClutterTools
 
     /// <summary>
     /// #9382: the window note, naming each arm that holds less than the window and how far back that arm reaches. A null start means that arm
-    /// covers the whole window. The wording is shared by the web Queries tab, which renders the note it is sent.
+    /// covers the whole window. The web Queries tab renders this note and rewrites "covers effective_hours_back, not hours_back" and "raw query_store_stats".
     /// </summary>
-    private static string WindowTruncationNote(DateTime? planChurnStart, DateTime? waitStart, DateTime requestedStart, DateTime now)
+    private static string WindowTruncationNote(DateTime? planChurnStart, DateTime? waitStart, DateTime now)
     {
         static string Hours(DateTime start, DateTime now) =>
             Math.Round((now - start).TotalHours, 1).ToString("0.#", CultureInfo.InvariantCulture);
 
-        var parts = new List<string>();
+        var arms = new List<string>();
+        var detail = new List<string>();
         if (planChurnStart is { } churn)
         {
-            parts.Add($"the plan-churn arm (clutter rollups plus raw query_store_stats) holds {Hours(churn, now)} hours of the window");
+            arms.Add("the plan-churn arm (clutter rollups plus raw query_store_stats)");
+            detail.Add($"The plan-churn arm holds {Hours(churn, now)} hours of the window.");
         }
 
         if (waitStart is { } wait)
         {
-            parts.Add($"the wait arm (wait_stats) holds {Hours(wait, now)} hours of the window");
+            arms.Add("the wait arm (wait_stats)");
+            detail.Add($"The wait arm holds {Hours(wait, now)} hours of the window.");
         }
 
-        return "The window reaches further back than this server's stored data for " + string.Join(" and ", parts)
-            + ", not the " + Hours(requestedStart, now) + " asked for; effective_hours_back is the shorter of the arms that were cut."
-            + (planChurnStart is null ? " The plan-churn arm covers the whole window." : "")
-            + (waitStart is null ? " The wait arm covers the whole window." : "")
+        return "The window reaches further back than this server's stored data for " + string.Join(" and ", arms)
+            + ", so the answer covers effective_hours_back, not hours_back (effective_hours_back is the first arm named here). "
+            + string.Join(" ", detail)
             + " The read-cost and config arms read tables with longer retention and cover the whole window.";
     }
 
@@ -248,10 +250,9 @@ public sealed class DarlingMcpQueryStoreClutterTools
             var planChurnTruncated = RawWindowFloor.IsTruncated(planChurnStart, requestedStart);
             var waitTruncated = RawWindowFloor.IsTruncated(waitFloor, requestedStart);
             var windowTruncated = planChurnTruncated || waitTruncated;
-            var effectiveStart = RawWindowFloor.EffectiveStart(
-                planChurnTruncated && waitTruncated ? (planChurnStart > waitFloor ? planChurnStart : waitFloor) : planChurnTruncated ? planChurnStart : waitTruncated ? waitFloor : null,
-                requestedStart);
-            var truncationNote = windowTruncated ? WindowTruncationNote(planChurnTruncated ? planChurnStart : null, waitTruncated ? waitFloor : null, requestedStart, now) : null;
+            /* effective_start and effective_hours_back describe the first arm the note names: plan churn when it was cut, else the wait arm. */
+            var effectiveStart = RawWindowFloor.EffectiveStart(planChurnTruncated ? planChurnStart : waitTruncated ? waitFloor : null, requestedStart);
+            var truncationNote = windowTruncated ? WindowTruncationNote(planChurnTruncated ? planChurnStart : null, waitTruncated ? waitFloor : null, now) : null;
 
             var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
 
