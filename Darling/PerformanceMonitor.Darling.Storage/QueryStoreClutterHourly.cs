@@ -247,8 +247,14 @@ FROM collect.servers AS sv
 LEFT JOIN collect.query_store_closed_day_tick AS t ON t.server_id = sv.server_id
 WHERE sv.is_enabled;";
 
-    /// <summary>The late rows' hours and the built hours among them that this marks for a rebuild: the head both mark statements share.</summary>
-    private const string MarkChangedHoursHeadSql = @"
+    /// <summary>
+    /// Marks every built hour that holds a row collected after the server's last hour heartbeat as needing a rebuild, and returns how many it
+    /// marked: the mark a build that does not know the hourly tables never writes. The raw table has an index on (server, collection_time), so
+    /// the scan reads only the rows since the heartbeat. #9384: it also marks the stamped clutter day (<see cref="QueryStoreClutterDayFold"/>) of
+    /// each hour it marks. The service migrates the store before any tick, so the stamp table is always there and this does not probe for it.
+    /// $1 server_id, $2 the server's last hour heartbeat.
+    /// </summary>
+    public const string MarkChangedHoursSql = @"
 WITH late AS
 (
     SELECT DISTINCT date_trunc('hour', s.collection_time) AS hour_utc
@@ -265,23 +271,7 @@ marked AS
       AND b.hour_utc = l.hour_utc
       AND NOT b.rebuild_needed
     RETURNING b.hour_utc
-)";
-
-    /// <summary>
-    /// Marks every built hour that holds a row collected after the server's last hour heartbeat as needing a rebuild, and returns how many it
-    /// marked: the mark a build that does not know the hourly tables never writes. The raw table has an index on (server, collection_time), so
-    /// the scan reads only the rows since the heartbeat. For a store without the clutter day stamp table (<see cref="MarkChangedHoursAndDaysSql"/>
-    /// is for one with it). $1 server_id, $2 the server's last hour heartbeat.
-    /// </summary>
-    public const string MarkChangedHoursSql = MarkChangedHoursHeadSql + @"
-SELECT COUNT(*) FROM marked;";
-
-    /// <summary>
-    /// <see cref="MarkChangedHoursSql"/>, and #9384: it also marks the stamped clutter day (<see cref="QueryStoreClutterDayFold"/>) of each hour it
-    /// marks. Only for a store that has <c>collect.query_store_clutter_day_built</c>: the heartbeat probes for it, as every other statement on that
-    /// table does. $1 server_id, $2 the server's last hour heartbeat.
-    /// </summary>
-    public const string MarkChangedHoursAndDaysSql = MarkChangedHoursHeadSql + @",
+),
 marked_days AS
 (
     UPDATE collect.query_store_clutter_day_built AS d
@@ -487,12 +477,6 @@ ORDER BY b.hour_utc;";
             }
         }
 
-        bool hasFold;
-        await using (var probe = new NpgsqlCommand("SELECT to_regclass('collect.query_store_clutter_day_built') IS NOT NULL", connection) { CommandTimeout = CommandTimeoutSeconds })
-        {
-            hasFold = (bool)(await probe.ExecuteScalarAsync(cancellationToken))!;
-        }
-
         var marked = 0;
         var beat = Unspecified(nowUtc - QueryStoreClosedDayRollup.HeartbeatMargin);
         foreach (var (serverId, previous) in servers)
@@ -502,7 +486,7 @@ ORDER BY b.hour_utc;";
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
                 if (previous is { } last && last < nowUtc - QueryStoreClosedDayRollup.HeartbeatFreshFor)
                 {
-                    await using var mark = new NpgsqlCommand(hasFold ? MarkChangedHoursAndDaysSql : MarkChangedHoursSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+                    await using var mark = new NpgsqlCommand(MarkChangedHoursSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
                     mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
                     mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(last) });
                     marked += Convert.ToInt32(await mark.ExecuteScalarAsync(cancellationToken));

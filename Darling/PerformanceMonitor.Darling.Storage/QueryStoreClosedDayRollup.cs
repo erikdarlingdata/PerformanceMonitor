@@ -524,16 +524,15 @@ WHERE NOT b.rebuild_needed
         await transaction.SaveAsync(LateCollectionDaySavepointName, cancellationToken);
         try
         {
-            bool hasDaily, hasHourly, hasFold;
+            bool hasDaily, hasHourly;
             await using (var probe = new NpgsqlCommand(
-                "SELECT to_regclass('collect.query_store_clutter_plan_daily') IS NOT NULL, to_regclass('collect.query_store_clutter_hour_built') IS NOT NULL, to_regclass('collect.query_store_clutter_day_built') IS NOT NULL",
+                "SELECT to_regclass('collect.query_store_clutter_plan_daily') IS NOT NULL, to_regclass('collect.query_store_clutter_hour_built') IS NOT NULL",
                 connection, transaction) { CommandTimeout = commandTimeoutSeconds })
             await using (var probed = await probe.ExecuteReaderAsync(cancellationToken))
             {
                 await probed.ReadAsync(cancellationToken);
                 hasDaily = probed.GetBoolean(0);
                 hasHourly = probed.GetBoolean(1);
-                hasFold = probed.GetBoolean(2);
             }
 
             var marked = false;
@@ -550,8 +549,9 @@ WHERE NOT b.rebuild_needed
                 marked |= await QueryStoreClutterHourly.TryMarkLateHourAsync(connection, transaction, serverId, collectionTime, nowUtc, commandTimeoutSeconds, cancellationToken);
             }
 
-            /* #9384: the clutter day is built from its hours soon after midnight, so a late row for a closed hour marks the hour's day too. */
-            if (hasFold && lateHour)
+            /* #9384: the clutter day is built from its hours soon after midnight, so a late row for a closed hour marks the hour's day too.
+               The service migrates the store before any collector write, so the stamp table is there and this does not probe for it. */
+            if (lateHour)
             {
                 marked |= await QueryStoreClutterDayFold.TryMarkLateDayAsync(connection, transaction, serverId, collectionTime, nowUtc, commandTimeoutSeconds, cancellationToken);
             }
