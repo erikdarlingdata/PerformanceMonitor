@@ -138,6 +138,70 @@ public sealed class SliceRepairCopiesTests : IClassFixture<SharedDuckDbFixture>,
         Assert.Equal([3L, 55L, 500L], rows[2]);
     }
 
+    /// <summary>
+    /// #9352: a backfill slice that re-walks a range the store already holds writes the same rows again, under the same stamp
+    /// (two passes whose chunks line up) or under another one (a live cycle's rows). The guard removes the rows of the slice that
+    /// an earlier row equals in the key and every measurement, keeps the earlier copy, and keeps a row whose measurements differ
+    /// (the newer state of the interval) and a row of another query.
+    /// </summary>
+    [Fact]
+    public async Task Backfill_AChunkThatIsAlreadyStored_LeavesNoSecondCopy()
+    {
+        var stamp = T.AddHours(5);
+        var later = T.AddHours(6);
+
+        /* Query 1: a live row, then the backfill stamps a second copy of it (id 5). Query 2: a row of an earlier pass, then an exact
+           same-stamp copy (id 6). Query 3: the same interval with more executions, which is newer state and stays. Query 4: only once. */
+        await SeedStampedAsync(collectionId: 1, stamp: T, queryId: 1, executionCount: 10, avgDurationUs: 100);
+        await SeedStampedAsync(collectionId: 2, stamp: stamp, queryId: 2, executionCount: 20, avgDurationUs: 200);
+        await SeedStampedAsync(collectionId: 3, stamp: T, queryId: 3, executionCount: 30, avgDurationUs: 300);
+        await SeedStampedAsync(collectionId: 5, stamp: stamp, queryId: 1, executionCount: 10, avgDurationUs: 100);
+        await SeedStampedAsync(collectionId: 6, stamp: stamp, queryId: 2, executionCount: 20, avgDurationUs: 200);
+        await SeedStampedAsync(collectionId: 7, stamp: stamp, queryId: 3, executionCount: 35, avgDurationUs: 310);
+        await SeedStampedAsync(collectionId: 8, stamp: stamp, queryId: 4, executionCount: 5, avgDurationUs: 50);
+        await SeedStampedAsync(collectionId: 9, stamp: later, queryId: 4, executionCount: 5, avgDurationUs: 50);
+
+        Assert.Equal(8L, await ScalarAsync("SELECT COUNT(*) FROM query_store_stats"));
+
+        int removed;
+        using (_duckDb.AcquireReadLock())
+        {
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+            removed = RemoteCollectorService.RemoveStoredBackfillCopies(connection, ServerId, "DB", stamp);
+        }
+
+        Assert.Equal(2, removed);
+        Assert.Equal(6L, await ScalarAsync("SELECT COUNT(*) FROM query_store_stats"));
+        Assert.Equal(1L, await ScalarAsync("SELECT COUNT(*) FROM query_store_stats WHERE query_id = 1"));
+        Assert.Equal(1L, await ScalarAsync("SELECT COUNT(*) FROM query_store_stats WHERE query_id = 2"));
+        Assert.Equal(2L, await ScalarAsync("SELECT COUNT(*) FROM query_store_stats WHERE query_id = 3"));
+        Assert.Equal(2L, await ScalarAsync("SELECT COUNT(*) FROM query_store_stats WHERE query_id = 4"));
+        Assert.Equal(1L, await ScalarAsync("SELECT collection_id FROM query_store_stats WHERE query_id = 1"));
+    }
+
+    private async Task SeedStampedAsync(long collectionId, DateTime stamp, long queryId, long executionCount, long avgDurationUs)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var connection = await SeedConnectionAsync();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = @"
+INSERT INTO query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name,
+     query_id, plan_id, execution_type_desc, first_execution_time, last_execution_time,
+     query_text, query_hash, execution_count, avg_duration_us, min_duration_us, max_duration_us,
+     query_plan_hash, is_forced_plan, force_failure_count, runtime_stats_interval_id)
+VALUES ($1, $2, $3, 'SRV', 'DB', $4, 11, 'Regular', $5, $5, 'SELECT 1', '0xH', $6, $7, 998, 4708, '0xP', false, 0, 7)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = collectionId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = stamp });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = queryId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = T });
+        cmd.Parameters.Add(new DuckDBParameter { Value = executionCount });
+        cmd.Parameters.Add(new DuckDBParameter { Value = avgDurationUs });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seed is null)
