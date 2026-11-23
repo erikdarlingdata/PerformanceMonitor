@@ -1398,6 +1398,23 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// The sentence the store-log capture's warning gives as the cause (#9333). A 58P01 (UndefinedFile) means the log
+    /// folder is not there, which is a store that keeps no log files, not a missing privilege: the compose store ran
+    /// without logging_collector and named the privilege anyway. A 42501 (InsufficientPrivilege) keeps the privilege
+    /// text. Any other fault keeps the privilege text too, as it always did.
+    /// </summary>
+    internal static string StoreLogCaptureFailureCause(Exception ex)
+    {
+        if (ex is PostgresException { SqlState: PostgresErrorCodes.UndefinedFile })
+        {
+            return "The store keeps no log files to read (logging_collector is off or the log folder is missing)";
+        }
+
+        return "Reading the store's own log needs pg_read_server_files and EXECUTE on pg_read_binary_file; "
+            + "a bring-your-own store may not grant them";
+    }
+
+    /// <summary>
     /// The read-latency flush, with its own catch so a failed flush costs only this window's histogram rows (#4442 scope 2).
     /// Shared by the hourly tick and the stop-time flush (#7153). A cancellation the caller's budget caused is not a flush
     /// failure and passes through.
@@ -1572,9 +1589,8 @@ AND   j.hypertable_name = '{relation}'", connection))
                 {
                     _logger.LogWarning(
                         "Store log capture failed, so this hour's store-log census is missing (get_store_log "
-                        + "reports the capture gap). Reading the store's own log needs pg_read_server_files and "
-                        + "EXECUTE on pg_read_binary_file; a bring-your-own store may not grant them: {Message}",
-                        ex.Message);
+                        + "reports the capture gap). {Cause}: {Message}",
+                        StoreLogCaptureFailureCause(ex), ex.Message);
                     _storeLogCaptureUnavailableWarned |= unavailable;
                 }
             }

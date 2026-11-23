@@ -397,6 +397,81 @@ public sealed class DailySummaryWarmerLiveTests
         }
     }
 
+    /// <summary>#9334: on a fresh install the first pass runs before the first connection writes the server's registry row. The
+    /// pass decides that from the store's own registry, logs no Warning (the wait trend read used to log "no servers are
+    /// registered yet") and builds no block for the server; the pass after the row exists warms it. The closed day's wait is read
+    /// after each step: a block built by the first pass would still hold the one seeded row when the second row lands.</summary>
+    [Fact]
+    public async Task WarmerPass_ForAServerWithNoRegistryRowYet_LogsNoWarningAndBuildsNothing_ThenWarmsItOnceRegistered()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary warmer test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            var today = DateTime.UtcNow.Date;
+            var closedDay = today.AddDays(-2);
+            await PlantWaitAsync(connection, ServerIdA, ServerA, closedDay.AddHours(10), 1000, ct);
+
+            DarlingHealthReader.ResetRangeCacheForTests();
+
+            var log = new CapturingTestLogger();
+            var warmer = Warmers.Create(
+                servers: () => [(ServerIdA, ServerA)],
+                warm: (serverId, name, token) => Warmers.WarmAsync(dataSource, serverId, name, token, log),
+                enabled: () => true,
+                admission: null,
+                logger: log,
+                registered: token => Warmers.RegisteredIdsAsync(dataSource, token));
+
+            var first = await Warmers.RunPassAsync(warmer, ct);
+
+            Assert.Equal(0, first.Warmed);
+            Assert.Equal(1, first.Skipped);
+            Assert.True(first.Complete);
+            Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+
+            await PlantWaitAsync(connection, ServerIdA, ServerA, closedDay.AddHours(11), 4000, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerIdA, ServerA, ct);
+
+            var second = await Warmers.RunPassAsync(warmer, ct);
+
+            Assert.Equal(1, second.Warmed);
+            Assert.Equal(0, second.Skipped);
+            Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+
+            await PlantWaitAsync(connection, ServerIdA, ServerA, closedDay.AddHours(12), 9000, ct);
+
+            /* The second pass built the block from both rows planted before it; the third row, planted after, is not in it. A
+               first pass that had built a block would show 1000 here, and no warm at all would show 14000. */
+            var json = await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerA, 31);
+            SkipWhenTheDayChanged(today);
+            using var doc = JsonDocument.Parse(json);
+            var row = Assert.Single(
+                doc.RootElement.GetProperty("days").EnumerateArray().ToArray(),
+                d => d.GetProperty("summary_date").GetString() == closedDay.ToString("yyyy-MM-dd"));
+            Assert.Equal(5000m, row.GetProperty("total_wait_time_sec").GetDecimal() * 1000m);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            DarlingHealthReader.ResetRangeCacheForTests();
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /// <summary>#8824: the service reads one store through three pools, and the warm pass runs through the worker's. A visitor's
     /// first read of a server goes through the web host's pool, which used to probe the store's rollup coverage itself (the
     /// longest statement of that read on a large store) because the warm pass's probe was kept for the worker's pool alone. The
