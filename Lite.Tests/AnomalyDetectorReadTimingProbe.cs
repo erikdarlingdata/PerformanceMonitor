@@ -21,7 +21,7 @@ public sealed class AnomalyDetectorReadTimingProbe : IDisposable
 
     public void Dispose()
     {
-        File.WriteAllLines(Path.Combine(Path.GetTempPath(), "anomaly-probe.txt"), _lines);
+        File.WriteAllLines(Path.Combine(Path.GetTempPath(), "anomaly-probe2.txt"), _lines);
         try { Directory.Delete(_tempDir, true); } catch { }
     }
 
@@ -50,7 +50,7 @@ public sealed class AnomalyDetectorReadTimingProbe : IDisposable
             "SELECT {B} + row_number() OVER () AS collection_id, t AS collection_time, sid AS server_id, 'S' AS server_name, 'SQLServer:SQL Statistics' AS object_name, CASE WHEN w = 0 THEN 'Batch Requests/sec' ELSE 'Counter ' || w END AS counter_name, '' AS instance_name, 1 AS cntr_value, (random()*600)::BIGINT AS delta_cntr_value, 60 AS sample_interval_seconds FROM {G} CROSS JOIN range(40) r(w)",
             "SELECT {B} + row_number() OVER () AS collection_id, t AS collection_time, sid AS server_id, 'S' AS server_name, 'App ' || w AS program_name, (random()*20)::BIGINT AS connection_count, 0 AS running_count, 0 AS sleeping_count, 0 AS dormant_count FROM {G} CROSS JOIN range(10) r(w)",
             "SELECT {B} + row_number() OVER () AS collection_id, t AS collection_time, sid AS server_id, 'S' AS server_name, 10 AS execution_count, 100 AS total_elapsed_time, 0 AS total_worker_time, 0 AS total_logical_reads, 0 AS total_logical_writes, 0 AS total_physical_reads, 1 + (random()*5)::INT AS delta_execution_count, (random()*100000)::BIGINT AS delta_elapsed_time, 0 AS delta_worker_time, 0 AS delta_logical_reads, 0 AS delta_logical_writes, 0 AS delta_physical_reads, 0 AS delta_rows, 0 AS delta_spills FROM {G} CROSS JOIN range(100) r(w)",
-            "SELECT {B} + row_number() OVER () AS collection_id, t AS collection_time, sid AS server_id, 'S' AS server_name, 'Db' || w AS database_name, 'f' || w AS file_name, 'ROWS' AS file_type, 'D:\x' || w AS physical_name, 100 AS size_mb, 100 + (random()*100)::BIGINT AS delta_reads, 50 AS delta_writes, 81920 AS delta_read_bytes, 1000 AS delta_write_bytes, (random()*1000)::BIGINT AS delta_stall_read_ms, (random()*500)::BIGINT AS delta_stall_write_ms, 60 AS sample_interval_seconds FROM {G} CROSS JOIN range(10) r(w)",
+            "SELECT {B} + row_number() OVER () AS collection_id, t AS collection_time, sid AS server_id, 'S' AS server_name, 'Db' || w AS database_name, 'f' || w AS file_name, 'ROWS' AS file_type, 'Dx' || w AS physical_name, 100 AS size_mb, 100 + (random()*100)::BIGINT AS delta_reads, 50 AS delta_writes, 81920 AS delta_read_bytes, 1000 AS delta_write_bytes, (random()*1000)::BIGINT AS delta_stall_read_ms, (random()*500)::BIGINT AS delta_stall_write_ms, 60 AS sample_interval_seconds FROM {G} CROSS JOIN range(10) r(w)",
             "SELECT {B} + row_number() OVER () AS collection_id, t AS collection_time, sid AS server_id, 'S' AS server_name, 65536 AS total_physical_memory_mb, 10000 AS available_physical_memory_mb, 50000 AS target_server_memory_mb, 40000 + (random()*5000) AS total_server_memory_mb, 30000 AS buffer_pool_mb FROM {G}",
             "SELECT {B} + row_number() OVER () AS log_id, sid AS server_id, 'S' AS server_name, 'collector_' || w AS collector_name, t AS collection_time, 'SUCCESS' AS status, 1 AS rows_collected FROM {G} CROSS JOIN range(20) r(w)",
             "SELECT {B} + row_number() OVER () AS log_id, sid AS server_id, 'S' AS server_name, 'session_stats' AS collector_name, t AS collection_time, 'SUCCESS' AS status, 1 AS rows_collected FROM {G}");
