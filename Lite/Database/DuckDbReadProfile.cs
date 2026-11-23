@@ -118,9 +118,11 @@ internal static class DuckDbReadProfile
             var folder = Folder() ?? throw new IOException("Lite has no logs folder to write profiles to.");
             Directory.CreateDirectory(folder);
             path = Path.Combine(folder, string.Create(CultureInfo.InvariantCulture, $"{readName}-{DateTime.UtcNow:yyyyMMddTHHmmssfff}.json"));
-            RunSet(connection, $"SET profiling_output = '{path.Replace("'", "''")}'");
-            profilingOn = true;
+            /* The mode comes first: DuckDB checks the output file's extension against the mode when the output is set, and the
+               default mode wants .txt. */
             RunSet(connection, "SET enable_profiling = 'json'");
+            profilingOn = true;
+            RunSet(connection, $"SET profiling_output = '{path.Replace("'", "''")}'");
             return new Scope(connection, readName, path);
         }
         catch (Exception ex)
