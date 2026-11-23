@@ -239,7 +239,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
 
     /// <summary>
     /// Every read path of the two grids refreshes the banner through the shared helper, over the UTC window that
-    /// path's grid read takes, AFTER the rows are bound: the sub-tab switch and the full refresh
+    /// path's grid read takes, AFTER the rows are bound: the sub-tab switch
     /// (<c>GetQueriesTabWindowUtc</c>, the same <c>GetTimeRange</c> pair the grid reads resolve), the slicer handler
     /// (<c>e.StartUtc</c>/<c>e.EndUtc</c>) and the chart drill-down (its own naive-UTC pair). Text-scans SOURCE with
     /// comments stripped, so a sentence that names the call cannot satisfy the pin.
@@ -271,10 +271,10 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         Assert.True(drillCall[0].Index > drill.IndexOf(bindCall, StringComparison.Ordinal) && drill.Contains(bindCall, StringComparison.Ordinal),
             $"{drillHandler} must refresh the banner after it binds the rows");
 
-        /* The sub-tab switch and the full refresh: each over GetQueriesTabWindowUtc's pair, after its bind. */
+        /* The sub-tab switch: over GetQueriesTabWindowUtc's pair, after its bind. */
         var refresh = MethodBody(Code("ServerTab.Refresh.cs"), "private async System.Threading.Tasks.Task RefreshBlockingAsync(");
         var refreshCalls = Regex.Matches(refresh, call + @"(?<s>windowStart\w*),\s*(?<e>windowEnd\w*)" + rowsCapAndTime);
-        Assert.True(refreshCalls.Count == 2, $"RefreshBlockingAsync must refresh the {relation} banner twice (sub-tab switch, full refresh); found {refreshCalls.Count}");
+        Assert.True(refreshCalls.Count == 1, $"RefreshBlockingAsync must refresh the {relation} banner once (sub-tab switch); found {refreshCalls.Count}");
         foreach (Match refreshCall in refreshCalls)
         {
             /* The pair is the one the grid read resolves: GetQueriesTabWindowUtc is GetTimeRange(hoursBack, fromDate, toDate, null). */
@@ -284,10 +284,7 @@ FROM generate_series($5::TIMESTAMP, $6::TIMESTAMP, INTERVAL {everyMinutes} MINUT
         }
 
         var firstBind = refresh.IndexOf(bindCall, StringComparison.Ordinal);
-        var secondBind = refresh.IndexOf(bindCall, firstBind + 1, StringComparison.Ordinal);
-        Assert.True(firstBind >= 0 && secondBind > firstBind, $"RefreshBlockingAsync no longer binds the {relation} grid twice; update this pin.");
-        Assert.True(refreshCalls[0].Index > firstBind && refreshCalls[0].Index < secondBind, "the sub-tab switch must refresh the banner after its own bind");
-        Assert.True(refreshCalls[1].Index > secondBind, "the full refresh must refresh the banner after its own bind");
+        Assert.True(firstBind >= 0 && refreshCalls[0].Index > firstBind, "the sub-tab switch must refresh the banner after its own bind");
     }
 
     /// <summary>The source with block and line comments removed, LF line ends.</summary>
