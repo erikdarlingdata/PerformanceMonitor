@@ -98,8 +98,7 @@ public sealed partial class DarlingCollectorRunner
         ServerRuntime server,
         DateTime collectionTime,
         CollectorContext context,
-        CancellationToken cancellationToken,
-        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task>? inTransaction = null)
+        CancellationToken cancellationToken)
     {
         if (rows.Count == 0)
         {
@@ -179,11 +178,11 @@ public sealed partial class DarlingCollectorRunner
             outcome = await StoreWriteReattempt.RunAsync(
                 write: async token => pgConnection.State == ConnectionState.Open
                     ? await CopyBatchOnceAsync(
-                        pgConnection, definition, rows, server, collectionTime, context, token, inTransaction)
+                        pgConnection, definition, rows, server, collectionTime, context, token)
                     : await CopyOnAFreshConnectionAsync(
-                        definition, rows, server, collectionTime, context, token, inTransaction),
+                        definition, rows, server, collectionTime, context, token),
                 rewrite: token => CopyOnAFreshConnectionAsync(
-                    definition, rows, server, collectionTime, context, token, inTransaction),
+                    definition, rows, server, collectionTime, context, token),
                 onReattempt: firstAttempt => _logger?.LogWarning(
                     firstAttempt,
                     StoreWriteReattemptLogTemplate,
@@ -546,12 +545,11 @@ public sealed partial class DarlingCollectorRunner
         ServerRuntime server,
         DateTime collectionTime,
         CollectorContext context,
-        CancellationToken cancellationToken,
-        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task>? inTransaction = null)
+        CancellationToken cancellationToken)
     {
         await using var freshConnection = await _postgres.OpenConnectionAsync(cancellationToken);
         return await CopyBatchOnceAsync(
-            freshConnection, definition, rows, server, collectionTime, context, cancellationToken, inTransaction);
+            freshConnection, definition, rows, server, collectionTime, context, cancellationToken);
     }
 
     /// <summary>
@@ -585,8 +583,7 @@ public sealed partial class DarlingCollectorRunner
         ServerRuntime server,
         DateTime collectionTime,
         CollectorContext context,
-        CancellationToken cancellationToken,
-        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task>? inTransaction = null)
+        CancellationToken cancellationToken)
     {
         var rowsWritten = 0;
         var writer = new PgCollectorRowWriter();
@@ -674,7 +671,7 @@ public sealed partial class DarlingCollectorRunner
                transaction; everything else keeps the pre-#1767 single-COPY commit and pays nothing. query_stats diverts
                its text and plans today, so the ledger term does not add a transaction; it is named so that the ledger
                upsert can never be left without the transaction its atomicity with the COPY depends on. */
-            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || totalsBatch || watermarkBatch || inTransaction is not null
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null || ledgerBatch || totalsBatch || watermarkBatch || context.StoreTransactionWrite is not null
                 ? await pgConnection.BeginTransactionAsync(cancellationToken)
                 : null;
 
@@ -944,9 +941,9 @@ public sealed partial class DarlingCollectorRunner
                 /* #9359: the caller's own writes (the Query Store backfill's state for this slice) join THIS transaction, so the rows and
                    the state commit together or not at all. No savepoint and no catch, deliberately: a fault throws out of the batch, the
                    transaction rolls back with the COPY in it, and the next pass walks the slice from a clean store. */
-                if (inTransaction is not null)
+                if (context.StoreTransactionWrite is { } transactionWrite)
                 {
-                    await inTransaction(pgConnection, transaction, cancellationToken);
+                    await transactionWrite(pgConnection, transaction, cancellationToken);
                 }
 
                 commitSent = true;

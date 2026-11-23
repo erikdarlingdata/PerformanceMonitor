@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -550,7 +551,7 @@ public sealed class QueryStoreBackfill
            failed save) was walked again and stored a second time. The rows and the state live in one store, so one transaction
            removes the window: a fault anywhere rolls both back and the re-walk starts clean. A tail slice with more range
            below it saves nothing (the derived ceiling is read off the stored rows), so it needs no hook. */
-        Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task>? sliceState = null;
+        Func<DbConnection, DbTransaction, CancellationToken, Task>? sliceState = null;
         if (isHole)
         {
             /* A chunked slice's rows all sit at or above its own chunk floor, so a missing shipped
@@ -565,7 +566,7 @@ public sealed class QueryStoreBackfill
                 }
 
                 await RetireDugHoleRangeAsync(
-                    TransactionState(server.ServerId, connection, transaction), databaseName, shippedTo > floorUtc ? shippedTo : floorUtc, ceilingUtc, floorUtc, token);
+                    TransactionState(server.ServerId, (NpgsqlConnection)connection, (NpgsqlTransaction)transaction), databaseName, shippedTo > floorUtc ? shippedTo : floorUtc, ceilingUtc, floorUtc, token);
             };
         }
         else if (boundary is not null && boundary <= floorUtc)
@@ -577,12 +578,13 @@ public sealed class QueryStoreBackfill
                     await beforeState();
                 }
 
-                await TransactionState(server.ServerId, connection, transaction)
+                await TransactionState(server.ServerId, (NpgsqlConnection)connection, (NpgsqlTransaction)transaction)
                     .Save(QueryStoreBackfillState.DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), token);
             };
         }
 
-        var written = await _runner.WriteBackfillBatchAsync(definition, rows, server, ceilingUtc, context, cancellationToken, sliceState);
+        context.StoreTransactionWrite = sliceState;
+        var written = await _runner.WriteBackfillBatchAsync(definition, rows, server, ceilingUtc, context, cancellationToken);
 
         _logger?.LogInformation(
             "query_store backfill on '{Server}' [{Database}]: shipped {Rows} rows ({ShippedMB:F1}MB) down to {Boundary:o} ({Range}, ceiling {Ceiling:o}).",
