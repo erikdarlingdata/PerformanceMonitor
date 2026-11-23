@@ -1212,7 +1212,8 @@ public sealed partial class DarlingWorker
             warm: (serverId, name, token) => DailySummaryWarmer.WarmAsync(postgres, serverId, name, _registryState, _logger, token),
             enabled: () => config.DailySummaryWarmerEnabled && ShouldRunCollection(_paused) && !_materializationHoleRepairRunning && (config.Web.Enabled || config.Mcp.Enabled),
             readAdmission: _readAdmission,
-            logger: _logger);
+            logger: _logger,
+            registered: token => DailySummaryWarmer.RegisteredServerIdsAsync(postgres, token));
         var dailySummaryWarmLoop = dailySummaryWarmer.RunAsync(stoppingToken);
 
         /* #5450 proposal 2: the outbound heartbeat, on its own task and connection so a slow or dead URL never touches
