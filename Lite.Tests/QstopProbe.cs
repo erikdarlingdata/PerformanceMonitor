@@ -129,6 +129,30 @@ public sealed class QstopProbe
                 Line($"LATEST {hours}h keys {keys.Count}: {string.Join(" ", lt)}  TEXT: {string.Join(" ", tt)}");
             }
 
+            foreach (var hours in new[] { 24, 168 })
+            {
+                var top26 = await data.GetQueryStoreTopQueriesAsync(1, hours, 21);
+                var k26 = top26.Select(r => (r.DatabaseName, r.QueryId)).ToList();
+                foreach (var rel in new[] { "v_query_store_stats", "query_store_stats" })
+                {
+                    var lt = new List<string>(); var tt = new List<string>(); int found = 0;
+                    for (var i = 0; i < 3; i++)
+                    {
+                        var sw = Stopwatch.StartNew();
+                        Dictionary<(string DatabaseName, long QueryId), (long CollectionId, DateTime CollectionTime)> lr;
+                        using (var c = await data.OpenConnectionAsync())
+                            lr = await LocalDataService.ReadQueryStoreLatestRowsAsync(c, 1, k26, rel, now.AddHours(-hours).AddDays(-1));
+                        found = lr.Count;
+                        lt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                        sw.Restart();
+                        using (var c = await data.OpenConnectionAsync())
+                            await LocalDataService.ReadQueryStoreTextByRowAsync(c, 1, lr.Values, rel);
+                        tt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                    }
+                    Line($"K26 {hours}h {rel} keys {k26.Count} found {found}: LATEST {string.Join(" ", lt)} TEXT {string.Join(" ", tt)}");
+                }
+            }
+
             var vdir = Path.Combine(dir, "variants");
             if (Directory.Exists(vdir))
             {
