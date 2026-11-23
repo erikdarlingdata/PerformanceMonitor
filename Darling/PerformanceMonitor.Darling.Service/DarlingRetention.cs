@@ -639,7 +639,7 @@ public static class DarlingRetention
 
             /* #9349: the object usage chain tables are derived from index_object_stats and follow ITS horizon, the one the loop above
                resolved for it (a per-collector override included), so a derived row never outlives the raw rows it was computed from.
-               collect.object_usage_runs is not here: the chain builder purges it. */
+               The closed rows of collect.object_usage_runs go in the same call (a plain table, so by the time-sliced DELETE). */
             var objectUsageChain = await PurgeObjectUsageChainAsync(
                 postgres, timescaleAvailable, retentionDaysFor, utcNow, logger, cancellationToken, walPacer);
             tablesPurged += objectUsageChain.TablesPurged;
@@ -1802,7 +1802,8 @@ public static class DarlingRetention
     /// Purges <c>collect.object_usage_snapshots</c> and <c>collect.object_usage_deltas</c> at <see cref="ObjectUsageChainRetentionDays"/> (#9349):
     /// <c>drop_chunks</c> where the table is a hypertable on a TimescaleDB store (the chunk width is the one <c>index_object_stats</c> has, so the same
     /// days go), and the time-sliced DELETE of a plain table otherwise, or where the drop failed. A table that is not there yet (a store behind V299)
-    /// fails its statement, is warned about by the helper it runs through, and counts as failed for the pass.
+    /// fails its statement, is warned about by the helper it runs through, and counts as failed for the pass. The closed rows of
+    /// <c>collect.object_usage_runs</c> (<c>last_time</c> set and older than the horizon) are deleted in the same call; open runs never are.
     /// </summary>
     internal static async Task<(int TablesPurged, int RowsDeleted, int ChunksDropped, int TablesFailed)> PurgeObjectUsageChainAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, Func<string, int>? retentionDaysFor, DateTime utcNow, ILogger? logger,
@@ -1846,6 +1847,22 @@ public static class DarlingRetention
                 tablesPurged++;
                 rowsDeleted += deleted.Value;
             }
+        }
+
+        /* The runs table is plain: a run is not a per-snapshot row, so it has no chunk to drop. A closed run (last_time set) whose last
+           snapshot is past the horizon goes, because no window the chain can answer reaches back to it. A run still open (last_time NULL)
+           means the index is present through the pair's newest snapshot and is never purged. The statement is sliced on last_time. */
+        var runsDeleted = await PurgeOneAsync(
+            postgres, ObjectUsageChain.RunsTable, TimeSlicedDeleteSql(ObjectUsageChain.RunsTable, "last_time", "last_time IS NOT NULL"),
+            utcNow.AddDays(-retentionDays), logger, cancellationToken, pacer: walPacer);
+        if (runsDeleted is null)
+        {
+            tablesFailed++;
+        }
+        else
+        {
+            tablesPurged++;
+            rowsDeleted += runsDeleted.Value;
         }
 
         return (tablesPurged, rowsDeleted, chunksDropped, tablesFailed);

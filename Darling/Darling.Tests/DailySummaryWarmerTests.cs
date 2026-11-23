@@ -37,6 +37,70 @@ public sealed class DailySummaryWarmerTests
     private static DateTime NextBoundary(DateTime nowUtc) =>
         nowUtc.Date.AddDays(1).Add(Warmers.PassMargin);
 
+    /// <summary>#9334: a fresh install's first pass runs before the first connection registers the server. The server is
+    /// skipped (no warm, no heavy slot, no Warning, the pass still complete) and warmed on the pass after it registers.</summary>
+    [Fact]
+    public async Task Pass_SkipsAServerTheRegistryDoesNotHoldYet_WithoutAWarning_AndWarmsItOnceItIsRegistered()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var registeredIds = new HashSet<int> { 1 };
+        var warmed = new List<int>();
+        var log = new CapturingTestLogger();
+        var warmer = Warmers.Create(
+            servers: () => TwoServers,
+            warm: (serverId, _, _) =>
+            {
+                warmed.Add(serverId);
+                return Task.CompletedTask;
+            },
+            enabled: () => true,
+            admission: null,
+            logger: log,
+            registered: _ => Task.FromResult<IReadOnlySet<int>>(registeredIds));
+
+        var first = await Warmers.RunPassAsync(warmer, ct);
+
+        Assert.Equal([1], warmed);
+        Assert.Equal(1, first.Warmed);
+        Assert.Equal(1, first.Skipped);
+        Assert.Equal(0, first.Failed);
+        Assert.True(first.Complete);
+        Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+
+        registeredIds.Add(2);
+        var second = await Warmers.RunPassAsync(warmer, ct);
+
+        Assert.Equal([1, 1, 2], warmed);
+        Assert.Equal(2, second.Warmed);
+        Assert.Equal(0, second.Skipped);
+        Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+    }
+
+    /// <summary>#9334: a registry read that fails must not stop the pass or hide servers: each is warmed as before, so a store
+    /// that cannot answer fails the reads with their own Warnings.</summary>
+    [Fact]
+    public async Task Pass_WhenTheRegistryReadFails_WarmsEveryServerAsBefore()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var warmed = new List<int>();
+        var warmer = Warmers.Create(
+            servers: () => TwoServers,
+            warm: (serverId, _, _) =>
+            {
+                warmed.Add(serverId);
+                return Task.CompletedTask;
+            },
+            enabled: () => true,
+            admission: null,
+            registered: _ => throw new InvalidOperationException("registry unavailable"));
+
+        var pass = await Warmers.RunPassAsync(warmer, ct);
+
+        Assert.Equal([1, 2], warmed);
+        Assert.Equal(2, pass.Warmed);
+        Assert.Equal(0, pass.Skipped);
+    }
+
     [Fact]
     public async Task RunAsync_WarmsEveryServerOnceAfterTheStartDelay_ThenWaitsTheRefreshInterval()
     {
@@ -345,8 +409,14 @@ internal static class Warmers
         Func<bool> enabled,
         ReadAdmission? admission,
         Func<DateTime>? clock = null,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
-        => new(servers, warm, enabled, admission, NullLogger.Instance, clock, delay);
+        Func<TimeSpan, CancellationToken, Task>? delay = null,
+        Microsoft.Extensions.Logging.ILogger? logger = null,
+        Func<CancellationToken, Task<IReadOnlySet<int>>>? registered = null)
+        => new(servers, warm, enabled, admission, logger ?? NullLogger.Instance, clock, delay, registered);
+
+    /// <summary>The product's registry read: the ids of the servers the store holds, the set the warm reads resolve through.</summary>
+    public static Task<IReadOnlySet<int>> RegisteredIdsAsync(Npgsql.NpgsqlDataSource postgres, CancellationToken ct)
+        => DailySummaryWarmer.RegisteredServerIdsAsync(postgres, ct);
 
     /// <summary>The product's own warm read for one server: the Overview's range through the daily summary reader.</summary>
     public static Task WarmAsync(Npgsql.NpgsqlDataSource postgres, int serverId, string name, CancellationToken ct, Microsoft.Extensions.Logging.ILogger? logger = null)

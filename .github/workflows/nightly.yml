@@ -1730,7 +1730,11 @@ jobs:
             echo "::error::The Linux tarball holds the PowerShell scripts listed above. They ship signed in the Windows zip only (#5796)."
             exit 1
           fi
-          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+          # #9333: the Compose files ride the nightly too, pinned to this nightly's own :<version> image tag (pushed
+          # beside :nightly), so the archive the release checklist tests exists before the release is cut. The same
+          # script build.yml's release job runs.
+          bash .github/scripts/pack-compose.sh "${version}" releases
+          (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" "PerformanceMonitorDarling-compose-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
           echo "${version}" > releases/linux-version.txt
 
       # The container image build needs THIS checkout (docker build's context is the repo root,
@@ -1760,6 +1764,7 @@ jobs:
           name: linux-release-assets
           path: |
             releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
+            releases/PerformanceMonitorDarling-compose-*.tar.gz
             releases/SHA256SUMS-linux.txt
             releases/linux-version.txt
           if-no-files-found: error
@@ -1923,7 +1928,7 @@ jobs:
       - name: Upload linux artifact to the nightly release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload nightly releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt --clobber
+        run: gh release upload nightly releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/PerformanceMonitorDarling-compose-*.tar.gz releases/SHA256SUMS-linux.txt --clobber
 
       - name: Push container image (ghcr, :nightly)
         env:
