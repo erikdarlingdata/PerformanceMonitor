@@ -138,6 +138,18 @@ public sealed class McpToolSearchTests
         Assert.Equal(7, NamesOf(exact).Length);
     }
 
+    [Theory]
+    [InlineData("names", 51)]
+    [InlineData("full", 11)]
+    [InlineData("summaries", 0)]
+    public void ALimitOutOfRange_IsRefusedByTheTool_WithTheSharedEnvelope(string detail, int limit)
+    {
+        /* The refusal comes before the request's server is read, so no host is needed. */
+        using var answer = JsonDocument.Parse(DarlingMcpToolSearchTools.FindTools(null!, "wait", detail, limit));
+
+        Assert.Equal("limit", answer.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+    }
+
     [Fact]
     public void ANoMatchAndAnEmptyQuery_AreAnsweredNotThrown()
     {

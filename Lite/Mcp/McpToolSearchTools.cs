@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.ComponentModel;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
@@ -28,5 +29,14 @@ public sealed class McpToolSearchTools
         [Description(McpToolSearchToolText.QueryParameter)] string query,
         [Description(McpToolSearchToolText.DetailParameter)] string detail = "summaries",
         [Description(McpToolSearchToolText.LimitParameter)] int? limit = null)
-        => McpToolSearch.Render(server.ServerOptions.ToolCollection, query, detail, limit);
+    {
+        /* A limit out of range is refused with the shared envelope, like every other bounded parameter (the payload contract census). */
+        if (limit is { } asked
+            && McpHelpers.ValidateTop(asked, string.Equals(detail?.Trim(), "full", StringComparison.OrdinalIgnoreCase) ? McpToolSearch.MaxFullLimit : McpToolSearch.MaxLimit) is { } refusal)
+        {
+            return refusal;
+        }
+
+        return McpToolSearch.Render(server.ServerOptions.ToolCollection, query, detail, limit);
+    }
 }
