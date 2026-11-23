@@ -9275,6 +9275,35 @@ AND   j.hypertable_name = '{relation}'";
         RawTierCoverage.Select(t => t.Relation).ToArray();
 
     /// <summary>
+    /// The raw relations (<see cref="RawRelations"/>) that are hypertables in this database: the ones only the gated raw purge drops, at
+    /// <see cref="RawRetentionSpan"/>. Empty when the timescaledb extension is not created here, so a store without it has no hypertable. One
+    /// catalog read, shared by the retention sweep's probe and the clutter rollups' unstamp.
+    /// </summary>
+    public static async Task<IReadOnlySet<string>> ReadRawHypertablesAsync(NpgsqlConnection connection, int timeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var hypertables = new HashSet<string>(StringComparer.Ordinal);
+        if (!await DetectAsync(connection, cancellationToken))
+        {
+            return hypertables;
+        }
+
+        await using var command = new NpgsqlCommand(
+            "SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = ANY($1)",
+            connection) { CommandTimeout = timeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = RawRelations.ToArray() });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            hypertables.Add(reader.GetString(0));
+        }
+
+        return hypertables;
+    }
+
+    /// <summary>
     /// EVERY retention policy this store attaches, each naming the tier(s) that must already cover it before
     /// arming is safe (#1680). The rule this list enforces is: NEVER DROP WHAT YOUR CONSUMER HAS NOT CAPTURED
     /// YET. Iterated by <see cref="EnsureRetentionPoliciesAsync"/>, which used to build it as a local.

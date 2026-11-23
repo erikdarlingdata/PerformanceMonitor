@@ -211,7 +211,9 @@ LIMIT $4;";
     /// <summary>
     /// #9383: removes the built stamp of an hour that starts before its server's oldest raw row and holds no clutter row in either hourly table
     /// (an earlier build stamped it empty, before raw held it), so the clutter route reports the span as not collected instead of "no plans". An
-    /// hour with rows keeps its stamp. A server with no raw row is left alone.
+    /// hour with rows keeps its stamp. A server with no raw row is left alone. Only a stamp built when raw could no longer hold its hour is removed
+    /// (built at or after the hour plus the days raw keeps): a stamp built while raw held the hour is an hour the collector ran in that stored
+    /// nothing, and it stays, so the hour reads "no plans" and not "not collected". $1 the days raw keeps (<see cref="RawHeldDaysAsync"/>).
     /// </summary>
     public const string UnstampBeforeFloorSql = @"
 DELETE FROM collect.query_store_clutter_hour_built AS b
@@ -223,6 +225,7 @@ USING
 ) AS f
 WHERE b.server_id = f.server_id
   AND b.hour_utc < f.first_hour
+  AND b.built_at >= b.hour_utc + make_interval(days => $1)
   AND NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_plan_hourly AS p WHERE p.server_id = b.server_id AND p.hour_utc = b.hour_utc)
   AND NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_collections_hourly AS c WHERE c.server_id = b.server_id AND c.hour_utc = b.hour_utc);";
 
@@ -537,12 +540,28 @@ ORDER BY b.hour_utc;";
         return removed;
     }
 
-    /// <summary>#9383: removes the empty built stamps of hours before each server's oldest raw row (<see cref="UnstampBeforeFloorSql"/>); returns how many.</summary>
-    public static async Task<long> UnstampBeforeFloorAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    /// <summary>
+    /// The days raw <c>query_store_stats</c> keeps on this store, or null when that is not known. A hypertable raw table is dropped only by the gated
+    /// raw purge, at <see cref="TimescaleSupport.RawRetentionSpan"/>, and a custom retention does not apply to it. A plain raw table is cleared by the
+    /// purge's time-sliced DELETE at <paramref name="rawRetentionDays"/>. The hypertable answer is the one the retention sweep uses to leave the raw
+    /// tables to the gated purge (<see cref="TimescaleSupport.ReadRawHypertablesAsync"/>).
+    /// </summary>
+    public static async Task<int?> RawHeldDaysAsync(NpgsqlConnection connection, int? rawRetentionDays, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        var hypertables = await TimescaleSupport.ReadRawHypertablesAsync(connection, CommandTimeoutSeconds, cancellationToken);
+        return hypertables.Contains("query_store_stats", StringComparer.Ordinal) ? (int)TimescaleSupport.RawRetentionSpan.TotalDays : rawRetentionDays;
+    }
+
+    /// <summary>#9383: removes the empty built stamps of hours before each server's oldest raw row that were built when raw could no longer hold
+    /// their hour (<see cref="UnstampBeforeFloorSql"/>); returns how many. <paramref name="rawHeldDays"/> is <see cref="RawHeldDaysAsync"/>'s answer.</summary>
+    public static async Task<long> UnstampBeforeFloorAsync(NpgsqlConnection connection, int rawHeldDays, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         await using var command = new NpgsqlCommand(UnstampBeforeFloorSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = rawHeldDays });
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -589,7 +608,7 @@ ORDER BY b.hour_utc;";
 
         await HeartbeatAsync(connection, nowUtc, logger, cancellationToken);
         var removed = await PruneAsync(connection, nowUtc, rawRetentionDays, cancellationToken);
-        removed += await UnstampBeforeFloorAsync(connection, cancellationToken);
+        removed += await UnstampBeforeFloorAsync(connection, await RawHeldDaysAsync(connection, rawRetentionDays, cancellationToken) ?? rawRetentionDays, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, rawRetentionDays, cancellationToken);
 
         int built = 0, failed = 0, started = 0;
