@@ -167,7 +167,7 @@ internal sealed class ObjectUsageWindowReplay
                         return replay;
                     }
 
-                    replay.IndexResets += 0;
+                    replay.IndexResets += fact.IndexResets;
                     if (fact.Reasons != ObjectUsageResetReasons.None)
                     {
                         replay._resets.Add(new ObjectUsageReset(fact.CollectionTime, fact.Reasons, step.PreviousServer, step.Server, fact.BlindFrom));

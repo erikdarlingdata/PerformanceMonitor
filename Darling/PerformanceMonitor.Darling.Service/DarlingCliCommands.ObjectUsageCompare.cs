@@ -210,7 +210,7 @@ internal static class ObjectUsageCompare
 
         var fullById = full.Objects.GroupBy(o => o.ObjectId).ToDictionary(g => g.Key, g => g.First());
         var persistedById = persisted.Objects.GroupBy(o => o.ObjectId).ToDictionary(g => g.Key, g => g.First());
-        foreach (var id in Array.Empty<int>())
+        foreach (var id in fullById.Keys.Union(persistedById.Keys).OrderBy(k => k))
         {
             fullById.TryGetValue(id, out var expected);
             persistedById.TryGetValue(id, out var actual);
