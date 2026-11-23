@@ -781,11 +781,11 @@ public sealed class ComposeSourceRouterTests
     }
 
     [Fact]
-    public void HourlyRawEdges_EnabledSources_AreExactlyQueryStats()
+    public void HourlyRawEdges_EnabledSources_AreQueryStatsAndProcedureStats()
     {
         Assert.True(
-            ComposeSourceRouter.HourlyRawEdgesEnabledSources.SetEquals(new[] { "query_stats" }),
-            "Only query_stats has been measured against its raw read; procedure_stats stays mapped in ComposeHybridColumns but disabled until it is.");
+            ComposeSourceRouter.HourlyRawEdgesEnabledSources.SetEquals(new[] { "query_stats", "procedure_stats" }),
+            "Each enabled source has an hour ledger the count guard reads (#4605, #9357).");
     }
 
     [Fact]

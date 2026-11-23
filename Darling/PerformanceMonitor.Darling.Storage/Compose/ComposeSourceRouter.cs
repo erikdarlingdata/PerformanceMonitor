@@ -207,10 +207,10 @@ public static class ComposeSourceRouter
     /// viewer's built-in tabs route off the same value.</summary>
     public static readonly TimeSpan RawRouteMaxAge = RetentionTierRouter.RawMaxAge;
 
-    /// <summary>The sources the hourly-raw-edges route is enabled for. Only <c>query_stats</c> has been measured
-    /// against its raw read, so <c>procedure_stats</c> (mapped in <see cref="ComposeHybridColumns"/>) stays out.</summary>
+    /// <summary>The sources the hourly-raw-edges route is enabled for: <c>query_stats</c> (#4605) and <c>procedure_stats</c> (#9357).
+    /// Each has an hour ledger that <see cref="IntervalRollupCountGuard"/> reads, and a mapping in <see cref="ComposeHybridColumns"/>.</summary>
     internal static readonly IReadOnlySet<string> HourlyRawEdgesEnabledSources =
-        new HashSet<string>(StringComparer.Ordinal) { "query_stats" };
+        new HashSet<string>(StringComparer.Ordinal) { "query_stats", "procedure_stats" };
 
     private static readonly TimeSpan HourlyRawEdgesMinWindow = TimeSpan.FromHours(12);
     private static readonly TimeSpan HourlyRawEdgesEndSlack = TimeSpan.FromMinutes(1);
