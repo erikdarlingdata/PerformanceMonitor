@@ -4035,6 +4035,10 @@ END $$;";
         /* V302 (#8570): the partial index of failed Agent job outcomes on collect.job_history, for the Daily Health Report's failed-jobs read. An older build
            never reads it. */
         new Migration(302, "job-history-failed-index", V302Sql),
+        /* V303 (#9384): the clutter-day stamp (collect.query_store_clutter_day_built), so a Query Store clutter day can be built from its 24 hourly rows soon
+           after midnight and not wait for the grid's close. One plain table created empty: no data moves. An older build ignores it and serves a clutter day
+           only from the grid's own stamp, so a day built from its hours is read from the hourly or raw rows there. */
+        new Migration(QueryStoreClutterDayFold.Version, "query-store-clutter-day-built", QueryStoreClutterDayFold.CreateSql),
     };
 
     /// <summary>
