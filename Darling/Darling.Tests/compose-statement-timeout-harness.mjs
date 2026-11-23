@@ -162,7 +162,7 @@ for (const kind of ["dashboard", "notebook"]) {
 
   /* The cell's own Retry button (the first Retry on the page is the stopped cell's) sends only that cell, and again after it fails again. */
   calls.length = 0;
-  retryButtons(main)[0].click();
+  retryButtons(main)[0].fire("click");
   await flush();
   r.retryClick = sourcesOf(calls);
   r.afterRetryTick = await render(main, { poll: true });
@@ -177,7 +177,7 @@ for (const kind of ["dashboard", "notebook"]) {
   s1Works = true;
   r.tickWhileHeld = await render(main, { poll: true });
   calls.length = 0;
-  retryButtons(main)[0].click();
+  retryButtons(main)[0].fire("click");
   await flush();
   r.retryWhenWorking = sourcesOf(calls);
   r.tickAfterRecovered = await render(main, { poll: true });
