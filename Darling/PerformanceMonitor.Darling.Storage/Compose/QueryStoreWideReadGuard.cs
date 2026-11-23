@@ -428,7 +428,7 @@ WHERE b.daily_rows IS NOT NULL
     internal static async Task<string?> CheckRawAsync(
         NpgsqlDataSource postgres, NpgsqlConnection? snapshotConnection, IReadOnlyList<string>? serverScope, string collector,
         DateTime countedStart, DateTime countedEnd, ILogger? logger,
-        int commandTimeoutSeconds, CancellationToken cancellationToken) =>
+        int commandTimeoutSeconds, CancellationToken cancellationToken, IReadOnlyList<ComposeFilter>? filters = null) =>
         RawRefusal(
             await EstimateRawAsync(postgres, snapshotConnection, serverScope, collector, countedStart, countedEnd, logger, commandTimeoutSeconds, cancellationToken),
             collector, countedStart, countedEnd, RawLimitFor(collector, filters));
