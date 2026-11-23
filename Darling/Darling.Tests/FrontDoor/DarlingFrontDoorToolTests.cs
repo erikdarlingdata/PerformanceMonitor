@@ -271,10 +271,9 @@ public sealed class DarlingFrontDoorToolTests
         });
     }
 
-    /// <summary>#9388: call_tool is served as the registered tool, with no outer store, because CallToolFilter discards one. Its
-    /// description says where a store goes.</summary>
+    /// <summary>#9388: call_tool is served as the registered tool, with no outer store, because CallToolFilter discards one.</summary>
     [Fact]
-    public async Task CallTool_OnAFrontDoor_HasNoOuterStore_AndSaysStoreGoesInsideArguments()
+    public async Task CallTool_OnAFrontDoor_HasNoOuterStore()
     {
         var directory = new FakeFrontDoorDirectory("use1", "use2");
         await using var running = await StartAsync(directory, new FakeFrontDoorPeers(), Operator);

@@ -1609,6 +1609,15 @@ public sealed class DarlingMcpHostService : BackgroundService
                 collection.Clear();
                 foreach (var tool in served)
                 {
+                    /* #9388: find_tools and call_tool stay the registered tools. find_tools answers from THIS request's collection (the wrapped
+                       tools, with store in their schemas, after the caller's policy), where a store would search its own set under the front
+                       door's peer token. call_tool is rewritten to the inner tool before dispatch, and its store goes inside arguments. */
+                    if (DarlingFrontDoorRouting.LocalTools.Contains(tool.ProtocolTool.Name))
+                    {
+                        collection.Add(tool);
+                        continue;
+                    }
+
                     collection.Add(new DarlingFrontDoorTool(
                         tool, frontDoor, sp => (perRequest && sp is not null ? PolicyOf(sp) : writes).Investigations));
                 }
