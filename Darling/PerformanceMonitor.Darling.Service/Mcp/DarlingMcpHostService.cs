@@ -2108,6 +2108,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Lite twin:
                McpToolGuideTools. */
             .WithGeminiCompatibleTools<DarlingMcpToolGuideTools>()
+            /* #9388: find_tools searches the tools this request serves (the per-request ToolCollection). Lite twin: McpToolSearchTools. */
+            .WithGeminiCompatibleTools<DarlingMcpToolSearchTools>()
             // FinOps web parity (#4843), set A: append new FinOps entries below this line only.
             .WithGeminiCompatibleTools<DarlingMcpFinOpsInventoryTools>()
             .WithGeminiCompatibleTools<DarlingMcpFinOpsRecommendationsTools>()

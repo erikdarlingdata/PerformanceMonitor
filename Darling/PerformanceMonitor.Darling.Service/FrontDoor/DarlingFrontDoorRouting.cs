@@ -63,6 +63,7 @@ internal static class DarlingFrontDoorRouting
     internal static readonly IReadOnlySet<string> AnyOneStoreTools = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_tool_guide",
+        "find_tools",
         "analyze_plan_xml",
         "validate_custom_view",
         "validate_custom_alert_rule",
