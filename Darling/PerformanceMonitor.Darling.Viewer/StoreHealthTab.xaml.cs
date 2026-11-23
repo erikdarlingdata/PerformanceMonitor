@@ -202,7 +202,7 @@ public partial class StoreHealthTab : UserControl
     /// leaves the screen alone, when the store has none to give (the live read then runs as it always did).</summary>
     private async Task<bool> ShowLastSizesAsync(ViewerLoadTimer timer)
     {
-        var read = LastSizesRead?.Invoke() ?? _dataService?.GetStoreLastSizesHealthAsync();
+        var read = (Task<StoreLastSizesHealth?>?)null;
         if (read is null)
         {
             return false;
