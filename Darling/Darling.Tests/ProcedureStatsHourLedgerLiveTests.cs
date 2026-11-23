@@ -45,7 +45,7 @@ public sealed class ProcedureStatsHourLedgerLiveTests
     private static readonly MethodInfo WriteBatchMethod = typeof(DarlingCollectorRunner)
         .GetMethod("WriteBatchAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
-    private sealed class Rig : IAsyncDisposable
+    internal sealed class Rig : IAsyncDisposable
     {
         public required ScratchPostgres Scratch { get; init; }
 
