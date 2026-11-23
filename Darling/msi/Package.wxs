@@ -66,7 +66,7 @@
         <!-- darling.json is never in this tree: install-darling.ps1 writes it. -->
         <Files Include="$(PayloadDir)\**">
           <Exclude Files="$(PayloadDir)\viewer\**" />
-          <Exclude Files="$(PayloadDir)\zh-Hant\**" />
+          <Exclude Files="$(PayloadDir)\zh-Hant\Microsoft.SqlServer.TransactSql.ScriptDom.resources.dll" />
           <Exclude Files="$(PayloadDir)\PerformanceMonitor.Darling.Service.exe" />
           <Exclude Files="$(PayloadDir)\darling.json" />
         </Files>
@@ -94,7 +94,7 @@
 
         <Directory Id="ViewerDir" Name="viewer">
           <Files Include="$(PayloadDir)\viewer\**">
-            <Exclude Files="$(PayloadDir)\viewer\zh-Hant\**" />
+            <Exclude Files="$(PayloadDir)\viewer\zh-Hant\Microsoft.SqlServer.TransactSql.ScriptDom.resources.dll" />
             <Exclude Files="$(PayloadDir)\viewer\PerformanceMonitor.Darling.Viewer.exe" />
           </Files>
           <Component Id="DarlingViewer" Guid="*">
