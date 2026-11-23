@@ -144,4 +144,29 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ServerId, ServerNa
             Assert.True(await reader.ReadAsync(ct));
             Assert.Equal(4, Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture));
         });
+
+    /// <summary>
+    /// #9337: the page is raw rows and the window total counts events, so a page of eight rows over five events once printed
+    /// "newest 8 of 5" with a negative left-out figure. The page reports the events its rows cover, so shown never passes the total.
+    /// </summary>
+    [Fact]
+    public async Task ThePage_CountsItsRowsAsEvents_NeverMoreThanTheWindowTotal_AgainstDevPostgres() =>
+        await RunAsync(async (connection, day, ct) =>
+        {
+            await using var postgres = NpgsqlDataSource.Create(connection.ConnectionString);
+
+            var all = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(postgres, ServerId, day, day.AddDays(1), 7, ct);
+            Assert.Equal(8, all.Rows.Count);
+            Assert.Equal(5, all.TotalEvents);
+            Assert.Equal(5, all.ShownEvents);
+            Assert.False(all.Truncated);
+
+            /* Four rows: the newest are the STEADY pair (one event) and the 1 ms pair (one event), so two events shown of five. */
+            var cut = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(postgres, ServerId, day, day.AddDays(1), 4, ct);
+            Assert.Equal(4, cut.Rows.Count);
+            Assert.Equal(2, cut.ShownEvents);
+            Assert.Equal(5, cut.TotalEvents);
+            Assert.True(cut.Truncated);
+            Assert.True(cut.TotalEvents - cut.ShownEvents >= 0);
+        });
 }
