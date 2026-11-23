@@ -25,16 +25,16 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>The plan is three cheap reads, none of which reads index rows.</b> (1) Each server's newest raw snapshot time: a skip scan over
 /// <c>idx_index_object_stats_server_time (server_id, collection_time DESC)</c>, one index probe per server. (2) The server's pair watermarks:
-/// <c>max(collection_time)</c> per database in <c>object_usage_snapshots</c>, an index-only read of that table's primary key. (3) Only for a
-/// server that needs it, the database names: a skip scan over <c>idx_index_object_stats_object</c>, one probe per name. A pair is built when it
-/// has no watermark (a backfill) or when its watermark is older than the server's newest raw snapshot; the builder says whether anything was
-/// there (0 steps = nothing to fold).</para>
+/// <c>max(collection_time)</c> per database in <c>object_usage_snapshots</c>, an index-only read of that table's primary key. (3) The server's
+/// database names: a skip scan over <c>idx_index_object_stats_object</c>, one probe per name. A pair is built when it has no watermark (a
+/// backfill, or a build that failed before its first snapshot) or when its watermark is older than the server's newest raw snapshot; the builder
+/// says whether anything was there (0 steps = nothing to fold).</para>
 ///
-/// <para><b>A server is skipped</b> when its newest raw snapshot is not newer than any of its pair watermarks and is older than
-/// <see cref="QuietWindow"/>. The window exists because the collector commits a run one database at a time, so a tick that lands mid-run sees a
-/// server whose newest snapshot is built for the databases already committed and not yet written for the rest. Until the run is surely over
-/// the server is listed again each tick. Each database's snapshot is written by one binary COPY (one commit), so a pair's snapshot is never
-/// visible half written and the builder never folds a partial one.</para>
+/// <para><b>Every server's databases are listed every tick.</b> A cheaper skip (the newest raw snapshot is not newer than any pair watermark)
+/// would be wrong twice: the collector commits a run one database at a time, so a tick that lands mid-run sees the databases already committed
+/// at the newest time and misses the rest until the next run, and a pair that has no watermark yet cannot be seen in the watermarks at all.
+/// Each database's snapshot is written by one binary COPY (one commit), so a pair's snapshot is never visible half written and the builder
+/// never folds a partial one.</para>
 ///
 /// <para><b>Bounds.</b> At most <see cref="MaxStepsPerTick"/> snapshots are folded a tick and no longer than <see cref="MaxTickDuration"/>;
 /// the next tick resumes, because the builder restores from what is committed. A pair or a server whose work throws is logged and skipped, and
@@ -47,9 +47,6 @@ public static class ObjectUsageChainTick
 
     /// <summary>The longest one tick runs. A snapshot being folded when it passes is rolled back and built again by the next tick.</summary>
     public static readonly TimeSpan MaxTickDuration = TimeSpan.FromMinutes(5);
-
-    /// <summary>How long after a server's newest raw snapshot its databases are still listed every tick (see the type's remarks).</summary>
-    public static readonly TimeSpan QuietWindow = TimeSpan.FromHours(3);
 
     private const int CommandTimeoutSeconds = 120;
 
@@ -148,11 +145,11 @@ public static class ObjectUsageChainTick
 
     /// <summary>One tick with the production bounds and the real builder.</summary>
     public static Task<TickResult> RunTickAsync(NpgsqlDataSource dataSource, ILogger logger, CancellationToken cancellationToken) =>
-        RunTickAsync(dataSource, DateTime.UtcNow, MaxStepsPerTick, MaxTickDuration, ObjectUsageChainBuilder.BuildPairAsync, logger, cancellationToken);
+        RunTickAsync(dataSource, MaxStepsPerTick, MaxTickDuration, ObjectUsageChainBuilder.BuildPairAsync, logger, cancellationToken);
 
-    /// <summary>One tick with the bounds, the clock and the builder call set, so a test can cap the steps or make one pair fail.</summary>
+    /// <summary>One tick with the bounds and the builder call set, so a test can cap the steps or make one pair fail.</summary>
     internal static async Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int maxSteps, TimeSpan maxDuration, BuildPair build, ILogger logger, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, int maxSteps, TimeSpan maxDuration, BuildPair build, ILogger logger, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
         ArgumentNullException.ThrowIfNull(build);
@@ -184,7 +181,7 @@ public static class ObjectUsageChainTick
             List<string> candidates;
             try
             {
-                candidates = await PlanServerAsync(dataSource, serverId, newest, nowUtc, cancellationToken);
+                candidates = await PlanServerAsync(dataSource, serverId, newest, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -240,9 +237,9 @@ public static class ObjectUsageChainTick
         return new TickResult(pairsBuilt, steps, failed, deferred);
     }
 
-    /// <summary>The pairs of one server worth a builder call, per the type's remarks. Empty when the server is skipped.</summary>
+    /// <summary>The pairs of one server worth a builder call, per the type's remarks.</summary>
     private static async Task<List<string>> PlanServerAsync(
-        NpgsqlDataSource dataSource, int serverId, DateTime newest, DateTime nowUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, int serverId, DateTime newest, CancellationToken cancellationToken)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
 
@@ -255,17 +252,6 @@ public static class ObjectUsageChainTick
             {
                 watermarks[reader.GetString(0)] = reader.GetDateTime(1);
             }
-        }
-
-        var behind = watermarks.Count == 0;
-        foreach (var watermark in watermarks.Values)
-        {
-            behind |= watermark < newest;
-        }
-
-        if (!behind && nowUtc - newest >= QuietWindow)
-        {
-            return [];
         }
 
         var candidates = new List<string>();

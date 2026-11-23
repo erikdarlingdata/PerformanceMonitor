@@ -44,7 +44,7 @@ public sealed class ObjectUsageChainTickLiveTests
 
     private static Task<ObjectUsageChainTick.TickResult> TickAsync(
         NpgsqlDataSource dataSource, int maxSteps, ObjectUsageChainTick.BuildPair build, CancellationToken ct) =>
-        ObjectUsageChainTick.RunTickAsync(dataSource, DateTime.UtcNow, maxSteps, TimeSpan.FromMinutes(5), build, NullLogger.Instance, ct);
+        ObjectUsageChainTick.RunTickAsync(dataSource, maxSteps, TimeSpan.FromMinutes(5), build, NullLogger.Instance, ct);
 
     /// <summary>The snapshot of one day for one database: two indexes whose counters grow by day.</summary>
     private static async Task PlantAsync(NpgsqlConnection connection, int serverId, string database, int day, CancellationToken ct)
