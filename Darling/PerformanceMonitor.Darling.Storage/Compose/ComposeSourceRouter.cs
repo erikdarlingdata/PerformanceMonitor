@@ -88,7 +88,7 @@ internal static class ComposeHybridColumns
 
     /// <summary>The sources whose hourly-raw-edges FROM item carries the raw restart-rows arm. <c>procedure_stats</c> does not (#9357):
     /// see <c>ComposeCompiler.HourlyRawEdgesRelation</c> for why a restart row can add no value there.</summary>
-    private static readonly IReadOnlySet<string> s_restartRowArmSources = new HashSet<string>(StringComparer.Ordinal) { "query_stats" };
+    private static readonly HashSet<string> s_restartRowArmSources = new HashSet<string>(StringComparer.Ordinal) { "query_stats" };
 
     public static bool ReadsRestartRows(string source) => s_restartRowArmSources.Contains(source);
 }
