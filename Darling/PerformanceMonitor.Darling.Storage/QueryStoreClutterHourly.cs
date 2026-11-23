@@ -247,7 +247,8 @@ WHERE sv.is_enabled;";
     /// <summary>
     /// Marks every built hour that holds a row collected after the server's last hour heartbeat as needing a rebuild, and returns how many it
     /// marked: the mark a build that does not know the hourly tables never writes. The raw table has an index on (server, collection_time), so
-    /// the scan reads only the rows since the heartbeat. $1 server_id, $2 the server's last hour heartbeat.
+    /// the scan reads only the rows since the heartbeat. #9384: it also marks the stamped clutter day (<see cref="QueryStoreClutterDayFold"/>) of
+    /// each hour it marks. $1 server_id, $2 the server's last hour heartbeat.
     /// </summary>
     public const string MarkChangedHoursSql = @"
 WITH late AS
@@ -265,6 +266,16 @@ marked AS
     WHERE b.server_id = $1
       AND b.hour_utc = l.hour_utc
       AND NOT b.rebuild_needed
+    RETURNING b.hour_utc
+),
+marked_days AS
+(
+    UPDATE collect.query_store_clutter_day_built AS d
+    SET rebuild_needed = true
+    FROM (SELECT DISTINCT m.hour_utc::date AS day_utc FROM marked AS m) AS md
+    WHERE d.server_id = $1
+      AND d.day_utc = md.day_utc
+      AND NOT d.rebuild_needed
     RETURNING 1
 )
 SELECT COUNT(*) FROM marked;";
