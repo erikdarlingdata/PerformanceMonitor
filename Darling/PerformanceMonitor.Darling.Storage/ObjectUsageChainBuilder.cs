@@ -41,28 +41,8 @@ public static class ObjectUsageChainBuilder
 
     private const int CommandTimeoutSeconds = 300;
 
-    private const string RawColumns = """
-        s.collection_time,
-        s.sqlserver_start_time,
-        s.answering_server_name,
-        s.object_id,
-        s.index_id,
-        s.schema_name,
-        s.table_name,
-        COALESCE(s.is_indexed_view, false),
-        COALESCE(s.user_seeks, 0),
-        COALESCE(s.user_scans, 0),
-        COALESCE(s.user_lookups, 0),
-        COALESCE(s.user_updates, 0),
-        s.last_user_seek,
-        s.last_user_scan,
-        s.last_user_lookup,
-        s.last_user_update,
-        s.is_memory_optimized
-        """;
-
     /// <summary>The raw rows after a time, oldest first, a fixed order inside a snapshot. $1 server_id, $2 database_name, $3 the first time read (inclusive), $4 the row limit.</summary>
-    private const string RawAfterSql = "SELECT " + RawColumns + """
+    private const string RawAfterSql = "SELECT " + ObjectUsageWindowRead.Columns + """
 
         FROM collect.v_index_object_stats AS s
         WHERE s.server_id = $1
@@ -75,7 +55,7 @@ public static class ObjectUsageChainBuilder
         """;
 
     /// <summary>The raw rows of named snapshots. $1 server_id, $2 database_name, $3 the collection times.</summary>
-    private const string RawAtSql = "SELECT " + RawColumns + """
+    private const string RawAtSql = "SELECT " + ObjectUsageWindowRead.Columns + """
 
         FROM collect.v_index_object_stats AS s
         WHERE s.server_id = $1

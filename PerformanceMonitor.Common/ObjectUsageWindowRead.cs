@@ -28,12 +28,36 @@ public static class ObjectUsageWindowRead
     public const int BaselineReachDays = 8;
 
     /// <summary>
-    /// The window's snapshots for one database, oldest first, from the newest snapshot at or before the window start (the baseline) onward.
-    /// $1 server_id, $2 database_name, $3 the window start (naive UTC, the clock collection_time is stored in). The baseline lookup is bounded
-    /// below by <see cref="BaselineReachDays"/> so Darling's (server_id, collection_time DESC) index answers it from the chunks near the start.
-    /// The SELECT list is <see cref="Map"/>'s contract: change both together.
+    /// The 17 columns every read of <c>v_index_object_stats</c> for <see cref="Map"/> selects, in the order <see cref="Map"/> reads them, from
+    /// a table aliased <c>s</c>. The one definition: <see cref="Sql"/>, Darling's boundary-row read and Darling's chain builder all build their
+    /// statements from it, so the list and the mapper cannot drift apart. Change this list and <see cref="Map"/> together.
     /// </summary>
-    public static readonly string Sql = $"""
+    public const string Columns = """
+        s.collection_time,
+        s.sqlserver_start_time,
+        s.answering_server_name,
+        s.object_id,
+        s.index_id,
+        s.schema_name,
+        s.table_name,
+        COALESCE(s.is_indexed_view, false),
+        COALESCE(s.user_seeks, 0),
+        COALESCE(s.user_scans, 0),
+        COALESCE(s.user_lookups, 0),
+        COALESCE(s.user_updates, 0),
+        s.last_user_seek,
+        s.last_user_scan,
+        s.last_user_lookup,
+        s.last_user_update,
+        s.is_memory_optimized
+        """;
+
+    /// <summary>
+    /// The baseline CTE: <c>baseline.collection_time</c> is the newest snapshot of one database at or before the window start, no more than
+    /// <see cref="BaselineReachDays"/> before it, or NULL. $1 server_id, $2 database_name, $3 the window start. The one definition: <see cref="Sql"/>
+    /// and Darling's bounds read both start from it, so the persisted path and the full fold always agree on the baseline.
+    /// </summary>
+    public static readonly string BaselineCte = $"""
         WITH baseline AS
         (
             SELECT max(b.collection_time) AS collection_time
@@ -43,24 +67,19 @@ public static class ObjectUsageWindowRead
             AND   b.collection_time <= $3
             AND   b.collection_time > $3 - interval '{BaselineReachDays} days'
         )
+        """;
+
+    /// <summary>
+    /// The window's snapshots for one database, oldest first, from the newest snapshot at or before the window start (the baseline) onward.
+    /// $1 server_id, $2 database_name, $3 the window start (naive UTC, the clock collection_time is stored in). The baseline lookup is bounded
+    /// below by <see cref="BaselineReachDays"/> so Darling's (server_id, collection_time DESC) index answers it from the chunks near the start.
+    /// The SELECT list is <see cref="Columns"/>, the contract <see cref="Map"/> reads: change <see cref="Columns"/> and <see cref="Map"/> together.
+    /// </summary>
+    public static readonly string Sql = BaselineCte + $"""
+
+
         SELECT
-            s.collection_time,
-            s.sqlserver_start_time,
-            s.answering_server_name,
-            s.object_id,
-            s.index_id,
-            s.schema_name,
-            s.table_name,
-            COALESCE(s.is_indexed_view, false),
-            COALESCE(s.user_seeks, 0),
-            COALESCE(s.user_scans, 0),
-            COALESCE(s.user_lookups, 0),
-            COALESCE(s.user_updates, 0),
-            s.last_user_seek,
-            s.last_user_scan,
-            s.last_user_lookup,
-            s.last_user_update,
-            s.is_memory_optimized
+        {Columns}
         FROM v_index_object_stats AS s
         WHERE s.server_id = $1
         AND   s.database_name = $2
@@ -69,7 +88,7 @@ public static class ObjectUsageWindowRead
             s.collection_time
         """;
 
-    /// <summary>Maps one row of <see cref="Sql"/> (17 columns, in the SELECT's order). The integer columns are converted rather than read by
+    /// <summary>Maps one row of <see cref="Sql"/> (17 columns, in the order of <see cref="Columns"/>). The integer columns are converted rather than read by
     /// their exact type, because the two stores do not declare them the same width. <c>is_memory_optimized</c> is read as stored: a row from
     /// before the column was collected holds NULL, which is "not known" and not "no".</summary>
     public static ObjectUsageSample Map(DbDataReader reader)
