@@ -372,7 +372,7 @@ public sealed class ViewerStoreHealthRefreshTests
 
             failure = new InvalidOperationException("scripted settings failure");
             await tab.RefreshAsync(force: true);
-            Assert.Equal("The autovacuum settings failed to load: scripted settings failure", tab.AutovacuumSettingsTextBlock.Text);
+            Assert.Equal("The store autovacuum settings did not load.", tab.AutovacuumSettingsTextBlock.Text);
             Assert.Single(tab.TablesDataGrid.Items);
             Assert.Equal(3, calls.Count);
         });
@@ -632,7 +632,7 @@ public sealed class ViewerStoreHealthRefreshTests
             Assert.Equal(
                 "Sizes are from the store's last measurement, taken " + MeasuredStamp() + ". The live read failed.",
                 tab.LastRefreshedIndicator.Text);
-            Assert.Contains(status, m => m.StartsWith("failed to load the store tables: ", StringComparison.Ordinal));
+            Assert.Contains("The store tables did not load.", status);
             Assert.DoesNotContain(status, m => m.StartsWith("store health: refreshed", StringComparison.Ordinal));
 
             /* The refresh the timer runs next reads live again: the last measured rows are not read again, and the live rows replace them. */

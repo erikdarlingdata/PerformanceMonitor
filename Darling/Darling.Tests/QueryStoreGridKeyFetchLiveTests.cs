@@ -148,6 +148,7 @@ ANALYZE collect.query_store_interval_wide;", ct);
                 {
                     AddShared(oracle, top);
                     keys.AddParameters(oracle);
+                    keys.AddFilterParameters(oracle);
                     await using var reader = await oracle.ExecuteReaderAsync(ct);
                     (expected, _) = await TopFill.ReadPageAsync(reader, ViewerDataService.QueryStorePageOrdinal, ViewerDataService.ReadQueryStoreTopRow, ct);
                 }
@@ -203,6 +204,7 @@ ANALYZE collect.query_store_interval_wide;", ct);
                 await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + ViewerDataService.QueryStoreTopTableByKeysSql, connection, transaction) { CommandTimeout = 300 };
                 AddShared(explain, top);
                 fetched.AddParameters(explain);
+                fetched.AddFilterParameters(explain);
                 return ExplainBuffers.DataPages(await explain.ExecuteScalarAsync(ct));
             }
 

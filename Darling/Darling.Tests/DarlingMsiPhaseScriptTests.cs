@@ -235,4 +235,44 @@ public sealed class DarlingMsiPhaseScriptTests
             ["msi-no-confirm=False", "msi-confirm=True", "hand-typed-delete=True", "hand-typed-other=False"],
             lines);
     }
+
+    /// <summary>
+    /// #9342: with no person to answer (remoting, redirected input, -NonInteractive) the install prompts take the default, No, and never reach
+    /// Read-Host, which throws there and would hide the pre-flight lines and the exit code. A host a person can answer on still asks. The
+    /// host check and Read-Host are stood in; the reader parameter stays unset so the default reader is the one under test.
+    /// </summary>
+    [Fact]
+    public void TheInstallPrompts_TakeNo_WhenNobodyCanAnswer_AndStillAsk_WhenSomeoneCan()
+    {
+        var lines = RunWindowsPowerShell(
+            ExtractFunction(Install, "Read-DarlingAnswer") + "\n"
+            + "function Test-DarlingInteractiveHost { $false }\n"
+            + "function Read-Host { throw 'asked a question nobody can answer' }\n"
+            + "'headless=' + (Read-DarlingAnswer '' 'Install anyway? [y/N]' 6>$null)\n"
+            + "function Test-DarlingInteractiveHost { $true }\n"
+            + "function Read-Host { param($Prompt) 'y' }\n"
+            + "'interactive=' + (Read-DarlingAnswer '' 'Install anyway? [y/N]')\n");
+
+        Assert.Equal(["headless=n", "interactive=y"], lines);
+    }
+
+    /// <summary>
+    /// #9342: the uninstall's typed-DELETE prompt follows the same rule. With no one to answer and no -ConfirmPurge the store is kept
+    /// and nothing is asked; a given -ConfirmPurge still deletes without a question.
+    /// </summary>
+    [Fact]
+    public void TheUninstallPurgePrompt_KeepsTheStore_WhenNobodyCanAnswer()
+    {
+        var lines = RunWindowsPowerShell(
+            ExtractFunction(Uninstall, "Test-DarlingPurgeConfirmed") + "\n"
+            + "function Test-DarlingInteractiveHost { $false }\n"
+            + "function Read-Host { throw 'asked a question nobody can answer' }\n"
+            + "'headless=' + (Test-DarlingPurgeConfirmed $false $false 6>$null)\n"
+            + "'headless-confirmed=' + (Test-DarlingPurgeConfirmed $true $false)\n"
+            + "function Test-DarlingInteractiveHost { $true }\n"
+            + "function Read-Host { param($Prompt) 'DELETE' }\n"
+            + "'interactive=' + (Test-DarlingPurgeConfirmed $false $false)\n");
+
+        Assert.Equal(["headless=False", "headless-confirmed=True", "interactive=True"], lines);
+    }
 }

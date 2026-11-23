@@ -47,10 +47,11 @@ public partial class ServerActionsTab : UserControl
     {
         if (_dataService is null)
             return;
+        var timer = new ViewerLoadTimer();
         try
         {
             var selected = ServersGrid.SelectedItem as ServerActionViewRow;
-            var rows = ServerActionViewRow.From(await _dataService.ReadServerActionsAsync());
+            var rows = ServerActionViewRow.From(await ViewerServerTab.Timed(timer, "server actions read", _dataService.ReadServerActionsAsync()));
             ServersGrid.ItemsSource = rows;
             if (selected is not null)
             {
@@ -66,7 +67,8 @@ public partial class ServerActionsTab : UserControl
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            Status?.Invoke("Could not read the server action switches: " + ex.Message);
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            Status?.Invoke(ViewerRefreshFailure.Report("Server Actions", timer, ex));
         }
     }
 

@@ -67,7 +67,7 @@ public sealed class ViewerSubTabPickCancelTests
                 {
                     pickedLoads++;
                     pickedStartedInBound = true;
-                    errorsBeforePickedStart |= pickedLoads == 1 && statuses.Any(s => s.Contains("refresh failed", StringComparison.Ordinal));
+                    errorsBeforePickedStart |= pickedLoads == 1 && statuses.Any(s => s.Contains("did not load", StringComparison.Ordinal));
                     pickedStarted.TrySetResult();
                 }
             };

@@ -106,6 +106,7 @@ public sealed class QueryStoreViewerTopSplitLiveTests
             await using var byKeys = new NpgsqlCommand(byKeysSql, connection) { CommandTimeout = 120 };
             AddShared(byKeys, start, end);
             keys.AddParameters(byKeys);
+            keys.AddFilterParameters(byKeys);
             return await ReadAllAsync(byKeys, ct);
         }
         finally

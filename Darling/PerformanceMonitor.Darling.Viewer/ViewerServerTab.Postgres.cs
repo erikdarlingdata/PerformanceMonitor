@@ -529,9 +529,10 @@ public partial class ViewerServerTab
             return;
         }
 
+        var timer = new ViewerLoadTimer();
         try
         {
-            var detail = await _dataService.GetPgDeadlockDetailAsync(_server.ServerId, row.DeadlockHash);
+            var detail = await Timed(timer, "deadlock graph read", _dataService.GetPgDeadlockDetailAsync(_server.ServerId, row.DeadlockHash));
             var text = detail.Count == 0
                 ? "No wait graph is stored for this deadlock any more: a report can age out of retention while its row is still on screen."
                 : $"Deadlock at {PgDisplay.SnapshotTime(detail[0].OccurredAtUtc)}, victim PID {detail[0].VictimPid}, "
@@ -559,7 +560,8 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            PgDeadlocksNote.Text = "The deadlock graph could not be read: " + ex.Message;
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in place of the driver's text. */
+            PgDeadlocksNote.Text = ViewerRefreshFailure.Report($"{_server.DisplayName}: Deadlocks", timer, ex);
         }
     }
 

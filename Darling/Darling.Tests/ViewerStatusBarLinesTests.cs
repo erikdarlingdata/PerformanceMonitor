@@ -71,7 +71,7 @@ public sealed class ViewerStatusBarLinesTests
                     ClippedTextProbe.Settle(host);
 
                     tabs.SelectedItem = recommendations;
-                    if (!status.Text.StartsWith("refresh failed", StringComparison.Ordinal))
+                    if (!status.Text.Contains("did not load", StringComparison.Ordinal))
                     {
                         findings.Add($"with Recommendations back on screen the status bar reads \"{status.Text}\", not its own failed read");
                     }
@@ -104,14 +104,14 @@ public sealed class ViewerStatusBarLinesTests
                     var serverItem = AddServerTab(w, tabs, service, new DarlingServer(3, "srv-c", "srv-c", true, null));
 
                     /* The server tab is selected with no store, so nothing loads yet; then the store arrives and the tab's own load runs
-                       and fails, raising its "refresh failed" line through the writer wired to its TabItem. */
+                       and fails, raising its "did not load" line through the writer wired to its TabItem. */
                     tabs.SelectedItem = serverItem;
                     ClippedTextProbe.Settle(host);
                     typeof(MainWindow).GetField("_dataService", Instance)!.SetValue(w, service);
                     await (Task)typeof(MainWindow).GetMethod("RefreshVisibleAsync", Instance)!.Invoke(w, null)!;
                     ClippedTextProbe.Settle(host);
 
-                    if (!status.Text.StartsWith("refresh failed: ", StringComparison.Ordinal))
+                    if (!status.Text.Contains("did not load", StringComparison.Ordinal))
                     {
                         findings.Add($"with a server tab whose read failed on screen the status bar reads \"{status.Text}\"");
                     }

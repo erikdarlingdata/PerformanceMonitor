@@ -80,13 +80,14 @@ public partial class FleetSweepsTab : UserControl
         }
 
         var gen = _loads.Claim(nameof(LoadTimelineAsync));
+        var timer = new ViewerLoadTimer();
         NoRunsMessage.Visibility = Visibility.Collapsed;
         LoadingMessage.Visibility = Visibility.Visible;
         try
         {
             var (startUtc, endUtc, _) = ViewerTimeRangeWindow.Window(
                 TimeRangePickerControl.Value, DateTime.UtcNow, ViewerTimeHelper.FleetWideZone());
-            var node = await _dataService.GetFleetSweepTimelineAsync(startUtc, endUtc);
+            var node = await ViewerServerTab.Timed(timer, "sweep timeline read", _dataService.GetFleetSweepTimelineAsync(startUtc, endUtc));
             if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
 
             /* The cadence line is display only, from the same alert settings the web page reads; a failed read leaves it blank and never costs the timeline. */
@@ -124,7 +125,8 @@ public partial class FleetSweepsTab : UserControl
             if (_loads.Superseded(nameof(LoadTimelineAsync), gen)) return;
 
             _timelineLoaded = false;
-            StatusChanged?.Invoke($"failed to load the fleet sweep timeline: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Fleet Sweeps", timer, ex));
         }
         finally
         {
@@ -144,10 +146,11 @@ public partial class FleetSweepsTab : UserControl
         }
 
         var gen = _loads.Claim(nameof(LoadDetailAsync));
+        var timer = new ViewerLoadTimer();
         try
         {
             long? id = _selectedSweepId is { } s && long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
-            var detail = await _dataService.GetFleetSweepDetailAsync(id);
+            var detail = await ViewerServerTab.Timed(timer, "sweep detail read", _dataService.GetFleetSweepDetailAsync(id));
             if (_loads.Superseded(nameof(LoadDetailAsync), gen)) return;
 
             if (detail is null)
@@ -171,7 +174,8 @@ public partial class FleetSweepsTab : UserControl
             if (_loads.Superseded(nameof(LoadDetailAsync), gen)) return;
 
             _detailLoaded = false;
-            StatusChanged?.Invoke($"failed to load the fleet sweep: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Fleet Sweeps", timer, ex));
         }
     }
 
@@ -218,10 +222,11 @@ public partial class FleetSweepsTab : UserControl
         }
 
         var gen = _loads.Claim(nameof(LoadWatchItemsAsync));
+        var timer = new ViewerLoadTimer();
         try
         {
             var closed = ShowClosedCheckBox.IsChecked == true;
-            var node = await _dataService.GetFleetSweepWatchItemsAsync(closed ? "closed" : null);
+            var node = await ViewerServerTab.Timed(timer, "watch items read", _dataService.GetFleetSweepWatchItemsAsync(closed ? "closed" : null));
             if (_loads.Superseded(nameof(LoadWatchItemsAsync), gen)) return;
 
             var rows = FleetSweepsRows.WatchItems(node);
@@ -239,7 +244,8 @@ public partial class FleetSweepsTab : UserControl
             if (_loads.Superseded(nameof(LoadWatchItemsAsync), gen)) return;
 
             _watchItemsLoaded = false;
-            StatusChanged?.Invoke($"failed to load the fleet sweep watch items: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report("Fleet Sweeps", timer, ex));
         }
     }
 

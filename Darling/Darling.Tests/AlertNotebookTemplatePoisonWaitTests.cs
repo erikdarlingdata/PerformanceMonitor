@@ -139,6 +139,27 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
     }
 
     [Fact]
+    public void BuildPoisonWaitCells_ThreadPool_WarnsTheSnapshotsAreOftenEmpty_AndPointsAtWhatIsStillRecorded()
+    {
+        var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
+
+        var threadPool = template.Invoke(
+            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, RowWithWaitType("THREADPOOL"), "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
+        var other = template.Invoke(
+            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, RowWithWaitType("LCK_M_X"), "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
+
+        var note = Assert.Single(threadPool.OfType<JsonObject>(), c => (string?)c["type"] == "markdown");
+        Assert.Equal(AlertNotebookEndpoint.ThreadPoolStepText, (string?)note["text"]);
+        var reads = threadPool.OfType<JsonObject>().Where(c => (string?)c["type"] == "read").Select(c => (string)c["read"]!).ToArray();
+        /* The note points at wait stats deltas, which stay in the notebook as reads. */
+        Assert.Contains("get_wait_stats", reads);
+        Assert.DoesNotContain(other.OfType<JsonObject>(), c => (string?)c["type"] == "markdown");
+
+        var validation = DarlingWebEndpoints.ValidateNotebookDefinition(new JsonObject { ["kind"] = "notebook", ["cells"] = threadPool });
+        Assert.True(validation.IsValid, validation.Error);
+    }
+
+    [Fact]
     public void BuildPoisonWaitCells_NoWaitType_OmitsTrend_AddsANoteInstead()
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
@@ -162,9 +183,10 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
 
+        /* #9339: THREADPOOL carries its own step (a note), so the parity check uses a wait type with none. */
         var withRow = template.Invoke(
             "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null,
-            RowWithWaitType("THREADPOOL"), "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
+            RowWithWaitType("LCK_M_X"), "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
         var withoutRow = template.Invoke(
             "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 

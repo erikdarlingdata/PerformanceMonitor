@@ -560,7 +560,7 @@ public class BlockingDeadlockContextBuilderTests
     /// <summary>
     /// #3539 A4: Lite's DuckDB poison read is the Darling text in another dialect — same wait types, same
     /// aggregates in the same column order, same GROUP BY, same parameter positions, and the same three
-    /// ABSENCES (no <c>delta_waiting_tasks &gt; 0</c> filter, no LIMIT, no threshold). Read from source on
+    /// ABSENCES (no row filter on <c>delta_waiting_tasks</c>, no LIMIT, no threshold). Read from source on
     /// both sides through <see cref="Lite.Tests.ParitySource"/> because Lite.Tests does not reference the Darling
     /// service project; the Darling-side pins in Darling.Tests hold the same clauses, so a drift on either
     /// SKU reds one suite or the other.
@@ -579,7 +579,7 @@ public class BlockingDeadlockContextBuilderTests
             "SUM(delta_wait_time_ms)",
             "SUM(delta_waiting_tasks)",
             "COUNT(*)",
-            "MAX(collection_time) AS newest_collection_time",
+            "MAX(collection_time) FILTER (WHERE delta_wait_time_ms > 0 OR delta_waiting_tasks > 0) AS newest_collection_time",
             "server_id = $1",
             "collection_time >= $2",
             "GROUP BY wait_type",
@@ -590,7 +590,7 @@ public class BlockingDeadlockContextBuilderTests
             Assert.Contains(clause, darlingSql, StringComparison.Ordinal);
         }
 
-        foreach (var absent in new[] { "delta_waiting_tasks > 0", "LIMIT", "avg_ms_per_wait", "sample_interval" })
+        foreach (var absent in new[] { "LIMIT", "avg_ms_per_wait", "sample_interval" })
         {
             Assert.DoesNotContain(absent, lite, StringComparison.Ordinal);
             Assert.DoesNotContain(absent, darlingSql, StringComparison.Ordinal);
