@@ -702,6 +702,33 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV18 = "# Managed by PerformanceMonitor Darling (v18 slow-statement plans) -- do not remove this block";
 
     /// <summary>
+    /// The v19 marker (#9400): the background writer, two settings only. <c>bgwriter_lru_maxpages = 1000</c>
+    /// (PostgreSQL's default is 100) and <c>bgwriter_lru_multiplier = 4.0</c> (default 2.0). <c>bgwriter_delay</c>
+    /// is not set, so the writer still wakes every 200 ms.
+    ///
+    /// <para><b>Why.</b> At the defaults the background writer cleans at most 100 pages a round, a ceiling of
+    /// about 4 MB/s. On a busy store it stopped at that cap on most of its rounds, and client backends then
+    /// wrote more relation buffers than the background writer and the checkpointer together. Those writes land
+    /// on reads: a backend that needs a free buffer and finds only dirty ones writes one out itself before it
+    /// can read, and the statement waits for it. A higher cap and a larger look-ahead multiplier let the writer
+    /// stay ahead of the reads.</para>
+    ///
+    /// <para><b>The risk this carries.</b> A more eager writer can write a page that is dirtied again before it
+    /// is evicted, so total relation writes and WAL bytes could climb. This block is held back from release
+    /// until a before-and-after trial on one store (the two values applied through <c>ALTER SYSTEM</c> and a
+    /// reload) shows the client-backend share of relation writes falling while total writes, WAL bytes and the
+    /// checkpoint sync phase (<see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>) hold.</para>
+    ///
+    /// <para>Both settings are <c>sighup</c>-context in PostgreSQL, so a running store could take them from a
+    /// reload alone, but like the other <c>sighup</c> settings this service manages, this append runs before
+    /// <c>pg_ctl start</c>, so a service-owned start applies them on the very start that writes the block.
+    /// Managed stores only: a bring-your-own store keeps whatever its owner set. A later change to either value
+    /// needs a NEW marker (the v11/v14/v15/v16 precedent): this block heals by its marker's absence, so an
+    /// edited value in an already-marked file would never be seen.</para>
+    /// </summary>
+    public const string ConfMarkerV19 = "# Managed by PerformanceMonitor Darling (v19 background writer) -- do not remove this block";
+
+    /// <summary>
     /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
     /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
     /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
@@ -714,7 +741,7 @@ public sealed class DarlingManagedPostgres
     [
         ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
         ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
-        ConfMarkerV15, ConfMarkerV16, ConfMarkerV17, ConfMarkerV18,
+        ConfMarkerV15, ConfMarkerV16, ConfMarkerV17, ConfMarkerV18, ConfMarkerV19,
     ];
 
     /// <summary>
@@ -2617,6 +2644,24 @@ public sealed class DarlingManagedPostgres
         builder.Append(AutoExplainLibrary).Append(".log_verbose = on\n");
         builder.Append(AutoExplainLibrary).Append(".log_settings = on\n");
         builder.Append(AutoExplainLibrary).Append(".log_parameter_max_length = 0\n");
+        return builder.ToString();
+    }
+
+    /* ===================== v19 background writer (#9400) ===================== */
+
+    /// <summary>
+    /// The v19 block: <c>bgwriter_lru_maxpages = 1000</c> and <c>bgwriter_lru_multiplier = 4.0</c> only.
+    /// See <see cref="ConfMarkerV19"/> for why, and for the trial this block waits on.
+    /// <c>bgwriter_delay</c> is deliberately not written. Carries no fingerprint or stamp line, so the v8 and
+    /// v12 staleness checks are untouched by this block.
+    /// </summary>
+    public static string BuildBackgroundWriterConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV19).Append('\n');
+        builder.Append("bgwriter_lru_maxpages = 1000\n");
+        builder.Append("bgwriter_lru_multiplier = 4.0\n");
         return builder.ToString();
     }
 
@@ -4688,6 +4733,19 @@ FROM (
             _logger.LogInformation(
                 "Appended v18 slow-statement plans to postgresql.conf (shared_preload_libraries = '{Libraries}', auto_explain.log_min_duration = 10s): a store statement that runs past ten seconds will leave its plan in the store's log. The preload is restart-only: it loads on this start when the service owns it, otherwise on the next start it owns.",
                 MergePreloadLibraries(v18EffectivePreload, StatementStatisticsLibrary, AutoExplainLibrary));
+        }
+
+        /* v19 (#9400): the background writer. Keyed on its marker's absence and placed after v18, so it is the
+           block this method appends LAST, matching its place at the end of AllManagedConfMarkers. Carries no
+           fingerprint or stamp line, so v8 and v12 read exactly what they did before this block existed.
+           Both settings are sighup-context, but like the other sighup settings this service manages, this is
+           appended before pg_ctl start, so a service-owned start applies them on the very start that writes
+           the block. */
+        if (!conf.Contains(ConfMarkerV19, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildBackgroundWriterConfAppend());
+            _logger.LogInformation(
+                "Appended v19 background writer to postgresql.conf (bgwriter_lru_maxpages = 1000, bgwriter_lru_multiplier = 4.0): the background writer cleans more pages a round, so a query on a busy store writes fewer dirty buffers itself. Effective on this start when the service owns it.");
         }
 
         LogStatementStatisticsPreloadCoverage(dataDirectory);

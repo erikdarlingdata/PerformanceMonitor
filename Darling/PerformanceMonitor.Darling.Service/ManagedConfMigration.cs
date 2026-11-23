@@ -31,7 +31,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="ConfLineClassification.HandEdit"/> (left in place, never migrated as ours) until this
 /// classifier covers that block version too.</para>
 ///
-/// <para><b>Coverage today: v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18</b>
+/// <para><b>Coverage today: v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15, v16, v17, v18, v19</b>
 /// (<see cref="CoveredMarkers"/>). v18 (part of #5097) reuses v13's preload form test and fixed-line compare. v4, v6, v9, v10, v11, v13, v14, v15 write only FIXED constants with no
 /// derivation input at all — a block appended once with the same bytes on every store, so the rebuild test
 /// is a plain string comparison (v14, v15, and v13's <c>track_utility</c> line), or a round trip through a
@@ -134,6 +134,7 @@ internal static class ManagedConfMigration
         DarlingManagedPostgres.ConfMarkerV16,
         DarlingManagedPostgres.ConfMarkerV17,
         DarlingManagedPostgres.ConfMarkerV18,
+        DarlingManagedPostgres.ConfMarkerV19,
     ];
 
     /// <summary>
@@ -298,6 +299,7 @@ internal static class ManagedConfMigration
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV17 => ClassifyFixedLine(
                 key, text, "log_line_prefix", "log_line_prefix = '%m [%p] %a '"),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV18 => ClassifyV18Line(key, value, text),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV19 => ClassifyV19Line(key, text),
             _ => (false, HandEditReason.FormMismatch),
         };
 
@@ -853,6 +855,31 @@ internal static class ManagedConfMigration
 
         return (false, HandEditReason.FormMismatch);
     }
+
+    /// <summary>
+    /// v19's two lines (#9400): <c>bgwriter_lru_maxpages = 1000</c> and <c>bgwriter_lru_multiplier = 4.0</c>.
+    /// Each is a fixed constant, so <see cref="ClassifyFixedLine"/> compares it byte for byte. Any other key
+    /// inside the block is a hand edit.
+    /// </summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV19Line(string key, string text)
+    {
+        foreach (var (setting, written) in V19FixedLines)
+        {
+            if (string.Equals(key, setting, StringComparison.OrdinalIgnoreCase))
+            {
+                return ClassifyFixedLine(key, text, setting, setting + " = " + written);
+            }
+        }
+
+        return (false, HandEditReason.FormMismatch);
+    }
+
+    /// <summary>v19's fixed lines, as the setting name and the value as written.</summary>
+    private static readonly (string Setting, string Written)[] V19FixedLines =
+    [
+        ("bgwriter_lru_maxpages", "1000"),
+        ("bgwriter_lru_multiplier", "4.0"),
+    ];
 
     /// <summary>v18's fixed lines, as the setting name after <c>auto_explain.</c> and the value as written.</summary>
     private static readonly (string Setting, string Written)[] V18FixedLines =

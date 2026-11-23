@@ -2687,17 +2687,17 @@ public sealed class DarlingManagedPostgresTests
     }
 
     [Fact]
-    public void ConfMarkerV18_IsLastInAllManagedConfMarkers()
-        => Assert.Equal(DarlingManagedPostgres.ConfMarkerV18, DarlingManagedPostgres.AllManagedConfMarkers[^1]);
+    public void ConfMarkerV18_IsInAllManagedConfMarkers()
+        => Assert.Contains(DarlingManagedPostgres.ConfMarkerV18, DarlingManagedPostgres.AllManagedConfMarkers);
 
     /// <summary>
-    /// The heal on real files, from a Legacy conf that carries v1 only: v18 lands once, LAST (after v17), with
+    /// The heal on real files, from a Legacy conf that carries v1 only: v18 lands once (after v17), with
     /// the preload list still holding <c>timescaledb</c> first (the re-read, because the text read at the top
     /// of the heal predates the v1 and v13 appends), and a second start appends nothing. The Information line
     /// says the library loads at the next start the service owns.
     /// </summary>
     [Fact]
-    public void EnsureConfAppended_AppendsV18LastAndOnce_KeepsTimescaleFirst_AndSaysWhenItLoads()
+    public void EnsureConfAppended_AppendsV18Once_KeepsTimescaleFirst_AndSaysWhenItLoads()
     {
         var root = Directory.CreateTempSubdirectory("darling-v18-");
         try
@@ -2718,7 +2718,7 @@ public sealed class DarlingManagedPostgresTests
                 first.IndexOf(DarlingManagedPostgres.ConfMarkerV18, StringComparison.Ordinal)
                     > first.IndexOf(DarlingManagedPostgres.ConfMarkerV17, StringComparison.Ordinal),
                 "v18 must be appended after v17");
-            Assert.EndsWith(ExpectedV18Body.Replace("\r\n", "\n"), first.Replace("\r\n", "\n"), StringComparison.Ordinal);
+            Assert.Contains(ExpectedV18Body.Replace("\r\n", "\n"), first.Replace("\r\n", "\n"), StringComparison.Ordinal);
             Assert.Equal("timescaledb,pg_stat_statements,auto_explain", LastConfAssignment(first, "shared_preload_libraries"));
             Assert.Equal("10s", LastSettingValue(first, "auto_explain.log_min_duration"));
 
@@ -2795,6 +2795,140 @@ public sealed class DarlingManagedPostgresTests
 
             /* "reload" as the start of a word: the identifier EffectivePreloadList contains it mid-word. */
             Assert.DoesNotMatch(@"(?<![A-Za-z])reload", code);
+        }
+    }
+
+    /* ===================== v19 background writer (#9400) ===================== */
+
+    private const string ExpectedV19Body =
+        "\n# Managed by PerformanceMonitor Darling (v19 background writer) -- do not remove this block\n"
+        + "bgwriter_lru_maxpages = 1000\n"
+        + "bgwriter_lru_multiplier = 4.0\n";
+
+    /// <summary>The v19 block's text, exactly: the two background-writer settings and nothing else, in
+    /// particular no <c>bgwriter_delay</c>, no fingerprint and no stamp line.</summary>
+    [Fact]
+    public void BackgroundWriterConfAppend_IsExactlyTheDocumentedBlock()
+    {
+        var block = DarlingManagedPostgres.BuildBackgroundWriterConfAppend();
+
+        Assert.Equal(ExpectedV19Body, block);
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV19, block, StringComparison.Ordinal);
+        Assert.Equal("1000", LastSettingValue(block, "bgwriter_lru_maxpages"));
+        Assert.Equal("4.0", LastSettingValue(block, "bgwriter_lru_multiplier"));
+        Assert.Null(LastSettingValue(block, "bgwriter_delay"));
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfWalSizingStampPrefix, block, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConfMarkerV19_IsLastInAllManagedConfMarkers()
+        => Assert.Equal(DarlingManagedPostgres.ConfMarkerV19, DarlingManagedPostgres.AllManagedConfMarkers[^1]);
+
+    /// <summary>
+    /// The heal on real files (#9400): a cluster whose conf carries v1 through v18 but not v19 gains exactly one
+    /// v19 block, LAST, with both settings live in the file and v18's block untouched above it. A second start
+    /// appends nothing more. A conf that already carries the marker gains nothing on its first start either.
+    /// </summary>
+    [Fact]
+    public void EnsureConfAppended_AppendsV19LastAndOnce_WhenItsMarkerIsAbsent()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v19-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, "#port = 5432\n");
+
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5987, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            pg.EnsureConfAppended(dataDirectory);
+            var first = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(first, DarlingManagedPostgres.ConfMarkerV19));
+            Assert.True(
+                first.IndexOf(DarlingManagedPostgres.ConfMarkerV19, StringComparison.Ordinal)
+                    > first.IndexOf(DarlingManagedPostgres.ConfMarkerV18, StringComparison.Ordinal),
+                "v19 must be appended after v18");
+            Assert.EndsWith(ExpectedV19Body.Replace("\r\n", "\n"), first.Replace("\r\n", "\n"), StringComparison.Ordinal);
+            Assert.Equal("1000", LastSettingValue(first, "bgwriter_lru_maxpages"));
+            Assert.Equal("4.0", LastSettingValue(first, "bgwriter_lru_multiplier"));
+            Assert.Null(LastSettingValue(first, "bgwriter_delay"));
+
+            pg.EnsureConfAppended(dataDirectory);
+            Assert.Equal(first, File.ReadAllText(confPath));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The heal is keyed on the marker alone: a cluster that carries v1 through v18 but lost the v19 block
+    /// (the marker absent) gets that one block back and nothing else is rewritten.
+    /// </summary>
+    [Fact]
+    public void EnsureConfAppended_HealsAnAbsentV19Marker_AndTouchesNothingElse()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v19heal-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, "#port = 5432\n");
+
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5986, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            pg.EnsureConfAppended(dataDirectory);
+            var full = File.ReadAllText(confPath);
+            var withoutV19 = full.Replace(DarlingManagedPostgres.BuildBackgroundWriterConfAppend(), string.Empty, StringComparison.Ordinal);
+            Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV19, withoutV19, StringComparison.Ordinal);
+            Assert.Contains(DarlingManagedPostgres.ConfMarkerV18, withoutV19, StringComparison.Ordinal);
+            File.WriteAllText(confPath, withoutV19);
+
+            pg.EnsureConfAppended(dataDirectory);
+
+            Assert.Equal(full, File.ReadAllText(confPath));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>A conf that already carries the v19 marker is not given a second block, even when the block's
+    /// values were changed by hand: the heal reads the marker, never the values.</summary>
+    [Fact]
+    public void EnsureConfAppended_LeavesAConfThatAlreadyHasV19Alone()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v19has-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, "#port = 5432\n");
+
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5985, DataDirectory = dataDirectory }, NullLogger.Instance);
+            pg.EnsureConfAppended(dataDirectory);
+
+            var edited = File.ReadAllText(confPath).Replace("bgwriter_lru_maxpages = 1000", "bgwriter_lru_maxpages = 500", StringComparison.Ordinal);
+            File.WriteAllText(confPath, edited);
+
+            pg.EnsureConfAppended(dataDirectory);
+
+            var after = File.ReadAllText(confPath);
+            Assert.Equal(edited, after);
+            Assert.Equal(1, CountOccurrences(after, DarlingManagedPostgres.ConfMarkerV19));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
         }
     }
 
@@ -3767,7 +3901,7 @@ public sealed class DarlingManagedPostgresTests
                 using var current = new NpgsqlCommand(
                     "SELECT current_database(), current_user, current_setting('max_worker_processes'), current_setting('work_mem'), current_setting('shared_buffers'), " +
                     "pg_size_bytes(current_setting('maintenance_work_mem')), pg_size_bytes(@confMaintenance), " +
-                    "current_setting('wal_compression')",
+                    "current_setting('wal_compression'), current_setting('bgwriter_lru_maxpages'), current_setting('bgwriter_lru_multiplier')",
                     connection);
                 current.Parameters.AddWithValue("confMaintenance", confMaintenanceWorkMem);
                 using var reader = await current.ExecuteReaderAsync(timeout.Token);
@@ -3803,6 +3937,10 @@ public sealed class DarlingManagedPostgresTests
                    separate reload. Not the PostgreSQL stock default (off). checkpoint_timeout is untouched:
                    the interval is held, not shipped (#4246's amended ruling). */
                 Assert.Equal("lz4", reader.GetString(7));
+
+                /* #9400: the v19 background-writer pair is LIVE too, not the stock 100 pages and 2.0 multiplier. */
+                Assert.Equal("1000", reader.GetString(8));
+                Assert.Equal(4.0, double.Parse(reader.GetString(9), CultureInfo.InvariantCulture));
             }
 
             /* Second EnsureRunning against the live server: idempotent — no re-init (credential

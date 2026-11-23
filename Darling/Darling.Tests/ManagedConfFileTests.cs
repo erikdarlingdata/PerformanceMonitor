@@ -417,6 +417,18 @@ public sealed class ManagedConfFileTests
         Assert.Contains("checkpoint_timeout = '15min'", body, StringComparison.Ordinal);
     }
 
+    /// <summary>#9400: v19's background-writer pair is one of the builders <see cref="ManagedConfFile.RenderBody"/>
+    /// calls, so the managed body itself carries both settings, and no <c>bgwriter_delay</c>.</summary>
+    [Fact]
+    public void RenderBody_ContainsTheBackgroundWriterSettings()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs());
+
+        Assert.Contains("bgwriter_lru_maxpages = '1000'", body, StringComparison.Ordinal);
+        Assert.Contains("bgwriter_lru_multiplier = '4.0'", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("bgwriter_delay", body, StringComparison.Ordinal);
+    }
+
     /// <summary>v17's <c>log_line_prefix</c> is one of the builders <see cref="ManagedConfFile.RenderBody"/>
     /// calls, so the managed body itself carries it — not just the legacy v1-v17 appenders
     /// <c>EnsureConfAppended</c> runs against a self-hosted conf.</summary>
@@ -742,6 +754,11 @@ public sealed class ManagedConfFileTests
         if (marker == DarlingManagedPostgres.ConfMarkerV18)
         {
             return DarlingManagedPostgres.BuildSlowPlanConfAppend(inputs.EffectivePreloadList);
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV19)
+        {
+            return DarlingManagedPostgres.BuildBackgroundWriterConfAppend();
         }
 
         throw new InvalidOperationException(
