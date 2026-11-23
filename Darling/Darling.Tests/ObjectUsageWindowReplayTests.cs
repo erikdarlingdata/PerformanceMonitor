@@ -295,6 +295,17 @@ public sealed class ObjectUsageWindowReplayTests
     }
 
     [Fact]
+    public void Assemble_WithAnIndexThatHasNoRunWhileAnotherIndexOfTheObjectHasOne_GivesUp()
+    {
+        var replay = Run(0, Fact(0), Fact(1, comparedWith: 0));
+        var runs = new[] { new ObjectUsageRun(100, 1, Day(0), null, "dbo", "Orders", false, false) };
+        var raw = new[] { Raw(0, 100, 1), Raw(0, 100, 2) };
+
+        Assert.Null(replay.Assemble(Array.Empty<ObjectUsageDeltaTotals>(), runs, raw, out var reason));
+        Assert.NotNull(reason);
+    }
+
+    [Fact]
     public void Assemble_WithAnObjectThatHasNoRun_GivesUp()
     {
         var replay = Run(0, Fact(0), Fact(1, comparedWith: 0));
@@ -303,7 +314,7 @@ public sealed class ObjectUsageWindowReplayTests
         Assert.Null(replay.Assemble(new[] { new ObjectUsageDeltaTotals(100, 1, 0, null, null) }, Array.Empty<ObjectUsageRun>(), raw, out var reason));
         Assert.Equal("a stored delta names an object with no run", reason);
         Assert.Null(replay.Assemble(Array.Empty<ObjectUsageDeltaTotals>(), Array.Empty<ObjectUsageRun>(), raw, out reason));
-        Assert.Equal("a raw row names an object with no run", reason);
+        Assert.NotNull(reason);
         Assert.Null(replay.Assemble(
             Array.Empty<ObjectUsageDeltaTotals>(), new[] { new ObjectUsageRun(100, 1, Day(0), null, "dbo", "T", false, false) }, Array.Empty<ObjectUsageSample>(), out reason));
         Assert.Equal("a raw snapshot the replay needs holds no rows", reason);

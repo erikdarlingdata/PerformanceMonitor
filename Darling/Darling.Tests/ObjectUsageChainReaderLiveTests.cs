@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
@@ -110,6 +111,62 @@ public sealed class ObjectUsageChainReaderLiveTests
         AssertSame(
             await DarlingObjectUsageReader.ReadTablesFullAsync(dataSource, ServerId, Db, T(5).AddHours(1), ct),
             await DarlingObjectUsageReader.ReadTablesAsync(dataSource, ServerId, Db, T(5).AddHours(1), ct));
+    }
+
+    [Fact]
+    public async Task AnIndexWithRawRowsButNoRun_TakesTheFullFold_EvenWhenAnotherIndexOfTheObjectHasARun()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, Node, ct);
+        await SeedRawAsync(connection, ct);
+        await SeedChainAsync(connection, ct);
+
+        var windowStart = T(2).AddHours(1);
+        Assert.NotNull((await DarlingObjectUsageReader.TryReadPersistedAsync(dataSource, ServerId, Db, windowStart, ct)).Result);
+
+        /* Object 100 keeps its clustered index's run; its nonclustered index loses the run while its raw rows stay. */
+        await ExecAsync(connection, "DELETE FROM collect.object_usage_runs WHERE object_id = 100 AND index_id = 2", ct);
+
+        var (persisted, reason) = await DarlingObjectUsageReader.TryReadPersistedAsync(dataSource, ServerId, Db, windowStart, ct);
+        Assert.Null(persisted);
+        Assert.NotNull(reason);
+        var expected = await DarlingObjectUsageReader.ReadTablesFullAsync(dataSource, ServerId, Db, windowStart, ct);
+        Assert.Equal(2, expected.Objects.Single(o => o.ObjectId == 100).IndexCount);
+        AssertSame(expected, await DarlingObjectUsageReader.ReadTablesAsync(dataSource, ServerId, Db, windowStart, ct));
+    }
+
+    [Fact]
+    public async Task AnUnreadableChainTable_TakesTheFullFoldWithAWarning_AndACancelledCallerStillThrows()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, Node, ct);
+        await SeedRawAsync(connection, ct);
+        await SeedChainAsync(connection, ct);
+
+        var windowStart = T(2).AddHours(1);
+        var expected = await DarlingObjectUsageReader.ReadTablesFullAsync(dataSource, ServerId, Db, windowStart, ct);
+        await ExecAsync(connection, "ALTER TABLE collect.object_usage_deltas RENAME TO object_usage_deltas_gone", ct);
+
+        var logger = new CapturingTestLogger();
+        AssertSame(expected, await DarlingObjectUsageReader.ReadTablesAsync(dataSource, ServerId, Db, windowStart, ct, logger));
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("deltas", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("42P01", logger.Joined, StringComparison.Ordinal);
+
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => DarlingObjectUsageReader.ReadTablesAsync(dataSource, ServerId, Db, windowStart, cancelled.Token, logger));
     }
 
     private static void AssertSame(ObjectUsageWindowResult expected, ObjectUsageWindowResult actual)

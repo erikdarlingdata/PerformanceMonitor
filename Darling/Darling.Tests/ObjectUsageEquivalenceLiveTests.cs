@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -52,7 +51,6 @@ public sealed class ObjectUsageEquivalenceLiveTests
         var ct = TestContext.Current.CancellationToken;
         var parallel = new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount, 2, 8), CancellationToken = ct };
         var stats = new List<string>();
-        var clock = Stopwatch.StartNew();
 
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -62,8 +60,7 @@ public sealed class ObjectUsageEquivalenceLiveTests
 
         var histories = Enumerable.Range(0, Histories).Select(ObjectUsageHistoryGenerator.Generate).ToList();
         await ObjectUsageHistoryGenerator.PlantAsync(connection, ServerId, ServerName, histories, ct);
-        stats.Add($"seed: {histories.Sum(h => h.Rows.Count)} rows, {histories.Sum(h => h.Times.Count)} snapshots, {clock.Elapsed.TotalSeconds:F1} s");
-        clock.Restart();
+        stats.Add($"seed: {histories.Sum(h => h.Rows.Count)} rows, {histories.Sum(h => h.Times.Count)} snapshots");
 
         /* The chain by backfill, then deleted and built again one snapshot per call: the same rows. */
         var backfilled = new ConcurrentDictionary<string, (string, string, string)>();
@@ -72,8 +69,7 @@ public sealed class ObjectUsageEquivalenceLiveTests
             await ObjectUsageChainBuilder.BuildPairAsync(dataSource, ServerId, history.Database, int.MaxValue, token);
             backfilled[history.Database] = await FingerprintAsync(dataSource, history.Database, token);
         });
-        stats.Add($"backfill: {clock.Elapsed.TotalSeconds:F1} s");
-        clock.Restart();
+        stats.Add("backfill: done");
 
         var chainSize = await ScalarAsync(connection, "SELECT (SELECT count(*) FROM collect.object_usage_snapshots) + (SELECT count(*) FROM collect.object_usage_deltas) + (SELECT count(*) FROM collect.object_usage_runs)", ct);
         var rawSize = await ScalarAsync(connection, "SELECT count(*) FROM collect.index_object_stats", ct);
@@ -106,8 +102,7 @@ public sealed class ObjectUsageEquivalenceLiveTests
                 mismatches.Add(history.Database);
             }
         });
-        stats.Add($"one snapshot per call: {clock.Elapsed.TotalSeconds:F1} s");
-        clock.Restart();
+        stats.Add("one snapshot per call: done");
         Assert.True(mismatches.IsEmpty, "a chain built one snapshot per call differs from the backfilled chain for: " + string.Join(", ", mismatches.Order().Take(10)));
 
         var work = histories.SelectMany(h => Starts(h).Select(s => (History: h, s.Start, s.Kind))).ToList();
@@ -126,7 +121,7 @@ public sealed class ObjectUsageEquivalenceLiveTests
 
             outcomes.Add(new Outcome(db, item.History.Tag, item.Start, item.Kind, reason, differences, full));
         });
-        stats.Add($"windows: {outcomes.Count} compared, {outcomes.Count(o => o.Reason is not null)} fell back, {clock.Elapsed.TotalSeconds:F1} s");
+        stats.Add($"windows: {outcomes.Count} compared, {outcomes.Count(o => o.Reason is not null)} fell back");
 
         /* Coverage: the generated histories do reach every kind of step. Counted on the window that starts at each history's first snapshot. */
         var whole = outcomes.Where(o => o.Kind == "first").ToList();
