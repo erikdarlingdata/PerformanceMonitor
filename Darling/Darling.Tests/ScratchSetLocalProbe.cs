@@ -30,6 +30,7 @@ public sealed class ScratchSetLocalProbe
             await cmd.ExecuteNonQueryAsync(ct);
         }
         await using (var cmd = new NpgsqlCommand("SELECT current_setting('lock_timeout')", c)) report.Add("after: " + await cmd.ExecuteScalarAsync(ct));
-        Assert.Fail(string.Join(" || ", report));
+        System.IO.File.WriteAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "probe9343.txt"), string.Join("
+", report));
     }
 }
