@@ -55,12 +55,16 @@ public sealed class ObjectReferencesLiveTests
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var parameters = method.GetParameters();
-        Assert.Equal("hasObjectReferences", parameters[^3].Name);
+        /* The arm is found by its name, not by its place from the end: a newer rung adds a parameter after it. */
+        var armIndex = Array.FindIndex(parameters, p => p.Name == "hasObjectReferences");
+        Assert.True(armIndex >= 0, "the probe has no hasObjectReferences parameter");
         var all = Enumerable.Repeat((object)true, parameters.Length).ToArray();
         Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-        all[^1] = false;
-        all[^2] = false;
-        all[^3] = false;
+        /* Arms are newest first, so turning off this rung and every rung after it leaves a store at the rung before. */
+        for (var i = armIndex; i < all.Length; i++)
+        {
+            all[i] = false;
+        }
         Assert.Equal(rung.Version - 1, (int)method.Invoke(null, all)!);
     }
 

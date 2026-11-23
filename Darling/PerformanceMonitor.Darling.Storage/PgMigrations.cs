@@ -656,6 +656,16 @@ CREATE TABLE IF NOT EXISTS config.store_statement_baseline
     private const string V164Sql = QueryStatsHourLedger.CreateSql;
 
     /// <summary>
+    /// V300 (#9357): <c>collect.procedure_stats_hour_ledger</c> and its one-row state table, V164's ledger for
+    /// <c>collect.procedure_stats</c>. The hourly-plus-raw-edges read of a procedure cell compares this ledger with
+    /// <c>collect.procedure_stats_interval_hourly</c> instead of counting raw. The text and the counted population are on
+    /// <see cref="ProcedureStatsHourLedger"/>, which the rung embeds. Both tables are empty when created, and the rung inserts only
+    /// the state row (<c>counted_since</c>, the next whole hour), so an existing store takes the route only once the ledger covers the
+    /// window. No GRANT and no provisioning change, as for V164. The rung is V300 because #9350 took V299.
+    /// </summary>
+    private const string V300Sql = ProcedureStatsHourLedger.CreateSql;
+
+    /// <summary>
     /// V165 (#5366) — the tables for the service's published password key: <c>config.password_key</c> (the public key,
     /// one <c>current</c> row at most), <c>config.password_key_service</c> (what each service host holds and its state),
     /// <c>config.legacy_secret_pin</c> and the one-row <c>config.legacy_secret_pin_marker</c>, seeded <c>pending</c>. The
@@ -3995,6 +4005,9 @@ END $$;";
         /* V299 (#9349): the persisted object usage chain, three tables created empty (snapshots, deltas, runs). The two per-snapshot tables become compressed
            hypertables on a TimescaleDB store at service start, and are purged with index_object_stats. */
         new Migration(ObjectUsageChain.Version, "object-usage-chain", V299Sql),
+        /* V300 (#9357): the procedure_stats hour ledger and its state row, V164's pair for the procedure rollup's count guard. An older build
+           ignores both tables. */
+        new Migration(ProcedureStatsHourLedger.RungVersion, "procedure-stats-hour-ledger", V300Sql),
     };
 
     /// <summary>

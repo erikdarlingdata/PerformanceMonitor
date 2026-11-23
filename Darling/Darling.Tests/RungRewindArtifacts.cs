@@ -967,6 +967,10 @@ CREATE INDEX IF NOT EXISTS idx_query_plan_dim_last_seen ON collect.query_plan_di
         new(299, "hasObjectUsageChain", @"DROP TABLE IF EXISTS collect.object_usage_snapshots;
 DROP TABLE IF EXISTS collect.object_usage_deltas;
 DROP TABLE IF EXISTS collect.object_usage_runs;"),
+        // V300 (#9357): the procedure_stats hour ledger and its state table. The pair is the probe's newest sentinel. The rewind drops both, so a re-run of V300
+        // creates them empty with a fresh counted_since. Safe on a store that never had them.
+        new(300, "hasProcedureStatsHourLedger", @"DROP TABLE IF EXISTS collect.procedure_stats_hour_ledger_state;
+DROP TABLE IF EXISTS collect.procedure_stats_hour_ledger;"),
     ];
 
     /// <summary>

@@ -114,6 +114,8 @@ plan_regression_daily,derived,derived,per-day plan regression summary
 plan_regression_daily_built,internal,no,which days are built
 procedure_stats,collected,yes,
 procedure_stats_daily,derived,derived,rollup view
+procedure_stats_hour_ledger,internal,no,hours already folded into the rollup
+procedure_stats_hour_ledger_state,internal,no,ledger progress
 procedure_stats_hourly,derived,derived,rollup view
 procedure_stats_interval_daily,derived,derived,rollup view
 procedure_stats_interval_hourly,derived,derived,rollup view
