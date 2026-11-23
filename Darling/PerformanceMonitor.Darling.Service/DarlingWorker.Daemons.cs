@@ -1112,6 +1112,35 @@ public sealed partial class DarlingWorker
     private static readonly TimeSpan BackfillSliceDeadline = TimeSpan.FromSeconds(300);
 
     /// <summary>
+    /// #9392: runs one background pass and says whether its loop should go on. A pass that ends because the service is
+    /// stopping returns false and logs nothing: that is a cancelled token, or a dependency (the data source, a scope) the
+    /// host disposed first while the pass was still using it. Any other failure, a disposed object while the service is
+    /// NOT stopping included, is logged at Warning with <paramref name="failureMessage"/> and the loop goes on.
+    /// </summary>
+    internal static async Task<bool> RunDaemonPassAsync(
+        ILogger logger, Func<Task> pass, string failureMessage, CancellationToken stoppingToken)
+    {
+        try
+        {
+            await pass();
+            return true;
+        }
+        catch (Exception ex) when (IsStopping(ex, stoppingToken))
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "{Failure}", failureMessage);
+            return true;
+        }
+    }
+
+    /// <summary>#9392: a cancellation, or a disposed object, that surfaces once the service token has been cancelled is the service stopping, not a fault.</summary>
+    internal static bool IsStopping(Exception ex, CancellationToken stoppingToken) =>
+        stoppingToken.IsCancellationRequested && ex is OperationCanceledException or ObjectDisposedException;
+
+    /// <summary>
     /// The command plane's poll loop (Stage 2), run concurrently with the collection sweep on its own
     /// ~5-second tick. Each tick DRAINS every currently-pending command (claim one at a time until the
     /// queue is empty), so a burst of viewer commands is not throttled to one per 5 seconds. Never throws
@@ -1141,6 +1170,10 @@ public sealed partial class DarlingWorker
                 }
             }
             catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (ObjectDisposedException) when (stoppingToken.IsCancellationRequested)
             {
                 return;
             }
@@ -1177,58 +1210,30 @@ public sealed partial class DarlingWorker
             if (ShouldRunCollection(_paused))
             {
                 /* #6234: its own try, like the passes below. */
-                try
-                {
-                    await changeWatchPass.RunOnceAsync(stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => changeWatchPass.RunOnceAsync(stoppingToken),
+                        "Change watch pass failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Change watch pass failed; it is tried again next pass");
                 }
 
                 /* #6005: the deadlock digest, once per 4-hour bucket; its own try, like the two below. */
-                try
-                {
-                    await deadlockRollup.RunDigestAsync(stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => deadlockRollup.RunDigestAsync(stoppingToken),
+                        "Deadlock digest failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Deadlock digest failed; it is tried again next pass");
                 }
 
-                try
-                {
-                    await InvestigationDispatchCore.SweepOnceAsync(store, _logger, stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => InvestigationDispatchCore.SweepOnceAsync(store, _logger, stoppingToken),
+                        "Investigation sweep failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Investigation sweep failed; it is tried again next pass");
                 }
 
                 /* #6003: its own try, so a failed sweep still delivers what is already journaled, and the reverse. */
-                try
-                {
-                    await events.RunOnceAsync(stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => events.RunOnceAsync(stoppingToken),
+                        "Investigation event delivery failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Investigation event delivery failed; it is tried again next pass");
                 }
             }
 
@@ -1255,17 +1260,10 @@ public sealed partial class DarlingWorker
         {
             if (ShouldRunCollection(_paused))
             {
-                try
-                {
-                    await capture.CaptureOnceAsync(stoppingToken);
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                if (!await RunDaemonPassAsync(_logger, () => capture.CaptureOnceAsync(stoppingToken),
+                        "Investigation evidence capture failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Investigation evidence capture failed; it is tried again next pass");
                 }
             }
 
@@ -1293,24 +1291,20 @@ public sealed partial class DarlingWorker
         {
             if (ShouldRunCollection(_paused))
             {
-                try
-                {
-                    var pass = await drain.RunPassAsync(stoppingToken);
-                    if (pass.Claimed > 0 || pass.Expired > 0)
+                if (!await RunDaemonPassAsync(_logger, async () =>
                     {
-                        _logger.LogInformation(
-                            "External alerts: claimed {Claimed} (delivered {Delivered}, muted {Muted}, no channel {NoChannel}, retry {Retried}, failed {Failed}, ignored {Ignored}, interrupted {Interrupted}), expired {Expired}",
-                            pass.Claimed, pass.Delivered, pass.Muted, pass.NoChannel,
-                            pass.Retried, pass.Failed, pass.Ignored, pass.Interrupted, pass.Expired);
-                    }
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                        var pass = await drain.RunPassAsync(stoppingToken);
+                        if (pass.Claimed > 0 || pass.Expired > 0)
+                        {
+                            _logger.LogInformation(
+                                "External alerts: claimed {Claimed} (delivered {Delivered}, muted {Muted}, no channel {NoChannel}, retry {Retried}, failed {Failed}, ignored {Ignored}, interrupted {Interrupted}), expired {Expired}",
+                                pass.Claimed, pass.Delivered, pass.Muted, pass.NoChannel,
+                                pass.Retried, pass.Failed, pass.Ignored, pass.Interrupted, pass.Expired);
+                        }
+                    },
+                    "External alert pass failed; it is tried again next pass", stoppingToken))
                 {
                     return;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "External alert pass failed; it is tried again next pass");
                 }
             }
 

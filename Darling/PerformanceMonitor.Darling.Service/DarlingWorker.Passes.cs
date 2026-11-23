@@ -968,6 +968,10 @@ public sealed partial class DarlingWorker
         {
             /* Expected on shutdown drain. */
         }
+        catch (ObjectDisposedException) when (ct.IsCancellationRequested)
+        {
+            /* #9392: a dependency the host disposed while the tick was still using it, once the service is stopping. */
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "{Tick} failed", name);
@@ -1360,6 +1364,10 @@ public sealed partial class DarlingWorker
         {
             /* Expected on shutdown drain. */
         }
+        catch (ObjectDisposedException) when (stoppingToken.IsCancellationRequested)
+        {
+            /* #9392: a dependency the host disposed while the purge was still using it, once the service is stopping. */
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "retention purge failed");
@@ -1476,6 +1484,10 @@ public sealed partial class DarlingWorker
             catch (OperationCanceledException)
             {
                 /* Expected on shutdown drain. */
+            }
+            catch (ObjectDisposedException) when (stoppingToken.IsCancellationRequested)
+            {
+                /* #9392: a dependency the host disposed while the reconcile was still using it, once the service is stopping. */
             }
             catch (Exception ex)
             {
