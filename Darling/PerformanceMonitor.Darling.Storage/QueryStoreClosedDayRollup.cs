@@ -1237,7 +1237,9 @@ WHERE s.server_id = $1;";
     /// build before #9287 stamped it empty, and the clutter route served it as "no plans" where raw never held it. With the stamp gone the day is
     /// not served from the rollups, and it is not built again because raw does not hold it whole (<see cref="StatsHoldDayWhole"/>), so the span
     /// reads as not collected. A day with clutter rows keeps its stamp. A server with no raw row is left alone. The oldest row is one read of the
-    /// raw table's <c>(server_id, collection_time)</c> index.</summary>
+    /// raw table's <c>(server_id, collection_time)</c> index. Only a stamp built when raw could no longer hold its day is removed (built at or after
+    /// the day's start plus the days raw keeps): a stamp built while raw held the day is a quiet day, and it stays. $1 the days raw keeps
+    /// (<see cref="QueryStoreClutterHourly.RawHeldDaysAsync"/>).</summary>
     public const string UnstampEmptyClutterDaysSql = @"
 UPDATE collect.query_store_closed_day_built AS b
 SET clutter_built_at = NULL
@@ -1258,15 +1260,17 @@ WHERE b.server_id = f.server_id
   AND NOT b.removed
   AND b.clutter_built_at = b.built_at
   AND (b.day_utc + 1)::timestamp <= f.t
+  AND b.clutter_built_at >= b.day_utc::timestamp + make_interval(days => $1)
   AND NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_plan_daily AS p WHERE p.server_id = b.server_id AND p.day_utc = b.day_utc)
   AND NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_collections_daily AS c WHERE c.server_id = b.server_id AND c.day_utc = b.day_utc);";
 
-    /// <summary>#9383: runs <see cref="UnstampEmptyClutterDaysSql"/>; returns how many days lost their stamp.</summary>
-    public static async Task<long> UnstampEmptyClutterDaysAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    /// <summary>#9383: runs <see cref="UnstampEmptyClutterDaysSql"/> with the days raw keeps; returns how many days lost their stamp.</summary>
+    public static async Task<long> UnstampEmptyClutterDaysAsync(NpgsqlConnection connection, int rawHeldDays, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
         await using var command = new NpgsqlCommand(UnstampEmptyClutterDaysSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = rawHeldDays });
         return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1481,7 +1485,8 @@ WHERE b.server_id = f.server_id
         var removed = await GcAsync(connection, nowUtc, retentionDays, cancellationToken);
 
         /* #9383: before the plan, so a day it unstamps is planned with no stamp and, raw not holding it whole, is not built. */
-        var unstamped = await UnstampEmptyClutterDaysAsync(connection, cancellationToken);
+        var rawHeldDays = await QueryStoreClutterHourly.RawHeldDaysAsync(connection, rawRetentionDays, cancellationToken);
+        var unstamped = rawHeldDays is { } held ? await UnstampEmptyClutterDaysAsync(connection, held, cancellationToken) : 0L;
         var plan = await PlanBuildsAsync(connection, nowUtc, retentionDays, cancellationToken);
 
         foreach (var item in plan)

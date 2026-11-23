@@ -2984,24 +2984,7 @@ $do$";
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            if (!await TimescaleSupport.DetectAsync(connection, cancellationToken))
-            {
-                return new HashSet<string>(StringComparer.Ordinal);
-            }
-
-            await using var command = new NpgsqlCommand(
-                "SELECT hypertable_name FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = ANY($1)",
-                connection) { CommandTimeout = DeleteTimeoutSeconds };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = TimescaleSupport.RawRelations.ToArray() });
-
-            var gated = new HashSet<string>(StringComparer.Ordinal);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                gated.Add(reader.GetString(0));
-            }
-
-            return gated;
+            return await TimescaleSupport.ReadRawHypertablesAsync(connection, DeleteTimeoutSeconds, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

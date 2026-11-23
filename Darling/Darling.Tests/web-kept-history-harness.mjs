@@ -462,7 +462,7 @@ const scenarios = {
   floorClutter: () => tabFloor("queries", "get_query_store_clutter", {
     databases: [{ database_name: "db1" }],
     qs_overhead: { wait_stats: { included: [{ wait_type: "QDS_X" }] }, memory_clerk: { latest_memory_mb: 1 } },
-    window: { window_truncated: true, truncation_note: "nested: the raw tier starts later" },
+    window: { window_truncated: true, truncation_note: "nested: the raw tier starts later", plan_churn_effective_hours_back: 96, wait_effective_hours_back: 72 },
   }),
   // A hand-built composite over one read (File I/O).
   fileIoRefused: () => {
