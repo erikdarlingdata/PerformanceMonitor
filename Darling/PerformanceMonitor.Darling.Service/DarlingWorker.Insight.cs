@@ -534,6 +534,11 @@ public sealed partial class DarlingWorker
             /* Shutting down — the loop's own cancellation check ends the sweep. */
             return new AnalysisPassResult(AnalysisPassStatus.Skipped, 0, "service is stopping");
         }
+        catch (Exception ex) when (IsStopping(ex, stoppingToken))
+        {
+            /* #9392: a dependency the host disposed while the pass was still using it, once the service is stopping. */
+            return new AnalysisPassResult(AnalysisPassStatus.Skipped, 0, "service is stopping");
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "[{Server}] Analysis failed: {Message}", displayName, ex.Message);
