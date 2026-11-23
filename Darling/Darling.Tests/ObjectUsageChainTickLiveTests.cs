@@ -281,8 +281,7 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
             lines.Add(reader.GetString(0));
         }
 
-        return string.Join("
-", lines);
+        return string.Join("\n", lines);
     }
 
     [Fact]
@@ -303,8 +302,6 @@ VALUES ($1,$2,$3,'tick-sql1',$4,$5,7,'dbo',100,'Orders',$6,'CLUSTERED',$7,0,0,$8
 
         var servers = await PlanOfAsync(connection, ObjectUsageChainTick.ServersSql, ct);
         var databases = await PlanOfAsync(connection, ObjectUsageChainTick.DatabasesSql, ct, ServerOne);
-        Assert.Fail("PLAN-SERVERS " + servers.Replace("
-", " | ", StringComparison.Ordinal) + " PLAN-DATABASES " + databases.Replace("
-", " | ", StringComparison.Ordinal));
+        Assert.Fail("PLAN-SERVERS " + servers.Replace("\n", " | ", StringComparison.Ordinal) + " PLAN-DATABASES " + databases.Replace("\n", " | ", StringComparison.Ordinal));
     }
 }
