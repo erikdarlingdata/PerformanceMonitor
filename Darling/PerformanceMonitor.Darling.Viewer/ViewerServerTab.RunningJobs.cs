@@ -47,7 +47,7 @@ public partial class ViewerServerTab
             /* A failed read is not "no jobs are running": the grid empties and says the read failed (the caller also reports it
                in the status bar). The grid used to keep whatever its last load said, "No SQL Agent jobs are running." included. */
             _runningJobsFilterMgr!.UpdateData(new System.Collections.Generic.List<RunningJobRow>());
-            RunningJobsNoDataMessage.Text = RunningJobsReadFailedText(ex);
+            RunningJobsNoDataMessage.Text = RunningJobsReadFailedText();
             RunningJobsNoDataMessage.Visibility = Visibility.Visible;
             throw;
         }
@@ -85,8 +85,8 @@ public partial class ViewerServerTab
     }
 
     /// <summary>What the tab says in place of "No SQL Agent jobs are running." when the read itself failed.</summary>
-    internal static string RunningJobsReadFailedText(Exception ex) =>
-        $"The running jobs could not be read: {ex.Message}";
+    internal static string RunningJobsReadFailedText() =>
+        "The running jobs could not be read. The Viewer log has the cause.";
 
     /// <summary>
     /// The msdb-access banner rule, derived from the store (the viewer has no live msdb probe): Lite shows

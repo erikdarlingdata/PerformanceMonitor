@@ -104,6 +104,7 @@ public partial class ViewerServerTab
     /// </summary>
     private async void DailyCalendar_DayDrillRequested(object? sender, PerformanceCalendarDrillEventArgs e)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             var (startUtc, endUtc) = DailyHealthBandCalculator.DayWindowUtc(e.Date);
@@ -143,19 +144,20 @@ public partial class ViewerServerTab
             switch (e.Target)
             {
                 case DayDrillTarget.Deadlocks:
-                    await LoadDeadlocksAsync(startUtc, endUtc);
+                    await LoadDeadlocksAsync(startUtc, endUtc, timer);
                     break;
                 case DayDrillTarget.Blocking:
-                    await LoadBlockedProcessReportsAsync(startUtc, endUtc);
+                    await LoadBlockedProcessReportsAsync(startUtc, endUtc, timer);
                     break;
                 case DayDrillTarget.TopQueries:
-                    await LoadTopQueriesAsync(startUtc, endUtc);
+                    await LoadTopQueriesAsync(startUtc, endUtc, timer);
                     break;
             }
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"day drill failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Daily Summary", timer, ex));
         }
     }
 }

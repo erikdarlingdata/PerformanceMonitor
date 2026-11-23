@@ -781,11 +781,12 @@ public partial class ViewerServerTab
 
     private async void OnQueryStatsSlicerChanged(object? sender, SlicerRangeEventArgs e)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             var tagFilter = await CurrentQueryTagFilterAsync();
             var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter);
+            var dataReadTask = Timed(timer, "grid read", _dataService.GetTopQueriesByCpuRoutedAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter));
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Stats");
             var read = dataReadTask.Result;
             var rows = read.Rows;
@@ -796,7 +797,8 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"query-stats slicer failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Queries > Top Queries by Duration", timer, ex));
         }
     }
 
@@ -820,11 +822,12 @@ public partial class ViewerServerTab
 
     private async void OnProcStatsSlicerChanged(object? sender, SlicerRangeEventArgs e)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             var tagFilter = await CurrentQueryTagFilterAsync();
             var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var dataReadTask = _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter);
+            var dataReadTask = Timed(timer, "grid read", _dataService.GetTopProceduresByCpuRoutedAsync(_server.ServerId, e.ReadStartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, tags: tagFilter));
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Procedure Stats");
             var read = dataReadTask.Result;
             var rows = read.Rows;
@@ -835,7 +838,8 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"procedure-stats slicer failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Queries > Top Procedures by Duration", timer, ex));
         }
     }
 
@@ -885,12 +889,13 @@ public partial class ViewerServerTab
 
     private async void OnQueryStoreSlicerChanged(object? sender, SlicerRangeEventArgs e)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             var tagFilter = await CurrentQueryTagFilterAsync();
             var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
             /* #3953 clause 4: a slicer selection is always a literal, user-drawn sub-range, never a preset. */
-            var dataReadTask = _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc, tags: tagFilter);
+            var dataReadTask = Timed(timer, "grid read", _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc, tags: tagFilter));
             await AwaitReadWatchingProbeAsync(dataReadTask, floorTask, "Query Store");
             var (rows, widePlan) = dataReadTask.Result;
             _queryStoreFilterMgr!.UpdateData(rows);
@@ -901,7 +906,8 @@ public partial class ViewerServerTab
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"query-store slicer failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Queries > Query Store by Duration", timer, ex));
         }
     }
 

@@ -39,6 +39,13 @@ internal static class ViewerRefreshFailure
         return PlainText(tab, read, restNote);
     }
 
+    /// <summary><see cref="Report"/> for a load on a <see cref="ViewerLoadTimer"/>: the read that failed and its own time come from the clock's tracked reads, and a failure no tracked read carries names no read and gives the clock's total.</summary>
+    internal static string Report(string tab, ViewerLoadTimer timer, Exception failure, string? restNote = null)
+    {
+        var failed = timer.FailedRead(failure);
+        return Report(tab, failed?.Phase, failed?.Ms ?? timer.ElapsedMs, failure, restNote);
+    }
+
     /// <summary>The log line: tab, read, time, then each exception in the chain by type and message.</summary>
     internal static string LogLine(string tab, string? read, long elapsedMs, Exception failure, bool retried = false)
     {
