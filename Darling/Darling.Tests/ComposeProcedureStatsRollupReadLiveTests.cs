@@ -18,6 +18,8 @@ using Xunit;
 
 namespace Darling.Tests;
 
+/* #1776 own-store: each test mints its own scratch store database through ScratchPostgres. */
+
 /// <summary>
 /// #9357: the procedure_stats hourly-raw-edges FROM item, built without the restart-rows arm, gives the same value as the raw read for
 /// every group (and every group-by-hour) that has a value. The route that takes this FROM item is not reachable until the guard reads its

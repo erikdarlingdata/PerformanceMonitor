@@ -21,6 +21,8 @@ using Xunit;
 
 namespace Darling.Tests;
 
+/* #1776 own-store: each test mints its own scratch store database through ScratchPostgres. */
+
 /// <summary>
 /// #9357 live pins, each on its own scratch store. The writer: a procedure_stats batch adds its non-restart row count to its hour
 /// in the COPY's own transaction (driven through the product's <c>WriteBatchAsync</c> with rows whose interval is the fact's), and a

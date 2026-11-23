@@ -23,6 +23,8 @@ using Xunit;
 
 namespace Darling.Tests;
 
+/* #1776 own-store: each test mints its own scratch store database through ScratchPostgres. */
+
 /// <summary>
 /// #9357: a fleet top-procedures cell over 24 hours, end to end on a throwaway store. The rows are written by the collector's own write
 /// path (<c>WriteBatchAsync</c>), so the hour ledger is the one the writer keeps, and the hourly rollup is refreshed over them. The cell
