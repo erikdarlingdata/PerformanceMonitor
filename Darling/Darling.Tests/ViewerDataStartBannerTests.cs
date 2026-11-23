@@ -135,7 +135,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
         Assert.Equal(1, Matches(body,
             @"await AwaitReadWatchingProbeAsync\(dataReadTask,\s*dataStartTask,\s*""Active Queries""\);\s*var \(totalCount, snapshots\) = dataReadTask\.Result;"));
         Assert.Equal(1, Matches(body,
-            @"_querySnapshotsFilterMgr!\.UpdateData\(snapshots\);[\s\S]*?UpdateTruncationBanner\(QuerySnapshotsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Active Queries""\),\s*fromUtc\);\s*await LoadActiveQueriesSlicerAsync\(fromUtc\.AddHours\(-1\),\s*toUtc\.AddHours\(1\)\);"));
+            @"_querySnapshotsFilterMgr!\.UpdateData\(snapshots\);[\s\S]*?UpdateTruncationBanner\(QuerySnapshotsTruncationBanner,\s*await DataStartOrNullAsync\(dataStartTask,\s*""Active Queries""\),\s*fromUtc\);\s*await LoadActiveQueriesSlicerAsync\(fromUtc\.AddHours\(-1\),\s*toUtc\.AddHours\(1\)(?:,\s*timer)?\);"));
     }
 
     /* "Latest Snapshot" swaps the grid for the newest stored batch, so the "Showing since" banner the last range read
@@ -197,7 +197,7 @@ public sealed class ViewerDataStartBannerTests : IDisposable
 
         Assert.Equal(1, Matches(tab, $@"var floorTask = Timed\(timer, ""data start"", _dataService\.{probe}\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(tab,
-            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*startUtc{tail}\);(?:\s*await Update{grid}LeftOutBannerAsync\(read,\s*startUtc,\s*endUtc\);)?\s*await Load{grid}SlicerAsync\(startUtc,\s*endUtc,\s*slicerTask\);\s*\}}\s*catch\s*\{{[^}}]*\}}\s*await Refresh{grid}ComparisonAsync\(startUtc,\s*endUtc,\s*timer\);"));
+            $@"UpdateTruncationBanner\({grid}TruncationBanner,\s*await DataStartOrNullAsync\(floorTask,\s*""{surface}""\),\s*startUtc{tail}\);(?:\s*await Update{grid}LeftOutBannerAsync\(read,\s*startUtc,\s*endUtc\);)?\s*await Load{grid}SlicerAsync\(startUtc,\s*endUtc,\s*slicerTask(?:,\s*\(\) => Timed\(timer,\s*""slicer read \(retry\)"",[^;]*?\))?\);\s*\}}\s*catch\s*\{{[^}}]*\}}\s*await Refresh{grid}ComparisonAsync\(startUtc,\s*endUtc,\s*timer\);"));
     }
 
     [Theory]
