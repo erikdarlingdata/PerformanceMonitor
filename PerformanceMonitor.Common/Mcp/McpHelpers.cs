@@ -537,6 +537,14 @@ internal static class McpHelpers
     public static readonly IReadOnlyList<string> QueryStoreExecutionTypes = new[] { "Regular", "Aborted", "Exception" };
 
     /// <summary>
+    /// #9341: why a Query Store ranking is empty over a window whose collector runs stored rows. The ranking places a window by each
+    /// interval's start time, so an interval collected inside the window that started before it, such as an hourly interval that is
+    /// still open, is not in it yet. Shared so both SKUs say it in the same words.
+    /// </summary>
+    public const string QueryStoreNoIntervalInWindow =
+        "The window holds no Query Store interval yet. A window is placed by each interval's start time, so an hourly interval that is still open, or one that started before the window, is not in it. Try a wider window with hours_back.";
+
+    /// <summary>
     /// The <c>empty</c> answer for an <c>execution_type</c> filter that matched nothing while the same read
     /// without it returns rows. Most queries never abort, so this is the common answer to an Aborted or
     /// Exception filter, and it is a measured zero: Query Store is collecting and the window has rows, just none

@@ -281,11 +281,12 @@ public sealed class McpQueryTools
     /// <c>successful_runs_in_window</c> beside the sentence; null when it has no successful run in the window. Twin of
     /// <c>DarlingMcpDataTools.EmptyCollectorRan</c>; the words are shared in <see cref="CollectorRunFacts.RanFoundNothing"/>.</summary>
     internal static string? EmptyCollectorRan(
-        CollectorRunFacts facts, string collectorName, int hoursBack, string found, string? databaseName)
+        CollectorRunFacts facts, string collectorName, int hoursBack, string found, string? databaseName, string? storedRowsExplanation = null)
     {
         var message = facts.RanFoundNothing(collectorName, hoursBack, found,
-            string.IsNullOrEmpty(databaseName) ? null : McpDatabaseSelection.Scope(new[] { databaseName }));
-        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow });
+            string.IsNullOrEmpty(databaseName) ? null : McpDatabaseSelection.Scope(new[] { databaseName }), storedRowsExplanation: storedRowsExplanation);
+        /* #9341: when the runs stored rows, the count beside the run count says what the sentence rests on. */
+        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow, rows_collected_in_window = facts.RowsCollectedInWindow });
     }
 
     /// <summary>#5633 item 3: the empty-page envelope of get_top_procedures_by_cpu, from the collector's own run history. Two cycles only while
@@ -635,7 +636,7 @@ public sealed class McpQueryTools
                     /* #6226 (Darling's twin): the collector ran in the window and stored nothing, so nothing executed: empty, not a gap. */
                     ?? EmptyCollectorRan(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "query_store", hours_back, asOfUtc: windowEnd),
-                        "query_store", hours_back, "Query Store intervals", database_name)
+                        "query_store", hours_back, "Query Store intervals", database_name, McpHelpers.QueryStoreNoIntervalInWindow)
                     ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
