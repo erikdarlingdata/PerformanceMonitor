@@ -281,11 +281,12 @@ public sealed class McpQueryTools
     /// <c>successful_runs_in_window</c> beside the sentence; null when it has no successful run in the window. Twin of
     /// <c>DarlingMcpDataTools.EmptyCollectorRan</c>; the words are shared in <see cref="CollectorRunFacts.RanFoundNothing"/>.</summary>
     internal static string? EmptyCollectorRan(
-        CollectorRunFacts facts, string collectorName, int hoursBack, string found, string? databaseName)
+        CollectorRunFacts facts, string collectorName, int hoursBack, string found, string? databaseName, string? storedRowsExplanation = null)
     {
         var message = facts.RanFoundNothing(collectorName, hoursBack, found,
-            string.IsNullOrEmpty(databaseName) ? null : McpDatabaseSelection.Scope(new[] { databaseName }));
-        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow });
+            string.IsNullOrEmpty(databaseName) ? null : McpDatabaseSelection.Scope(new[] { databaseName }), storedRowsExplanation: storedRowsExplanation);
+        /* #9341: when the runs stored rows, the count beside the run count says what the sentence rests on. */
+        return message is null ? null : McpHelpers.Status("empty", message, new { successful_runs_in_window = facts.SuccessfulRunsInWindow, rows_collected_in_window = facts.RowsCollectedInWindow });
     }
 
     /// <summary>#5633 item 3: the empty-page envelope of get_top_procedures_by_cpu, from the collector's own run history. Two cycles only while
@@ -635,7 +636,7 @@ public sealed class McpQueryTools
                     /* #6226 (Darling's twin): the collector ran in the window and stored nothing, so nothing executed: empty, not a gap. */
                     ?? EmptyCollectorRan(
                         await dataService.GetCollectorRunFactsAsync(resolved.ServerId, "query_store", hours_back, asOfUtc: windowEnd),
-                        "query_store", hours_back, "Query Store intervals", database_name)
+                        "query_store", hours_back, "Query Store intervals", database_name, McpHelpers.QueryStoreNoIntervalInWindow)
                     ?? McpHelpers.Status("unavailable", "No Query Store data available. Query Store may not be enabled on target databases.");
             }
 
@@ -1913,8 +1914,8 @@ public sealed class McpQueryTools
     /// word, and the window wrappers add none (<see cref="AnswerStatus.IsOffline"/>).
     /// </summary>
     internal static async Task<string> OfflineInsteadOfEmptyAsync(
-        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, DateTime? windowStart = null) =>
-        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), windowStart)).Answer;
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, DateTime? windowStart = null, string? snapshotCollector = null) =>
+        (await OfflineInsteadOfEmptyAsync(dataService, serverId, windowEnd, answer, ReadStatus(answer), windowStart, snapshotCollector)).Answer;
 
     /// <summary>
     /// <see cref="OfflineInsteadOfEmptyAsync(LocalDataService, int, DateTime, string)"/> over a status the caller has already read, so a
@@ -1922,7 +1923,8 @@ public sealed class McpQueryTools
     /// (read again only when the answer changed, which only an <c>empty</c> one does).
     /// </summary>
     private static async Task<(string Answer, AnswerStatus Status)> OfflineInsteadOfEmptyAsync(
-        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status, DateTime? windowStart = null)
+        LocalDataService dataService, int serverId, DateTime windowEnd, string answer, AnswerStatus status, DateTime? windowStart = null,
+        string? snapshotCollector = null)
     {
         if (!status.IsEmpty)
         {
@@ -1930,7 +1932,22 @@ public sealed class McpQueryTools
         }
 
         var offline = await OfflineAnswerOrNullAsync(dataService, serverId, windowEnd, windowStart);
-        return offline is null ? (answer, status) : (offline, ReadStatus(offline));
+        if (offline is not null)
+        {
+            return (offline, ReadStatus(offline));
+        }
+
+        /* #9339: a server that is online now can still have skipped or failed collection inside the window (a THREADPOOL episode starves
+           the collector's own connection). A snapshot read that passes its collector says so, with the count and the span, so an empty
+           answer does not read as "nothing was waiting". Darling's twin is DarlingServerOfflineNote.EmptyAsync. */
+        if (snapshotCollector is not null && windowStart is { } start)
+        {
+            var gaps = await dataService.GetCollectionGapsAsync(serverId, snapshotCollector, start, windowEnd);
+            var noted = CollectionGapNote.Apply(answer, snapshotCollector, gaps);
+            return ReferenceEquals(noted, answer) ? (answer, status) : (noted, ReadStatus(noted));
+        }
+
+        return (answer, status);
     }
 
     /// <summary>The offline answer for the server as of <paramref name="windowEnd"/>, or null when it is not offline (or the read failed).</summary>
