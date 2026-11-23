@@ -228,7 +228,9 @@ public sealed partial class ViewerDataService
     /// arms read as they did before (the second <c>EXISTS</c> branch finds those keys).
     /// </summary>
     private static string WithByKeysFilter(string prefix, int databaseParameter, int queryIdParameter) =>
-        databaseParameter + queryIdParameter > 0 ? prefix.Replace(ByKeysSlot, "", StringComparison.Ordinal) : prefix;
+        prefix.Replace(ByKeysSlot,
+            $"AND   (${databaseParameter}::text[] IS NULL OR database_name = ANY(${databaseParameter}))\n"
+            + $"            AND   (${queryIdParameter}::bigint[] IS NULL OR query_id = ANY(${queryIdParameter}))", StringComparison.Ordinal);
 
     /// <summary>#9373: <paramref name="prefix"/> with <see cref="ByKeysSlot"/> left empty, for the statements that rank (the keys statements) and the one-statement read.</summary>
     private static string WithoutByKeysFilter(string prefix) => prefix.Replace(ByKeysSlot, "", StringComparison.Ordinal);
