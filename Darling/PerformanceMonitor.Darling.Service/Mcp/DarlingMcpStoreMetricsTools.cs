@@ -652,6 +652,8 @@ public sealed class DarlingMcpStoreMetricsTools
                 total_crashes = CrashFor(r, crashesByJob)?.TotalCrashes,
                 next_start = CrashFor(r, crashesByJob)?.NextStart?.ToString("o", CultureInfo.InvariantCulture),
                 crash_backoff = CrashFor(r, crashesByJob)?.CrashBackoff,
+                /* #9391: true while the job has a live backend. Its crash counts then leave out the provisional crash its start added. */
+                running = CrashFor(r, crashesByJob)?.Running,
             };
         }
 
