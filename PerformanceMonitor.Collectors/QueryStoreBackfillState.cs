@@ -278,11 +278,12 @@ public static class QueryStoreBackfillState
 
     /// <summary>
     /// Takes a range the dig just finished out of the recorded holes (#9352): <c>[dugFromUtc, dugToUtc]</c> is
-    /// removed from every hole it touches, so a hole the live collector recorded while the slice ran keeps the
-    /// part the slice did not dig. Whatever remains is cut at <paramref name="floorUtc"/>, the horizon the
-    /// slice used, and a piece that ends at or below it is dropped. Returns the value to save, or null when no
-    /// hole is left and the key should go. For one hole and a slice that dug from its ceiling, the result is the
-    /// hole <c>(floorUtc, dugFromUtc)</c>, the value the dig has always saved.
+    /// removed from the hole it lies in, so a hole the live collector recorded while the slice ran keeps the part
+    /// the slice did not dig. What is left of that hole below the range is cut at <paramref name="floorUtc"/>, the
+    /// floor the slice used, and dropped when it ends at or below it. Holes the range does not touch are kept as
+    /// they are. Returns the value to save, or null when no hole is left and the key should go. For one hole and
+    /// a slice that dug from its ceiling, the result is the hole <c>(floorUtc, dugFromUtc)</c>, the value the dig
+    /// has always saved.
     /// </summary>
     public static string? RemoveDugRange(string? existingEncoded, DateTime dugFromUtc, DateTime dugToUtc, DateTime floorUtc)
     {
@@ -296,30 +297,22 @@ public static class QueryStoreBackfillState
         {
             if (to <= dugFromUtc || from >= dugToUtc)
             {
-                Keep(remaining, from, to, floorUtc);
+                remaining.Add((from, to));
                 continue;
             }
 
-            if (from < dugFromUtc)
+            if (from < dugFromUtc && dugFromUtc > floorUtc)
             {
-                Keep(remaining, from, dugFromUtc, floorUtc);
+                remaining.Add((from > floorUtc ? from : floorUtc, dugFromUtc));
             }
 
             if (to > dugToUtc)
             {
-                Keep(remaining, dugToUtc, to, floorUtc);
+                remaining.Add((dugToUtc, to));
             }
         }
 
         return EncodeHoles(remaining);
-    }
-
-    private static void Keep(List<(DateTime FromUtc, DateTime ToUtc)> holes, DateTime from, DateTime to, DateTime floorUtc)
-    {
-        if (to > floorUtc)
-        {
-            holes.Add((from > floorUtc ? from : floorUtc, to));
-        }
     }
 
     /// <summary>

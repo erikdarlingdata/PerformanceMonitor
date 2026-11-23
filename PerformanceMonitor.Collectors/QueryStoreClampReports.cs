@@ -37,6 +37,18 @@ public sealed class QueryStoreClampReports
             && seen.Raw == raw
             && floor <= seen.ReadThrough;
 
+    /// <summary>
+    /// Where a clamp hole for this raw watermark should start (#9352). A landed cycle read everything up to its
+    /// collection time, so a later clamp that is a new gap (an outage that outlasted the catch-up window) leaves
+    /// only the span from that time to the new floor unread. Opening the hole at the raw watermark instead made
+    /// it overlap the hole an earlier clamp recorded, and merging the two sent the dig back over a range it had
+    /// filled and a range the live read held. Any other raw value, database or server gets the raw watermark.
+    /// </summary>
+    public DateTime HoleFloor(int serverId, string database, DateTime raw)
+        => _landed.TryGetValue((serverId, database), out var seen) && seen.Raw == raw && seen.ReadThrough > raw
+            ? seen.ReadThrough
+            : raw;
+
     /// <summary>Lands a successful cycle. <paramref name="clampedRaw"/> is the raw watermark that cycle clamped,
     /// or null when it did not clamp (the watermark is fresh again, so a later stale one is a new gap).</summary>
     public void Land(int serverId, string database, DateTime? clampedRaw, DateTime collectionTime)

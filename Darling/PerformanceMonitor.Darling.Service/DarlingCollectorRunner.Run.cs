@@ -1044,7 +1044,7 @@ public sealed partial class DarlingCollectorRunner
                                 && WatermarkPolicy.ClampCatchup(context.Watermark, collectionTime) is DateTime azureClampedFloor)
                             {
                                 await RecordQueryStoreBackfillHoleAsync(
-                                    server.ServerId, databaseName, context.Watermark.Value, azureClampedFloor, dbToken);
+                                    server.ServerId, databaseName, _queryStoreClampReports.HoleFloor(server.ServerId, databaseName, context.Watermark.Value), azureClampedFloor, dbToken);
                             }
                         }
                     }
@@ -1746,7 +1746,8 @@ public sealed partial class DarlingCollectorRunner
                 if (cut.HoleFrom is DateTime holeFrom && cut.HoleTo is DateTime holeTo
                     && string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                 {
-                    await RecordQueryStoreBackfillHoleAsync(server.ServerId, item, holeFrom, holeTo, ct);
+                    await RecordQueryStoreBackfillHoleAsync(
+                        server.ServerId, item, _queryStoreClampReports.HoleFloor(server.ServerId, item, holeFrom), holeTo, ct);
                 }
             }
 

@@ -57,4 +57,42 @@ public sealed class QueryStoreClampReportsTests
         reports.Land(1, "Sales", null, T0.AddMinutes(5));
         Assert.False(reports.AlreadyReported(1, "Sales", Raw, T0.AddHours(-1)));
     }
+
+    [Fact]
+    public void ANewGapAfterALandedCycle_OpensItsHoleAtWhatTheCycleRead_NotAtTheRawWatermark()
+    {
+        var reports = new QueryStoreClampReports();
+        reports.Land(1, "Sales", Raw, T0);
+
+        /* Nothing ran for two days. The range from the raw watermark to T0 was reported and read by the landed cycle, so the new
+           hole starts at T0. Starting it at the raw watermark made it overlap the earlier hole and re-walk what was filled (#9352). */
+        Assert.Equal(T0, reports.HoleFloor(1, "Sales", Raw));
+    }
+
+    [Fact]
+    public void ACycleThatRanOnTime_OnAnIdleDatabase_LeavesNothingToRecord()
+    {
+        var reports = new QueryStoreClampReports();
+        reports.Land(1, "Sales", Raw, T0);
+
+        /* The next cycle, on time: its floor is inside what the landed cycle read, so it is already reported and opens no hole. */
+        var next = T0.AddMinutes(5);
+        var floor = next - WatermarkPolicy.MaxCatchup;
+        Assert.True(reports.AlreadyReported(1, "Sales", Raw, floor));
+        Assert.True(reports.HoleFloor(1, "Sales", Raw) >= floor);
+    }
+
+    [Fact]
+    public void AnUnknownDatabase_AnotherRawWatermark_OrANonClampingCycle_OpenTheirHoleAtTheRawWatermark()
+    {
+        var reports = new QueryStoreClampReports();
+        reports.Land(1, "Sales", Raw, T0);
+
+        Assert.Equal(Raw, reports.HoleFloor(1, "Orders", Raw));
+        Assert.Equal(Raw, reports.HoleFloor(2, "Sales", Raw));
+        Assert.Equal(Raw.AddMinutes(1), reports.HoleFloor(1, "Sales", Raw.AddMinutes(1)));
+
+        reports.Land(1, "Sales", null, T0.AddMinutes(5));
+        Assert.Equal(Raw, reports.HoleFloor(1, "Sales", Raw));
+    }
 }

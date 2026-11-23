@@ -573,17 +573,17 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
-    /// Removes the rows a backfill slice just wrote that the store already held (#9352). A catch-up clamp opens a hole that
-    /// REPLACES the database's one saved hole, so the dig restarts at the clamp point and walks ranges an earlier pass filled
-    /// and ranges the live collector already stored. Two passes whose chunks line up write the same rows under the same stamp
+    /// Removes the rows a backfill slice just wrote that the store already held (#9352). Before the recorded holes were kept
+    /// apart (<see cref="QueryStoreBackfillState.AddHole"/>), a catch-up clamp widened the database's one saved hole, so the
+    /// dig restarted at the clamp point and walked ranges an earlier pass filled and ranges the live collector already stored.
+    /// A slice whose save failed after its write can still be walked again. Two passes whose chunks line up write the same rows under the same stamp
     /// (exact copies), and passes that do not line up write the same rows under another stamp. Both inflate any total over raw
     /// rows, and the read side's dedup only hides them.
     ///
     /// <para>A row of the slice (stamped <paramref name="stamp"/>) goes when a row with a LOWER <c>collection_id</c> is equal to it
     /// in the dedup key and every measurement, <c>collection_time</c> aside: the copy that was stored first stays. Only rows equal
     /// in the measurements are removed, so a row whose interval has since gained executions is kept as the newer state.
-    /// Returns the rows removed. This is the guard at the write. The cause (the hole replacement and the clamp that opens it
-    /// on a quiet database) is separate.</para>
+    /// Returns the rows removed. This is the guard at the write.</para>
     /// </summary>
     internal static int RemoveStoredBackfillCopies(
         DuckDB.NET.Data.DuckDBConnection connection, int serverId, string databaseName, DateTime stamp)
