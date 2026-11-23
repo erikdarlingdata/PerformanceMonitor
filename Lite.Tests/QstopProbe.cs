@@ -137,6 +137,7 @@ public sealed class QstopProbe
                 {
                     var sql = File.ReadAllText(f);
                     var vt = new List<string>(); long rc = 0;
+                    try {
                     for (var i = 0; i < 4; i++)
                     {
                         var sw = Stopwatch.StartNew();
@@ -152,6 +153,8 @@ public sealed class QstopProbe
                         vt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
                         if (i == 0) Line($"VARIANT {Path.GetFileName(f)} rows {rc} hash {h}");
                     }
+                    } catch (Exception ex) { Line($"VARIANT {Path.GetFileName(f)} FAILED {ex.Message.Replace("
+", " ")}"); continue; }
                     Line($"VARIANT {Path.GetFileName(f)}: {string.Join(" ", vt)}");
                 }
                 return;
