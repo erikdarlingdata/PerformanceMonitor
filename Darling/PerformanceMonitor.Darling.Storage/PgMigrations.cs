@@ -3979,6 +3979,10 @@ END $$;";
            refresh no longer rewrites a text or plan row. Per dimension: the table, the insert trigger, the backfill, the two constraints and the
            index, then the drop of the dimension's own last_seen index. */
         new Migration(298, "payload-dimension-seen", V298Sql),
+        /* V299 (#9374): the newest measured size of every relation the Store Health reads size (collect.store_relation_sizes_latest) and the one-row
+           time they were measured (collect.store_relation_sizes_measured), so the Viewer's first open shows the last sizes at once. Two plain tables
+           created empty: no data moves, and the service fills them from a size pass. An older build ignores them. */
+        new Migration(StoreRelationSizesStore.Version, "store-relation-sizes-latest", StoreRelationSizesStore.CreateSql),
     };
 
     /// <summary>

@@ -1486,6 +1486,23 @@ WHERE s.name IN ('autovacuum', 'autovacuum_max_workers', 'autovacuum_naptime', '
         }
     }
 
+    /// <summary>The same read, sized from <paramref name="sizes"/> (#9374) instead of a size pass of its own: the Viewer's first open hands in the
+    /// last measured sizes the store holds (<see cref="StoreRelationSizesStore.ReadLastSizesAsync"/>), so the read does no size work. A relation
+    /// the map does not hold reads as empty, and one dropped since is not listed.</summary>
+    public static async Task<List<StoreTableHealthRow>> GetAsync(
+        NpgsqlDataSource postgres, DateTime asOfUtc, RelationSizePass sizes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sizes);
+        try
+        {
+            return await ReadTablesAsync(postgres, asOfUtc, cancellationToken, sizes);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
     /// <summary>The relations the per-index read sizes (#9170): every member relation (the heap each index hangs under) and every index on one.</summary>
     internal static string IndexRelationsSql(bool timescale) => $@"
 WITH {BuildMembersCtes(timescale)}
@@ -1534,13 +1551,16 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
 
     /// <summary>What one pass sized: per relation its oid, the heap its index hangs under (0 for a heap), its main-fork size, the
     /// size of its other forks (indexes only) and its TOAST total (heaps only).</summary>
-    private sealed record RelationSizePass(long[] Oids, long[] Parents, long[] Main, long[] OtherForks, long[] Toast);
+    public sealed record RelationSizePass(long[] Oids, long[] Parents, long[] Main, long[] OtherForks, long[] Toast);
 
     /// <summary>One data source's held pass, and how many relations the passes on it have sized (what a test counts).</summary>
     private sealed class SizePassSlot(TimeSpan lifetime)
     {
         public readonly SingleFlightTtlCache<RelationSizePass> Cache = new(lifetime);
         public long RelationsSized;
+
+        /// <summary>The newest pass that finished on this data source and when it did (#9374), so the service writes the sizes a read just took instead of taking them again.</summary>
+        public MeasuredSizePass? Last;
     }
 
     private static readonly ConditionalWeakTable<NpgsqlDataSource, SizePassSlot> SizePasses = new();
@@ -1560,8 +1580,17 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
     private static Task<RelationSizePass> GetSizePassAsync(NpgsqlDataSource postgres, bool timescale, CancellationToken cancellationToken)
     {
         var slot = SlotFor(postgres);
-        return slot.Cache.GetOrStartAsync(() => ReadSizePassAsync(postgres, timescale, slot), cancellationToken);
+        return slot.Cache.GetOrStartAsync(async () =>
+        {
+            var pass = await ReadSizePassAsync(postgres, timescale, slot);
+            slot.Last = new MeasuredSizePass(pass, DateTime.UtcNow);
+            return pass;
+        }, cancellationToken);
     }
+
+    /// <summary>The newest size pass that finished on <paramref name="postgres"/> (#9374), with the time it finished, or null when none has. The pass is shared
+    /// with the tables read and the indexes read, so the service writes it to the store without a second pass.</summary>
+    public static MeasuredSizePass? LastSizePassOn(NpgsqlDataSource postgres) => SlotFor(postgres).Last;
 
     private static async Task<RelationSizePass> ReadSizePassAsync(NpgsqlDataSource postgres, bool timescale, SizePassSlot slot)
     {
@@ -1648,14 +1677,14 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
     }
 
     private static async Task<List<StoreTableHealthRow>> ReadTablesAsync(
-        NpgsqlDataSource postgres, DateTime asOfUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, DateTime asOfUtc, CancellationToken cancellationToken, RelationSizePass? given = null)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var (timescale, serverVersion) = await ProbeAsync(postgres, cancellationToken);
 
         var read = new List<(StoreTableHealthRow Row, TailRelation[] TailRelations)>();
-        var sizes = await GetSizePassAsync(postgres, timescale, cancellationToken);
+        var sizes = given ?? await GetSizePassAsync(postgres, timescale, cancellationToken);
         await using (var command = postgres.CreateCommand(BuildSql(timescale, serverVersion, presized: true)))
         {
             command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
@@ -1833,13 +1862,27 @@ LEFT JOIN pg_catalog.pg_index AS x ON x.indexrelid = c.oid";
         }
     }
 
-    private static async Task<List<StoreIndexHealthRow>> ReadIndexesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    /// <summary>The same read, sized from <paramref name="sizes"/> (#9374), as <see cref="GetAsync(NpgsqlDataSource, DateTime, RelationSizePass, CancellationToken)"/>.</summary>
+    public static async Task<List<StoreIndexHealthRow>> GetIndexesAsync(NpgsqlDataSource postgres, RelationSizePass sizes, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sizes);
+        try
+        {
+            return await ReadIndexesAsync(postgres, cancellationToken, sizes);
+        }
+        catch (Exception ex) when (StoreTableHealthTimeoutException.IsDeadlineTrip(ex, cancellationToken))
+        {
+            throw new StoreTableHealthTimeoutException(ex);
+        }
+    }
+
+    private static async Task<List<StoreIndexHealthRow>> ReadIndexesAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken, RelationSizePass? given = null)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var (timescale, _) = await ProbeAsync(postgres, cancellationToken);
         var rows = new List<StoreIndexHealthRow>();
-        var sizes = await GetSizePassAsync(postgres, timescale, cancellationToken);
+        var sizes = given ?? await GetSizePassAsync(postgres, timescale, cancellationToken);
         await using var command = postgres.CreateCommand(BuildIndexSql(timescale, presized: true));
         command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
         AddSizeParameters(command, sizes.Oids, sizes.Main);

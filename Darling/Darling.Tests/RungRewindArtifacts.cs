@@ -962,6 +962,10 @@ DROP TABLE IF EXISTS collect.query_text_dim_seen;
 DROP TABLE IF EXISTS collect.query_plan_dim_seen;
 CREATE INDEX IF NOT EXISTS idx_query_text_dim_last_seen ON collect.query_text_dim (last_seen);
 CREATE INDEX IF NOT EXISTS idx_query_plan_dim_last_seen ON collect.query_plan_dim (last_seen);"),
+        // V299 (#9374): the last measured relation sizes and the one-row time they were measured. The pair is the probe's newest sentinel. The rewind drops both, so a re-run of V299
+        // creates them empty. Safe on a store that never had them.
+        new(299, "hasStoreRelationSizes", @"DROP TABLE IF EXISTS collect.store_relation_sizes_latest;
+DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
     ];
 
     /// <summary>

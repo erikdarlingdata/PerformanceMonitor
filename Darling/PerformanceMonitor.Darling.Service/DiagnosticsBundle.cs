@@ -99,6 +99,7 @@ internal static class DiagnosticsBundle
         "DarlingConfig.CollectSchemaChangeEvents",
         "DarlingConfig.RawChunkIntervalReconcileEnabled", "DarlingConfig.DailySummaryWarmerEnabled",
         "DarlingConfig.ProcedureStatsPlanCycleInterval",
+        "DarlingConfig.StoreHealthSizesIntervalMinutes",
         "DarlingConfig.XeRingBufferMaxEvents",
         "DarlingConfig.Alerts",
         "DarlingConfig.Smtp",
