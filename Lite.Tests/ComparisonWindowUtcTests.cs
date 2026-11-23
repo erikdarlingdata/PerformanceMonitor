@@ -40,7 +40,7 @@ public sealed class ComparisonWindowUtcTests
     [Fact]
     public void ShiftComparisonRange_MatchesGridsUtcWindow_ShiftedByOneOrSevenDays()
     {
-        // The same derivation CompareToCombo_SelectionChanged and the six ServerTab.Refresh.cs call sites
+        // The same derivation CompareToCombo_SelectionChanged and the ServerTab.Refresh.cs call sites
         // now use for "current": the tab's held UTC pair, handed to LocalDataService.GetQueriesTabWindowUtc as it is (#4766).
         var fromUtc = new DateTime(2026, 3, 10, 9, 0, 0, DateTimeKind.Unspecified);
         var toUtc = new DateTime(2026, 3, 10, 17, 0, 0, DateTimeKind.Unspecified);
@@ -128,18 +128,22 @@ public sealed class ComparisonWindowUtcTests
         Assert.False(Regex.IsMatch(refreshSource, @"var\s+cStart\d?\s*="),
             "a comparison call site in ServerTab.Refresh.cs still builds a server-local cStart from fromDate (#4284).");
 
-        // The six Refresh.cs comparison calls each share the IDENTICAL windowStart/windowEnd tuple the
-        // banner call right beside them uses -- computed once, handed to both (ruling item 1).
+        // Every Refresh.cs comparison call shares the IDENTICAL windowStart/windowEnd tuple the banner call right
+        // beside them uses -- computed once, handed to both (ruling item 1). How many such calls there are is not
+        // the rule, so the scan only has to reach at least one and leave none out.
+        var comparisonCalls = Regex.Matches(refreshSource,
+            @"Refresh(?:QueryStats|ProcStats|QueryStore)ComparisonAsync\(").Count;
         var pairedCalls = Regex.Matches(refreshSource,
             @"Refresh(?:QueryStats|ProcStats|QueryStore)ComparisonAsync\((windowStart\d?),\s*(windowEnd\d?)\);\s*" +
             @"await RefreshWindowTruncatedBannerAsync\(QueryWindowRelation\.\w+,\s*\w+,\s*\1,\s*\2\);");
-        Assert.True(pairedCalls.Count == 6,
-            $"expected all 6 ServerTab.Refresh.cs comparison calls to share the SAME windowStart/windowEnd tuple " +
-            $"the adjacent banner call uses (found {pairedCalls.Count}) -- a divergent tuple means the comparison " +
+        Assert.True(comparisonCalls > 0, "found no comparison call in ServerTab.Refresh.cs -- the scan reached nothing.");
+        Assert.True(pairedCalls.Count == comparisonCalls,
+            $"{comparisonCalls - pairedCalls.Count} of the {comparisonCalls} ServerTab.Refresh.cs comparison calls do not share the SAME " +
+            "windowStart/windowEnd tuple the adjacent banner call uses -- a divergent tuple means the comparison " +
             "and the banner could disagree about the window again (#4284).");
 
         // #5371: CompareToCombo_SelectionChanged no longer builds a window of its own: it asks the refresh
-        // coordinator for the visible tab, whose reads are the six Refresh.cs calls pinned above (the SAME
+        // coordinator for the visible tab, whose reads are the Refresh.cs calls pinned above (the SAME
         // GetQueriesTabWindowUtc tuple as the grid beside each). So nothing in the handler may call a comparison
         // read with a window it made up (a bare DateTime.UtcNow/fromDate pair).
         Assert.False(Regex.IsMatch(comparisonSource, @"Refresh(?:QueryStats|ProcStats|QueryStore)ComparisonAsync\((?!DateTime currentStart)"),
