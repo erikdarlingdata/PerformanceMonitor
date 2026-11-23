@@ -17,6 +17,7 @@ namespace PerformanceMonitorLite.Tests;
 [Collection("CollectionResetGate")]
 public sealed class QstopProbe
 {
+    private static int Scale => int.Parse(Environment.GetEnvironmentVariable("PM_PROBE_SCALE") ?? "1");
     private readonly StringBuilder _out = new();
     private void Line(string s) => _out.AppendLine(s);
 
@@ -47,7 +48,7 @@ public sealed class QstopProbe
                 using (var c = new DuckDBConnection($"Data Source={dbPath}"))
                 {
                     await c.OpenAsync(ct);
-                    rows = await QueryStoreArchiveFixture.SeedAsync(c, now, 14, [2400, 120], 20, 500, ct);
+                    rows = await QueryStoreArchiveFixture.SeedAsync(c, now, 14, [Scale * 2400, Scale * 120], 20, 500, ct);
                 }
                 Line($"seeded {rows} rows in {sw.Elapsed.TotalSeconds:F1}s");
                 var svc = new ArchiveService(initializer, archiveDir);
@@ -94,6 +95,38 @@ public sealed class QstopProbe
                     ft.Add($"{sw.Elapsed.TotalSeconds:F2}s");
                 }
                 Line($"FLOOR {hours}h: {string.Join(" ", ft)} -> {floor:O} start {now.AddHours(-hours):O}");
+                ft.Clear();
+                for (var i = 0; i < 3; i++)
+                {
+                    var sw = Stopwatch.StartNew();
+                    floor = await data.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, 1, now.AddDays(-30).AddHours(-hours), now.AddDays(-30));
+                    ft.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                }
+                Line($"FLOOR-BEFORE-HISTORY {hours}h: {string.Join(" ", ft)} -> {floor:O}");
+                ft.Clear();
+                for (var i = 0; i < 3; i++)
+                {
+                    var sw = Stopwatch.StartNew();
+                    floor = await data.GetQueryWindowFloorAsync(QueryWindowRelation.QueryStoreStats, 1, now.AddDays(-8), now);
+                    ft.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                }
+                Line($"FLOOR-8D {hours}h: {string.Join(" ", ft)} -> {floor:O}");
+                var top = await data.GetQueryStoreTopQueriesAsync(1, hours, 250);
+                var keys = top.Select(r => (r.DatabaseName, r.QueryId)).ToList();
+                var lt = new List<string>(); var tt = new List<string>();
+                Dictionary<(string DatabaseName, long QueryId), (long CollectionId, DateTime CollectionTime)>? latest = null;
+                for (var i = 0; i < 3; i++)
+                {
+                    var sw = Stopwatch.StartNew();
+                    using (var c = await data.OpenConnectionAsync())
+                        latest = await LocalDataService.ReadQueryStoreLatestRowsAsync(c, 1, keys, "v_query_store_stats", now.AddHours(-hours).AddDays(-1));
+                    lt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                    sw.Restart();
+                    using (var c = await data.OpenConnectionAsync())
+                        await LocalDataService.ReadQueryStoreTextByRowAsync(c, 1, latest.Values);
+                    tt.Add($"{sw.Elapsed.TotalSeconds:F2}s");
+                }
+                Line($"LATEST {hours}h keys {keys.Count}: {string.Join(" ", lt)}  TEXT: {string.Join(" ", tt)}");
             }
 
             var src = FindSource();
