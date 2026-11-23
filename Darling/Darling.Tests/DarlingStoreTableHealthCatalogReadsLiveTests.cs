@@ -198,7 +198,8 @@ ANALYZE;", ct);
 
         // The first read sized every relation, and the second took that pass: one stat per relation, not two. Before, the tables
         // read sized the heaps and the indexes' forks and the indexes read sized every heap and index again.
-        Assert.Equal(listed, DarlingStoreTableHealthReader.RelationsSizedOn(store));
+        Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(store));
+        Assert.Equal(listed, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(store));
         Assert.NotEmpty(tables);
         Assert.NotEmpty(indexes);
 
@@ -215,5 +216,166 @@ ANALYZE;", ct);
             Assert.Equal(reader.GetInt64(1), row.IndexBytes);
             Assert.Equal(reader.GetInt64(2), row.ToastBytes);
         }
+    }
+
+    /// <summary>What a store with TOAST values, an unlogged table (an index with an init fork), a vacuumed index (a free space map
+    /// fork) and a hypertable with chunks adds to the #9224 seed (#9364).</summary>
+    private const string ForksSeedSql = @"
+CREATE TABLE zz9224.big (id integer PRIMARY KEY, body text);
+INSERT INTO zz9224.big SELECT g, (SELECT string_agg(md5(g::text || i::text), '') FROM generate_series(1, 400) AS i) FROM generate_series(1, 200) AS g;
+CREATE INDEX big_body_len ON zz9224.big (length(body));
+DELETE FROM zz9224.big WHERE id % 2 = 0;
+VACUUM zz9224.big;
+CREATE UNLOGGED TABLE zz9224.ul (id integer PRIMARY KEY, v text);
+CREATE INDEX ul_v ON zz9224.ul (v);
+INSERT INTO zz9224.ul SELECT g, md5(g::text) FROM generate_series(1, 500) AS g;
+VACUUM zz9224.ul;
+VACUUM zz9224.ht;
+ANALYZE;";
+
+    private static async Task<long> ListedRelationsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        await using var count = new NpgsqlCommand("SELECT count(*) FROM (" + DarlingStoreTableHealthReader.IndexRelationsSql(timescale: true) + ") AS l(oid)", connection);
+        return (long)(await count.ExecuteScalarAsync(ct))!;
+    }
+
+    [Fact]
+    public async Task TheIndexesRead_RunsTheMainPassOnly_AndTheTablesReadAddsTheExtras()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9364 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await ExecAsync(connection, SeedSql, ct);
+        var listed = await ListedRelationsAsync(connection, ct);
+        Assert.True(listed >= 300, $"relations listed {listed}");
+
+        // The indexes read first: it waits for the main pass only, and nothing stats the other forks or the TOAST tables.
+        await using (var indexesFirst = NpgsqlDataSource.Create(scratch.ConnectionString))
+        {
+            Assert.NotEmpty(await DarlingStoreTableHealthReader.GetIndexesAsync(indexesFirst, ct));
+            Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(indexesFirst));
+            Assert.Equal(0, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(indexesFirst));
+
+            // The tables read right after takes that main pass and runs the extras.
+            Assert.NotEmpty(await DarlingStoreTableHealthReader.GetAsync(indexesFirst, ct));
+            Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(indexesFirst));
+            Assert.Equal(listed, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(indexesFirst));
+        }
+
+        // The other order: the tables read runs both, and the indexes read after it runs neither.
+        await using (var tablesFirst = NpgsqlDataSource.Create(scratch.ConnectionString))
+        {
+            Assert.NotEmpty(await DarlingStoreTableHealthReader.GetAsync(tablesFirst, ct));
+            Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(tablesFirst));
+            Assert.Equal(listed, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(tablesFirst));
+            Assert.NotEmpty(await DarlingStoreTableHealthReader.GetIndexesAsync(tablesFirst, ct));
+            Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(tablesFirst));
+            Assert.Equal(listed, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(tablesFirst));
+        }
+    }
+
+    [Fact]
+    public async Task TheRowsOfBothReads_MatchTheUnsizedForm_OnAStoreWithTOASTForksAndAHypertable()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9364 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await ExecAsync(connection, SeedSql, ct);
+        await ExecAsync(connection, ForksSeedSql, ct);
+        await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+
+        await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var tables = await DarlingStoreTableHealthReader.GetAsync(store, ct);
+        var indexes = await DarlingStoreTableHealthReader.GetIndexesAsync(store, ct);
+
+        await using var version = new NpgsqlCommand("SELECT current_setting('server_version_num')::int", connection);
+        var serverVersion = (int)(await version.ExecuteScalarAsync(ct))!;
+
+        // The unsized form calls the size functions inline: the original statement, and the oracle for the passes.
+        var oracleTables = new System.Collections.Generic.Dictionary<(string, string), (long Total, long Heap, long Index, long Toast)>();
+        await using (var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildSql(timescale: true, serverVersion, presized: false), connection) { CommandTimeout = 300 })
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                oracleTables[(reader.GetString(0), reader.GetString(1))] = (reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6));
+            }
+        }
+
+        var oracleIndexes = new System.Collections.Generic.Dictionary<(string, string, string), (long Bytes, long Heap, long? Reclaimable, long? Basis)>();
+        await using (var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildIndexSql(timescale: true, presized: false), connection) { CommandTimeout = 300 })
+        await using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                oracleIndexes[(reader.GetString(0), reader.GetString(1), reader.GetString(3))] =
+                    (reader.GetInt64(7), reader.GetInt64(8), reader.IsDBNull(18) ? null : reader.GetInt64(18), reader.IsDBNull(22) ? null : reader.GetInt64(22));
+            }
+        }
+
+        Assert.Equal(oracleTables.Count, tables.Count);
+        foreach (var t in tables)
+        {
+            var o = oracleTables[(t.SchemaName, t.TableName)];
+            Assert.Equal(o, (t.TotalBytes, t.HeapBytes, t.IndexBytes, t.ToastBytes));
+        }
+
+        Assert.Equal(oracleIndexes.Count, indexes.Count);
+        foreach (var i in indexes)
+        {
+            var o = oracleIndexes[(i.SchemaName, i.TableName, i.IndexName)];
+            Assert.Equal(o, (i.Bytes, i.HeapBytes, i.EstimatedReclaimableBytes, i.EstimatedBasisBytes));
+        }
+
+        // The seed has what the passes treat differently: TOAST on a heap, indexes with forks beyond the main one, a hypertable with chunks.
+        Assert.True(tables.Single(t => t.TableName == "big").ToastBytes > 0, "the TOAST table has bytes");
+        await using (var forks = new NpgsqlCommand(
+            "SELECT pg_catalog.pg_indexes_size('zz9224.ul') - pg_catalog.pg_relation_size('zz9224.ul_v') - pg_catalog.pg_relation_size('zz9224.ul_pkey')", connection))
+        {
+            Assert.True((long)(await forks.ExecuteScalarAsync(ct))! > 0, "the unlogged table's indexes have forks beyond the main one");
+        }
+
+        Assert.Contains(tables, t => t.TableName == "ht" && t.ChunkCount > 0);
+    }
+
+    [Fact]
+    public async Task AFailedExtrasPass_DoesNotStopTheIndexesRead_AndTheNextTablesReadRunsTheExtrasAgain()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9364 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await ExecAsync(connection, SeedSql, ct);
+        var listed = await ListedRelationsAsync(connection, ct);
+
+        await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+        DarlingStoreTableHealthReader.FailExtrasPassesOn(store, new InvalidOperationException("injected extras failure"));
+
+        // The tables read needs the extras and fails with them. It does not take the main pass down: the indexes read returns its rows
+        // and the main pass is held.
+        await Assert.ThrowsAsync<InvalidOperationException>(() => DarlingStoreTableHealthReader.GetAsync(store, ct));
+        Assert.NotEmpty(await DarlingStoreTableHealthReader.GetIndexesAsync(store, ct));
+        Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(store));
+        Assert.Equal(0, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(store));
+
+        // A failed pass is not held: once it can run, the next tables read runs it and does not size the main pass again.
+        DarlingStoreTableHealthReader.FailExtrasPassesOn(store, null);
+        Assert.NotEmpty(await DarlingStoreTableHealthReader.GetAsync(store, ct));
+        Assert.Equal(listed, DarlingStoreTableHealthReader.MainRelationsSizedOn(store));
+        Assert.Equal(listed, DarlingStoreTableHealthReader.ExtraRelationsSizedOn(store));
     }
 }
