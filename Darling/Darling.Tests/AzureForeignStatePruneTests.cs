@@ -128,11 +128,14 @@ public sealed class AzureForeignStatePruneTests
         /* #2312 shrank this from five to three: the planwm:/textwm: watermark families retired with the
            watermarks themselves (the fetches are activity-driven against the store now), and V77 deleted
            their orphaned rows wholesale — a dropped-database prune has nothing left to own there. */
-        Assert.Equal(4, QueryStorePerDatabaseState.PrunableKeys.Count);
+        Assert.Equal(5, QueryStorePerDatabaseState.PrunableKeys.Count);
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreBackfillState.DoneKeyPrefix);
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreBackfillState.HoleKeyPrefix);
+        /* #9359: the last landed clamped read, so a restart does not forget it. */
+        Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
+            k => k.Prefix == QueryStoreBackfillState.LandedKeyPrefix);
         /* #2312: the open-interval refresh stamp. */
         Assert.Contains(QueryStorePerDatabaseState.PrunableKeys,
             k => k.Prefix == QueryStoreOpenIntervalState.WatermarkKeyPrefix);
