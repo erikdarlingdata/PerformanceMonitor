@@ -408,13 +408,14 @@ public class InferenceEngine
     /// </summary>
     private static string ClassifyThreadpool(Dictionary<string, Fact> factsByKey)
     {
-        /* #9340: parallelism counts as elevated only when its fact clears the bar that roots a story by itself
-           (FactScorer.ClearsRootBar: base severity at MinimumSeverityThreshold), not at any positive score: a few seconds of CX waits at DOP 1 scores above zero. */
-        var parallel = ParallelismElevated(factsByKey, "CXPACKET")
-                    || ParallelismElevated(factsByKey, "QUERY_HIGH_DOP");
-        var blocking = factsByKey.ContainsKey("BLOCKING_EVENTS")
-                    || factsByKey.ContainsKey("BLOCKING_CHAIN")
-                    || factsByKey.ContainsKey("LCK");
+        /* #9340: each half counts as elevated only when its fact clears the bar that roots a story by itself
+           (FactScorer.ClearsRootBar: base severity at MinimumSeverityThreshold), not at any positive score: a few seconds of CX waits
+           at DOP 1, or one short lock wait, scores above zero. */
+        var parallel = FactElevated(factsByKey, "CXPACKET")
+                    || FactElevated(factsByKey, "QUERY_HIGH_DOP");
+        var blocking = FactElevated(factsByKey, "BLOCKING_EVENTS")
+                    || FactElevated(factsByKey, "BLOCKING_CHAIN")
+                    || FactElevated(factsByKey, "LCK");
         return (parallel, blocking) switch
         {
             (true, true) => "THREADPOOL_MIXED",
@@ -424,9 +425,9 @@ public class InferenceEngine
         };
     }
 
-    /// <summary>#9340: true when the parallelism fact <paramref name="key"/> is present AND clears the bar that roots a story by itself
-    /// (<see cref="FactScorer.ClearsRootBar"/>), so a trace score does not count as elevated.</summary>
-    private static bool ParallelismElevated(Dictionary<string, Fact> factsByKey, string key)
+    /// <summary>#9340: true when the fact <paramref name="key"/> (a parallelism or a blocking fact) is present AND clears the bar that roots a story
+    /// by itself (<see cref="FactScorer.ClearsRootBar"/>), so a trace score does not count as elevated.</summary>
+    private static bool FactElevated(Dictionary<string, Fact> factsByKey, string key)
         => factsByKey.TryGetValue(key, out var fact) && FactScorer.ClearsRootBar(fact);
 
     /// <summary>
