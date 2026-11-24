@@ -126,7 +126,11 @@ public sealed class StoreJobRunsToolLiveTests
         return JsonDocument.Parse(json).RootElement.Clone();
     }
 
-    private static JsonElement[] Runs(JsonElement answer) => answer.GetProperty("runs").EnumerateArray().ToArray();
+    private static JsonElement[] Runs(JsonElement answer)
+    {
+        Assert.True(answer.TryGetProperty("runs", out var runs), "the read returned no runs: " + answer.ToString()[..Math.Min(answer.ToString().Length, 600)]);
+        return runs.EnumerateArray().ToArray();
+    }
 
     /// <summary>The issue's own test: a compression job run by hand comes back with its start, end and outcome.</summary>
     [Fact]
@@ -303,7 +307,7 @@ public sealed class StoreJobRunsToolLiveTests
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #9440 job run tests.");
         var ct = TestContext.Current.CancellationToken;
-        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: true);
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, plainPostgres: true);
         var bodySucceeded = false;
         try
         {
