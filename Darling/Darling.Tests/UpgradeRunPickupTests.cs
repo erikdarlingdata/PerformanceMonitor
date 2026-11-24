@@ -24,8 +24,6 @@ namespace Darling.Tests;
 /* #1776 own-store: each test mints its own scratch store database through ScratchPostgres. */
 public sealed class UpgradeRunPickupTests
 {
-    static UpgradeRunPickupTests() { AppDomain.CurrentDomain.FirstChanceException += (_, e) => { try { File.AppendAllText("C:/runner/logs/p9432-fc.txt", e.Exception.GetType().Name + ": " + e.Exception.Message.Replace(Environment.NewLine, " ") + Environment.NewLine); } catch (IOException) { } }; }
-
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     private const string SkipReason = "Set DARLING_TEST_PG to a Postgres connection string to run the live #9432 tests (each mints its own scratch database).";
@@ -97,7 +95,6 @@ public sealed class UpgradeRunPickupTests
             Assert.Equal(UpgradeRunPickupOutcome.NoFile, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(15), ct)).Outcome);
             bodySucceeded = true;
         }
-        catch (Exception ex) { File.AppendAllText("C:/runner/logs/p9432-err.txt", ex.ToString() + Environment.NewLine); throw; }
         finally
         {
             try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
@@ -136,7 +133,6 @@ public sealed class UpgradeRunPickupTests
             Assert.False(File.Exists(file));
             bodySucceeded = true;
         }
-        catch (Exception ex) { File.AppendAllText("C:/runner/logs/p9432-err.txt", ex.ToString() + Environment.NewLine); throw; }
         finally
         {
             try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
@@ -180,7 +176,6 @@ public sealed class UpgradeRunPickupTests
             Assert.Equal((1L, "in_progress"), await RowAsync(connection, oldId));
             bodySucceeded = true;
         }
-        catch (Exception ex) { File.AppendAllText("C:/runner/logs/p9432-err.txt", ex.ToString() + Environment.NewLine); throw; }
         finally
         {
             try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
