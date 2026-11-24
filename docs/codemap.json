@@ -574,7 +574,7 @@
       ]
     }
   ],
-  "generated_from": "a4120a4a6",
+  "generated_from": "c0c0b0776",
   "mcp_tools": [
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
@@ -2623,9 +2623,9 @@
     }
   ],
   "migrations": {
-    "count": 303,
+    "count": 305,
     "file": "Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs",
-    "newest_version": 304
+    "newest_version": 306
   },
   "overview": [
     "This repository holds two products you can build and run. Darling is a headless collector service that keeps its data in PostgreSQL with TimescaleDB, and it comes with a WPF viewer and a web dashboard. Lite is a portable WPF app that keeps its data in DuckDB.",
@@ -2851,7 +2851,7 @@
     {
       "name": "Darling.Tests",
       "project": "Darling/Darling.Tests/Darling.Tests.csproj",
-      "test_classes": 3560
+      "test_classes": 3563
     },
     {
       "name": "PerformanceMonitor.Exporter.TestChild",

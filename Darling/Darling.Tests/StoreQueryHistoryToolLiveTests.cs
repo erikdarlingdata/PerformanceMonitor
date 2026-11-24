@@ -143,6 +143,86 @@ public sealed class StoreQueryHistoryToolLiveTests
         }
     }
 
+    private static Task WriteRow(NpgsqlDataSource s, double hoursAgo, long queryId, double totalMs, long dirtied, long written, long walBytes, long fpi, CancellationToken ct) =>
+        ExecAsync(s, $"INSERT INTO collect.store_statement_history (capture_time, interval_seconds, role_name, queryid, delta_calls, delta_total_exec_ms, delta_rows, delta_shared_blks_hit, delta_shared_blks_read, delta_temp_blks_written, max_exec_ms, first_seen, entry_restarted, reset_in_interval, delta_shared_blks_dirtied, delta_shared_blks_written, delta_wal_bytes, delta_wal_fpi) VALUES ({Ts(hoursAgo)}, 3600, 'owner', {queryId}, 10, {totalMs.ToString(CultureInfo.InvariantCulture)}, 1, 2, 3, 4, 9.5, false, false, false, {dirtied}, {written}, {walBytes}, {fpi})", ct);
+
+    /// <summary>
+    /// #9410: ranked by blocks dirtied, the statement that dirtied the most comes first even when it spent the least time, a row from before the
+    /// write counters (NULL) sorts last and reads back as null with no hours that carried them, and the series carries the counters per hour.
+    /// </summary>
+    [Fact]
+    public async Task RankedByDirtied_PutsTheBiggestWriterFirst_AndAPreMigrationRowReadsNull()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            await Capture(source, 1.5, "ok", ct);
+            await WriteRow(source, 1.5, 1, 500, 10, 5, 100, 1, ct);
+            await WriteRow(source, 1.5, 2, 10, 900, 800, 123456789, 40, ct);
+            await Row(source, 1.5, 3, 10, 900, None, ct);
+
+            var byTime = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, top: 5, cancellationToken: ct)).RootElement;
+            Assert.Equal("time", byTime.GetProperty("order_by").GetString());
+            Assert.Equal("3", byTime.GetProperty("statements")[0].GetProperty("query_id").GetString());
+
+            var byDirtied = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, top: 5, order_by: " Dirtied ", cancellationToken: ct)).RootElement;
+            var rows = byDirtied.GetProperty("statements").EnumerateArray().ToArray();
+            Assert.Equal("dirtied", byDirtied.GetProperty("order_by").GetString());
+            Assert.Equal(new[] { "2", "1", "3" }, rows.Select(r => r.GetProperty("query_id").GetString()).ToArray());
+            Assert.Equal(900L, rows[0].GetProperty("shared_blks_dirtied").GetInt64());
+            Assert.Equal(800L, rows[0].GetProperty("shared_blks_written").GetInt64());
+            Assert.Equal(123456789m, rows[0].GetProperty("wal_bytes").GetDecimal());
+            Assert.Equal(40L, rows[0].GetProperty("wal_fpi").GetInt64());
+            Assert.Equal(1, rows[0].GetProperty("write_counter_hours").GetInt32());
+            Assert.Equal(JsonValueKind.Null, rows[2].GetProperty("shared_blks_dirtied").ValueKind);
+            Assert.Equal(JsonValueKind.Null, rows[2].GetProperty("wal_bytes").ValueKind);
+            Assert.Equal(0, rows[2].GetProperty("write_counter_hours").GetInt32());
+
+            var byWal = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, top: 5, order_by: "wal", cancellationToken: ct)).RootElement;
+            Assert.Equal("2", byWal.GetProperty("statements")[0].GetProperty("query_id").GetString());
+            var byWritten = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, top: 5, order_by: "written", cancellationToken: ct)).RootElement;
+            Assert.Equal("2", byWritten.GetProperty("statements")[0].GetProperty("query_id").GetString());
+
+            var series = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, query_id: "2", cancellationToken: ct)).RootElement.GetProperty("series")[0];
+            Assert.Equal(900L, series.GetProperty("shared_blks_dirtied").GetInt64());
+            var old = JsonDocument.Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, query_id: "3", cancellationToken: ct)).RootElement.GetProperty("series")[0];
+            Assert.Equal(JsonValueKind.Null, old.GetProperty("shared_blks_dirtied").ValueKind);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AnUnknownOrderBy_IsRefused_AndNoRowsAreRead()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            await Capture(source, 1.5, "ok", ct);
+            await Row(source, 1.5, 1, 10, 10, None, ct);
+
+            var json = await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, order_by: "cpu", cancellationToken: ct);
+            Assert.Contains("order_by", json, StringComparison.Ordinal);
+            Assert.DoesNotContain("statements", json, StringComparison.Ordinal);
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
     [Fact]
     public async Task AStoreWithoutTheRung_AnswersPrecondition()
     {

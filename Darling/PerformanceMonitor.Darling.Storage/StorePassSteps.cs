@@ -32,7 +32,7 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class StorePassSteps
 {
     /// <summary>The migration that creates the table.</summary>
-    public const int Version = 304;
+    public const int Version = 306;
 
     /// <summary>The hourly store-maintenance tick.</summary>
     public const string StoreMaintenancePass = "store_maintenance";
