@@ -429,6 +429,8 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         var writes = 0;
         var collector = new DrillDownCollector(_duckDb)
         {
+            /* A target of nothing makes every database a batch of its own (#9353), so the three of them give two gaps. */
+            RegressedQueriesHoldTargetForTests = TimeSpan.Zero,
             AfterRegressedQueriesDatabaseReadForTests = () =>
             {
                 using var write = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(5));
