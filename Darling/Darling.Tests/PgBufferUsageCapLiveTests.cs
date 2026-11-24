@@ -239,56 +239,69 @@ public sealed class PgBufferUsageCapLiveTests
         Assert.SkipWhen(string.IsNullOrWhiteSpace(adminConnectionString),
             "Set DARLING_TEST_PG to a Postgres connection string to run the buffer cap test.");
         var ct = TestContext.Current.CancellationToken;
-        var own = target is null;
-        target ??= await ScratchPostgres.CreateAsync(adminConnectionString!, ct);
-        if (withSummary is not null)
+        var ownedScratch = target is null ? await ScratchPostgres.CreateAsync(adminConnectionString!, ct) : null;
+        target ??= ownedScratch!;
+        try
         {
-            await ExecAsync(target.ConnectionString, Fixture, ct);
-            if (withSummary == true)
+            if (withSummary is not null)
             {
-                await ExecAsync(target.ConnectionString, FakeSummary, ct);
+                await ExecAsync(target.ConnectionString, Fixture, ct);
+                if (withSummary == true)
+                {
+                    await ExecAsync(target.ConnectionString, FakeSummary, ct);
+                }
             }
-        }
 
-        var admin = new NpgsqlConnectionStringBuilder(adminConnectionString!);
-        var config = new MonitoredServer
-        {
-            Name = ServerName,
-            Host = admin.Host ?? "127.0.0.1",
-            Port = admin.Port,
-            Database = target.DatabaseName,
-            Engine = "postgres",
-            Auth = "sql",
-            Username = admin.Username!,
-            EncryptMode = "Optional",
-        };
-        var monitoring = MonitoredServerConnection.BuildConnectionString(config, admin.Password ?? "unused");
-        var major = (int)(await ScalarAsync<int>(monitoring, "SELECT pg_catalog.current_setting('server_version_num')::int / 10000", ct));
-        var runtime = new ServerRuntime
-        {
-            Config = config,
-            ConnectionString = monitoring,
-            Target = new CollectorTargetInfo
+            var admin = new NpgsqlConnectionStringBuilder(adminConnectionString!);
+            var config = new MonitoredServer
             {
-                Engine = CollectorTargetEngine.PostgreSql,
-                PostgresMajorVersion = major,
-                PostgresVersionNum = major * 10000,
-            },
-            StorageName = ServerName,
-            ServerId = ServerId,
-        };
+                Name = ServerName,
+                Host = admin.Host ?? "127.0.0.1",
+                Port = admin.Port,
+                Database = target.DatabaseName,
+                Engine = "postgres",
+                Auth = "sql",
+                Username = admin.Username!,
+                EncryptMode = "Optional",
+            };
+            var monitoring = MonitoredServerConnection.BuildConnectionString(config, admin.Password ?? "unused");
+            var major = (int)(await ScalarAsync<int>(monitoring, "SELECT pg_catalog.current_setting('server_version_num')::int / 10000", ct));
+            var runtime = new ServerRuntime
+            {
+                Config = config,
+                ConnectionString = monitoring,
+                Target = new CollectorTargetInfo
+                {
+                    Engine = CollectorTargetEngine.PostgreSql,
+                    PostgresMajorVersion = major,
+                    PostgresVersionNum = major * 10000,
+                },
+                StorageName = ServerName,
+                ServerId = ServerId,
+            };
 
-        var store = NpgsqlDataSource.Create(target.ConnectionString);
-        await using (var connection = await store.OpenConnectionAsync(ct))
-        {
-            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
-            await DarlingMcpTestData.ExecAsync(connection, ct,
-                "UPDATE servers SET engine_kind = $2, created_date = $3 WHERE server_id = $1",
-                ServerId, MonitoredEngineKind.Postgres, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-30)));
+            var store = NpgsqlDataSource.Create(target.ConnectionString);
+            await using (var connection = await store.OpenConnectionAsync(ct))
+            {
+                await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    "UPDATE servers SET engine_kind = $2, created_date = $3 WHERE server_id = $1",
+                    ServerId, MonitoredEngineKind.Postgres, DarlingMcpTestData.Naive(DateTime.UtcNow.AddDays(-30)));
+            }
+
+            var runner = new DarlingCollectorRunner(store, new CollectorDeltaCalculator(), NullLogger<DarlingCollectorRunner>.Instance);
+            return new Rig(ownedScratch, store, runner, runtime, monitoring);
         }
+        catch
+        {
+            /* A failure before the Rig exists would leave the database this call made for the exit drain. */
+            if (ownedScratch is not null)
+            {
+                await ownedScratch.DisposeAsync();
+            }
 
-        var runner = new DarlingCollectorRunner(store, new CollectorDeltaCalculator(), NullLogger<DarlingCollectorRunner>.Instance);
-        return new Rig(own ? target : null, store, runner, runtime, monitoring);
+            throw;
+        }
     }
 
     private static async Task ExecAsync(string connectionString, string sql, CancellationToken ct)
@@ -309,7 +322,7 @@ public sealed class PgBufferUsageCapLiveTests
 
     private sealed class Rig : IAsyncDisposable
     {
-        private readonly ScratchPostgres? _owned;
+        private readonly ScratchPostgres? _ownedScratch;
         private readonly NpgsqlDataSource _store;
         private readonly DarlingCollectorRunner _runner;
         private readonly ServerRuntime _runtime;
@@ -318,7 +331,7 @@ public sealed class PgBufferUsageCapLiveTests
 
         public Rig(ScratchPostgres? owned, NpgsqlDataSource store, DarlingCollectorRunner runner, ServerRuntime runtime, string monitoring)
         {
-            _owned = owned;
+            _ownedScratch = owned;
             _store = store;
             _runner = runner;
             _runtime = runtime;
@@ -386,9 +399,9 @@ public sealed class PgBufferUsageCapLiveTests
         public async ValueTask DisposeAsync()
         {
             await _store.DisposeAsync();
-            if (_owned is not null)
+            if (_ownedScratch is not null)
             {
-                await _owned.DisposeAsync();
+                await _ownedScratch.DisposeAsync();
             }
         }
     }
