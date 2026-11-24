@@ -233,8 +233,7 @@ public sealed class DarlingUpgradeRunRecordTests
     };
 
     /// <summary>
-    /// The review of #9493: the service account (NT SERVICE
-ame, never LocalSystem) holds an explicit Modify grant on upgrade-run.json,
+    /// The review of #9493: the service account (NT SERVICE account, never LocalSystem) holds an explicit Modify grant on upgrade-run.json,
     /// and the pre-lock walk of a re-run named it as a stranger's write grant, so a run that failed before the lock blocked the documented
     /// re-run. A real SID that is not this account (Network Service) stands for the service: granting on a file this account owns needs no
     /// admin. The control run, with no service SID passed, shows the walk does see the grant.
