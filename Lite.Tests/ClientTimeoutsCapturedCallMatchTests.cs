@@ -38,6 +38,7 @@ public sealed class ClientTimeoutsCapturedCallMatchTests : IClassFixture<SharedD
     private const int NoCallServer = 95077;
     private const int OverFloorServer = 95078;
     private const int ExcludedAppServer = 95079;
+    private const int ShortCallServer = 95080;
 
     private static readonly TimeSpan MatchAfter = TimeSpan.FromMicroseconds(AttentionWindowSql.CapturedCallMatchAfterUs);
     private static readonly TimeSpan MatchBefore = TimeSpan.FromMicroseconds(AttentionWindowSql.CapturedCallMatchBeforeUs);
@@ -318,6 +319,35 @@ public sealed class ClientTimeoutsCapturedCallMatchTests : IClassFixture<SharedD
         Assert.Empty(window.MatchedCalls);
         Assert.All(samples, s => Assert.False(s.MatchedCall));
         Assert.Equal(2, samples.Count);
+    }
+
+    [Fact]
+    public async Task ACallThatRanUnderTheFloor_IsNotACommandTimeout_ButOneThatRanLongerIs()
+    {
+        var (at, eventTime) = await SeedJudgedSpanAsync(ShortCallServer);
+
+        /* Three 4 ms attentions. Session 1 cancelled a call 50 ms into its run (a data layer cancelling before it closes a reader), session 2 a call
+           that had run 5 s (a command timeout), session 3 a call that ran exactly the floor. Only the longer two are command timeouts. */
+        for (var session = 1; session <= 3; session++)
+        {
+            await RowAsync(ShortCallServer, at, "sample", "db1", "app", null, null, durationUs: 4_000, eventTime: eventTime, sessionId: session);
+        }
+
+        await RowAsync(ShortCallServer, at, "aborted", "db1", "app", "fp-call", "dbo.A: EXEC dbo.A", durationUs: 50_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 1);
+        await RowAsync(ShortCallServer, at, "aborted", "db1", "app", "fp-call", "dbo.B: EXEC dbo.B", durationUs: 5_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 2);
+        await RowAsync(ShortCallServer, at, "aborted", "db1", "app", "fp-call", "dbo.C: EXEC dbo.C", durationUs: AttentionWindowSql.MinInterruptDurationUs, eventTime: eventTime.AddMilliseconds(10), sessionId: 3);
+
+        var window = await new LocalDataService(_duckDb).GetAttentionWindowAsync(ShortCallServer, Lookback);
+
+        Assert.Equal(3, window.SampleGroups.Sum(g => g.Samples));
+        Assert.Equal(2, window.SampleGroups.Sum(g => g.MatchedSamples));
+        Assert.Equal(1, window.SampleGroups.Sum(g => g.ShortSamples));
+
+        var now = DateTime.UtcNow;
+        var (range, samples) = await new LocalDataService(_duckDb).GetAttentionRangeAsync(ShortCallServer, now.AddHours(-1), now, 20);
+        Assert.Equal(2, range.MatchedCalls.Count);
+        Assert.DoesNotContain(range.MatchedCalls, c => c.ElapsedUs == 50_000);
+        Assert.Equal(2, samples.Count(s => s.MatchedCall));
     }
 
     /// <summary>The range read and the shared payload, as get_client_timeouts builds them.</summary>
