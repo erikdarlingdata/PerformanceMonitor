@@ -4085,7 +4085,10 @@ END $$;";
            from (collect.store_table_activity_baseline). Two plain tables created empty: no data moves, and the service fills them from the hourly self-metrics sweep.
            An older build ignores them. */
         new Migration(StoreTableActivity.Version, "store-table-activity", StoreTableActivity.CreateSql),
-        /* V309 (#9485): planned change windows. config.investigation_change_windows (a declared window over one server, a list or every server) and two nullable
+        /* V309 (#9414): one row per checkpoint of the store's own PostgreSQL server (collect.store_checkpoints), read from its log. One plain table created
+           empty: no data moves. An older build never reads it. */
+        new Migration(StoreCheckpoints.Version, "store-checkpoints", StoreCheckpoints.CreateSql),
+        /* V310 (#9485): planned change windows. config.investigation_change_windows (a declared window over one server, a list or every server) and two nullable
            columns on config.investigation_requests that say which window held a request and when a late join released the hold. One new table and two catalog-only
            columns: no data moves. An older build ignores them, so it hands a request that opened in a window to the request runner as it always did. */
         new Migration(InvestigationChangeWindows.Version, "investigation-change-windows", InvestigationChangeWindows.CreateSql),

@@ -552,7 +552,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "keeps a small share of those. The build takes seconds on a large store, nowhere near a MigrationCommandTimeoutSeconds window, so "
             + "this rung does not move the multiple"),
         new(
-            309,
+            310,
             SetsTheFloor: false,
             "#9485: a partial CREATE INDEX over config.investigation_requests (created V184) on the new nullable held_window_id, which is NULL on every "
             + "existing row, so the index is empty when it is built. V215's case on the same narrow control-plane table (one row per incident, kept a "
