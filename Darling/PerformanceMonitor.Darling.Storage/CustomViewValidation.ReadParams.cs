@@ -148,7 +148,7 @@ public static partial class CustomViewValidation
             ["measure_store_table"] = new ReadPanelParam[] { new("table", false) },
             ["get_store_maintenance_readiness"] = Array.Empty<ReadPanelParam>(),
             ["get_store_log"] = new ReadPanelParam[] { new("hours", false), new("limit", false), new("as_of", false) },
-            ["get_store_query_history"] = new ReadPanelParam[] { new("query_id", false), new("role", false), new("hours", false), new("top", false) },
+            ["get_store_query_history"] = new ReadPanelParam[] { new("query_id", false), new("role", false), new("hours", false), new("top", false), new("order_by", false) },
             ["get_store_query_stats"] = new ReadPanelParam[] { new("role", false), new("order_by", false), new("top", false), new("full_text", false) },
             ["get_store_host"] = Array.Empty<ReadPanelParam>(),
             ["get_collector_cost"] = new ReadPanelParam[] { new("days_back", false), new("collector_name", false) },
