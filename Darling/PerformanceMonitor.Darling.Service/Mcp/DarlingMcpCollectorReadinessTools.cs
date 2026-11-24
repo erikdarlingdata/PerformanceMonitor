@@ -39,7 +39,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// the start, is due from the start.</para>
 ///
 /// <para><b>First full cycle.</b> The first moment every collector that was due at the start had a good cycle, on every enrolled server.
-/// Null with "not yet" until it happens.</para>
+/// Null with "not yet" until it happens, and it never goes back: a collector that came due later and keeps failing is waiting, but it does not hold the first full cycle.</para>
 /// </summary>
 [McpServerToolType]
 public sealed class DarlingMcpCollectorReadinessTools
@@ -281,7 +281,11 @@ CROSS JOIN LATERAL (
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = pairs.Select(p => p.Collector).ToArray() });
     }
 
-    /// <summary>The newest run of each pair before the start, by one keyed index seek per pair. A pair with no run in the log has no entry.</summary>
+    /// <summary>
+    /// The newest run of each pair before the start, by one keyed index seek per pair, looking back no further than
+    /// <see cref="DarlingWorker.WatermarkFloorLookback"/> from the start: the floor the worker seeds its schedule with, so an older run reads as
+    /// never run here exactly as it does for the worker. A pair with no run in that span has no entry.
+    /// </summary>
     internal const string LastRunBeforeStartSql = @"
 SELECT p.server_id, p.collector_name, l.collection_time
 FROM unnest($1::int[], $2::text[]) AS p(server_id, collector_name)
@@ -291,6 +295,7 @@ CROSS JOIN LATERAL (
     WHERE x.server_id = p.server_id
     AND   x.collector_name = p.collector_name
     AND   x.collection_time < $3
+    AND   x.collection_time >= $4
     ORDER BY x.collection_time DESC
     LIMIT 1
 ) l";
@@ -309,6 +314,7 @@ CROSS JOIN LATERAL (
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = pairs.Select(p => p.ServerId).ToArray() });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = pairs.Select(p => p.Collector).ToArray() });
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, startUtc - DarlingWorker.WatermarkFloorLookback);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -433,14 +439,14 @@ CROSS JOIN LATERAL (
             .ToList();
         var waitingServers = ordered.Select(w => w.Server.ServerId).Distinct().Count();
 
-        /* The first full cycle is over the pairs that were due at the start, so a collector that only came due later cannot move it. */
-        var reached = ordered.Count == 0 && dueAtStartTotal > 0 && dueAtStartDone == dueAtStartTotal;
+        /* The first full cycle is over the pairs that were due at the start, so a collector that only came due later, done or waiting, cannot move it. Once every due-at-start pair has a good cycle it stays reached. */
+        var reached = dueAtStartTotal > 0 && dueAtStartDone == dueAtStartTotal;
         string fullCycleStatus;
         if (reached)
         {
             fullCycleStatus = "reached";
         }
-        else if (dueAtStartTotal == 0 && ordered.Count == 0)
+        else if (dueAtStartTotal == 0)
         {
             fullCycleStatus = "nothing due at the start";
         }
@@ -461,7 +467,8 @@ CROSS JOIN LATERAL (
         {
             var longest = ordered[0];
             verdict = $"{ordered.Count} of {dueTotal} due collector(s) on {waitingServers} server(s) have no good cycle since the service started at {Stamp(startUtc)}. "
-                + $"Longest wait: {longest.Pair.Collector} on {Name(longest.Server)} since {Stamp(longest.DueAt)}. First full cycle: not yet.";
+                + $"Longest wait: {longest.Pair.Collector} on {Name(longest.Server)} since {Stamp(longest.DueAt)}. "
+                + (reached ? $"First full cycle at {Stamp(lastFirstGood!.Value)}." : "First full cycle: not yet.");
         }
 
         var shown = ordered.Take(MaxWaitingRows).ToList();
@@ -505,7 +512,7 @@ CROSS JOIN LATERAL (
                         collectors_done = t.Done,
                         collectors_waiting = t.Waiting,
                         collectors_not_yet_due = t.NotYetDue,
-                        first_full_cycle_at = t.Waiting == 0 && t.DueAtStart > 0 && t.DueAtStartDone == t.DueAtStart && t.LastDueAtStartGood is DateTime g ? Stamp(g) : null,
+                        first_full_cycle_at = t.DueAtStart > 0 && t.DueAtStartDone == t.DueAtStart && t.LastDueAtStartGood is DateTime g ? Stamp(g) : null,
                     };
                 }).ToList();
 

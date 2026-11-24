@@ -115,13 +115,11 @@ GROUP BY server_id, collector_name";
                 }
 
                 /* Same waiting set, and for the waiting pairs the same counts and newest error. */
-                var before = new Dictionary<(int, string), DateTime>();
                 var waiting = pairs.Where(p => !firstGood.ContainsKey((p.ServerId, p.Collector))).ToList();
                 var oldWaiting = pairs.Where(p => oldRows.GetValueOrDefault((p.ServerId, p.Collector))?.FirstGood is null).ToList();
                 Assert.Equal(
                     oldWaiting.Select(p => (p.ServerId, p.Collector)).OrderBy(k => k).ToList(),
                     waiting.Select(p => (p.ServerId, p.Collector)).OrderBy(k => k).ToList());
-                Assert.NotEmpty(before.Keys.Concat(Enumerable.Empty<(int, string)>()).DefaultIfEmpty((0, "")));
                 var detail = await DarlingMcpCollectorReadinessTools.ReadDetailAsync(postgres, waiting, start, now, ct);
                 foreach (var pair in waiting)
                 {
@@ -142,6 +140,9 @@ GROUP BY server_id, collector_name";
                     report.AppendLine($"== {label}: new detail read for {Math.Min(waiting.Count, DarlingMcpCollectorReadinessTools.MaxWaitingRows)} shown waiting pairs");
                     report.Append(await ExplainPairsAsync(
                         connection, DarlingMcpCollectorReadinessTools.DetailSql, waiting.Take(DarlingMcpCollectorReadinessTools.MaxWaitingRows).ToList(), start, now, ct));
+                    report.AppendLine($"== {label}: new last-run-before-start probe, floored at the worker's seeding lookback");
+                    report.Append(await ExplainPairsAsync(
+                        connection, DarlingMcpCollectorReadinessTools.LastRunBeforeStartSql, pairs, start, start - DarlingWorker.WatermarkFloorLookback, ct));
                 }
             }
 

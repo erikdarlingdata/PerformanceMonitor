@@ -122,6 +122,108 @@ public sealed class CollectorReadinessSinceStartLiveTests
         }
     }
 
+    [Fact]
+    public async Task LastRunOlderThanTheWorkersTwoDayFloor_ReadsAsNeverRun_ForAnIntervalOverTwoDays()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live get_collector_readiness test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var now = DateTime.UtcNow;
+            var start = now.AddMinutes(-10);
+            await RegisterServerAsync(connection, 9417011, "readiness-floor", ct);
+
+            /* Both collectors run every five days. One last ran three days before the start, past the worker's two-day floor, so the worker
+               seeds it as never run and it is due from the start. The other ran one day before, inside the floor, so it waits out its interval. */
+            await SetIntervalAsync(connection, 9417011, "wait_stats", 7200, ct);
+            await SetIntervalAsync(connection, 9417011, "memory_stats", 7200, ct);
+            await InsertAsync(connection, 9417011, "readiness-floor", "wait_stats", start.AddDays(-3), "SUCCESS", null, ct);
+            await InsertAsync(connection, 9417011, "readiness-floor", "memory_stats", start.AddDays(-1), "SUCCESS", null, ct);
+
+            using var doc = JsonDocument.Parse(await DarlingMcpCollectorReadinessTools.GetCollectorReadiness(postgres, "readiness-floor", start, now, ct));
+            var waiting = doc.RootElement.GetProperty("waiting").EnumerateArray().ToList();
+            var old = waiting.Single(w => w.GetProperty("collector").GetString() == "wait_stats");
+            Assert.Equal(DateTime.SpecifyKind(start, DateTimeKind.Utc).ToString("o"), old.GetProperty("waiting_since").GetString());
+            Assert.DoesNotContain(waiting, w => w.GetProperty("collector").GetString() == "memory_stats");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task FirstFullCycleCountsOnlyPairsDueAtTheStart_AndStaysReachedWhileALateDuePairKeepsFailing()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live get_collector_readiness test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var now = DateTime.UtcNow;
+            var start = now.AddMinutes(-10);
+            await RegisterServerAsync(connection, 9417021, "readiness-late", ct);
+
+            /* memory_stats runs every 12 minutes and last ran five minutes before the start, so it came due seven minutes after the start. */
+            await SetIntervalAsync(connection, 9417021, "memory_stats", 12, ct);
+            await InsertAsync(connection, 9417021, "readiness-late", "memory_stats", start.AddMinutes(-5), "SUCCESS", null, ct);
+            await InsertAsync(connection, 9417021, "readiness-late", "memory_stats", start.AddMinutes(8), "ERROR", "still failing", ct);
+
+            /* Every other collector the catalog runs is due at the start and has a good cycle. */
+            var good = start.AddMinutes(3);
+            good = new DateTime(good.Ticks - (good.Ticks % 10), DateTimeKind.Utc);
+            foreach (var name in CollectorCatalog.All.Select(d => d.Name).Where(n => n != "memory_stats"))
+            {
+                await InsertAsync(connection, 9417021, "readiness-late", name, good, "SUCCESS", null, ct);
+            }
+
+            foreach (var asOf in new[] { now, now.AddMinutes(1) })
+            {
+                using var doc = JsonDocument.Parse(await DarlingMcpCollectorReadinessTools.GetCollectorReadiness(postgres, null, start, asOf, ct));
+                var root = doc.RootElement;
+                Assert.Contains(root.GetProperty("waiting").EnumerateArray(), w => w.GetProperty("collector").GetString() == "memory_stats");
+                var cycle = root.GetProperty("first_full_cycle");
+                Assert.Equal("reached", cycle.GetProperty("status").GetString());
+                Assert.Equal(good.ToString("o"), cycle.GetProperty("at").GetString());
+                var server = root.GetProperty("done").EnumerateArray().Single();
+                Assert.Equal(good.ToString("o"), server.GetProperty("first_full_cycle_at").GetString());
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task SetIntervalAsync(NpgsqlConnection connection, int serverId, string collector, int minutes, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "INSERT INTO config_collector_schedules (server_id, collector_name, frequency_minutes, retention_days, enabled) VALUES ($1,$2,$3,NULL,TRUE)", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(collector);
+        command.Parameters.AddWithValue(minutes);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
     private static async Task RegisterServerAsync(NpgsqlConnection connection, int serverId, string name, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(@"
