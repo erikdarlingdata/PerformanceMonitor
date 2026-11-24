@@ -4081,6 +4081,10 @@ END $$;";
            change, ERROR and WARN counts, and a row per migration rung the start tried. Two plain tables created empty: no data moves. An older build ignores
            them and writes no start rows. */
         new Migration(ServiceStartHistory.Version, "service-start-history", ServiceStartHistory.CreateSql),
+        /* V308 (#9413): what each store table did every hour (collect.store_table_activity) and the last capture's per-relation counters those differences are taken
+           from (collect.store_table_activity_baseline). Two plain tables created empty: no data moves, and the service fills them from the hourly self-metrics sweep.
+           An older build ignores them. */
+        new Migration(StoreTableActivity.Version, "store-table-activity", StoreTableActivity.CreateSql),
     };
 
     /// <summary>
