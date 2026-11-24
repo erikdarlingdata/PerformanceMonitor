@@ -146,7 +146,7 @@ public sealed class PgCapacityCeilingWorkerLiveTests
         {
             var rows = new List<(string, bool, string?)>();
             await using var command = Source.CreateCommand(
-                "SELECT metric_name, muted, detail_text FROM config_alert_log WHERE server_id = $1 ORDER BY alert_time, alert_id");
+                "SELECT metric_name, muted, detail_text FROM config_alert_log WHERE server_id = $1 ORDER BY alert_time");
             command.Parameters.AddWithValue(ServerId);
             await using var reader = await command.ExecuteReaderAsync(Ct);
             while (await reader.ReadAsync(Ct))
