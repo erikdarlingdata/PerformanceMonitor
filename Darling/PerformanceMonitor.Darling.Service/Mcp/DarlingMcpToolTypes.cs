@@ -61,12 +61,12 @@ internal static class DarlingMcpToolTypes
     /// page's list is the registry and a new tool needs no line in the page's scripts.</summary>
     internal static string ToolNamesModule => NamesModule.Value;
 
-    /// <summary>Registers every tool class in <see cref="All"/> with <see cref="McpSchemaCompat.WithGeminiCompatibleTools(IMcpServerBuilder, Type)"/>.</summary>
+    /// <summary>Registers every tool class in <see cref="All"/> with <see cref="McpSchemaCompat.WithGeminiCompatibleToolsOf(IMcpServerBuilder, Type)"/>.</summary>
     internal static IMcpServerBuilder WithDarlingTools(this IMcpServerBuilder builder)
     {
         foreach (var type in All)
         {
-            builder.WithGeminiCompatibleTools(type);
+            builder.WithGeminiCompatibleToolsOf(type);
         }
 
         return builder;

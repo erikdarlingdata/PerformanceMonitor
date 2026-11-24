@@ -32,7 +32,7 @@ namespace Darling.Tests;
 /// was no pin for it: these shipped reachable only through the WEB.</para>
 ///
 /// <para><b>Derived, not enumerated.</b> The check walks the assembly for the attribute and the tool methods, and
-/// reads the host's registrations from the discovery list it registers (<see cref="DarlingMcpToolTypes"/>), so it cannot go stale the way a hand-kept list does — and it fails the moment
+/// reads the host's registrations from the discovery list it registers (<see cref="DarlingMcpToolTypes"/>), so it cannot go stale the way a hand-kept list does, and it fails the moment
 /// someone adds a class, rather than whenever an agent next reaches for the tool. That is the same
 /// reasoning as the tab pin being derived from the dispatch.</para>
 ///

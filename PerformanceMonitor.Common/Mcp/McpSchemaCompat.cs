@@ -128,13 +128,14 @@ public static class McpSchemaCompat
         DynamicallyAccessedMemberTypes.PublicMethods |
         DynamicallyAccessedMemberTypes.NonPublicMethods)] TToolType>(
         this IMcpServerBuilder builder) =>
-        builder.WithGeminiCompatibleTools(typeof(TToolType));
+        builder.WithGeminiCompatibleToolsOf(typeof(TToolType));
 
     /// <summary>
     /// <see cref="WithGeminiCompatibleTools{TToolType}(IMcpServerBuilder)"/> for a tool class named by its <see cref="Type"/>, for a host
-    /// that finds its tool classes by their <see cref="McpServerToolTypeAttribute"/> instead of naming each one.
+    /// that finds its tool classes by their <see cref="McpServerToolTypeAttribute"/> instead of naming each one. Its name differs from the
+    /// generic method's so a lookup of that method by name finds exactly one.
     /// </summary>
-    public static IMcpServerBuilder WithGeminiCompatibleTools(
+    public static IMcpServerBuilder WithGeminiCompatibleToolsOf(
         this IMcpServerBuilder builder,
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type toolType)
     {

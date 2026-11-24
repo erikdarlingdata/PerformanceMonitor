@@ -23,12 +23,12 @@ const REGISTERED_TOOL_NAMES = await import("./mcp-tool-names.js").then((m) => m.
 
 /** Every MCP tool whose name starts with get_, the only names the tool-name rule rewrites. A user's own text can hold a
     get_ word that is no tool (a procedure dbo.get_orders, a server get_prod), and it must reach the page as written. */
-export const MCP_TOOL_NAMES = REGISTERED_TOOL_NAMES.filter((name) => name.startsWith("get_"));
+export const MCP_TOOL_NAMES = REGISTERED_TOOL_NAMES.filter((name) => /^get_/.test(name));
 const TOOL_NAME_SET = new Set(MCP_TOOL_NAMES);
 
 /** Every other MCP tool the service registers (the ones whose name does not start with get_): reads that act, and the write
-    tools. A message that names one tells a client what to call next; a web reader cannot call it. */
-export const MCP_ACTION_TOOL_NAMES = REGISTERED_TOOL_NAMES.filter((name) => !name.startsWith("get_"));
+    tools. A message that names one tells a client what to call next, and a web reader cannot call it. */
+export const MCP_ACTION_TOOL_NAMES = REGISTERED_TOOL_NAMES.filter((name) => !/^get_/.test(name));
 const ACTION_TOOL_SET = new Set(MCP_ACTION_TOOL_NAMES);
 
 /** The page's own word for the place a read shows, keyed by tool. A message that tells a client to call one of these reads
