@@ -156,7 +156,7 @@ INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
      first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity, trigger_kind, held_window_id)
 VALUES ($1, $2, $3, COALESCE((SELECT COALESCE(sv.display_name, sv.server_name) FROM collect.servers AS sv WHERE sv.server_id = $3), $4), $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
-        " + StampLevelSql(6, 13) + ", $14, $15, " + InvestigationChangeWindows.HeldWindowIdSql("$10", "$3") + @")
+        " + StampLevelSql(6, 13) + ", $14, $15, " + "NULL::bigint" + @")
 RETURNING held_window_id";
 
     internal const string AlertRowsSql = @"
