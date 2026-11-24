@@ -542,7 +542,7 @@ public sealed class McpQueryTools
         using var profiles = DuckDbProfileTrail.Begin();
         var phases = new ReadPhaseSplit();
         /* #9423: this read keeps a phase split, so the slow-call row stores its hot against archive figures. */
-        lockWaits.MarkSplitKept();
+        // lockWaits.MarkSplitKept();
         try
         {
             /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */
