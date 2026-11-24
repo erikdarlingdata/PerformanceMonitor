@@ -60,6 +60,9 @@ public sealed class PgCapacityCeilingWorkerLiveTests
         public required DarlingWorker Worker { get; init; }
         public required Func<Task> CapacityPass { get; init; }
         public required Func<Task> CpuPass { get; init; }
+
+        /// <summary>The whole PostgreSQL alert sweep, the one call site the worker's sweep loop reaches the gates through.</summary>
+        public required Func<Task> SweepPass { get; init; }
     }
 
     private sealed class Harness
@@ -116,7 +119,11 @@ public sealed class PgCapacityCeilingWorkerLiveTests
                 return () => (Task)evaluate.Invoke(worker, new object[] { runtime, snapshot, config, ct })!;
             }
 
-            return new Life { Worker = worker, CapacityPass = Pass("EvaluatePgCapacityCeilingAsync"), CpuPass = Pass("EvaluatePgCpuAsync") };
+            return new Life
+            {
+                Worker = worker, CapacityPass = Pass("EvaluatePgCapacityCeilingAsync"), CpuPass = Pass("EvaluatePgCpuAsync"),
+                SweepPass = Pass("EvaluatePostgresAlertsAsync"),
+            };
         }
 
         public async Task SeedAsync(IEnumerable<Seed> series, DateTime now)
@@ -240,10 +247,10 @@ public sealed class PgCapacityCeilingWorkerLiveTests
             }, now);
             var life = h.StartLife();
 
-            await life.CpuPass();
-            await life.CapacityPass();
+            /* Through the sweep, so the test also fails if the worker stops calling the gate. */
+            await life.SweepPass();
             /* A second sweep with no new sample is inside the cooldown and sends nothing more. */
-            await life.CapacityPass();
+            await life.SweepPass();
 
             var rows = await h.RowsAsync();
             var row = Assert.Single(rows);
