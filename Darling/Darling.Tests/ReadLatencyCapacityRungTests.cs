@@ -113,7 +113,7 @@ VALUES ('2026-10-01 05:10', 'mcp', 'get_wait_stats', 'timeout', 60000, '{}', fal
         Assert.Equal("3|3|0|0|10", await ScalarAsync(connection, @"
 SELECT count(*) || '|' || count(*) FILTER (WHERE window_band = 'none') || '|' || max(max_in_flight) || '|' || sum(wait_total_ms) || '|' || sum(run_count)
 FROM collect.read_latency", ct));
-        /* V306 (#9434) moved the key from the primary key to a unique index that also names the process start. The band is still part of it. */
+        /* V309 (#9434) moved the key from the primary key to a unique index that also names the process start. The band is still part of it. */
         Assert.Equal("metric_time,surface,route,outcome,window_band,process_started_at", await ScalarAsync(connection, @"
 SELECT string_agg(a.attname, ',' ORDER BY k.ord)
 FROM pg_index AS i

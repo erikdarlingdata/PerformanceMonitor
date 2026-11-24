@@ -83,7 +83,7 @@ internal static class DarlingReadLatencyReader
     public sealed record ReadLatencySide(long Count, long MaxMs, long[] BucketCounts);
 
     /// <summary>A route's figures before and after the split instant (#9434). <paramref name="AmbiguousCount"/> is the reads of
-    /// buckets that carry no process start (stored before V306) and whose hour holds the split instant: they are counted by
+    /// buckets that carry no process start (stored before V309) and whose hour holds the split instant: they are counted by
     /// their hour, as before, and may belong to either side.</summary>
     public sealed record ReadLatencySplit(ReadLatencySide Before, ReadLatencySide After, long AmbiguousCount);
 
@@ -111,7 +111,7 @@ internal static class DarlingReadLatencyReader
             : string.Empty;
 
         /* #9434: the split instant is the last parameter. A bucket is on the AFTER side when the process that wrote it started at or
-           after the instant. A bucket written before V306 has no start: it falls back to its hour, after when the hour starts at or
+           after the instant. A bucket written before V309 has no start: it falls back to its hour, after when the hour starts at or
            after the instant, so the hour that holds the instant counts as before, and is_ambiguous marks those rows so the answer
            can say how many reads that is. Every figure below is NULL-safe on is_after: no split leaves it NULL and the side figures 0. */
         var splitParam = 1 + (normalizedSurface is not null ? 1 : 0) + (normalizedRoute is not null ? 1 : 0) + 1;

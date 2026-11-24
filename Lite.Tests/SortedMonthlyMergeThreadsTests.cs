@@ -79,9 +79,10 @@ public sealed class SortedMonthlyMergeThreadsTests : IDisposable
             $"SELECT count(*) FROM (SELECT row_group_id FROM parquet_metadata('{output}') WHERE path_in_schema = 'server_id' " +
             "GROUP BY row_group_id HAVING min(stats_min) <> max(stats_max))");
         var groups = Scalar(con, $"SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{output}')");
-        Assert.True(groups > 100, $"{groups} row groups");
+        /* The sorted size (#9407): about ten groups of 122,880 rows. */
+        Assert.True(groups >= rows / ParquetCompaction.SortedArchiveRowGroupSize, $"{groups} row groups");
         /* Sorted by server then time, a group holds one server except where one server's run ends. */
-        Assert.True(mixed <= 10, $"{mixed} of {groups} row groups mix servers");
+        Assert.True(mixed <= 6, $"{mixed} of {groups} row groups mix servers");
     }
 
     [Theory]
@@ -114,8 +115,9 @@ public sealed class SortedMonthlyMergeThreadsTests : IDisposable
 
     /// <summary>
     /// #9320. MergeBatchToFile with no threads argument: the sorted attempt runs on one thread, and when it runs out of
-    /// memory the unsorted fallback runs on the compaction thread count for the table (two for a monthly table).
-    /// The counts are what each attempt's connection was set to run on.
+    /// memory the sorted retry at 2,048-row groups runs on one thread too, and the unsorted fallback after it runs on the
+    /// compaction thread count for the table (two for a monthly table). The counts are what each attempt's connection
+    /// was set to run on.
     /// </summary>
     [Theory]
     [InlineData("wait_stats")]
@@ -148,7 +150,7 @@ public sealed class SortedMonthlyMergeThreadsTests : IDisposable
         }
 
         Assert.Single(fallbacks);
-        Assert.Equal([(true, 1), (false, ParquetCompaction.ThreadsFor(table))], attempts);
+        Assert.Equal([(true, 1), (true, 1), (false, ParquetCompaction.ThreadsFor(table))], attempts);
         Assert.Equal(2, ParquetCompaction.ThreadsFor(table));
     }
 }
