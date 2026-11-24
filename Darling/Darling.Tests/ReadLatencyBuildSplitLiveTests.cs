@@ -43,7 +43,7 @@ public sealed class ReadLatencyBuildSplitLiveTests
     [Fact]
     public async Task ARestartWithinAnHour_WritesTwoRows_AndTheSameProcessStillAddsIntoOne()
     {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the V309 key pin.");
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the V315 key pin.");
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -72,7 +72,7 @@ public sealed class ReadLatencyBuildSplitLiveTests
     [Fact]
     public async Task TwoRowsOfOneKeyWithNoProcessStart_AreOneKey()
     {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the V309 NULL key pin.");
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the V315 NULL key pin.");
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);

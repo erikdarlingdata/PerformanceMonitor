@@ -1439,6 +1439,84 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// The #9437 once-a-minute store connection sample, on the checkpointer sample's minute: the store's client backends by role,
+    /// application, state and wait type, and the slots left against <c>max_connections</c>
+    /// (<see cref="StoreConnectionSamples.CaptureAsync"/>). Awaited on the main loop under its own short budget. A failure (a store that is
+    /// down, a role that cannot read <c>pg_stat_activity</c>, the budget expiring) is a Debug line and a skipped minute. Never throws except
+    /// for the service stopping.
+    ///
+    /// <para>The host load is the managed store's available memory (<see cref="ReadStoreHostLoad"/>) and nothing else. A bring-your-own or
+    /// compose store runs on a host the service does not describe, so it passes null, and CPU percent and disk queue are not read for any store.
+    /// The columns left empty stay NULL and the read says so.</para>
+    /// </summary>
+    private async Task SampleStoreConnectionsAsync(bool managedStore, CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_checkpointSyncSampleBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await StoreConnectionSamples.CaptureAsync(connection, DateTime.UtcNow, ReadStoreHostLoad(managedStore), budget.Token);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogDebug(ex, "store connection sample failed and was skipped");
+        }
+    }
+
+    /// <summary>
+    /// The #9427 once-a-minute capture of the store's settings: compared with the last capture, each change is a row (old and new value, source, reload
+    /// time), and the first capture on a store writes only the baseline. Awaited on the main loop, so it runs under one short budget. A failure (a store
+    /// that is down, a store below the rung, the budget expiring) is a Debug line and a skipped minute, since the next capture compares against the same
+    /// state. Each change is also logged once, by name and by where its new value came from, with no value in the line, since a setting can hold a
+    /// credential. Never throws except for the service stopping.
+    /// </summary>
+    private async Task CaptureStoreSettingChangesAsync(CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_storeSettingCaptureBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            var capture = await StoreSettingChanges.CaptureAsync(connection, budget.Token);
+            if (capture.IsBaseline)
+            {
+                _logger.LogInformation("Store settings baseline captured: {Settings} settings. Changes from here on are recorded.", capture.Stored);
+            }
+            else if (capture.Changes > 0)
+            {
+                _logger.LogInformation("Store settings changed: {Changes} setting(s) recorded. get_store_setting_changes lists them.", capture.Changes);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogDebug(ex, "store setting capture failed and was skipped");
+        }
+    }
+
+    /// <summary>
+    /// What the store's host offers the connection sample (#9437). A managed store runs on the service's own Windows machine, which is the
+    /// machine <see cref="DarlingStoreHostProfile"/> describes, so the memory it can still hand out (the <c>GlobalMemoryStatusEx</c> read the
+    /// profile already makes for total memory) is that host's. Any other store is on a host the service does not describe, and a failed read
+    /// gives nothing: both are null, never a made-up figure. CPU percent and disk queue are left null because the service has no reader for them.
+    /// </summary>
+    internal static StoreHostLoad? ReadStoreHostLoad(bool managedStore)
+    {
+        if (!managedStore || !OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        return DarlingManagedPostgres.TryReadWindowsMemoryStatus(out _, out var available, out _, out _)
+            ? new StoreHostLoad(null, available, null)
+            : null;
+    }
+
+    /// <summary>
     /// The sentence the store-log capture's warning gives as the cause (#9333). A 58P01 (UndefinedFile) means the log
     /// folder is not there, which is a store that keeps no log files, not a missing privilege: the compose store ran
     /// without logging_collector and named the privilege anyway. A 42501 (InsufficientPrivilege) keeps the privilege

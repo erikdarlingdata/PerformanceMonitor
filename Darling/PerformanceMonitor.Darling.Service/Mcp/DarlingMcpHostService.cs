@@ -1824,11 +1824,17 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #9415 get_service_starts - the service's own start history: the build, schema change, migration rung timings and
                error and warning counts of each start. Darling-only: Lite has no service host or store to record a start in. */
             .WithGeminiCompatibleTools<DarlingMcpServiceStartTools>()
+            /* #9414 get_store_checkpoints - one row per checkpoint of the store's own server, from the same log. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreCheckpointTools>()
             /* #9411 get_store_pass_steps - what the service's own background passes did, step by step. Darling-only, like get_store_log. */
+            /* #9437 get_store_connections: the store's OWN connections by role, application, state and wait type a minute at a time,
+               with the slots left before new logins are refused. Darling-only: Lite has no PostgreSQL store. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreConnectionsTools>()
             .WithGeminiCompatibleTools<DarlingMcpStorePassStepsTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreTableHealthTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreTableMeasureTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreMaintenanceReadinessTools>()
+            .WithGeminiCompatibleTools<DarlingMcpStoreSettingChangesTools>()
             .WithGeminiCompatibleTools<DarlingMcpReadLatencyTools>()
             .WithGeminiCompatibleTools<DarlingMcpSlowReadTools>()
             /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store

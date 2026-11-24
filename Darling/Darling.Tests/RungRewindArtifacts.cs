@@ -999,9 +999,27 @@ DROP TABLE IF EXISTS collect.service_starts;"),
         // Safe on a store that never had them.
         new(308, "hasStoreTableActivity", @"DROP TABLE IF EXISTS collect.store_table_activity;
 DROP TABLE IF EXISTS collect.store_table_activity_baseline;"),
-        // V309 (#9434): the process start column and the unique index that is the read_latency bucket key. The index is the probe's newest sentinel. The rewind drops the column,
-        // which drops the index with it, then puts the primary key back, so a re-run of V309 moves the key again. Safe on a store that never had them.
-        new(309, "hasReadLatencyProcessStart", @"ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS process_started_at;
+        // V309 (#9414): the store checkpoint rows. It is the probe's newest sentinel. The rewind drops it, so a re-run of V309 creates it empty. Safe on a store
+        // that never had it.
+        new(309, "hasStoreCheckpoints", @"DROP TABLE IF EXISTS collect.store_checkpoints;"),
+        // V310 (#9452): the partial index of the oversized-plan backlog's pending rows. It is the probe's newest sentinel. The rewind drops it, so a re-run of V310 builds it again.
+        // Safe on a store that never had it.
+        new(310, "hasOversizedPlanBacklogPendingIndex", @"DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_pending;"),
+        // V311 (#9438): the migration rung object table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V311 creates it empty. Safe on a store that never
+        // had it.
+        new(311, "hasServiceStartRungObjects", @"DROP TABLE IF EXISTS collect.service_start_rung_objects;"),
+        // V312 (#9432): the upgrade run table. The rewind drops it, so a re-run of V312 creates it again. Safe on a store that never had it.
+        new(312, "hasUpgradeRuns", @"DROP TABLE IF EXISTS collect.upgrade_runs;"),
+        // V313 (#9427): the store setting state and changes tables. The probe's newest sentinel is both. The rewind drops both, so a re-run of V313 creates them empty. Safe on a store
+        // that never had them.
+        new(313, "hasStoreSettingChanges", @"DROP TABLE IF EXISTS collect.store_setting_changes;
+DROP TABLE IF EXISTS collect.store_setting_state;"),
+        // V314 (#9437): the two store connection tables. collect.store_connection_slots is the probe's newest sentinel. The rewind drops both, so a re-run of V314 creates them
+        // empty. Safe on a store that never had them.
+        new(314, "hasStoreConnectionSamples", @"DROP TABLE IF EXISTS collect.store_connection_slots; DROP TABLE IF EXISTS collect.store_connection_samples;"),
+        // V315 (#9434): the process start column and the unique index that is the read_latency bucket key. The index is the probe's newest sentinel. The rewind drops the column,
+        // which drops the index with it, then puts the primary key back, so a re-run of V315 moves the key again. Safe on a store that never had them.
+        new(315, "hasReadLatencyProcessStart", @"ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS process_started_at;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'collect.read_latency'::regclass AND contype = 'p') THEN ALTER TABLE collect.read_latency ADD CONSTRAINT read_latency_pkey PRIMARY KEY (metric_time, surface, route, outcome, window_band); END IF; END $$;"),
     ];
 

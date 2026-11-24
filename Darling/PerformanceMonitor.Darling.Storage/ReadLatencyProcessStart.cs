@@ -30,7 +30,7 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class ReadLatencyProcessStart
 {
     /// <summary>The store migration that adds the column and moves the key. One constant so a renumber is mechanical.</summary>
-    public const int Version = 309;
+    public const int Version = 315;
 
     /// <summary>The unique index that is the bucket key from this rung on. The probe finds the rung by this name.</summary>
     public const string KeyIndexName = "uq_read_latency_key";

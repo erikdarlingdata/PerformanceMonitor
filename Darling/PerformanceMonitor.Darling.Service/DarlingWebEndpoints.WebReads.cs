@@ -398,7 +398,10 @@ public static partial class DarlingWebEndpoints
             ["get_store_table_health"] = (c, pg, an) => DarlingMcpStoreTableHealthTools.GetStoreTableHealth(pg, Rows(c, "top", DarlingMcpStoreTableHealthTools.DefaultTop), QueryBool(c, "candidates_only", false), First(c, "section"), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["measure_store_table"] = (c, pg, an) => DarlingMcpStoreTableMeasureTools.MeasureStoreTable(pg, Str(c, "table"), c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, query_id: Str(c, "query_id"), responseByteBudget: null, c.RequestAborted),
-            ["get_service_starts"] = (c, pg, an) => DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), c.RequestAborted),
+            ["get_service_starts"] = (c, pg, an) => !OptionalInt(c, "rung", out var startsRung) ? UnparseableParam("rung")
+                : !OptionalInt(c, "hours_back", out var startsHours) ? UnparseableParam("hours_back")
+                : DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), startsRung, startsHours, c.RequestAborted),
+            ["get_store_checkpoints"] = (c, pg, an) => DarlingMcpStoreCheckpointTools.GetStoreCheckpoints(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreCheckpointTools.DefaultLimit), AsOf(c), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["get_store_pass_steps"] = (c, pg, an) => DarlingMcpStorePassStepsTools.GetStorePassSteps(pg, Hours(c, 24), Str(c, "pass"), Str(c, "step"), Rows(c, "limit", DarlingMcpStorePassStepsTools.DefaultLimit), AsOf(c), responseByteBudget: null, c.RequestAborted),
             ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), Str(c, "order_by"), logger: logger, cancellationToken: c.RequestAborted),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
@@ -791,7 +794,7 @@ public static partial class DarlingWebEndpoints
     }
 
     /// <summary>The hours-back window from <c>?hours=</c> (or the tool's own <c>?hours_back=</c>), else the tool's default.</summary>
-    private static int Hours(HttpContext context, int def) => QueryInt(context, "hours", "hours_back", def);
+    internal static int Hours(HttpContext context, int def) => QueryInt(context, "hours", "hours_back", def);
 
     /// <summary>
     /// The window ANCHOR from <c>?as_of=</c>; null when absent, which is what makes the window end at now.
@@ -799,10 +802,10 @@ public static partial class DarlingWebEndpoints
     /// MCP surfaces cannot disagree about what a bad anchor means, and the refusal envelope reaches the same
     /// <see cref="ToHttpResult"/> 400 mapping every other client-correctable outcome does.
     /// </summary>
-    private static string? AsOf(HttpContext context) => First(context, "as_of");
+    internal static string? AsOf(HttpContext context) => First(context, "as_of");
 
     /// <summary>An optional text parameter; null when absent or empty (so the tool sees its own default).</summary>
-    private static string? Str(HttpContext context, string key) => First(context, key);
+    internal static string? Str(HttpContext context, string key) => First(context, key);
 
     /* ── the database list (#5245): repeated ?database_name= keys, one per chosen database ── */
 
@@ -1184,7 +1187,7 @@ public static partial class DarlingWebEndpoints
     private static string? NonIntegerParamRefusal(HttpContext context) =>
         NonIntegerParamRefusal(key => First(context, key));
 
-    private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
+    internal static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);
 
     /// <summary>A knob whose omitted value is derived from another knob (#5633 item 12: compare_analysis's baseline follows
@@ -1197,7 +1200,7 @@ public static partial class DarlingWebEndpoints
     /// dispatch layer so an authenticated/loopback caller can't request an unbounded result set from a reader
     /// that binds the value straight into <c>LIMIT $N</c> (the /api/fleet window is refused out of range instead, #5644).
     /// </summary>
-    private static int Rows(HttpContext context, string key, int def) =>
+    internal static int Rows(HttpContext context, string key, int def) =>
         ClampRows(QueryInt(context, key, null, def));
 
     /// <summary>The dispatch-layer ceiling on any caller-supplied row count — generous for real use, bounded against abuse.</summary>
