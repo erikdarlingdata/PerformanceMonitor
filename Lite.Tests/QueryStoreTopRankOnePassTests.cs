@@ -57,7 +57,7 @@ public sealed class QueryStoreTopRankOnePassTests : IDisposable
     }
 
     /* The statement before #9195, kept as the reference: the newest id per interval by arg_max, then a second wide scan joined to it. */
-    private const string OldHead = @"
+    internal const string OldHead = @"
 WITH latest AS (
     SELECT
         arg_max(collection_id, (collection_time, COALESCE(execution_count, -1))) AS latest_id,
