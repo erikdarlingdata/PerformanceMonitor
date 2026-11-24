@@ -200,7 +200,7 @@ ORDER BY metric_time";
     }
 
     /// <summary>
-    /// Reads <see cref="SeriesSql"/> for the last <paramref name="hoursBack"/> hours and builds the reading. A store below V304 has no WAL columns, and
+    /// Reads <see cref="SeriesSql"/> for the last <paramref name="hoursBack"/> hours and builds the reading. A store below V305 has no WAL columns, and
     /// the read answers <c>unavailable</c> for it instead of an error or an empty series.
     /// </summary>
     public static async Task<Reading> GetAsync(NpgsqlDataSource postgres, int hoursBack, DateTime utcNow, CancellationToken cancellationToken = default)
@@ -226,7 +226,7 @@ ORDER BY metric_time";
         {
             return new Reading(
                 "unavailable",
-                "The store's schema is below V304, which adds the WAL columns. Upgrade the service so the store migrates, then wait an hour for the first row.",
+                "The store's schema is below V305, which adds the WAL columns. Upgrade the service so the store migrates, then wait an hour for the first row.",
                 Array.Empty<Point>(), "unavailable", null);
         }
 

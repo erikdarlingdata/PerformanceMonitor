@@ -2511,6 +2511,34 @@ CREATE INDEX IF NOT EXISTS idx_job_history_job_failed
     WHERE step_id = 0 AND run_status = 0;";
 
     /// <summary>
+    /// V304 (#9410): the write-side counters on the store's own statement history. <c>collect.store_statement_history</c> gains
+    /// <c>delta_shared_blks_dirtied</c>, <c>delta_shared_blks_written</c>, <c>delta_wal_bytes</c> and <c>delta_wal_fpi</c>, and
+    /// <c>config.store_statement_baseline</c> gains the four cumulative counters they are differenced from. Those are the counters that say
+    /// which statement made the pages a checkpoint writes, including a read that only sets hint bits.
+    ///
+    /// <para><b>Nullable, no default, so no table rewrite.</b> A history row written before this rung has no value for the four and reads NULL,
+    /// never 0: nothing measured them. A baseline row written before it carries NULL too, so the first hour after the upgrade has no way to
+    /// difference the four for a statement and stores NULL for it, not the statement's whole lifetime. <c>delta_wal_bytes</c> and <c>wal_bytes</c>
+    /// are <c>numeric</c> because <c>pg_stat_statements</c> types <c>wal_bytes</c> that way. The tables are plain and written once an hour,
+    /// so <c>ADD COLUMN</c> holds its lock for an instant.</para>
+    ///
+    /// <para><b>An older build ignores the columns.</b> Its writer names its own column list and its reads name theirs, so it neither fills
+    /// nor reads them.</para>
+    /// </summary>
+    private const string V304Sql = @"
+ALTER TABLE collect.store_statement_history
+    ADD COLUMN IF NOT EXISTS delta_shared_blks_dirtied bigint,
+    ADD COLUMN IF NOT EXISTS delta_shared_blks_written bigint,
+    ADD COLUMN IF NOT EXISTS delta_wal_bytes numeric,
+    ADD COLUMN IF NOT EXISTS delta_wal_fpi bigint;
+
+ALTER TABLE config.store_statement_baseline
+    ADD COLUMN IF NOT EXISTS shared_blks_dirtied bigint,
+    ADD COLUMN IF NOT EXISTS shared_blks_written bigint,
+    ADD COLUMN IF NOT EXISTS wal_bytes numeric,
+    ADD COLUMN IF NOT EXISTS wal_fpi bigint;";
+
+    /// <summary>
     /// V221 (#6800): <c>collect.query_store_hash_hourly</c>, the narrow hourly source of the fleet tag roll-up, its <c>(hour, server_id)</c>
     /// index, and <c>hash_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text, the column map and the reasoning are on
     /// <see cref="QueryStoreComposeStamp.HashHourlyCreateSql"/>. The service's hourly tick (V173's builder) fills the table in the stamp's
@@ -4039,7 +4067,10 @@ END $$;";
            after midnight and not wait for the grid's close. One plain table created empty: no data moves. An older build ignores it and serves a clutter day
            only from the grid's own stamp, so a day built from its hours is read from the hourly or raw rows there. */
         new Migration(QueryStoreClutterDayFold.Version, "query-store-clutter-day-built", QueryStoreClutterDayFold.CreateSql),
-        /* V304 (#9419): the store's own WAL figures, eleven nullable columns on collect.store_metrics filled on the object_kind = 'wal' row only. No data moves
+        /* V304 (#9410): the dirtied blocks, written blocks, WAL bytes and full-page images of each statement in the store's own statement history, on the history
+           table and its baseline. Four nullable columns on each, no default, no rewrite. A row from before the rung reads NULL. An older build never names them. */
+        new Migration(StoreStatementHistory.WriteCountersVersion, "store-statement-history-write-counters", V304Sql),
+        /* V305 (#9419): the store's own WAL figures, eleven nullable columns on collect.store_metrics filled on the object_kind = 'wal' row only. No data moves
            and existing rows keep NULL. An older build ignores the columns and the row: its store reads list only the kinds it knows. */
         new Migration(StoreWalFigures.Version, "store-wal-figures", StoreWalFigures.AddColumnsSql),
     };

@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>Why columns and not more rows of the checkpointer's shape.</b> The checkpointer row fits its three counters in columns
 /// the table already had. The WAL row needs eleven figures and a reset stamp, and no existing column means any of them. Borrowing
-/// <c>total_bytes</c> and the row count column would also put the row into the inventory's byte sums. So V304 adds eleven nullable
+/// <c>total_bytes</c> and the row count column would also put the row into the inventory's byte sums. So V305 adds eleven nullable
 /// columns, and the row leaves <c>total_bytes</c> empty like the checkpointer's.</para>
 ///
 /// <para><b>Raw counters, the read takes the difference.</b> Same rule as the checkpointer row (<see cref="StoreSelfMetrics.CheckpointerInsertSql"/>
@@ -42,7 +42,7 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class StoreWalFigures
 {
     /// <summary>The store migration that adds the WAL columns. One constant so a renumber is mechanical.</summary>
-    public const int Version = 304;
+    public const int Version = 305;
 
     /// <summary>The <c>object_kind</c> of the WAL row. A const because the reader filters on it.</summary>
     public const string WalObjectKind = "wal";
@@ -60,7 +60,7 @@ public static class StoreWalFigures
     public const string InsufficientPrivilege = "42501";
 
     /// <summary>
-    /// V304 (#9419): the WAL columns on <c>collect.store_metrics</c>, all nullable and filled on the <c>wal</c> row only. Plain table with no
+    /// V305 (#9419): the WAL columns on <c>collect.store_metrics</c>, all nullable and filled on the <c>wal</c> row only. Plain table with no
     /// passthrough view, so the ALTER stands alone, as V137 and V156 did. Existing rows keep NULL.
     /// </summary>
     public const string AddColumnsSql = @"
