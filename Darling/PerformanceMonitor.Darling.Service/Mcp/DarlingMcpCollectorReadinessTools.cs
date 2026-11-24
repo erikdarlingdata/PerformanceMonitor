@@ -149,7 +149,7 @@ public sealed class DarlingMcpCollectorReadinessTools
 
             return await ComposeAsync(
                 servers, pairs, firstGood, before, startUtc, nowUtc, notCollected, disabled, onlyServerId is not null,
-                shown => ReadDetailAsync(postgres, shown, startUtc, nowUtc, cancellationToken));
+                detailPairs => ReadDetailAsync(postgres, detailPairs, startUtc, nowUtc, cancellationToken));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
