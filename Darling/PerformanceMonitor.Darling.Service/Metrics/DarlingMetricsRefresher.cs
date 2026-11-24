@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Metrics;
 
@@ -121,7 +122,7 @@ internal sealed class DarlingMetricsRefresher
 
         var serverSetStarted = _time.GetTimestamp();
         IReadOnlyList<ServerSetValue> values;
-        await using (var connection = await postgres.OpenConnectionAsync(ct).ConfigureAwait(false))
+        await using (var connection = await postgres.OpenConnectionAsync(StoreSessionNames.MetricsRefresh, ct).ConfigureAwait(false))
         {
             values = await DarlingMetricsServerSetReader.ReadAsync(connection, now, ct).ConfigureAwait(false);
         }

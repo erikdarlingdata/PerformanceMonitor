@@ -474,7 +474,7 @@ SELECT EXISTS
             specs,
             async (spec, token) =>
             {
-                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreBackgroundIndexes, token).ConfigureAwait(false);
                 await EnsureAsync(connection, spec, logger, token).ConfigureAwait(false);
             },
             cancellationToken);

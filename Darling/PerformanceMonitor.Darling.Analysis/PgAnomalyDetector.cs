@@ -14,6 +14,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Analysis.Baselines.AnomalyThresholds;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -592,7 +593,7 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
 
             // Growth: biggest day-over-day table grower (indexes rolled up) over threshold.
             using (var cmd = new NpgsqlCommand(ObjectGrowthSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
@@ -698,7 +699,7 @@ ORDER BY ms_delta DESC LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, cancellationToken);
 
             using var cmd = new NpgsqlCommand(HasBaselineDataSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
@@ -730,7 +731,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.Cpu, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
 
             List<WindowTile> tiles;
             using (var cmd = new NpgsqlCommand(CpuTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
@@ -840,7 +841,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.WaitMsPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
 
             // Current window: all-types wait ms/sec per collection (interval via LAG), tiled by target-local
             // hour (#3653 A8 option B, lane L2a) — the ordinals are WaitRateTileWindowSql's column order, pinned.
@@ -1065,7 +1066,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             bool blockingFromDmv;
             /* #7588: this connection closes before the baselines are fetched. A baseline compute opens its own connection on a
                cache miss, so holding this one across the calls put two pooled connections on every blocking pass. */
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken))
             {
                 using var cmd = new NpgsqlCommand(separate is null ? BlockingWindowSql : BlockingSkippingSeparateCountSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
                 cmd.Parameters.AddWithValue(context.ServerId);
@@ -1186,7 +1187,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var readMap = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.IoLatency, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
 
             // #3653 A8 option B (lane L2a): ONE tiled read feeds both gates (design's I/O row) — each
             // family builds its own WindowTile list from the same rows (0 local_hour, 1 peak_read,
@@ -1373,7 +1374,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.BatchRequests, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
 
             List<WindowTile> tiles;
             using (var cmd = new NpgsqlCommand(BatchRequestTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
@@ -1473,7 +1474,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.SessionCount, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
 
             List<WindowTile> tiles;
             using (var cmd = new NpgsqlCommand(SessionTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
@@ -1574,7 +1575,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.QueryDuration, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
 
             List<WindowTile> tiles;
             using (var cmd = new NpgsqlCommand(QueryDurationTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
@@ -1676,7 +1677,7 @@ ORDER BY ms_delta DESC LIMIT 1";
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.Memory, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
 
             List<WindowTile> tiles;
             using (var cmd = new NpgsqlCommand(MemoryTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })

@@ -216,7 +216,7 @@ WHERE status = 'in_progress'
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CommandPlane, cancellationToken);
             using var command = new NpgsqlCommand(ReclaimStaleCommandsSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = StaleCommandTimeout });
@@ -245,7 +245,7 @@ WHERE status = 'in_progress'
     /// </summary>
     public async Task<ClaimedCommand?> ClaimNextAsync(CancellationToken cancellationToken)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CommandPlane, cancellationToken);
         using var command = new NpgsqlCommand(ClaimCommandSql, connection);
         command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
         command.Parameters.AddWithValue(_serviceInstance);                                                          // $1
@@ -1014,7 +1014,7 @@ WHERE status = 'in_progress'
             throw new ArgumentException($"Only a {nameof(CommandKind.StoreWrite)} plan can be executed against the store; got {plan.Kind}.", nameof(plan));
         }
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.CommandPlane, cancellationToken);
         using var command = new NpgsqlCommand(plan.Sql, connection);
         command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
         if (plan.TimeoutSeconds is { } ownSeconds)
@@ -1034,7 +1034,7 @@ WHERE status = 'in_progress'
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CommandPlane, cancellationToken);
             using var command = new NpgsqlCommand(ReportCommandSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CommandPlaneSeconds;
             command.Parameters.AddWithValue(commandId);
