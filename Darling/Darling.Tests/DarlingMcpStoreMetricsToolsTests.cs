@@ -68,12 +68,13 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         /* Deliberately NO server_name: the store is the subject, not a monitored server. #3903 added the two
            filters and the list bound; each is optional, so a caller sending only days_back — every caller before
            #3903 — gets the summary, whose lists say what bounded them. */
-        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit" }, mcpParams.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit", "wal_hours_back" }, mcpParams.Select(p => p.Name).ToArray());
         Assert.All(mcpParams, p => Assert.True(p.HasDefaultValue, $"{p.Name} must stay optional"));
         Assert.Equal(30, mcpParams[0].DefaultValue);
         Assert.Null(mcpParams[1].DefaultValue);
         Assert.Null(mcpParams[2].DefaultValue);
         Assert.Equal(DarlingMcpStoreMetricsTools.DefaultLimit, mcpParams[3].DefaultValue);
+        Assert.Equal(24, mcpParams[4].DefaultValue);
 
         /* The window ceiling is the series' own retention — past it there is nothing to read, and the two
            numbers drifting apart would let a caller ask for days the sweep deliberately deleted. */
