@@ -137,14 +137,14 @@ SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.
 
     /* A sum over every row's identity, so a rewrite that drops, repeats or alters a row changes it. */
     private static long RowHash(string from) =>
-        Scalar($"SELECT sum((hash(collection_id, server_id, collection_time) % 1000000007)::BIGINT) FROM {from}");
+        Scalar($"SELECT sum((hash(collection_id, server_id, collection_time) % 1000000007)::BIGINT)::BIGINT FROM {from}");
 
     private long HotRowHash()
     {
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
         connection.Open();
         using var cmd = connection.CreateCommand();
-        cmd.CommandText = "SELECT sum((hash(collection_id, server_id, collection_time) % 1000000007)::BIGINT) FROM query_store_stats";
+        cmd.CommandText = "SELECT sum((hash(collection_id, server_id, collection_time) % 1000000007)::BIGINT)::BIGINT FROM query_store_stats";
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
