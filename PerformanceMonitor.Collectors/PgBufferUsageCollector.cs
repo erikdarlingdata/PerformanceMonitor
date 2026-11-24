@@ -152,7 +152,7 @@ public sealed class PgBufferUsageCollector : PostgresCollectorDefinitionBase<PgB
        that tail is thousands of rows that never inform anything. */
     private const string QueryText = @"
 WITH cfg AS (
-    SELECT (s.setting::bigint * 8192 / pg_catalog.current_setting('block_size')::bigint) AS pool_buffers
+    SELECT s.setting::bigint AS pool_buffers
     FROM pg_catalog.pg_settings AS s
     WHERE s.name = 'shared_buffers'
 ),
