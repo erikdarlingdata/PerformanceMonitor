@@ -392,4 +392,74 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
         Assert.Contains("wait_stats", row.Message);
         Assert.Equal(0, detail.GroupsMerged);
     }
+
+    private static StoreHousekeepingEvent CompactionRow(DateTime time, int groupsMerged, int filesRecut = 0) => new(
+        time, StoreHousekeepingHistory.KindCompaction, StoreHousekeepingHistory.OutcomeOk,
+        Files: 1,
+        Compaction: new CompactionPassDetail(time.AddSeconds(-5), 5, GroupsMerged: groupsMerged, FilesIn: 3, FilesOut: 1, FilesRecut: filesRecut));
+
+    /// <summary>
+    /// A week of hourly passes, each an archive that moved rows and a compaction that merged them, keeps the oldest retention row
+    /// in the 200 (#9448). Before compaction rows folded, the pair wrote two rows an hour and the 200 reached back about 4 days.
+    /// </summary>
+    [Fact]
+    public void AWeekOfHourlyArchiveAndCompactionPasses_KeepsTheOldestRetentionRow()
+    {
+        var start = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+        _history.Record(new StoreHousekeepingEvent(start, StoreHousekeepingHistory.KindRetention, StoreHousekeepingHistory.OutcomeOk, Files: 3));
+
+        for (var hour = 1; hour <= 7 * 24; hour++)
+        {
+            var time = start.AddHours(hour);
+            _history.Record(new StoreHousekeepingEvent(time, StoreHousekeepingHistory.KindArchive, StoreHousekeepingHistory.OutcomeOk, Rows: 5_000, Files: 20));
+            _history.Record(CompactionRow(time.AddMinutes(1), groupsMerged: hour));
+        }
+
+        var rows = _history.Read();
+        Assert.Contains(rows, e => e.Kind == StoreHousekeepingHistory.KindRetention);
+        Assert.Equal(7 * 24, rows.Count(e => e.Kind == StoreHousekeepingHistory.KindArchive));
+
+        /* The compaction rows fold to one that still reads as the newest pass, with the count of the passes it stands for. */
+        var compaction = Assert.Single(rows, e => e.Kind == StoreHousekeepingHistory.KindCompaction);
+        Assert.Equal(7 * 24, compaction.Count);
+        Assert.Equal(7 * 24, compaction.Compaction!.GroupsMerged);
+    }
+
+    /// <summary>A compaction pass with a re-cut in it keeps its own row and is never folded into a routine one.</summary>
+    [Fact]
+    public void ACompactionWithARecut_IsNotFoldedIntoARoutineOne()
+    {
+        var start = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+        _history.Record(CompactionRow(start, groupsMerged: 1));
+        _history.Record(CompactionRow(start.AddHours(1), groupsMerged: 1, filesRecut: 2));
+        _history.Record(CompactionRow(start.AddHours(2), groupsMerged: 1, filesRecut: 4));
+        _history.Record(CompactionRow(start.AddHours(3), groupsMerged: 1));
+
+        var rows = _history.Read().Where(e => e.Kind == StoreHousekeepingHistory.KindCompaction).ToList();
+        Assert.Equal(4, rows.Count);
+        Assert.All(rows, r => Assert.Equal(1, r.Count));
+        Assert.Equal([0, 4, 2, 0], rows.Select(r => r.Compaction!.FilesRecut).ToArray());
+    }
+
+    /// <summary>
+    /// A failure outside the group loop is recorded as a failed compaction row and thrown on unchanged: the same exception
+    /// instance, so its type, message and stack are the caller's to see (#9448). The seam is the replay hook, which runs once the
+    /// swap journals are resolved and before any group is read.
+    /// </summary>
+    [Fact]
+    public void AFailureOutsideTheGroupLoop_IsRecordedAndRethrownUnchanged()
+    {
+        File.WriteAllText(Path.Combine(_archiveDir, $"{Day}_wait_stats.swap"), "not a journal");
+        var thrown = new InvalidOperationException("the replay hook failed");
+        var service = NewService();
+        service.AfterCompactionReplayForTests = () => throw thrown;
+
+        var caught = Assert.Throws<InvalidOperationException>(() => service.CompactParquetFiles());
+
+        Assert.Same(thrown, caught);
+        var row = Assert.Single(_history.Read());
+        Assert.Equal(StoreHousekeepingHistory.KindCompaction, row.Kind);
+        Assert.Equal(StoreHousekeepingHistory.OutcomeFailed, row.Outcome);
+        Assert.Equal("the replay hook failed", row.Message);
+    }
 }

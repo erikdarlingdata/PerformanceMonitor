@@ -92,7 +92,8 @@ public sealed record CompactionPassDetail(
 /// <para><b>Bounded.</b> A pass that did nothing, and a failure that repeats with the same message, replace the newest entry
 /// of their kind and raise its <see cref="StoreHousekeepingEvent.Count"/>. Without that, the hourly archive pass that finds
 /// nothing old, or a full disk that fails the size reset every 15 minutes, would push every other entry out of the 200 within
-/// days.</para>
+/// days. A compaction pass that only merged folds the same way into the newest routine compaction entry, which keeps the newest
+/// pass's figures (#9448).</para>
 ///
 /// <para>Best effort: a read of a missing or damaged file is an empty history, and a write that fails is logged and dropped.
 /// The history is a diagnostic aid and must never fail the pass it describes.</para>
@@ -214,10 +215,31 @@ public sealed class StoreHousekeepingHistory
             return string.Equals(previous.Message, entry.Message, StringComparison.Ordinal);
         }
 
-        /* A compaction entry is written only for a pass that merged or re-cut something, so an ok one is never idle (#9422). */
+        if (entry.Kind == KindCompaction)
+        {
+            /* A compaction entry is written only for a pass that merged or re-cut something, so none is idle. The hourly archive
+               pass that exported rows is followed by a pass that merges them into the month or day file, and without a fold that
+               doubles the rows per hour and the 200 reach back half as far (#9448). A routine pass folds into the newest
+               routine one. A pass with anything to read in it (a re-cut, a skip, a retry at 2,048-row groups, an unsorted
+               fallback) never folds, so its own figures stay. */
+            return entry.Outcome == OutcomeOk && IsRoutineCompaction(previous) && IsRoutineCompaction(entry);
+        }
+
         return entry.Outcome == OutcomeOk
-            && entry.Kind != KindCompaction
             && (previous.Rows ?? 0) == 0 && (previous.Files ?? 0) == 0
             && (entry.Rows ?? 0) == 0 && (entry.Files ?? 0) == 0;
     }
+
+    /// <summary>A compaction pass that only merged: it re-cut nothing, skipped nothing and needed no smaller row groups or unsorted
+    /// fallback (#9448).</summary>
+    private static bool IsRoutineCompaction(StoreHousekeepingEvent e) =>
+        e.Kind == KindCompaction
+        && e.Outcome == OutcomeOk
+        && e.Compaction is { } c
+        && c.FilesRecut == 0
+        && c.RecutSkippedLiveJournal == 0
+        && c.RecutSkippedTimeBudget == 0
+        && (c.RecutSkips is null || c.RecutSkips.Values.All(n => n == 0))
+        && c.SortedAtSmallGroupBatches == 0
+        && c.UnsortedFallbackBatches == 0;
 }
