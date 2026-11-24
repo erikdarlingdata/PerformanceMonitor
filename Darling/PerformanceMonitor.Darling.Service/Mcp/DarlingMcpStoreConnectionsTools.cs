@@ -172,14 +172,17 @@ public sealed class DarlingMcpStoreConnectionsTools
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
-            return McpHelpers.Status(
-                "unavailable",
-                "The store's schema is below V306, which adds the connection tables. Upgrade the service so the store migrates, then wait a minute for the first sample.");
+            /* Not an error: the tables are newer than this store, so the answer is the unavailable status below. */
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_store_connections", ex);
         }
+
+        /* A store below the migration that creates the tables: not an error, so it is answered outside the catch. */
+        return McpHelpers.Status(
+            "unavailable",
+            $"The store's schema is below version {StoreConnectionSamples.Version}, which adds the connection tables. Upgrade the service so the store migrates, then wait a minute for the first sample.");
     }
 
     private static string? Normalise(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
