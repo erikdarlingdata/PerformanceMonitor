@@ -228,7 +228,7 @@ internal static class DarlingMcpInstructions
     });
 
     /// <summary>
-    /// The protocol name of every tool the service registers: each <c>[McpServerTool(Name = ...)]</c> method in this assembly,
+    /// The protocol name of every tool the service registers: each method in this assembly that carries a tool attribute with a name,
     /// less <c>call_tool</c>, which is served on <c>/lean</c> only and which <see cref="DarlingMcpWritePolicy.ToolNames"/> leaves out
     /// of every census too (#9388). Read from the attributes, not listed by hand (#9474).
     /// </summary>
