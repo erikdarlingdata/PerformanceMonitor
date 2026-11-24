@@ -115,7 +115,7 @@ public class OptionalTablesTests
 
     private static readonly string[] Group7cWindowNames =
     [
-        "pg_autovacuum_stats", "pg_blocking_edges", "pg_column_stats", "pg_cpu_utilization",
+        "pg_autovacuum_stats", "pg_blocking_edges", "pg_buffer_usage", "pg_column_stats", "pg_cpu_utilization",
         "pg_database_size_stats", "pg_database_stats", "pg_deadlocks", "pg_extension_availability",
         "pg_index_bloat", "pg_index_usage_stats", "pg_io_stats", "pg_lock_stats", "pg_log_events",
         "pg_plan_capture_readiness", "pg_replication_slot_stats", "pg_replication_stats",
@@ -124,11 +124,27 @@ public class OptionalTablesTests
     ];
 
     [Fact]
-    public void ByGroup_7c_has_24_window_entries_plus_the_blocked_dimension()
+    public void ByGroup_7c_has_25_window_entries_plus_the_blocked_dimension()
     {
         var group7c = OptionalTables.ByGroup("7c");
-        Assert.Equal(25, group7c.Count);
-        Assert.Equal(24, group7c.Count(t => t.Kind == OptionalTableKind.Window));
+        Assert.Equal(26, group7c.Count);
+        Assert.Equal(25, group7c.Count(t => t.Kind == OptionalTableKind.Window));
+    }
+
+    [Fact]
+    public void Pg_log_events_is_gated_on_the_last_parsing_rung_and_pg_buffer_usage_is_a_candidate_event_table()
+    {
+        // A store at rung 239 or later parses log lines the way the keep-only export expects; below it, the table is
+        // skipped. pg_buffer_usage holds numbers and catalog names only, so it needs no column policy or gate.
+        var log = OptionalTables.TryGet("pg_log_events");
+        Assert.NotNull(log);
+        Assert.Equal(239, log!.MinDarlingSchemaVersion);
+
+        var buffers = OptionalTables.TryGet("pg_buffer_usage");
+        Assert.NotNull(buffers);
+        Assert.Equal(OptionalTableStatus.Candidate, buffers!.Status);
+        Assert.Equal(ExportGrain.Event, buffers.Grain);
+        Assert.Null(buffers.MinDarlingSchemaVersion);
     }
 
     [Fact]
