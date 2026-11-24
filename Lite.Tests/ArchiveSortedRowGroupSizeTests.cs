@@ -535,9 +535,10 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
     public void AMergeWhoseSwapFails_DoesNotNoteItsOutputInTheSkipList_UntilASwapSucceeds()
     {
         /* The day's existing file is replaced by the merge, so it is still there, and still a name the skip list could hold,
-           after a swap that failed. */
-        WriteUnsorted(DayFile, 30_000, payloadCopies: 4);
-        var hourly = WriteUnsorted($"{Day}_1000_query_store_stats.parquet", 30_000, payloadCopies: 4);
+           after a swap that failed. It is one row group, so the cut of the same pass leaves it alone and the only entry
+           that could appear is the merge's. */
+        WriteUnsorted(DayFile, 1_500);
+        var hourly = WriteUnsorted($"{Day}_1000_query_store_stats.parquet", 60_000, payloadCopies: 4);
         var service = NewService();
         service.MergeMemoryLimit = "2MB";
         FileStream? hold = null;
