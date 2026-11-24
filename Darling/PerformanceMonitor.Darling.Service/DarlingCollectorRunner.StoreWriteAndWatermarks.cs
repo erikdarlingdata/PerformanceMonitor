@@ -1057,6 +1057,7 @@ public sealed partial class DarlingCollectorRunner
             ExcludedDatabases = server.Config.ExcludedDatabases?.ToArray() ?? Array.Empty<string>(),
             PerfmonCounterOverride = null,
             CapturePlanXml = CapturePlansFor(server.CapturePlans),
+            PgBufferUsagePoolCapBuffers = PgBufferUsagePoolCapBuffersForTests,
             /* #2150: stays FALSE here, and NOT because the readers are behind — this is FetchRowsAsync, the
                on-demand live fetch. It returns the rows straight to the caller and writes nothing: no store
                insert, no text fetch, no watermark. Turning it on would null query_sql_text in rows that have
