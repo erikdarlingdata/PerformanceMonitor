@@ -113,13 +113,13 @@ WHERE s.name = 'log_lock_waits'";
         [Description("Only waits on this relation, as schema.name. Default none.")] string? relation = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         CancellationToken cancellationToken = default) =>
-        GetStoreLockWaits(postgres, hours_back, limit, role, relation, as_of, cancellationToken, lcMessagesOverride: null);
+        GetStoreLockWaits(postgres, hours_back, limit, role, relation, as_of, lcMessagesOverride: null, cancellationToken);
 
     /// <param name="lcMessagesOverride">Tests only. <c>lc_messages</c> can only be set to a locale the host has installed, so a test that needs
     /// the store to answer "not English" hands the value in. An empty string reads as a setting that could not be read.</param>
     internal static async Task<string> GetStoreLockWaits(
         NpgsqlDataSource postgres, int hours_back, int limit, string? role, string? relation, string? as_of,
-        CancellationToken cancellationToken, string? lcMessagesOverride)
+        string? lcMessagesOverride, CancellationToken cancellationToken)
     {
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null)

@@ -496,11 +496,11 @@ public sealed class StoreLockWaitsLiveTests
 
         string StatusOf(string json) => JsonDocument.Parse(json).RootElement.GetProperty("status").GetString()!;
 
-        var german = await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, ct, lcMessagesOverride: "de_DE.UTF-8");
+        var german = await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, lcMessagesOverride: "de_DE.UTF-8", ct);
         Assert.Equal("precondition", StatusOf(german));
         Assert.Contains("de_DE.UTF-8", german);
 
-        Assert.Equal("precondition", StatusOf(await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, ct, lcMessagesOverride: string.Empty)));
-        Assert.Equal("empty", StatusOf(await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, ct, lcMessagesOverride: "en_US.UTF-8")));
+        Assert.Equal("precondition", StatusOf(await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, lcMessagesOverride: string.Empty, ct)));
+        Assert.Equal("empty", StatusOf(await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, lcMessagesOverride: "en_US.UTF-8", ct)));
     }
 }
