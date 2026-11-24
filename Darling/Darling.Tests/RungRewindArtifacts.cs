@@ -1025,7 +1025,8 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'collect
         new(316, "hasStoreLockWaits", @"DROP TABLE IF EXISTS collect.store_lock_waits;"),
         // V317 (#9433): the reply size on the slow read record and the read latency histogram. The slow read column is the probe's newest sentinel. The rewind drops both columns, so a re-run of V317 adds them again, empty. Safe on a store that never had them.
         new(317, "hasReadReplyBytes", @"ALTER TABLE collect.slow_reads DROP COLUMN IF EXISTS reply_bytes;
-ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS reply_bytes_total;"),
+ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS reply_bytes_total;
+ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS reply_bytes_count;"),
     ];
 
     /// <summary>

@@ -138,6 +138,7 @@ public sealed class ReadCacheWebEndToEndTests
         Assert.True(received.Length > 600, "the answer holds 300 two-byte characters");
         var sample = Assert.Single(readLatency.Drain(), d => d.Route == route && d.Outcome == ReadOutcome.Ok);
         Assert.Equal(received.Length, sample.ReplyBytesTotal);
+        Assert.Equal(1L, sample.ReplyBytesCount);
         Assert.True(slowReads.TryRead(out var record));
         Assert.Equal(route, record!.Route);
         Assert.Equal(received.Length, record.ReplyBytes);

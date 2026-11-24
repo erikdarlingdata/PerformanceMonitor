@@ -2540,11 +2540,11 @@ ALTER TABLE config.store_statement_baseline
 
     /// <summary>
     /// V317 (#9433): <c>collect.slow_reads</c> gains <c>reply_bytes</c>, the size in bytes of the reply the caller received, and
-    /// <c>collect.read_latency</c> gains <c>reply_bytes_total</c>, the sum of those sizes over the reads the row counts. Both are nullable
-    /// <c>bigint</c> with no default: a row written before this rung has no size, and a NULL says so where a 0 would claim an empty reply.
-    /// A read that sent no reply (it threw, the caller left, the store refused it busy) adds 0 to the total, so the average over a
-    /// route's reads counts only the reads this build measured (rows with a total). The tables are plain and small, so <c>ADD COLUMN</c>
-    /// holds its lock for an instant.
+    /// <c>collect.read_latency</c> gains <c>reply_bytes_total</c>, the sum of those sizes, and <c>reply_bytes_count</c>, how many reads of
+    /// the row were measured. All three are nullable <c>bigint</c> with no default: a row written before this rung has no size, and a NULL
+    /// says so where a 0 would claim an empty reply. A read whose size was never taken (it threw, a plain-sentence answer, a composed
+    /// panel) adds to neither column, so the average is the total over the count and a bucket that mixes measured and unmeasured reads
+    /// averages its measured reads only. The tables are plain and small, so <c>ADD COLUMN</c> holds its lock for an instant.
     ///
     /// <para><b>An older build ignores the columns.</b> Its writer names its own column list and its reads name theirs, so it neither fills
     /// nor reads them.</para>
@@ -2554,7 +2554,8 @@ ALTER TABLE collect.slow_reads
     ADD COLUMN IF NOT EXISTS reply_bytes bigint;
 
 ALTER TABLE collect.read_latency
-    ADD COLUMN IF NOT EXISTS reply_bytes_total bigint;";
+    ADD COLUMN IF NOT EXISTS reply_bytes_total bigint,
+    ADD COLUMN IF NOT EXISTS reply_bytes_count bigint;";
 
     /// <summary>
     /// V221 (#6800): <c>collect.query_store_hash_hourly</c>, the narrow hourly source of the fleet tag roll-up, its <c>(hour, server_id)</c>

@@ -363,7 +363,7 @@ VALUES ($1, 'mcp', 'get_wait_stats', 'ok', 'none', 4, 400, 200, ARRAY[4,0,0,0,0,
         var row = Assert.Single(rows);
         Assert.Equal(7, row.RunCount);
         Assert.Equal(600L, row.ReplyBytesTotal);
-        Assert.Equal(3L, row.ReplyBytesRuns);
+        Assert.Equal(3L, row.ReplyBytesCount);
         Assert.Equal(200L, row.MeanReplyBytes);
 
         var onlyOlder = await DarlingReadLatencyReader.GetSummaryAsync(postgres, metricTime.AddHours(-3), "mcp", "get_wait_stats", ct);
@@ -426,6 +426,8 @@ VALUES ($1, 'mcp', 'get_wait_stats', 'ok', 'none', 4, 400, 200, ARRAY[4,0,0,0,0,
             var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, metricTime.AddHours(-1), null, null, ct);
             var unmeasured = Assert.Single(rows, r => r.Route == "get_wait_stats");
             Assert.Equal(2, unmeasured.RunCount);
+            Assert.Null(unmeasured.ReplyBytesTotal);
+            Assert.Equal(0L, unmeasured.ReplyBytesCount);
             Assert.Null(unmeasured.MeanReplyBytes);
             Assert.Equal(0L, Assert.Single(rows, r => r.Route == "get_plan_cache").MeanReplyBytes);
 
@@ -439,6 +441,77 @@ VALUES ($1, 'mcp', 'get_wait_stats', 'ok', 'none', 4, 400, 200, ARRAY[4,0,0,0,0,
             third.Record(ReadSurface.Web, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, 0, 0, null, replyBytes: 500);
             await third.FlushAsync(connection, metricTime, logger: null, ct);
             Assert.Equal(500L, await StoredTotal("get_wait_stats"));
+
+            /* The row now holds 3 unmeasured runs and one measured 500-byte read: the mean is that one read, not 500 over 4 runs. */
+            var mixed = Assert.Single(await DarlingReadLatencyReader.GetSummaryAsync(postgres, metricTime.AddHours(-1), null, null, ct), r => r.Route == "get_wait_stats");
+            Assert.Equal(4, mixed.RunCount);
+            Assert.Equal(500L, mixed.ReplyBytesTotal);
+            Assert.Equal(1L, mixed.ReplyBytesCount);
+            Assert.Equal(500L, mixed.MeanReplyBytes);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #9433: one measured read of 10,000 bytes and one read that took no size land on one key in one hour. The hour stores the
+    /// 10,000 bytes and a measured count of 1, and the mean is 10,000: the unmeasured read is not a 0-byte reply. A window whose
+    /// reads were all unmeasured reports a null total and a null mean, not 0.
+    /// </summary>
+    [Fact]
+    public async Task AMeasuredAndAnUnmeasuredRead_OnOneKey_AverageTheMeasuredReadOnly()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the #9433 mixed key pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        try
+        {
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var hour = DateTime.UtcNow.AddHours(-1);
+            var metricTime = new DateTime(hour.Year, hour.Month, hour.Day, hour.Hour, 0, 0, DateTimeKind.Utc);
+
+            var accumulator = new ReadLatencyAccumulator();
+            accumulator.Record(ReadSurface.Web, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, 0, 0, null, replyBytes: 10_000);
+            accumulator.Record(ReadSurface.Web, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, 0, 0, null);
+            accumulator.Record(ReadSurface.Web, "get_memory_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, 0, 0, null);
+            await accumulator.FlushAsync(connection, metricTime, logger: null, ct);
+
+            using (var stored = new NpgsqlCommand("SELECT reply_bytes_total, reply_bytes_count FROM collect.read_latency WHERE route = 'get_wait_stats'", connection))
+            await using (var storedReader = await stored.ExecuteReaderAsync(ct))
+            {
+                Assert.True(await storedReader.ReadAsync(ct));
+                Assert.Equal(10_000L, storedReader.GetInt64(0));
+                Assert.Equal(1L, storedReader.GetInt64(1));
+            }
+
+            using (var unmeasuredStored = new NpgsqlCommand("SELECT reply_bytes_total IS NULL AND reply_bytes_count IS NULL FROM collect.read_latency WHERE route = 'get_memory_stats'", connection))
+            {
+                Assert.Equal(true, await unmeasuredStored.ExecuteScalarAsync(ct));
+            }
+
+            var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, metricTime.AddHours(-1), null, null, ct);
+            var mixed = Assert.Single(rows, r => r.Route == "get_wait_stats");
+            Assert.Equal(2, mixed.RunCount);
+            Assert.Equal(10_000L, mixed.ReplyBytesTotal);
+            Assert.Equal(1L, mixed.ReplyBytesCount);
+            Assert.Equal(10_000L, mixed.MeanReplyBytes);
+
+            var unmeasured = Assert.Single(rows, r => r.Route == "get_memory_stats");
+            Assert.Equal(1, unmeasured.RunCount);
+            Assert.Null(unmeasured.ReplyBytesTotal);
+            Assert.Null(unmeasured.MeanReplyBytes);
 
             bodySucceeded = true;
         }
