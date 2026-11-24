@@ -204,7 +204,6 @@ calls AS (
     AND   {call}.database_name IS NOT DISTINCT FROM {sample}.database_name
     AND   {call}.event_time >= {sample}.event_time - {MatchCallToleranceBeforeSql}
     AND   {call}.event_time <= {sample}.event_time + {MatchCallWindowAfterSql}
-    AND   FALSE
 """;
 
     /// <summary>
