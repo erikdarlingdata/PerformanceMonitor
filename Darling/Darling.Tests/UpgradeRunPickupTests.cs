@@ -24,8 +24,7 @@ namespace Darling.Tests;
 /* #1776 own-store: each test mints its own scratch store database through ScratchPostgres. */
 public sealed class UpgradeRunPickupTests
 {
-    static UpgradeRunPickupTests() { AppDomain.CurrentDomain.FirstChanceException += (_, e) => { try { File.AppendAllText("C:/runner/logs/p9432-fc.txt", e.Exception.GetType().Name + ": " + e.Exception.Message.Replace("", " ").Replace("
-", " ") + Environment.NewLine); } catch (IOException) { } }; }
+    static UpgradeRunPickupTests() { AppDomain.CurrentDomain.FirstChanceException += (_, e) => { try { File.AppendAllText("C:/runner/logs/p9432-fc.txt", e.Exception.GetType().Name + ": " + e.Exception.Message.Replace(Environment.NewLine, " ") + Environment.NewLine); } catch (IOException) { } }; }
 
     private static string? BaseConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
