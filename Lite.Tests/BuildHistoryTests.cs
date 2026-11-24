@@ -190,7 +190,8 @@ public sealed class BuildHistoryTests : IDisposable
         history.Record(new BuildStartEntry(Start1, "3.12.0", "3.12.0", 84, 85, 5, 0), null);
         history.Record(new BuildStartEntry(Start2, "3.13.0", "3.13.0", 85, 85, 0, 0), Start1.AddHours(1));
 
-        var rows = new StoreHealthReader(new DuckDbInitializer(_dbPath), Path.Combine(_tempDir, "no-such-archive"), NewHousekeeping(_dbPath)).ReadBuildHistory();
+        using var duckDb = new DuckDbInitializer(_dbPath);
+        var rows = new StoreHealthReader(duckDb, Path.Combine(_tempDir, "no-such-archive"), NewHousekeeping(_dbPath)).ReadBuildHistory();
 
         Assert.Equal(["3.13.0", "3.12.0"], rows.Select(r => r.Build).ToArray());
         Assert.Equal("3.12.0", rows[0].PreviousBuild);
