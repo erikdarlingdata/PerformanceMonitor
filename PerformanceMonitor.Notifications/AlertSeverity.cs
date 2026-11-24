@@ -88,7 +88,7 @@ internal static class AlertSeverity
             /* #3653 (A8e): graded at the fire site — Warning, or Critical at the CPU health band's Critical
                bar (95% of a fixed host, the card's ladder). Like the deadlock arm above, this styles only
                pre-#3653 replays, all of which were amber. */
-            "High CPU" => ("#F59E0B", "WARNING", "\U0001F7E1"),
+            "High CPU" or "Capacity at ceiling" => ("#F59E0B", "WARNING", "\U0001F7E1"),
             /* #3539 A4: GRADED at both engines' fire sites now — Warning at one task/backend continuously
                stuck across the ten-minute window, Critical at ten (PoisonWaitEvaluator's shared bars; the
                PostgreSQL twin has graded since #2711, SQL Server fired presence-flat CRITICAL until #3539).
