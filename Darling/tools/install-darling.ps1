@@ -345,7 +345,8 @@ function Resolve-DarlingServiceAccountSid([string]$account) {
 # account is trusted as owner and as a write grantee), so the two cannot drift apart. Directories are always
 # created and granted; KeyDirectories only on a bring-your-own PostgreSQL install (Get-DarlingExtraServiceWriteDirectories
 # returns them, and only then are they on the list). Files are matched in the install root only, and only files (a folder of the same name is not on the
-# list): darling.json, and every file whose name starts with darling.json.bak- (BackupPrefix, #5649). That is the prefix the hardening covers: the
+# list): darling.json, upgrade-run.json (the run record upgrade-darling.ps1 writes and the service removes, #9432), and every file whose
+# name starts with darling.json.bak- (BackupPrefix, #5649). That is the prefix the hardening covers: the
 # install-time pass in install-darling.ps1, the service's TryHardenConfigBackups and the CLI's backup enumeration all
 # take every darling.json.bak-* name, not only the darling.json.bak-yyyyMMdd-HHmmss(-N) names the config-editing verbs
 # write, so a backup an operator named by hand (darling.json.bak-before-edit) becomes service-owned at the next start
@@ -361,7 +362,7 @@ function Get-DarlingServiceWrittenNames {
     return [pscustomobject]@{
         Directories    = @('pg-runtime', 'pg-runtime-prev')
         KeyDirectories = @('darling-keys')
-        Files          = @('darling.json')
+        Files          = @('darling.json', 'upgrade-run.json')
         BackupPrefix   = 'darling.json.bak-'
     }
 }
@@ -1231,7 +1232,7 @@ function Get-DarlingBackupFileFindingNames([string]$root, [array]$findings) {
         $segments = Get-DarlingSegmentsBelowRoot $root "$($finding.Path)"
         if ($null -eq $segments -or $segments.Count -ne 1) { return @() }
         $leaf = $segments[0]
-        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or [string]::Equals($leaf, 'darling.json', [StringComparison]::OrdinalIgnoreCase)) { return @() }
+        if (-not (Test-DarlingServiceWrittenFileName $leaf) -or -not $leaf.StartsWith((Get-DarlingServiceWrittenNames).BackupPrefix, [StringComparison]::OrdinalIgnoreCase)) { return @() }
         if ($names -notcontains $leaf) { $names += $leaf }
     }
     return @($names)
