@@ -25,6 +25,7 @@ public sealed class McpToolGuideHeadsAgStoreTests
         "get_store_query_stats",
         "get_store_query_history",
         "get_store_pass_steps",
+        "get_store_setting_changes",
     ];
 
     [Fact]

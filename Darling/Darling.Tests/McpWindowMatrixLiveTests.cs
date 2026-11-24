@@ -435,8 +435,10 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
            is told by the oldest minute returned, and the window_truncated notice is not rolled out to it. */
         ["get_store_connections"] = NoNotice,
         ["get_store_log"] = "store-log window: the answer's capture denominator says how much of the window was captured (#7010)",
+        ["get_store_checkpoints"] = "store-checkpoint window: a window with no checkpoint rows answers with the reason (log_checkpoints off, or the store log unread), not an empty success (#9414)",
         /* #9411: a log of events, not a series: a window with no row is the answer (the pass recorded nothing then), and the table holds nothing before the store was migrated to it, so there is no data floor to notice. */
         ["get_store_pass_steps"] = "pass step log: an hour with no row means the pass recorded nothing, so there is no data floor to name (#9411)",
+        ["get_service_starts"] = "service start history: hours_back keeps the starts that began in the window, and a window with no start is a true negative (the service did not start), so there is no data floor to name (#9438)",
         /* #7010: not a data window by design. The window picks the fleet sweeper's own run records for the timeline, the latest sweep is read outside
            it on purpose, and no collector table backs it for a coverage probe. */
         ["get_sweep_reports"] = "sweep timeline of the store's own run records; the latest sweep is read outside the window (#7010)",
