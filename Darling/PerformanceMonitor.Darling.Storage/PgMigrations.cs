@@ -4124,7 +4124,8 @@ END $$;";
         /* V315 (#9434): the service process's start instant on each collect.read_latency bucket, and the bucket key now names it, so a restart within an hour
            writes a second row for that hour instead of adding into the first. One nullable column, and the primary key becomes a unique index built with
            NULLS NOT DISTINCT. The table is a plain table that holds at most 90 days of hourly rows, so the index build is a short, bounded step. An older
-           build ignores the column, and its flush writes NULL, which the new key treats as one more value. */
+           build ignores the column, but its flush still names the old five-column conflict key, which no unique index matches any more, so it fails
+           (42P10) until the rollback statement in docs/darling/admin.md restores the primary key. */
         new Migration(ReadLatencyProcessStart.Version, "read-latency-process-start", ReadLatencyProcessStart.Sql),
         /* V316 (#9439): collect.store_lock_waits, one empty plain table and two indexes, filled by the hourly store log sweep from the lock waits the log records. No data
            moves. An older build never reads or names it. */

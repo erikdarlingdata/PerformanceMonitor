@@ -792,6 +792,12 @@ public static class AlertContextBuilders
                 $"{finding.ShortSamples:N0} of {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationText} (too short to be a client timeout); they are left out of the rate judged")));
         }
 
+        if (finding.MatchedCalls > 0)
+        {
+            reading.Fields.Add(("Matched calls", string.Create(CultureInfo.InvariantCulture,
+                $"{finding.MatchedCalls:N0} of {finding.SampledEvents:N0} sampled events lasted under {AttentionWindowSql.MinInterruptDurationText} but each matched a call the client cancelled while it ran; they count as client timeouts. The attention event times the cancel, not the command, so its length is not the timeout's length")));
+        }
+
         if (finding.AzdataMetadataSamples > 0)
         {
             reading.Fields.Add(("Azure Data Studio", string.Create(CultureInfo.InvariantCulture,

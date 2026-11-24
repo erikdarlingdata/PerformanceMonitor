@@ -342,16 +342,38 @@ FROM config.store_log_read_marker AS m";
         ILogger? logger,
         IStoreLogFiles? files,
         CancellationToken cancellationToken = default) =>
-        SweepAsync(connection, utcNow, logger, files, StoreLockWaits.Shared, cancellationToken);
+        SweepAsync(connection, utcNow, logger, files, StoreLockWaits.Shared, null, cancellationToken);
+
+    /// <summary>The sweep over a given set of log files with <paramref name="readOnBudget"/> in place of
+    /// <see cref="ReadOnBudget"/>, for a test whose point is the byte and slab bounds, so a slow machine cannot end its
+    /// capture early.</summary>
+    internal static Task<List<FileCapture>> SweepAsync(
+        NpgsqlConnection connection,
+        DateTime utcNow,
+        ILogger? logger,
+        IStoreLogFiles? files,
+        TimeSpan readOnBudget,
+        CancellationToken cancellationToken) =>
+        SweepAsync(connection, utcNow, logger, files, StoreLockWaits.Shared, readOnBudget, cancellationToken);
 
     /// <summary>The sweep over a given set of log files and a given map of sessions (#9439): the service's own map in
     /// production, a test's in a test.</summary>
-    internal static async Task<List<FileCapture>> SweepAsync(
+    internal static Task<List<FileCapture>> SweepAsync(
         NpgsqlConnection connection,
         DateTime utcNow,
         ILogger? logger,
         IStoreLogFiles? files,
         StoreLockWaits.PidMap pids,
+        CancellationToken cancellationToken) =>
+        SweepAsync(connection, utcNow, logger, files, pids, null, cancellationToken);
+
+    private static async Task<List<FileCapture>> SweepAsync(
+        NpgsqlConnection connection,
+        DateTime utcNow,
+        ILogger? logger,
+        IStoreLogFiles? files,
+        StoreLockWaits.PidMap pids,
+        TimeSpan? readOnBudget,
         CancellationToken cancellationToken)
     {
         if (connection is null)
@@ -377,8 +399,12 @@ FROM config.store_log_read_marker AS m";
            capture row's totals and the marker move together), so a budget that cancels mid-way keeps every slab it
            finished, and each slab's text is classified and released before the next is read. */
         var clock = Stopwatch.StartNew();
-        var byteBudget = new ByteBudget(MaxBytesPerCapture, clock);
+        var timeBudget = readOnBudget ?? ReadOnBudget;
+        var byteBudget = new ByteBudget(MaxBytesPerCapture, clock, timeBudget);
         var slabsRead = 0;
+        /* #9439: ends of lock waits whose opening the store did not hold when their slab was written. The wait may open in a slab read later in
+           this same capture (an older file's later slab), so they are retried once the capture has read on. */
+        var unmatchedCloses = new List<StoreLockWaits.UnmatchedClose>();
         var open = new List<(int Index, Candidate Candidate, long NextOffset, List<StoreLogClassifier.Group> Groups, StoreLogClassifier.CaptureBudget Budget)>();
 
         foreach (var candidate in candidates)
@@ -414,7 +440,7 @@ FROM config.store_log_read_marker AS m";
                 OffsetReset: resume.OffsetReset,
                 Census: census);
 
-            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, firstSlab: true, step.Value.Waits, pids, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
+            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, firstSlab: true, step.Value.Waits, pids, unmatchedCloses, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
             captured.Add(capture);
             slabsRead++;
 
@@ -433,7 +459,7 @@ FROM config.store_log_read_marker AS m";
         {
             var nextOffset = file.NextOffset;
             while (slabsRead < MaxSlabsPerCapture
-                   && clock.Elapsed < ReadOnBudget
+                   && clock.Elapsed < timeBudget
                    && byteBudget.Remaining > 0
                    && file.Candidate.SizeBytes > nextOffset)
             {
@@ -457,7 +483,7 @@ FROM config.store_log_read_marker AS m";
                     BytesPending: Math.Max(0, file.Candidate.SizeBytes - nextOffset),
                     OffsetReset: false,
                     Census: census);
-                await WriteAsync(connection, captureTime, slabCapture, nextOffset, file.Candidate.SizeBytes, firstSlab: false, step.Value.Waits, pids, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
+                await WriteAsync(connection, captureTime, slabCapture, nextOffset, file.Candidate.SizeBytes, firstSlab: false, step.Value.Waits, pids, unmatchedCloses, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
 
                 file.Groups.AddRange(census.Groups);
                 captured[file.Index] = new FileCapture(
@@ -475,6 +501,8 @@ FROM config.store_log_read_marker AS m";
                 slabsRead++;
             }
         }
+
+        await StoreLockWaits.RetryClosesAsync(connection, unmatchedCloses, cancellationToken);
 
         if (ShouldWriteHeartbeat(captured.Count, candidates.Count))
         {
@@ -630,11 +658,11 @@ FROM config.store_log_read_marker AS m";
     /// chunk past a line longer than one slab draw on it, and a slab is read no longer than what is left, so the capture's
     /// total stays at <see cref="MaxBytesPerCapture"/>. A scan also stops once the capture's time budget
     /// (<see cref="ReadOnBudget"/>) is spent, as it does when the bytes are.</summary>
-    private sealed class ByteBudget(long remaining, Stopwatch clock)
+    private sealed class ByteBudget(long remaining, Stopwatch clock, TimeSpan timeBudget)
     {
         public long Remaining { get; set; } = remaining;
 
-        public bool ScanMayContinue => Remaining > 0 && clock.Elapsed < ReadOnBudget;
+        public bool ScanMayContinue => Remaining > 0 && clock.Elapsed < timeBudget;
     }
 
     /// <summary>How much of a long line one scan read holds (#9314).</summary>
@@ -782,6 +810,7 @@ FROM config.store_log_read_marker AS m";
         bool firstSlab,
         StoreLockWaits.ParseResult waits,
         StoreLockWaits.PidMap pids,
+        List<StoreLockWaits.UnmatchedClose> unmatchedCloses,
         StoreCheckpoints.Parsed checkpoints,
         ILogger? logger,
         CancellationToken cancellationToken)
@@ -790,7 +819,7 @@ FROM config.store_log_read_marker AS m";
 
         /* #9439: the lock waits of this slab, in the slab's own transaction, so the rows and the marker that
            accounts for them land together or not at all. */
-        await StoreLockWaits.WriteAsync(connection, transaction, waits, pids, captureTime, cancellationToken);
+        await StoreLockWaits.WriteAsync(connection, transaction, waits, pids, captureTime, unmatchedCloses, cancellationToken);
 
         var groups = capture.Census.Groups;
         if (groups.Count > 0)

@@ -4745,6 +4745,7 @@
                         <DataGridTextColumn Header="Unit" Binding="{Binding Unit}" Width="70"/>
                         <DataGridTextColumn Header="Scope" Binding="{Binding Scope}" Width="160"/>
                         <DataGridTextColumn Header="Kind" Binding="{Binding Kind}" Width="80"/>
+                        <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="160"/>
                         <DataGridTextColumn Header="Change Needs" Binding="{Binding Context}" Width="120"/>
                         <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="150"/>
                         <DataGridTextColumn Header="Description" Binding="{Binding ShortDescription}" MinWidth="200" Width="*"/>

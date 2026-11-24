@@ -355,8 +355,8 @@ public sealed class DarlingMcpReadLatencyTools
     /// </summary>
     internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes, object? admission = null, DateTime? splitAt = null, IReadOnlyList<string>? processStarts = null)
     {
-        /* Insertion order is the member order of the answer. split_at appears only when the read asked for a split, so a read without one
-           is byte for byte what it was (#9434). */
+        /* Insertion order is the member order of the answer. split_at appears only when the read asked for a split. process_starts is on every
+           answer, so a caller can copy one of them into split_at (#9434). */
         string Envelope(IReadOnlyList<object> page, bool truncated)
         {
             var answer = new Dictionary<string, object?>
