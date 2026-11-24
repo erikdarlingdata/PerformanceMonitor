@@ -37,6 +37,7 @@ public sealed class StoreTableActivityTimingScratch
             await using var rd = await cnt.ExecuteReaderAsync(ct);
             await rd.ReadAsync(ct);
             var msg = $"TIMING first={first}ms second={second}ms rows={rows} userTables={rd.GetValue(0)} baseline={rd.GetValue(1)} htScanned={rd.GetValue(2)}";
+            System.IO.File.WriteAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "timing9413.txt"), msg);
             ok = true;
             Assert.Fail(msg);
         }
