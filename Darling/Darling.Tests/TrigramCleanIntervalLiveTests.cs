@@ -84,7 +84,7 @@ public sealed class TrigramCleanIntervalLiveTests
     private const string TextsSql = @"
 WITH v AS (SELECT array_agg(w ORDER BY id) AS a FROM public.zz_vocab)
 SELECT g AS n,
-       (SELECT string_agg(v.a[1 + floor(power(random(), 3) * {0})::int], ' ') FROM generate_series(1, {1}) AS x(i) WHERE x.i > 0 OR g > 0) || ' ' || g::text || '/' || {2}::text AS t
+       (SELECT string_agg(v.a[1 + floor(power(random(), 3) * {0} * (1 + x.i * 0))::int], ' ') FROM generate_series(1, {1}) AS x(i) WHERE x.i > 0 OR g > 0) || ' ' || g::text || '/' || {2}::text AS t
 FROM v, generate_series({3}, {4}) AS g";
 
     private static string Texts(int first, int last, int salt) =>
