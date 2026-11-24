@@ -119,9 +119,17 @@ public static class ParquetCompaction
 
     /* The one option list for archive COPYs; Lite.Tests' ArchiveCopyOptionsPinTests scans Lite/ so a
        new COPY cannot skip it. */
-    public static string BuildArchiveCopyOptions(int rowGroupSize = ArchiveRowGroupSize, long rowGroupBytes = 0) =>
+    public static string BuildArchiveCopyOptions(int rowGroupSize = ArchiveRowGroupSize, long rowGroupBytes = 0, bool stampSortedCut = false) =>
         $"FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE {rowGroupSize}" +
-        (rowGroupBytes > 0 ? $", ROW_GROUP_SIZE_BYTES {rowGroupBytes}" : "");
+        (rowGroupBytes > 0 ? $", ROW_GROUP_SIZE_BYTES {rowGroupBytes}" : "") +
+        (stampSortedCut ? $", KV_METADATA {{{SortedCutStampKey}: '{SortedCutRule}'}}" : "");
+
+    /* The footer key a server-ordered write stamps its file with (#9409), and its value: the rule the file was cut under.
+       The rule is a version plus the row and byte targets of a sorted cut, so a change to either target makes every
+       stamped file one the re-cut picks up again, and a file stamped with the current rule is never cut again. A
+       sorted write is stamped whatever size it ended at: the retry at 2,048 rows is as small as a sorted merge gets. */
+    internal const string SortedCutStampKey = "pm_sorted_cut";
+    internal static readonly string SortedCutRule = $"1:{SortedArchiveRowGroupSize}:{SortedRowGroupBytes}";
 
     public static readonly string ArchiveCopyOptions = BuildArchiveCopyOptions();
 
@@ -525,13 +533,41 @@ public static class ParquetCompaction
        The target of a file is its row-group size or the byte bound, whichever a cut would reach first (#9455). Rows of a
        wide table fill a group with far fewer than 16,384 rows, so a file whose largest group already holds the byte bound
        is at its target, a file whose target is 2,048 rows (rows of several KB) is never cut, and the cut never picks
-       the file it wrote. */
+       the file it wrote.
+
+       The byte clause alone cannot tell that a file is the cut's own: the footer's size is after dictionary encoding, so
+       a group the byte bound cut can read far under half the bound when the text repeats (a 4 KB statement text with a
+       few hundred distinct values cut at 6,235 rows and 0.87 MB), and the same file would be sorted again on every pass
+       (#9409). A file stamped with the current rule (SortedCutStampKey) is therefore never cut again. A file with no
+       stamp or an old one is judged by the row and byte rule, so a file written before the stamp is cut at most once more. */
     internal static bool NeedsRecut(DuckDBConnection con, string path, int targetRows = SortedArchiveRowGroupSize)
     {
+        if (IsStampedWithCurrentRule(SortedCutStamp(con, path)))
+        {
+            return false;
+        }
+
         var (groups, maxRows) = RowGroupShape(con, path);
-        return groups > 1
-            && maxRows < Math.Min(RecutBelowRowGroupRows, targetRows)
-            && MaxRowGroupUncompressedBytes(con, path) < RecutAtByteTarget;
+        return NeedsRecut(con, path, groups, maxRows, stamp: null, targetRows);
+    }
+
+    /* The same rule for a caller that has already read the footer: its row-group shape and the file's stamp (null when
+       it has none). */
+    internal static bool NeedsRecut(DuckDBConnection con, string path, long groups, long maxGroupRows, string? stamp, int targetRows = SortedArchiveRowGroupSize) =>
+        !IsStampedWithCurrentRule(stamp)
+        && groups > 1
+        && maxGroupRows < Math.Min(RecutBelowRowGroupRows, targetRows)
+        && MaxRowGroupUncompressedBytes(con, path) < RecutAtByteTarget;
+
+    internal static bool IsStampedWithCurrentRule(string? stamp) =>
+        string.Equals(stamp, SortedCutRule, StringComparison.Ordinal);
+
+    /* The rule a file was stamped with, or null when its footer has none (key and value are BLOB). */
+    internal static string? SortedCutStamp(DuckDBConnection con, string path)
+    {
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = $"SELECT decode(value) FROM parquet_kv_metadata('{EscapeSqlPath(path)}') WHERE decode(key) = '{SortedCutStampKey}' LIMIT 1";
+        return cmd.ExecuteScalar() as string;
     }
 
     internal static long RowCount(string path)
@@ -604,7 +640,7 @@ public static class ParquetCompaction
         using var cmd = con.CreateCommand();
         cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)" +
                           (orderBy is null ? "" : $" ORDER BY {orderBy}") + ") " +
-                          $"TO '{EscapeSqlPath(outputPath)}' ({BuildArchiveCopyOptions(rowGroupSize, groupBytes)})";
+                          $"TO '{EscapeSqlPath(outputPath)}' ({BuildArchiveCopyOptions(rowGroupSize, groupBytes, stampSortedCut: orderBy is not null)})";
         cmd.ExecuteNonQuery();
     }
 

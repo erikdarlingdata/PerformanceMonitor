@@ -203,6 +203,81 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
         }
     }
 
+    private const int RepeatingTextRows = 20_000;
+
+    /* Rows of 4 KB statement text with a few hundred distinct values, the way archived query_store_stats and query_stats
+       repeat: DuckDB dictionary-encodes it, so a row group the byte bound cut is small in the footer (#9409). */
+    private string WriteUnsortedRepeatingText(string fileName)
+    {
+        var path = P(fileName);
+        Exec($"COPY (SELECT i::BIGINT AS collection_id, TIMESTAMP '2026-09-28 00:00:00' + to_seconds(((i * 7919) % {RepeatingTextRows})::BIGINT) AS collection_time, " +
+             $"(1 + i % {Servers})::INTEGER AS server_id, repeat(md5((i % 200)::VARCHAR), 128) AS payload FROM range({RepeatingTextRows}) t(i)) " +
+             $"TO '{path}' ({ParquetCompaction.BuildArchiveCopyOptions(ParquetCompaction.ArchiveRowGroupSize)})");
+        return path;
+    }
+
+    /// <summary>
+    /// Text that repeats makes a group the byte bound cut read small in the footer, under half the bound. The sorted merge
+    /// and the cut stamp their files, so neither output is picked again, while a file with no stamp and groups of 2,048 rows
+    /// still is.
+    /// </summary>
+    [Fact]
+    public void ASortedFileOfRepeatingText_IsStamped_AndNotPickedForACut()
+    {
+        var source = WriteUnsortedRepeatingText("repeating_source.parquet");
+        var merged = P("repeating_merged.parquet");
+        var recut = P("repeating_recut.parquet");
+        Directory.CreateDirectory(P("spill"));
+        using var con = new DuckDBConnection("DataSource=:memory:");
+        con.Open();
+
+        Assert.True(ParquetCompaction.NeedsRecut(con, source));
+
+        ParquetCompaction.MergeBatchToFile("query_store_stats", [source], merged, P("spill"));
+        Assert.True(ParquetCompaction.TryRecutToFile("query_store_stats", source, recut, P("spill")));
+
+        foreach (var output in new[] { merged, recut })
+        {
+            /* The shape the byte clause alone would pick again: several groups, none near the row cap, all small in the footer. */
+            Assert.True(Groups(output) > 1, $"{output} is {Groups(output)} group(s)");
+            Assert.True(MaxGroupRows(output) < ParquetCompaction.RecutBelowRowGroupRows, $"{output} has groups of {MaxGroupRows(output)} rows");
+            Assert.True(ParquetCompaction.MaxRowGroupUncompressedBytes(con, output) < ParquetCompaction.SortedRowGroupBytes / 2);
+            Assert.False(ParquetCompaction.NeedsRecut(con, output), $"{output} would be sorted again");
+        }
+
+        Assert.Null(ParquetCompaction.SortedCutStamp(con, source));
+    }
+
+    /// <summary>
+    /// A file of repeating text that is cut once is not cut again by a later pass: one merge, and the file's bytes are left alone.
+    /// </summary>
+    [Fact]
+    public void ARecutFileOfRepeatingText_IsNotCutOnEveryPass()
+    {
+        var file = WriteUnsortedRepeatingText(DayFile);
+        var merges = new List<string>();
+        var previous = ParquetCompaction.MergeAttemptObservedForTests;
+        ParquetCompaction.MergeAttemptObservedForTests = (path, _, _) => { lock (merges) { merges.Add(path); } };
+        try
+        {
+            NewService().CompactParquetFiles();
+            Assert.Single(merges);
+            Assert.True(Groups(file) > 1, "the file is several byte-bound groups");
+            var bytes = File.ReadAllBytes(file);
+
+            NewService().CompactParquetFiles();
+            NewService().CompactParquetFiles();
+
+            Assert.Single(merges);
+            Assert.True(bytes.AsSpan().SequenceEqual(File.ReadAllBytes(file)), "a later pass rewrote the file");
+            AssertOnlyTheDayFile();
+        }
+        finally
+        {
+            ParquetCompaction.MergeAttemptObservedForTests = previous;
+        }
+    }
+
     /// <summary>
     /// A re-cut that fails after its temp is written, or is interrupted there by shutdown, leaves the original byte for
     /// byte, with no temp, journal or set-aside file in the folder.
@@ -450,6 +525,39 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
         {
             ParquetCompaction.MergeAttemptObservedForTests = previous;
         }
+    }
+
+    /// <summary>
+    /// The merge that fell back to the unsorted order notes its output in the skip list only after the swap put the output in
+    /// place. A swap that fails leaves the originals and no entry, so the file is not kept out of the cut for the build.
+    /// </summary>
+    [Fact]
+    public void AMergeWhoseSwapFails_DoesNotNoteItsOutputInTheSkipList_UntilASwapSucceeds()
+    {
+        var hourly = WriteUnsorted($"{Day}_1000_query_store_stats.parquet", 60_000, payloadCopies: 4);
+        var service = NewService();
+        service.MergeMemoryLimit = "2MB";
+        FileStream? hold = null;
+        /* A scanner-like handle: readable, but without FileShare.Delete, so the rename fails. */
+        service.OnCompactionTempsReadyForTests = temps =>
+            hold = new FileStream(temps[^1].Replace("/", "\\"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        try
+        {
+            service.CompactParquetFiles();
+        }
+        finally
+        {
+            hold?.Dispose();
+        }
+
+        Assert.True(File.Exists(hourly), "the swap failed, so the per-cycle input stays");
+        Assert.False(File.Exists(P(SkipListFile)), "the output was noted before the swap");
+
+        service.OnCompactionTempsReadyForTests = null;
+        service.CompactParquetFiles();
+
+        Assert.True(File.Exists(DayPath));
+        Assert.Contains(DayFile, File.ReadAllText(P(SkipListFile)), StringComparison.Ordinal);
     }
 
     /* #9455: rows with long text at the real sorted-merge limit. 250,000 rows of about 1 KB of text that never repeats ran
