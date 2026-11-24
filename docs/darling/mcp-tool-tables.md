@@ -196,6 +196,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_collection_log` | `collect.collection_log`<br>`collect.servers`<br>`collect.v_collection_log` |
 | `get_collection_state` | `config.config_service`<br>`config.config_monitored_servers` |
 | `get_collector_cost` | `collect.collector_cost` |
+| `get_collector_readiness` | `collect.collection_log`<br>`collect.servers`<br>`collect.server_properties`<br>`collect.pg_extension_availability`<br>`config.config_collector_schedules`<br>`config.config_collector_run_times` |
 | `get_collector_schedules` | `config.config_collector_schedules`<br>`config.config_collector_run_times` |
 | `get_collector_stall_probes` | `collect.collector_stall_probes` |
 | `get_command_result` | `config.config_command`<br>`config.read_mcp_command_result` |

@@ -574,7 +574,7 @@
       ]
     }
   ],
-  "generated_from": "c0c0b0776",
+  "generated_from": "37abd720a",
   "mcp_tools": [
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
@@ -919,6 +919,11 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorCostTools.cs",
       "name": "get_collector_cost",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorReadinessTools.cs",
+      "name": "get_collector_readiness",
       "product": "Darling"
     },
     {
@@ -2497,6 +2502,11 @@
       "product": "Lite"
     },
     {
+      "file": "Lite/Mcp/McpSlowCallTools.cs",
+      "name": "get_slow_mcp_calls",
+      "product": "Lite"
+    },
+    {
       "file": "Lite/Mcp/McpLatchSpinlockTools.cs",
       "name": "get_spinlock_stats",
       "product": "Lite"
@@ -2851,7 +2861,7 @@
     {
       "name": "Darling.Tests",
       "project": "Darling/Darling.Tests/Darling.Tests.csproj",
-      "test_classes": 3563
+      "test_classes": 3570
     },
     {
       "name": "PerformanceMonitor.Exporter.TestChild",
@@ -2866,7 +2876,7 @@
     {
       "name": "Lite.Tests",
       "project": "Lite.Tests/Lite.Tests.csproj",
-      "test_classes": 1189
+      "test_classes": 1194
     }
   ]
 }
