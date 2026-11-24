@@ -54,14 +54,14 @@ public sealed class DarlingUpgradeRunRecordTests
     }
 
     /// <summary>Runs the extracted functions plus <paramref name="body"/> under PowerShell and returns what the body wrote to the output.</summary>
-    private static string Run(string folder, string body)
+    private static string Run(string folder, string body, params string[] extraFunctions)
     {
         var pwsh = PwshPath;
         Assert.SkipUnless(pwsh is not null, "neither Windows PowerShell 5.1 nor pwsh is installed on this machine.");
         var script = ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
         var text = new StringBuilder();
         text.AppendLine("$ErrorActionPreference = 'Stop'");
-        foreach (var name in FunctionNames) { text.AppendLine(Extract(script, name)); }
+        foreach (var name in FunctionNames.Concat(extraFunctions)) { text.AppendLine(Extract(script, name)); }
         text.AppendLine("$root = '" + folder.Replace("'", "''") + "'");
         text.AppendLine(body);
         var driver = Path.Combine(folder, "driver.ps1");
@@ -223,5 +223,78 @@ public sealed class DarlingUpgradeRunRecordTests
             if (OperatingSystem.IsWindows()) { Assert.Equal(before, File.ReadAllText(Path.Combine(folder, "upgrade-run.json"))); }
         }
         finally { Cleanup(folder); }
+    }
+
+    private static readonly string[] ServiceWrittenListFunctions =
+    {
+        "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount",
+        "Initialize-DarlingNativeOwner", "Test-DarlingServiceWrittenPath", "Get-DarlingServiceWrittenRootFiles", "Get-DarlingCanonicalPath",
+        "Get-DarlingSegmentsBelowRoot",
+    };
+
+    /// <summary>
+    /// The review of #9493: the service account (NT SERVICE
+ame, never LocalSystem) holds an explicit Modify grant on upgrade-run.json,
+    /// and the pre-lock walk of a re-run named it as a stranger's write grant, so a run that failed before the lock blocked the documented
+    /// re-run. A real SID that is not this account (Network Service) stands for the service: granting on a file this account owns needs no
+    /// admin. The control run, with no service SID passed, shows the walk does see the grant.
+    /// </summary>
+    [Fact]
+    public void TheServicesGrantOnTheRunFile_IsNotAStrangersGrant_ToThePreLockWalk()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the grant is an NTFS ACL.");
+        var folder = NewFolder();
+        try
+        {
+            var body = "$run = New-DarlingUpgradeRun 'a' 'b' ([datetime]::UtcNow); $w = Write-DarlingUpgradeRunFile $root $run '*S-1-5-20'; 'warning=[' + $w.Warning + ']'; "
+                + "$wk = [System.Security.Principal.WellKnownSidType]; $service = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-20'); "
+                + "$trusted = @([System.Security.Principal.WindowsIdentity]::GetCurrent().User, (New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)), (New-Object System.Security.Principal.SecurityIdentifier($wk::BuiltinAdministratorsSid, $null))); "
+                + "$rule = @((Get-Acl -LiteralPath (Join-Path $root 'upgrade-run.json')).GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference -eq $service }); 'granted=' + ($rule.Count -gt 0); "
+                + "$control = @(Get-UntrustedWriteGrantees $root $trusted -Recurse | Where-Object { $_ -like '*upgrade-run.json*' }); 'control=' + $control.Count; "
+                + "$walk = @(Get-UntrustedWriteGrantees $root $trusted -Recurse -ServiceSids @($service) | Where-Object { $_ -like '*upgrade-run.json*' }); 'walk=' + $walk.Count; "
+                + "'trustedPath=' + (Test-DarlingServiceWrittenPath $root (Join-Path $root 'upgrade-run.json') @() (Get-Item -LiteralPath (Join-Path $root 'upgrade-run.json')))";
+            var output = Run(folder, body, ServiceWrittenListFunctions.Append("Get-UntrustedWriteGrantees").ToArray());
+            Assert.Contains("granted=True", output, StringComparison.Ordinal);
+            Assert.Contains("control=1", output, StringComparison.Ordinal);
+            Assert.Contains("walk=0", output, StringComparison.Ordinal);
+            Assert.Contains("trustedPath=True", output, StringComparison.Ordinal);
+        }
+        finally { Cleanup(folder); }
+    }
+
+    /// <summary>
+    /// The review of #9493: the install-tree lock kept resetting the run file's explicit grant, and File.Replace keeps the DACL of the file it
+    /// replaces, so after the lock the service could never delete the file. With the file on the service-written list the lock keeps the
+    /// grant, and a rewrite after the lock (the run's end, or -MarkVerified) keeps it too. The lock needs an elevated token for its owner step:
+    /// without one it reports the file as not owned by the service, which this test ignores, and still sets the permissions it asserts on.
+    /// </summary>
+    [Fact]
+    public void AfterTheInstallTreeLock_AndARewrite_TheServiceStillHoldsModifyOnTheRunFile()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the grant is an NTFS ACL.");
+        var folder = NewFolder();
+        try
+        {
+            var body = "$run = New-DarlingUpgradeRun 'a' 'b' ([datetime]::UtcNow); Write-DarlingUpgradeRunFile $root $run 'NT AUTHORITY\NETWORK SERVICE' | Out-Null; "
+                + "$service = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-20'); $file = Join-Path $root 'upgrade-run.json'; "
+                + "function Get-ServiceModify { @((Get-Acl -LiteralPath $file).GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference -eq $service -and ([int]$_.FileSystemRights -band 0x10000) -ne 0 }).Count -gt 0 }; "
+                + "'before=' + (Get-ServiceModify); "
+                + "$open = @(Lock-DarlingInstallTree $root 'NT AUTHORITY\NETWORK SERVICE'); 'lockRan=' + ($open.Count -ge 0); "
+                + "'afterLock=' + (Get-ServiceModify); "
+                + "Close-DarlingUpgradeRun $root $run $true 'clear' '' '' 'NT AUTHORITY\NETWORK SERVICE' | Out-Null; "
+                + "'afterRewrite=' + (Get-ServiceModify); "
+                + "'state=' + (Read-DarlingUpgradeRunFile $root)['state']";
+            var output = Run(folder, body, ServiceWrittenListFunctions.Append("Lock-DarlingInstallTree").ToArray());
+            Assert.Contains("before=True", output, StringComparison.Ordinal);
+            Assert.Contains("afterLock=True", output, StringComparison.Ordinal);
+            Assert.Contains("afterRewrite=True", output, StringComparison.Ordinal);
+            Assert.Contains("state=succeeded", output, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { _ = System.Diagnostics.Process.Start(new ProcessStartInfo("icacls.exe", $"\"{folder}\" /reset /T /C /Q") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true })?.WaitForExit(30_000); }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { }
+            Cleanup(folder);
+        }
     }
 }
