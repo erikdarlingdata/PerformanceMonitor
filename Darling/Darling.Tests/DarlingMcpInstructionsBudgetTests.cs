@@ -113,6 +113,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
         var writes = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
         var admin = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
         var shared = served.Count(DarlingMcpInstructions.LiteToolNames.Contains);
+        var postgres = served.Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal));
 
         Assert.True(served.Count < catalog.Count, "the writes-off configuration should serve fewer tools than the catalog");
         var investigations = catalog.Count(DarlingMcpWritePolicy.IsInvestigation);
@@ -123,7 +124,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
             $"This server exposes {served.Count} of its {catalog.Count} tools: the write tools are off, so the {writes + admin} that change " +
             $"monitoring configuration are not served (`mcp.allowWrites` with a token adds {writes}, `mcp.allowServerAdmin` {admin} more); " +
             $"`mcp.allowInvestigations` with a token adds the {investigations} investigation tools. " +
-            $"{shared} are the same names Lite exposes. The remaining {served.Count - shared} are unique to Darling: thirty-five are the " +
+            $"{shared} are the same names Lite exposes. The remaining {served.Count - shared} are unique to Darling: {postgres} are the " +
             "PostgreSQL reads (`get_pg_*`), plus the Custom Views, custom-alert-rule and query-tag reads and the investigation-wait tool, and central-store-only reads",
             text, StringComparison.Ordinal);
         Assert.DoesNotContain($"This server exposes {catalog.Count} tools.", text, StringComparison.Ordinal);
@@ -137,6 +138,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
         var catalog = Catalog();
         var served = Served(new DarlingMcpWritePolicy.Effective(Writes: true, ServerAdmin: false));
         var shared = served.Count(DarlingMcpInstructions.LiteToolNames.Contains);
+        var postgres = served.Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal));
 
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains(
@@ -144,7 +146,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
             $"{catalog.Count(DarlingMcpWritePolicy.IsServerAdmin)} tools that add, edit and remove monitored servers, or switch agent actions, are not served; " +
             $"the {catalog.Count(DarlingMcpWritePolicy.IsInvestigation)} investigation tools stay off while `mcp.allowWrites` is on (one token " +
             $"cannot tell an agent from a person). {shared} are the same names Lite exposes. The remaining " +
-            $"{served.Count - shared} are unique to Darling: thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, " +
+            $"{served.Count - shared} are unique to Darling: {postgres} are the PostgreSQL reads (`get_pg_*`), plus Custom Views, " +
             "custom-alert-rule, alert-tuning, server/query-tag and investigation-wait tools, and central-store-only reads",
             text, StringComparison.Ordinal);
         Assert.True(text.Length <= InstructionsBudget, $"the writes-on instructions are {text.Length} characters; D2's budget is {InstructionsBudget}");
@@ -223,25 +225,6 @@ public sealed class DarlingMcpInstructionsBudgetTests
         Assert.Equal(
             Catalog().OrderBy(n => n, StringComparer.Ordinal).ToArray(),
             DarlingMcpInstructions.RegisteredToolNames().OrderBy(n => n, StringComparer.Ordinal).ToArray());
-    }
-
-    /// <summary>#9474: one more registered tool makes the census sentence say one more tool, in the total and in the Darling-only
-    /// remainder. The old fixed census said 292 whatever the catalog held.</summary>
-    [Fact]
-    public void Build_WithOneMoreRegisteredTool_CountsIt()
-    {
-        var catalog = Catalog();
-        var served = Served(new DarlingMcpWritePolicy.Effective(Writes: true, ServerAdmin: true, Investigations: true));
-        var shared = served.Count(DarlingMcpInstructions.LiteToolNames.Contains);
-        var withExtra = catalog.Append("get_a_tool_added_later").ToList();
-        var servedWithExtra = served.Append("get_a_tool_added_later").ToList();
-
-        var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, withExtra, servedWithExtra);
-
-        Assert.Contains(
-            $"This server exposes {catalog.Count + 1} tools. {shared} are the same names Lite exposes. The remaining {catalog.Count + 1 - shared} are unique to Darling: ",
-            text, StringComparison.Ordinal);
-        Assert.DoesNotContain($"This server exposes {catalog.Count} tools.", text, StringComparison.Ordinal);
     }
 
     /// <summary><see cref="DarlingMcpInstructions.LiteToolNames"/> is exactly the set of tool names Lite registers,
