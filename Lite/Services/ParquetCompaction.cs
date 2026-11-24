@@ -37,7 +37,16 @@ public static class ParquetCompaction
     public const int SortedMergeThreads = 1;
     public const int DefaultRowGroupSize = ArchiveRowGroupSize;
 
-    /* Row-group size for every parquet COPY that writes a file the archive views read (#5381).
+    /* Row-group size of every UNSORTED parquet COPY that writes a file the archive views read (#5381): the per-cycle
+       and reset exports, the unsorted day merges and the unsorted monthly tables. A merge that sorts by server, then
+       time (ServerOrderedTables) writes SortedArchiveRowGroupSize instead (#9407).
+
+       2,048 was measured on unsorted files, where small groups are the only pruning there is: the rows of a group are
+       in collection order, so a short window can skip only the groups it does not touch, and a group decodes about
+       its whole column chunk. In a file sorted by server, then time, the footer stats of each group prune by server
+       and by time, so a read skips the groups outside the servers and times it asks for, and small groups only add
+       per-group overhead (many more groups to open, a larger footer, and a worse compression ratio).
+
 
        DuckDB decodes about a row group's whole column chunk for any read that touches the
        column, whatever the filter. query_text is the wide one: a file written at the default
@@ -73,6 +82,17 @@ public static class ParquetCompaction
        (one 68,708-row group). */
     public const int ArchiveRowGroupSize = 2048;
 
+    /* Row-group size of a merge that sorts by server, then time (#9407): DuckDB's default. A day or month file of a
+       sorted table is then a handful of groups, each one server's rows in time order, and the footer stats prune the
+       rest. Measured on a real archive, the same sorted day files read much faster at this size than at 2,048, with
+       identical replies, the same or lower peak memory and a fraction of the disk. */
+    public const int SortedArchiveRowGroupSize = 122_880;
+
+    /* A sorted table's file whose largest row group is under this many rows, and that has more than one group, was
+       written at the old size and is cut again once (#9407). After the cut a file has one group or groups of
+       SortedArchiveRowGroupSize, so it never matches again. */
+    public const int RecutBelowRowGroupRows = 16_384;
+
     /* The one option list for archive COPYs; Lite.Tests' ArchiveCopyOptionsPinTests scans Lite/ so a
        new COPY cannot skip it. */
     public static string BuildArchiveCopyOptions(int rowGroupSize = ArchiveRowGroupSize, long rowGroupBytes = 0) =>
@@ -106,7 +126,8 @@ public static class ParquetCompaction
        tools/CompactionRepro on a copy of one laptop's hourly files, repeated for size (directional: one laptop,
        DuckDB 1.5.5): the day merge with no sort peaked at 1.16 GB at most and used no temp space; ORDER BY
        collection_time added nothing to the pruning and peaked at 4.2 GB, so the day merge has no sort, except
-       query_store_stats' by server then time (ServerOrderedTables, #9255), which has no plan text to hold.
+       query_store_stats' (ServerOrderedTables, #9255) and query_stats' (#9407) by server then time: Lite never
+       collects a plan into query_stats, so no row that reaches either table holds plan text.
        A month file written before the switch, and an imported_ file, stay as they are: the per-cycle files that
        are waiting at the switch were never merged into the month file, so a day file and a month file never
        hold the same row (neither archive view dedups). */
@@ -219,10 +240,11 @@ public static class ParquetCompaction
        DuckDB's out-of-memory error fires quickly, before anything is spilled. Field compressibility does not reach
        this case, so the fallback guards against unusually long, repetitive statement texts or a DuckDB change.
 
-       Which tables are sorted. At the daily level only query_store_stats: its merge reads no plan text
-       (CompactionExcludeColumns drops query_plan_text), so the #5410 peak does not apply, and its day budget
-       stays DailyBatchInputBytes. query_snapshots and query_stats carry plan XML, are merged per day and stay
-       unsorted. At the monthly level every table listed below is sorted (#9258) and takes SortedBatchInputBytes
+       Which tables are sorted. At the daily level query_store_stats and query_stats. query_store_stats's merge reads
+       no plan text (CompactionExcludeColumns drops query_plan_text). query_stats has a query_plan_xml column, but
+       Lite's collector never sets CapturePlanXml (Darling does), so the column is NULL on every row Lite writes
+       and the archive holds no plan text for the #5410 peak to apply to (#9407). Both keep their day budget,
+       DailyBatchInputBytes. query_snapshots carries plan XML, is merged per day and stays unsorted. At the monthly level every table listed below is sorted (#9258) and takes SortedBatchInputBytes
        (32 MiB) per batch, not the 200 MB default the unsorted monthly tables keep: a numeric month batch of
        100 MB peaked at 1.2 GB sorted against 290 MB unsorted, so a sorted batch needs its own smaller budget
        (see there for the measurements). A table not listed keeps its merge unsorted at the default budget. The
@@ -234,11 +256,12 @@ public static class ParquetCompaction
     {
         var tables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["query_store_stats"] = "collection_time"
+            ["query_store_stats"] = "collection_time",
+            ["query_stats"] = "collection_time"
         };
 
         /* The monthly-merged tables (#9258): every table Lite stores and archives except the three merged per day
-           above (query_snapshots and query_stats stay unsorted, see below). Each carries server_id and its own
+           above (query_store_stats and query_stats are added above, query_snapshots stays unsorted). Each carries server_id and its own
            time column: capture_time for the config snapshots, alert_time for the alert log, collection_time for
            the rest. A table that is not named here keeps its merge unsorted, whatever it is called (the
            ArchiveService tests merge tables of other names with files that have no server_id). */
@@ -352,7 +375,7 @@ public static class ParquetCompaction
         string spillDirSql,
         string? memoryLimit = null,
         int? threads = null,
-        int rowGroupSize = DefaultRowGroupSize,
+        int? rowGroupSize = null,
         long? rowGroupBytes = null,
         Action<string, int, string>? onSortFallback = null)
     {
@@ -360,7 +383,8 @@ public static class ParquetCompaction
         try
         {
             RunMerge(table, sourcePaths, outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
-                threads ?? ThreadsFor(table, sortedAttempt: orderBy is not null), rowGroupSize, rowGroupBytes, orderBy);
+                threads ?? ThreadsFor(table, sortedAttempt: orderBy is not null),
+                rowGroupSize ?? (orderBy is null ? ArchiveRowGroupSize : SortedArchiveRowGroupSize), rowGroupBytes, orderBy);
         }
         catch (DuckDBException ex) when (orderBy is not null && IsOutOfMemoryOrTempSpace(ex))
         {
@@ -375,8 +399,61 @@ public static class ParquetCompaction
 
             onSortFallback?.Invoke(table, sourcePaths.Count, ex.Message);
             RunMerge(table, sourcePaths, outputPath, spillDirSql, DefaultMemoryLimit,
-                threads ?? ThreadsFor(table), rowGroupSize, rowGroupBytes, orderBy: null);
+                threads ?? ThreadsFor(table), rowGroupSize ?? ArchiveRowGroupSize, rowGroupBytes, orderBy: null);
         }
+    }
+
+    /* The one-file sorted merge of the re-cut (#9407): the file's rows, sorted by the table's server then time order,
+       written at the sorted row-group size, with the same settings and sorted attempt as a compaction merge of the
+       table. Returns false, with nothing left at the output, when the sort runs out of memory or temp space: the
+       caller keeps the original rather than swap in the unsorted order the compaction merge falls back to. Any other
+       failure throws. */
+    internal static bool TryRecutToFile(
+        string table, string sourcePath, string outputPath, string spillDirSql, string? memoryLimit = null, int? rowGroupSize = null)
+    {
+        var orderBy = ServerOrderByFor(table) ?? throw new ArgumentException($"{table} is not merged in server order", nameof(table));
+        try
+        {
+            RunMerge(table, [sourcePath], outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
+                ThreadsFor(table, sortedAttempt: true), rowGroupSize ?? SortedArchiveRowGroupSize, rowGroupBytes: null, orderBy);
+            return true;
+        }
+        catch (DuckDBException ex) when (IsOutOfMemoryOrTempSpace(ex))
+        {
+            if (File.Exists(outputPath))
+            {
+                File.Delete(outputPath);
+            }
+
+            return false;
+        }
+    }
+
+    /* Row groups and the largest one's row count of a parquet file, read from its footer. */
+    internal static (long Groups, long MaxGroupRows) RowGroupShape(DuckDBConnection con, string path)
+    {
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = $"SELECT count(DISTINCT row_group_id), coalesce(max(row_group_num_rows), 0) FROM parquet_metadata('{EscapeSqlPath(path)}')";
+        using var reader = cmd.ExecuteReader();
+        reader.Read();
+        return (Convert.ToInt64(reader.GetValue(0)), Convert.ToInt64(reader.GetValue(1)));
+    }
+
+    /* Whether the file of a sorted table is cut again: more than one row group, none of them over RecutBelowRowGroupRows
+       rows. A caller that cuts at a smaller size (tests) never re-cuts a file already at that size. */
+    internal static bool NeedsRecut(DuckDBConnection con, string path, int targetRows = SortedArchiveRowGroupSize)
+    {
+        var (groups, maxRows) = RowGroupShape(con, path);
+        return groups > 1 && maxRows < Math.Min(RecutBelowRowGroupRows, targetRows);
+    }
+
+    internal static long RowCount(string path)
+    {
+        using var con = new DuckDBConnection("DataSource=:memory:");
+        con.Open();
+        using var cmd = con.CreateCommand();
+        cmd.CommandText = $"SELECT count(*) FROM read_parquet('{EscapeSqlPath(path)}')";
+        return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
     /* The memory limit a merge of the table runs at: the caller's when it passes one, else the sorted merge's lower

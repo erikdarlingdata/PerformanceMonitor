@@ -264,7 +264,8 @@ SELECT count(*) FROM g a JOIN g b ON a.row_group_id < b.row_group_id AND a.mn <=
             await write.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
-        ParquetCompaction.MergeBatchToFile("collection_log", [source], output, _tempDir.Replace('\\', '/'));
+        /* A table that merges unsorted: a sorted table writes SortedArchiveRowGroupSize rows per group (#9407). */
+        ParquetCompaction.MergeBatchToFile("other_table", [source], output, _tempDir.Replace('\\', '/'));
 
         var groups = await ScalarAsync($"SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{output}')");
         Assert.True(groups > 1, $"compaction wrote {groups} row group(s)");

@@ -113,6 +113,17 @@ public class ArchiveService
        cancels the shutdown token here to stop a group between two batches. */
     internal Action<int>? AfterCompactionBatchMergedForTests { get; set; }
 
+    /* Tests only (#9407): the row-group size of a sorted table's merge and of the re-cut, null for the production size. */
+    internal int? SortedRowGroupSizeOverride { get; set; }
+
+    /* Tests only (#9407): the memory limit of the re-cut's sort, null for the sorted merge's own limit. A small one makes the
+       sort run out of memory, which the re-cut answers by keeping the original. */
+    internal string? RecutMemoryLimit { get; set; }
+
+    /* Tests only (#9407): fires with the re-cut's temp path after it is written and checked, before the swap. A test throws or
+       cancels here to stop a re-cut where it leaves a complete temp beside the untouched original. */
+    internal Action<string>? AfterRecutMergedForTests { get; set; }
+
     /* How long one compaction pass keeps starting new merges of a daily table (query_snapshots, #5393; query_stats and query_store_stats, #5410). A store
        that already holds months of per-cycle files merges one day per group, slowly (the table's budget is a few
        MiB and one thread), so the first pass could hold the pass for hours; past this time it starts no further
@@ -1673,10 +1684,18 @@ COPY (
 
                     /* No threads argument: a sorted merge's first attempt runs on one thread, the unsorted merge and the
                        fallback on ParquetCompaction.ThreadsFor(table) (#9320). */
+                    var outputFinalPath = batchOutputs[i].FinalPath;
                     ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql,
-                        onSortFallback: (fallbackTable, files, error) => _logger?.LogWarning(
-                            "Compaction of {Table}: the server-ordered merge ran out of memory or temp space, so this batch of {Files} files fell back to the unsorted order: {Error}",
-                            fallbackTable, files, error));
+                        rowGroupSize: ParquetCompaction.ServerOrderByFor(table) is null ? null : SortedRowGroupSizeOverride,
+                        onSortFallback: (fallbackTable, files, error) =>
+                        {
+                            /* The output is in the unsorted order at the small size: the re-cut below would sort it again
+                               and fall back again, so it leaves the file alone (#9407). */
+                            SkipRecut(outputFinalPath);
+                            _logger?.LogWarning(
+                                "Compaction of {Table}: the server-ordered merge ran out of memory or temp space, so this batch of {Files} files fell back to the unsorted order: {Error}",
+                                fallbackTable, files, error);
+                        });
                     AfterCompactionBatchMergedForTests?.Invoke(i);
                 }
 
@@ -1769,6 +1788,16 @@ COPY (
             }
         }
 
+        /* The one-time re-cut of sorted files written at the old row-group size (#9407), after the normal merges and inside
+           the same time budget. */
+        if (!cancelled)
+        {
+            var (recutCancelled, recutLockTimeouts) = RecutSmallRowGroupFiles(
+                unresolvedGroups, compactionClock, dailyMergesStarted, dailyGroupsDeferred > 0, cancellationToken);
+            cancelled = recutCancelled;
+            lockTimeouts += recutLockTimeouts;
+        }
+
         if (dailyGroupsDeferred > 0)
         {
             _logger?.LogInformation(
@@ -1822,6 +1851,189 @@ COPY (
         }
 
         return lockTimeouts == 0 && !cancelled;
+    }
+
+    /* Files the re-cut leaves alone for the rest of the process's life (#9407): a sort that fell back to the unsorted order
+       (out of memory or temp space) or failed would only do it again on every pass. Full paths, any case. */
+    private static readonly HashSet<string> s_recutSkipped = new(StringComparer.OrdinalIgnoreCase);
+
+    private static void SkipRecut(string path)
+    {
+        lock (s_recutSkipped)
+        {
+            s_recutSkipped.Add(path);
+        }
+    }
+
+    private static bool IsRecutSkipped(string path)
+    {
+        lock (s_recutSkipped)
+        {
+            return s_recutSkipped.Contains(path);
+        }
+    }
+
+    /* The files the compaction merge writes: YYYYMMDD_table or YYYYMMDD_table_ptNNN (a table merged per day), and
+       YYYYMM_table or YYYYMM_table_ptNNN (a monthly table, or a day table's month file from a build before daily grouping,
+       which compaction skips today). Per-cycle, reset-export, imported_ and legacy names do not match. */
+    private static readonly Regex s_recutFileName = new(@"^(?<period>\d{8}|\d{6})_(?<table>[a-z][a-z0-9_]*?)(_pt\d{3})?\.parquet$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// The one-time re-cut (#9407). A file of a table that merges in server order, written by compaction at the old
+    /// 2,048-row groups (more than one row group, none of them over 16,384 rows), is rewritten sorted at the sorted size
+    /// through the compaction swap. The sort goes to a <c>.tmp</c> that no archive glob matches, its row count must equal the
+    /// source's, and a sort that runs out of memory or temp space (the compaction merge would fall back to the unsorted
+    /// order) or any other failure leaves the file as it was and is not tried again by this process. Newest files first.
+    /// Starts a file only while the pass has time left and the disk has room, as the day merges do.
+    /// </summary>
+    private (bool Cancelled, int LockTimeouts) RecutSmallRowGroupFiles(
+        HashSet<(string Month, string Table)> unresolvedGroups,
+        Stopwatch compactionClock,
+        int dailyMergesStarted,
+        bool dailyMergesDeferred,
+        CancellationToken cancellationToken)
+    {
+        var candidates = new List<(string Period, string Path)>();
+        var tables = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in Directory.GetFiles(_archivePath, "*.parquet").Select(f => Path.GetFileName(f)))
+        {
+            var m = s_recutFileName.Match(file);
+            if (!m.Success)
+            {
+                continue;
+            }
+
+            var period = m.Groups["period"].Value;
+            var table = m.Groups["table"].Value;
+            if (ParquetCompaction.ServerOrderByFor(table) is null
+                || (period.Length == 8 && !ParquetCompaction.IsDailyTable(table))
+                || unresolvedGroups.Contains((period, table)))
+            {
+                continue;
+            }
+
+            var path = Path.Combine(_archivePath, file).Replace("\\", "/");
+            if (!IsRecutSkipped(path))
+            {
+                candidates.Add((period, path));
+                tables[path] = table;
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            return (false, 0);
+        }
+
+        /* A file a live .archive-pending journal names is not touched, as in the merge. */
+        var pending = PendingArchiveFileNames();
+        var lockTimeouts = 0;
+        var recut = 0;
+        var started = 0;
+        var lowSpace = 0;
+        var spillDir = Path.Combine(_archivePath, "duckdb_tmp");
+        Directory.CreateDirectory(spillDir);
+        var spillDirSql = spillDir.Replace("\\", "/");
+
+        using var probe = new DuckDBConnection("DataSource=:memory:");
+        probe.Open();
+
+        /* Newest first: a month file counts as the last day of its month. */
+        foreach (var (period, path) in candidates
+            .OrderByDescending(c => c.Period.PadRight(8, '9'), StringComparer.Ordinal)
+            .ThenByDescending(c => c.Path, StringComparer.Ordinal))
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return (true, lockTimeouts);
+            }
+
+            if (pending.Contains(Path.GetFileName(path)))
+            {
+                continue;
+            }
+
+            /* The pass's time budget, shared with the day merges: a pass that spent it on merges starts no re-cut, and a
+               pass that merged nothing still starts its first. */
+            if ((started > 0 || dailyMergesStarted > 0 || dailyMergesDeferred) && compactionClock.Elapsed >= DailyCompactionPassBudget)
+            {
+                break;
+            }
+
+            var table = tables[path];
+            var tempPath = path + ".tmp";
+            try
+            {
+                if (!ParquetCompaction.NeedsRecut(probe, path, SortedRowGroupSizeOverride ?? ParquetCompaction.SortedArchiveRowGroupSize))
+                {
+                    continue;
+                }
+
+                var sourceBytes = new FileInfo(path.Replace("/", "\\")).Length;
+                var freeBytes = _duckDb.AvailableFreeBytesProvider(_archivePath);
+                if (freeBytes is long free && sourceBytes + DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath) > free)
+                {
+                    lowSpace++;
+                    continue;
+                }
+
+                started++;
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+
+                if (!ParquetCompaction.TryRecutToFile(table, path, tempPath, spillDirSql, RecutMemoryLimit, SortedRowGroupSizeOverride))
+                {
+                    SkipRecut(path);
+                    _logger?.LogWarning(
+                        "Re-cut of {File}: the server-ordered sort ran out of memory or temp space, so the file stays as it is and is not tried again until the service restarts",
+                        Path.GetFileName(path));
+                    continue;
+                }
+
+                if (ParquetCompaction.RowCount(tempPath) != ParquetCompaction.RowCount(path))
+                {
+                    throw new InvalidOperationException("The re-cut file does not hold the source file's row count");
+                }
+
+                AfterRecutMergedForTests?.Invoke(tempPath);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                using (_duckDb.AcquireWriteLock(WriteLockBudget))
+                {
+                    SwapCompactionOutputs(period, table, [path], [(tempPath, path)]);
+                }
+
+                recut++;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                try { File.Delete(tempPath); } catch { /* best effort */ }
+                return (true, lockTimeouts);
+            }
+            catch (StoreLockTimeoutException ex)
+            {
+                lockTimeouts++;
+                _logger?.LogInformation("Re-cut of {File} deferred: {Message} It is tried again on a later pass", Path.GetFileName(path), ex.Message);
+                try { File.Delete(tempPath); } catch { /* best effort */ }
+            }
+            catch (Exception ex)
+            {
+                SkipRecut(path);
+                _logger?.LogError(ex, "Re-cut of {File} failed; the file stays as it is and is not tried again until the service restarts", Path.GetFileName(path));
+                try { File.Delete(tempPath); } catch { /* best effort */ }
+            }
+        }
+
+        if (recut > 0 || lowSpace > 0)
+        {
+            _logger?.LogInformation(
+                "Re-cut {Recut} archive file(s) to {RowGroupRows}-row groups sorted by server and time; {LowSpace} left for a pass with more free disk space",
+                recut, SortedRowGroupSizeOverride ?? ParquetCompaction.SortedArchiveRowGroupSize, lowSpace);
+        }
+
+        return (false, lockTimeouts);
     }
 
     /* A file already in its final monthly form: YYYYMM_table or YYYYMM_table_ptNNN, with or without the imported_

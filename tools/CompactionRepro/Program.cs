@@ -32,7 +32,7 @@ using PerformanceMonitorLite.Services;
  * Tuning knobs (defaults = ParquetCompaction's non-table-specific defaults):
  *   --memory-limit <str>   DuckDB memory_limit per merge connection. Default: the table's production limit
  *   --threads <int>        DuckDB threads per merge connection. Default: the production pick
- *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: ParquetCompaction.DefaultRowGroupSize (2048)
+ *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: production size of the table (2048, or 122880 for a table that merges in server order)
  *   --row-group-bytes-mb <int>  Output ROW_GROUP_SIZE_BYTES in MiB (0 = none). Default: the table's
  *                          ParquetCompaction.RowGroupBytesFor (#5393: the daily table's byte bound)
  *   (Absent --threads is the production pick: one thread for the sorted attempt, ThreadsFor(--table) for the fallback.)
@@ -104,7 +104,7 @@ var table = GetArg(args, "--table", "query_snapshots");
 var memoryLimitArg = GetArg(args, "--memory-limit", "");
 string? memoryLimit = memoryLimitArg.Length > 0 ? memoryLimitArg : null;
 int? threads = args.Contains("--threads") ? int.Parse(GetArg(args, "--threads", "")) : null;
-var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", ParquetCompaction.DefaultRowGroupSize.ToString()));
+var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", (ParquetCompaction.ServerOrderByFor(table) is null ? ParquetCompaction.ArchiveRowGroupSize : ParquetCompaction.SortedArchiveRowGroupSize).ToString()));
 var rowGroupBytesMb = long.Parse(GetArg(args, "--row-group-bytes-mb", (ParquetCompaction.RowGroupBytesFor(table) / (1024 * 1024)).ToString()));
 var rowGroupBytes = rowGroupBytesMb * 1024L * 1024L;
 var copies = int.Parse(GetArg(args, "--copies", "1"));
