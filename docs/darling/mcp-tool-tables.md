@@ -7,6 +7,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 ## How to read the tables
 
 - **Store objects** are tables, views and continuous aggregates in the store's `collect` and `config` schemas.
+- A tool that reads PostgreSQL's or TimescaleDB's own views about the store names them as theirs.
 - When a tool reads a view or a continuous aggregate, the page names the base table first. The view or aggregate follows in parentheses.
 - A note in parentheses after a table, such as `(only when tag given)`, means that the tool reads the table only in that case.
 - For a tool that changes something, `(insert)`, `(update)` and `(delete)` show what the tool does to each table. Tables that such a tool only reads have no note.
@@ -20,7 +21,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 - The page was made by reading each tool's code down to the SQL that runs. It was not made from a store trace.
 
 
-## Tools that read collected data (157)
+## Tools that read collected data
 
 | Tool | Store objects |
 |---|---|
@@ -182,11 +183,12 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `test_custom_alert_rule` | The table that the rule's measure names. Also its hourly or daily aggregate, when the window uses one.<br>`config.custom_alert_rules` (when rule_id given)<br>`config.server_tags`<br>`config.server_tag_map` (tag scope) |
 | `test_query_tag_rule` | `collect.query_tag_sightings`<br>`config.query_tag_rules`<br>`config.query_tags`<br>`config.query_tag_assignments`<br>`collect.servers` |
 
-## Tools about Darling itself (50)
+## Tools about Darling itself
 
 | Tool | Store objects |
 |---|---|
 | `analyze_plan_xml` | None. It analyses the plan XML that you pass in. |
+| `call_tool` | None. It calls the tool it names, and that tool reads its own store objects. |
 | `describe_custom_view_catalog` | None. The catalog is built into the service. |
 | `find_tools` | None. It searches the tools the connection can call. |
 | `get_agent_changes` | `config.investigation_journal`<br>`config.config_alert_log`<br>`config.investigation_requests`<br>`config.investigation_evidence`<br>`config.config_service`<br>`collect.servers` |
@@ -217,14 +219,17 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_slow_reads` | `collect.slow_reads` |
 | `get_store_connections` | `collect.store_connection_samples`<br>`collect.store_connection_slots` |
 | `get_store_host` | `collect.store_metrics` |
+| `get_store_job_runs` | `collect.store_job_runs` (a function, where the store has it)<br>TimescaleDB's `timescaledb_information.job_history` and `timescaledb_information.jobs` (where it does not) |
 | `get_store_lock_waits` | `collect.store_lock_waits` |
 | `get_store_log` | `collect.store_log_captures`<br>`collect.store_log_events` |
 | `get_store_checkpoints` | `collect.store_checkpoints` |
+| `get_store_maintenance_readiness` | PostgreSQL's own `pg_stat_activity`, `pg_stat_progress_vacuum` and `pg_class` |
 | `get_store_metrics` | `collect.store_metrics`<br>`collect.query_store_compose_stamp_failures`<br>`collect.store_table_activity`<br>`collect.store_table_activity_baseline`<br>`collect.service_starts` (the build markers) |
 | `get_store_pass_steps` | `collect.store_pass_steps` |
 | `get_store_query_history` | `collect.store_statement_history`<br>`collect.store_statement_captures`<br>`collect.service_starts` (the build markers)<br>`config.store_statement_stats()` (function over pg_stat_statements) |
 | `get_store_query_stats` | `config.store_statement_stats()` (function over pg_stat_statements)<br>`config.store_statement_stats_info()` (function over pg_stat_statements_info) |
 | `get_store_setting_changes` | `collect.store_setting_changes`<br>`collect.store_setting_state` |
+| `get_store_table_health` | `collect.store_metrics`<br>`collect.store_log_events`<br>PostgreSQL's own `pg_stat_all_tables`, `pg_stat_all_indexes`, `pg_stat_database` and `pg_stat_activity`<br>TimescaleDB's `timescaledb_information` views |
 | `get_tool_guide` | None. The guides are built into the service. |
 | `list_custom_alert_rules` | `config.custom_alert_rules`<br>`config.config_alert_log` |
 | `list_custom_alert_templates` | None. The templates are built into the service. |
@@ -233,11 +238,12 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `list_query_tag_rules` | `config.query_tag_rules`<br>`config.query_tags`<br>`config.query_tag_state` |
 | `list_query_tags` | `config.query_tags`<br>`config.query_tag_assignments`<br>`config.query_tag_rules`<br>`config.query_tag_state`<br>`collect.servers` |
 | `list_servers` | `collect.servers`<br>`config.config_monitored_servers`<br>`collect.collection_log`<br>`collect.v_collection_log` |
+| `measure_store_table` | `collect.store_metrics`<br>TimescaleDB's `timescaledb_information.hypertables` and `timescaledb_information.chunks`, measured with `pgstattuple` |
 | `validate_custom_alert_rule` | None. It checks the definition that you pass in. |
 | `validate_custom_view` | None. It checks the definition that you pass in. |
 | `wait_for_investigation_requests` | `config.investigation_journal`<br>`config.investigation_requests`<br>`config.investigation_request_alerts`<br>`collect.servers` |
 
-## Tools that change something (90)
+## Tools that change something
 
 | Tool | Store objects |
 |---|---|
@@ -282,6 +288,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `merge_deadlock_signatures` | `config.investigation_signature_merges`<br>`config.investigation_signature_days` |
 | `mute_analysis_finding` | `config.analysis_muted`<br>`collect.analysis_findings` |
 | `pause_collection` | `config.config_command`<br>`config.config_service` |
+| `post_investigation_message` | `config.investigation_requests` (claim check)<br>`config.investigation_journal` (insert) |
 | `purge_expired_mute_rules` | `config.config_mute_rules` |
 | `purge_now` | `config.config_command`<br>`config.config_collector_schedules` (retention overrides read for the preview)<br>`config.request_mcp_command` |
 | `recompile_module` | No collected data. It acts on the monitored server and records the change in the agent change list. |
