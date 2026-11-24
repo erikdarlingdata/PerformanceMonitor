@@ -2029,6 +2029,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                its result, over the same ChangeWatchStore the worker pass writes. A read of the monitoring store: the investigation
                agent may call it. */
             .WithGeminiCompatibleTools<DarlingMcpChangeWatchTools>()
+            .WithGeminiCompatibleTools<DarlingMcpChangeWindowTools>()
             /* The known-pattern read - get_known_patterns (#6334) - the operator-written entries that get_alert_history rows carry the matches of. */
             .WithGeminiCompatibleTools<DarlingMcpKnownPatternTools>()
             /* The known-pattern writes - create_known_pattern / update_known_pattern / delete_known_pattern (#6398) - admin writes over the same store

@@ -134,6 +134,57 @@ SET alert_count = alert_count + 1,
     max_severity = $5
 WHERE request_id = $1";
 
+    /* #9485: an alert that joins a held request after the window's tail has ended is new evidence from outside the window, so it releases the
+       hold. $1 request, $2 the joining alert's time, $3 now (the store's clock, written once and never moved: the guard is hold_released_at IS NULL).
+       Returns the window's id when it released one, and no row for a request that is not held, is already released, or joined inside the tail. */
+    internal static readonly string ReleaseHoldSql = @"
+UPDATE config.investigation_requests AS r
+SET hold_released_at = $3
+FROM config.investigation_change_windows AS w
+WHERE r.request_id = $1
+  AND r.held_window_id = w.window_id
+  AND r.hold_released_at IS NULL
+  AND $2 > w.ends_at + " + InvestigationChangeWindows.TailIntervalSql + @"
+RETURNING w.window_id";
+
+    /* #9485: the close summary. A window is closed when its tail has ended (ends_at + tail), or at cleared_at when that is earlier. One journal
+       row per window, written once (the once key, and summarized_at, which this statement sets in the same step). The row belongs to no request.
+       The counts cover every request the window held, released ones included, by family and by server name. $1 is now. */
+    internal static readonly string CloseWindowsSql = @"
+WITH due AS (
+    SELECT w.window_id, w.reason
+    FROM config.investigation_change_windows AS w
+    WHERE w.summarized_at IS NULL
+      AND least(coalesce(w.cleared_at, 'infinity'::timestamptz), w.ends_at + " + InvestigationChangeWindows.TailIntervalSql + @") <= $1
+    FOR UPDATE OF w
+),
+held AS (
+    SELECT d.window_id, r.family, r.server_name, r.hold_released_at
+    FROM due AS d
+    JOIN config.investigation_requests AS r ON r.held_window_id = d.window_id
+),
+journaled AS (
+    INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key)
+    SELECT $1, NULL, NULL, NULL, '" + InvestigationEvents.ChangeWindowClosed + @"', 'service', NULL,
+           jsonb_build_object(
+               'window_id', d.window_id,
+               'reason', d.reason,
+               'held', (SELECT count(*) FROM held AS h WHERE h.window_id = d.window_id),
+               'released', (SELECT count(h.hold_released_at) FROM held AS h WHERE h.window_id = d.window_id),
+               'by_family', coalesce((SELECT jsonb_object_agg(f.family, f.n)
+                                      FROM (SELECT h.family, count(*) AS n FROM held AS h WHERE h.window_id = d.window_id GROUP BY h.family) AS f), '{}'::jsonb),
+               'by_server', coalesce((SELECT jsonb_object_agg(v.server_name, v.n)
+                                      FROM (SELECT h.server_name, count(*) AS n FROM held AS h WHERE h.window_id = d.window_id GROUP BY h.server_name) AS v), '{}'::jsonb)),
+           '" + InvestigationEvents.ChangeWindowClosed + @":' || d.window_id::text
+    FROM due AS d
+    ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING
+    RETURNING once_key
+)
+UPDATE config.investigation_change_windows AS w
+SET summarized_at = $1
+FROM due AS d
+WHERE w.window_id = d.window_id";
+
     /* A chat request (#7659) is counted apart, by ChatCountsSql, so a busy thread cannot block the route's alerts. A request that is still held by a
        change window (#9485) is left out, so one window cannot use up a route's limit and make a real request after the tail read limit_reached. A
        released request counts. */
@@ -156,7 +207,8 @@ INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
      first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity, trigger_kind, held_window_id)
 VALUES ($1, $2, $3, COALESCE((SELECT COALESCE(sv.display_name, sv.server_name) FROM collect.servers AS sv WHERE sv.server_id = $3), $4), $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
-        " + StampLevelSql(6, 13) + ", $14, $15, " + InvestigationChangeWindows.HeldWindowIdSql("$10", "$3") + ")";
+        " + StampLevelSql(6, 13) + ", $14, $15, " + InvestigationChangeWindows.HeldWindowIdSql("$10", "$3") + @")
+RETURNING held_window_id";
 
     internal const string AlertRowsSql = @"
 INSERT INTO config.investigation_request_alerts
@@ -455,7 +507,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     internal static readonly string ListSql = $@"
 SELECT request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, alert_count,
        effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at, practice_of,
-       registry_display_name, registry_instance_name, change_watch_detail
+       registry_display_name, registry_instance_name, change_watch_detail,
+       hold_window_id, hold_reason, hold_ends_at, hold_released
 FROM (
     SELECT r.*,
            CASE
@@ -466,12 +519,17 @@ FROM (
                ELSE r.state
            END AS effective_state,
            {RegistryNamesSelect("r", "sv")},
-           {ChangeWatchDetailSelect("r")}
+           {ChangeWatchDetailSelect("r")},
+           r.held_window_id AS hold_window_id, w.reason AS hold_reason, w.ends_at AS hold_ends_at, r.hold_released_at AS hold_released
     FROM config.investigation_requests AS r
     LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
+    LEFT JOIN config.investigation_change_windows AS w ON w.window_id = r.held_window_id
     WHERE ($3::integer IS NULL OR r.server_id = $3)
       AND ($4::text IS NULL OR r.family = $4)
       AND ($6::integer[] IS NULL OR r.server_id = ANY($6))
+      AND ($7::text IS NULL
+           OR ($7 = '{InvestigationChangeWindows.HeldOnly}' AND r.held_window_id IS NOT NULL AND r.hold_released_at IS NULL)
+           OR ($7 = '{InvestigationChangeWindows.HeldExclude}' AND (r.held_window_id IS NULL OR r.hold_released_at IS NOT NULL)))
 ) AS s
 WHERE ($2::text IS NULL OR s.effective_state = $2)
 ORDER BY s.opened_at DESC, s.request_id
@@ -559,9 +617,11 @@ SELECT r.request_id, r.route_id, r.server_id, r.server_name, r.family, r.first_m
            ELSE r.state
        END AS effective_state,
        r.opened_at, r.expires_at, r.claimed_by, r.lease_until, r.claim_count, r.reported_at, r.brief::text, r.practice_of,
-       {RegistryNamesSelect("r", "sv")}
+       {RegistryNamesSelect("r", "sv")},
+       r.held_window_id, w.reason, w.ends_at, r.hold_released_at
 FROM config.investigation_requests AS r
-LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id";
+LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
+LEFT JOIN config.investigation_change_windows AS w ON w.window_id = r.held_window_id";
 
     /* #5918: the one definition of "a LIVE practice request": a practice request that reads open or claimed (the computed state,
        as ListSql computes it), so a submitted, released-to-expiry or expired practice is not live. It returns
@@ -742,8 +802,26 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
             await JournalAsync(connection, transaction, now, join, alert.RouteId, alert.ServerId,
                 evented ? InvestigationEvents.Joined : InvestigationEvents.QuietJoin, "service",
                 alert.MetricName, evented ? JoinDetail(newMetric, severity) : null, null, cancellationToken);
+            /* #9485: a join after the window's tail releases the hold. Only an alert request is ever joined (FindJoinSql), so a held
+               change-watch request, which joins nothing, stays held until it expires or is claimed. */
+            long? releasedWindow = null;
+            await using (var release = Command(connection, transaction, ReleaseHoldSql, P(join), P(alertTime), P(now)))
+            {
+                if (await release.ExecuteScalarAsync(cancellationToken) is long windowId)
+                {
+                    releasedWindow = windowId;
+                }
+            }
+
+            if (releasedWindow is long releasedFrom)
+            {
+                await JournalAsync(connection, transaction, now, join, alert.RouteId, alert.ServerId, InvestigationEvents.HoldReleased, "service",
+                    alert.MetricName, HoldReleasedDetail(releasedFrom, alert.MetricName, alertTime), InvestigationEvents.HoldReleasedOnceKey(join),
+                    cancellationToken);
+            }
+
             await transaction.CommitAsync(cancellationToken);
-            return new InvestigationOpenResult(InvestigationOpenOutcome.Joined, join) { Evented = evented };
+            return new InvestigationOpenResult(InvestigationOpenOutcome.Joined, join) { Evented = evented || releasedWindow is not null };
         }
 
         await ExecAsync(connection, transaction, RouteLockSql, cancellationToken, P(RouteLockKey), P(alert.RouteId));
@@ -770,20 +848,34 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         }
 
         var requestId = Guid.NewGuid();
-        await ExecAsync(connection, transaction, OpenSql, cancellationToken,
+        bool held;
+        await using (var open = Command(connection, transaction, OpenSql,
             P(requestId), P(alert.RouteId), P(alert.ServerId), P(alert.ServerName), P(alert.Family), P(alert.MetricName),
             PNullable(keys.FirstOrDefault()), PNullable(alert.StoryPathHash), P(alertTime), P(now), P(alert.ExpiryMinutes),
-            P(alert.LeaseMinutes), P((short)alert.AutonomyLevel), P(severity), P(alert.TriggerKind));
+            P(alert.LeaseMinutes), P((short)alert.AutonomyLevel), P(severity), P(alert.TriggerKind)))
+        {
+            /* #9485: the INSERT says which window held the request, so the caller knows not to wake the long-poll for it. */
+            held = await open.ExecuteScalarAsync(cancellationToken) is long;
+        }
         await InsertAlertRowsAsync(connection, transaction, requestId, alert, alertTime, keys, cancellationToken);
         await JournalAsync(connection, transaction, now, requestId, alert.RouteId, alert.ServerId, "opened", "service",
             alert.MetricName, null, null, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return new InvestigationOpenResult(InvestigationOpenOutcome.Opened, requestId) { Evented = true };
+        return new InvestigationOpenResult(InvestigationOpenOutcome.Opened, requestId) { Evented = true, Held = held };
     }
 
     /// <summary>The stored severity word: critical, or warning for anything else (null included).</summary>
     private static string AlertSeverityWord(string? severity) =>
         string.Equals(severity, InvestigationEvents.Critical, StringComparison.Ordinal) ? InvestigationEvents.Critical : InvestigationEvents.Warning;
+
+    /// <summary>#9485: what a <c>hold_released</c> event names: the window that held the request, and the joining alert's metric and time.</summary>
+    private static string HoldReleasedDetail(long windowId, string metric, DateTime alertTime) =>
+        new JsonObject
+        {
+            ["window_id"] = windowId,
+            ["metric"] = metric,
+            ["alert_time"] = alertTime.ToString("O", CultureInfo.InvariantCulture),
+        }.ToJsonString();
 
     /// <summary>What a <c>joined</c> event says it brought: a new metric, a higher severity, or both.</summary>
     private static string JoinDetail(bool newMetric, string severity) =>
@@ -1195,7 +1287,18 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         reader.IsDBNull(15) ? null : reader.GetFieldValue<DateTime>(15),
         reader.IsDBNull(17) ? null : reader.GetGuid(17),
         reader.GetString(18),
-        reader.IsDBNull(19) ? null : reader.GetString(19));
+        reader.IsDBNull(19) ? null : reader.GetString(19),
+        HeldBy: ReadHold(reader, 20));
+
+    /// <summary>#9485: the hold columns that follow the registry names (window id, its reason and end, the release time), or null when the request was never held.</summary>
+    private static InvestigationRequestHold? ReadHold(NpgsqlDataReader reader, int firstOrdinal) =>
+        reader.IsDBNull(firstOrdinal)
+            ? null
+            : new InvestigationRequestHold(
+                reader.GetInt64(firstOrdinal),
+                reader.IsDBNull(firstOrdinal + 1) ? string.Empty : reader.GetString(firstOrdinal + 1),
+                reader.IsDBNull(firstOrdinal + 2) ? default : reader.GetFieldValue<DateTime>(firstOrdinal + 2),
+                reader.IsDBNull(firstOrdinal + 3) ? null : reader.GetFieldValue<DateTime>(firstOrdinal + 3));
 
     /// <summary>
     /// Reads requests with their reports and journal (#5632 Phase A, <c>get_investigation_reports</c>): one request by id
@@ -1334,14 +1437,24 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
     /// <c>open</c>, or <c>expired</c> after three claims; a request past its expiry reads <c>expired</c>). Writes nothing.
     /// Every filter is optional.
     /// </summary>
+    public Task<IReadOnlyList<InvestigationRequestRow>> ListAsync(
+        string? state, int? serverId, string? family, int limit, CancellationToken cancellationToken = default) =>
+        ListAsync(state, serverId, family, limit, null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="ListAsync(string?, int?, string?, int, CancellationToken)"/> with the planned change window filter (#9485):
+    /// <paramref name="held"/> is <see cref="InvestigationChangeWindows.HeldOnly"/> (only requests a window is holding),
+    /// <see cref="InvestigationChangeWindows.HeldExclude"/> (everything else, a released hold included) or null (both). Each row
+    /// carries <see cref="InvestigationRequestRow.HeldBy"/>.
+    /// </summary>
     public async Task<IReadOnlyList<InvestigationRequestRow>> ListAsync(
-        string? state, int? serverId, string? family, int limit, CancellationToken cancellationToken = default)
+        string? state, int? serverId, string? family, int limit, string? held, CancellationToken cancellationToken = default)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = Command(connection, null, ListSql,
             P(Now()), PNullable(state), new NpgsqlParameter<int?> { TypedValue = serverId, NpgsqlDbType = NpgsqlDbType.Integer },
-            PNullable(family), P(limit), ReadServerScopeParameter());
+            PNullable(family), P(limit), ReadServerScopeParameter(), PNullable(held));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var rows = new List<InvestigationRequestRow>();
         while (await reader.ReadAsync(cancellationToken))
@@ -1366,7 +1479,8 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.IsDBNull(16) ? null : reader.GetGuid(16),
                 reader.GetString(17),
                 reader.IsDBNull(18) ? null : reader.GetString(18),
-                reader.IsDBNull(19) ? null : reader.GetString(19)));
+                reader.IsDBNull(19) ? null : reader.GetString(19),
+                HeldBy: ReadHold(reader, 20)));
         }
 
         return rows;
@@ -1533,7 +1647,14 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         await using var proposalTransaction = await connection.BeginTransactionAsync(cancellationToken);
         var proposals = await SweepProposalsAsync(connection, proposalTransaction, now, cancellationToken);
         await proposalTransaction.CommitAsync(cancellationToken);
-        return new InvestigationSweepResult(lapsed, expired) { Resolved = resolved, FollowUps = followUps + forceChecks, Proposals = proposals };
+        /* #9485: the change windows whose tail has ended get their one close summary, in a transaction of their own. */
+        await using var windowTransaction = await connection.BeginTransactionAsync(cancellationToken);
+        var windowsClosed = await ExecAsync(connection, windowTransaction, CloseWindowsSql, cancellationToken, P(now));
+        await windowTransaction.CommitAsync(cancellationToken);
+        return new InvestigationSweepResult(lapsed, expired)
+        {
+            Resolved = resolved, FollowUps = followUps + forceChecks, Proposals = proposals, ChangeWindowsClosed = windowsClosed,
+        };
     }
 
     /// <summary>
