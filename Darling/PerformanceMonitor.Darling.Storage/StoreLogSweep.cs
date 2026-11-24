@@ -341,8 +341,10 @@ FROM config.store_log_read_marker AS m";
         DateTime utcNow,
         ILogger? logger,
         IStoreLogFiles? files,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        StoreLockWaits.PidMap? pids = null)
     {
+        pids ??= StoreLockWaits.Shared;
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
@@ -403,7 +405,7 @@ FROM config.store_log_read_marker AS m";
                 OffsetReset: resume.OffsetReset,
                 Census: census);
 
-            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, firstSlab: true, cancellationToken);
+            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, firstSlab: true, step.Value.Waits, pids, cancellationToken);
             captured.Add(capture);
             slabsRead++;
 
@@ -446,7 +448,7 @@ FROM config.store_log_read_marker AS m";
                     BytesPending: Math.Max(0, file.Candidate.SizeBytes - nextOffset),
                     OffsetReset: false,
                     Census: census);
-                await WriteAsync(connection, captureTime, slabCapture, nextOffset, file.Candidate.SizeBytes, firstSlab: false, cancellationToken);
+                await WriteAsync(connection, captureTime, slabCapture, nextOffset, file.Candidate.SizeBytes, firstSlab: false, step.Value.Waits, pids, cancellationToken);
 
                 file.Groups.AddRange(census.Groups);
                 captured[file.Index] = new FileCapture(
@@ -644,7 +646,7 @@ FROM config.store_log_read_marker AS m";
     /// starts one byte early to see that byte, and the rest of the line is dropped up to its newline before anything is
     /// handed on, so a tail is never classified as a line.</para>
     /// </summary>
-    private static async Task<(StoreLogSlab.Slab Slab, StoreLogClassifier.Census Census)?> ReadSlabAsync(
+    private static async Task<(StoreLogSlab.Slab Slab, StoreLogClassifier.Census Census, StoreLockWaits.ParseResult Waits)?> ReadSlabAsync(
         NpgsqlConnection connection,
         IStoreLogFiles? files,
         Candidate candidate,
@@ -669,7 +671,7 @@ FROM config.store_log_read_marker AS m";
             var tailEnd = body.Span.IndexOf((byte)0x0A);
             if (tailEnd >= 0)
             {
-                return (new StoreLogSlab.Slab(string.Empty, tailEnd + 1), StoreLogClassifier.Classify(null));
+                return (new StoreLogSlab.Slab(string.Empty, tailEnd + 1), StoreLogClassifier.Classify(null), StoreLockWaits.ParseResult.Empty);
             }
 
             if (body.Length < length || offset + body.Length >= candidate.SizeBytes)
@@ -678,7 +680,7 @@ FROM config.store_log_read_marker AS m";
                 return null;
             }
 
-            return (new StoreLogSlab.Slab(string.Empty, body.Length), StoreLogClassifier.Classify(null));
+            return (new StoreLogSlab.Slab(string.Empty, body.Length), StoreLogClassifier.Classify(null), StoreLockWaits.ParseResult.Empty);
         }
 
         var slab = StoreLogSlab.TrimToLastNewline(body.Span);
@@ -698,7 +700,7 @@ FROM config.store_log_read_marker AS m";
             slab = StoreLogSlab.TrimLongLine(body.Span, (int)(lineEnd - offset));
         }
 
-        return (slab, StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget, lastLineCut: slab.Cut));
+        return (slab, StoreLogClassifier.Classify(slab.Text, detailInEnglish, budget, lastLineCut: slab.Cut), StoreLockWaits.Parse(slab.Text, detailInEnglish));
     }
 
     /// <summary>Scans on from <paramref name="from"/> for the first newline, <see cref="LongLineScanChunkBytes"/> at a
@@ -769,9 +771,15 @@ FROM config.store_log_read_marker AS m";
         long newOffset,
         long sizeBytes,
         bool firstSlab,
+        StoreLockWaits.ParseResult waits,
+        StoreLockWaits.PidMap pids,
         CancellationToken cancellationToken)
     {
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        /* #9439: the lock waits of this slab, in the slab's own transaction, so the rows and the marker that
+           accounts for them land together or not at all. */
+        await StoreLockWaits.WriteAsync(connection, transaction, waits, pids, captureTime, cancellationToken);
 
         var groups = capture.Census.Groups;
         if (groups.Count > 0)
@@ -870,8 +878,14 @@ FROM config.store_log_read_marker AS m";
             await events.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using var captures = new NpgsqlCommand(CaptureRetentionDeleteSql, connection) { CommandTimeout = SweepTimeoutSeconds };
-        captures.Parameters.AddWithValue(cutoff);
-        await captures.ExecuteNonQueryAsync(cancellationToken);
+        await using (var captures = new NpgsqlCommand(CaptureRetentionDeleteSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+        {
+            captures.Parameters.AddWithValue(cutoff);
+            await captures.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var lockWaits = new NpgsqlCommand(StoreLockWaits.RetentionDeleteSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+        lockWaits.Parameters.AddWithValue(cutoff);
+        await lockWaits.ExecuteNonQueryAsync(cancellationToken);
     }
 }

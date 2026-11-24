@@ -66,8 +66,25 @@ public static class StoreLockWaits
     /// <summary>The wait was still open when the log read ended.</summary>
     public const string Waiting = "waiting";
 
-    /// <summary>How long the map of sessions keeps a reading.</summary>
-    public static readonly TimeSpan PidMapRetention = TimeSpan.FromMinutes(15);
+    /// <summary>
+    /// How long the map of sessions keeps a reading after it was last seen. The log sweep runs hourly and resolves each wait in the
+    /// hour it reads, so a reading has to outlive a whole sweep slab: 60 minutes of log plus 15 for a late or skipped tick.
+    /// </summary>
+    public static readonly TimeSpan PidMapRetention = TimeSpan.FromMinutes(75);
+
+    /// <summary>How often the service reads the sessions into the map.</summary>
+    public static readonly TimeSpan PidMapRefreshInterval = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// How long after a session was last seen it still answers for a wait that began then: two refresh intervals. A blocker usually
+    /// ends within seconds of the wait it caused, so its last reading is often a little older than the wait. Its process id could
+    /// only belong to another session if the operating system wrapped its process ids inside that time, and a later session on the
+    /// same id that the map read has its own start time, which is what keeps the two apart.
+    /// </summary>
+    public static readonly TimeSpan PidMapResolveSlack = TimeSpan.FromMinutes(2);
+
+    /// <summary>The time one read of the sessions may take, in seconds.</summary>
+    public const int PidMapRefreshTimeoutSeconds = 15;
 
     /// <summary>The rung (V305): one empty plain table and two indexes. No data moves. An older build never reads it.</summary>
     public const string CreateSql = @"
@@ -169,13 +186,14 @@ SELECT a.pid,
        (pg_catalog.clock_timestamp() AT TIME ZONE 'UTC')
 FROM pg_catalog.pg_stat_activity AS a
 WHERE a.pid IS NOT NULL
-AND   a.backend_start IS NOT NULL";
+AND   a.backend_start IS NOT NULL
+AND   a.backend_type = 'client backend'";
 
     /* ===================== the sessions map ===================== */
 
     /// <summary>
     /// A rolling map of the store's sessions: a process id to the role and application it had, with when it started and when it was
-    /// last seen alive. <see cref="Shared"/> is the service's, refreshed by every store log sweep.
+    /// last seen alive. <see cref="Shared"/> is the service's, refreshed once a minute by the store pass.
     /// </summary>
     public sealed class PidMap
     {
@@ -189,11 +207,11 @@ AND   a.backend_start IS NOT NULL";
         /// <param name="Application">Its application name.</param>
         public readonly record struct Entry(DateTime BackendStartUtc, DateTime SeenAliveUtc, string Role, string Application);
 
-        /// <summary>Takes one reading of every session, and drops readings older than <see cref="PidMapRetention"/>.</summary>
+        /// <summary>Takes one reading of every client session, and drops readings older than <see cref="PidMapRetention"/>.</summary>
         public async Task RefreshAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
         {
             var read = new List<(int Pid, Entry Entry)>();
-            await using (var command = new NpgsqlCommand(ActivitySql, connection) { CommandTimeout = StoreLogSweep.SweepTimeoutSeconds })
+            await using (var command = new NpgsqlCommand(ActivitySql, connection) { CommandTimeout = PidMapRefreshTimeoutSeconds })
             await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
             {
                 while (await reader.ReadAsync(cancellationToken))
@@ -252,7 +270,8 @@ AND   a.backend_start IS NOT NULL";
 
         /// <summary>
         /// The reading that answers for <paramref name="pid"/> at <paramref name="atUtc"/>, or null. A reading answers only when the
-        /// session had started by then and was alive when read at or after it: otherwise the process id may have belonged to another
+        /// session had started by then and was last seen no more than <see cref="PidMapResolveSlack"/> before it. When two readings of
+        /// the id both qualify, the later start wins. Otherwise the process id may have belonged to another
         /// session at <paramref name="atUtc"/>.
         /// </summary>
         public Entry? Resolve(int pid, DateTime atUtc)
@@ -261,13 +280,18 @@ AND   a.backend_start IS NOT NULL";
             {
                 if (_byPid.TryGetValue(pid, out var list))
                 {
+                    Entry? best = null;
                     foreach (var entry in list)
                     {
-                        if (entry.BackendStartUtc <= atUtc && atUtc <= entry.SeenAliveUtc)
+                        if (entry.BackendStartUtc <= atUtc
+                            && atUtc <= entry.SeenAliveUtc + PidMapResolveSlack
+                            && (best is null || entry.BackendStartUtc > best.Value.BackendStartUtc))
                         {
-                            return entry;
+                            best = entry;
                         }
                     }
+
+                    return best;
                 }
             }
 

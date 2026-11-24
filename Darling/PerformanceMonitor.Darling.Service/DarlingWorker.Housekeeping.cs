@@ -1398,6 +1398,41 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// The #9439 once-a-minute read of the store's client sessions into <see cref="StoreLockWaits.Shared"/>, so the hourly store
+    /// log sweep can name the roles and applications of a lock wait's blocker even when the blocker ended long before the sweep.
+    /// Its own budget and its own connection, a separate step from the checkpoint sample above. A failed read keeps the old map
+    /// and logs one warning when it starts failing (a Debug line while it goes on), and the next minute tries again. Never throws
+    /// except for the service stopping.
+    /// </summary>
+    private async Task RefreshStoreSessionMapAsync(CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(TimeSpan.FromSeconds(StoreLockWaits.PidMapRefreshTimeoutSeconds));
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await StoreLockWaits.Shared.RefreshAsync(connection, budget.Token);
+            _storeSessionMapFailing = false;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            if (!_storeSessionMapFailing)
+            {
+                _storeSessionMapFailing = true;
+                _logger.LogWarning(
+                    "The store session map could not be refreshed, so lock waits keep the last map and may show unresolved roles until it can: {Message}",
+                    ex.Message);
+            }
+            else
+            {
+                _logger.LogDebug(ex, "store session map refresh failed and was skipped");
+            }
+        }
+    }
+
+    /// <summary>
     /// The sentence the store-log capture's warning gives as the cause (#9333). A 58P01 (UndefinedFile) means the log
     /// folder is not there, which is a store that keeps no log files, not a missing privilege: the compose store ran
     /// without logging_collector and named the privilege anyway. A 42501 (InsufficientPrivilege) keeps the privilege

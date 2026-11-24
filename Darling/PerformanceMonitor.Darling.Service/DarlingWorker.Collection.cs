@@ -1800,6 +1800,9 @@ public sealed partial class DarlingWorker
             {
                 _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
                 await SampleCheckpointSyncAsync(stoppingToken);
+
+                /* #9439: the same minute keeps the lock-wait session map (pid to role and application) current. */
+                await RefreshStoreSessionMapAsync(stoppingToken);
             }
 
             /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */
