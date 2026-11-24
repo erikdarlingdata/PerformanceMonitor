@@ -580,28 +580,44 @@ psp_signature AS
         MIN(creation_time) AS creation_time
     FROM
     (
+        -- #9195: each plan's newest row by one hash aggregate, not ROW_NUMBER() over the window: the same read as the
+        -- latest CTE of CollectParameterSensitivity (and the fact read), so a tie on (collection_time, collection_id) picks
+        -- the same row in all three. The newest row is the largest (collection_time, collection_id), the old ORDER BY
+        -- collection_time DESC, collection_id DESC. Its fields ride in the struct.
         SELECT
-            database_name,
-            query_hash,
-            query_plan_hash,
-            execution_count,
-            creation_time,
-            creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
-            min_worker_time,
-            max_worker_time,
-            ROW_NUMBER() OVER
-            (
-                PARTITION BY database_name, query_hash, query_plan_hash
-                ORDER BY collection_time DESC, collection_id DESC
-            ) AS rn
-        FROM v_query_stats, svr
-        WHERE server_id = $1
-        AND   collection_time >= $3
-        AND   collection_time <= $4
-        AND   delta_execution_count > 0
-        /*DB*/
+            g.database_name,
+            g.query_hash,
+            g.query_plan_hash,
+            g.w.execution_count AS execution_count,
+            g.w.creation_time AS creation_time,
+            g.w.creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
+            g.w.min_worker_time AS min_worker_time,
+            g.w.max_worker_time AS max_worker_time
+        FROM
+        (
+            SELECT
+                database_name,
+                query_hash,
+                query_plan_hash,
+                max(
+                {
+                    'collection_time': collection_time,
+                    'collection_id': collection_id,
+                    'execution_count': execution_count,
+                    'creation_time': creation_time,
+                    'min_worker_time': min_worker_time,
+                    'max_worker_time': max_worker_time
+                }) AS w
+            FROM v_query_stats
+            WHERE server_id = $1
+            AND   collection_time >= $3
+            AND   collection_time <= $4
+            AND   delta_execution_count > 0
+            /*DB*/
+            GROUP BY database_name, query_hash, query_plan_hash
+        ) AS g, svr
     ) AS latest_cache
-    WHERE rn = 1
+    WHERE 1 = 1
 " + ParameterSensitivitySignature.PredicateSql("creation_time_utc <= $7", "    ") + @"
     GROUP BY database_name, query_hash
 ),
