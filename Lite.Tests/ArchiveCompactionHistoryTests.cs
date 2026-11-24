@@ -121,7 +121,7 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
         Assert.Equal(3, detail.FilesIn);
         Assert.Equal(1, detail.FilesOut);
         Assert.Equal(bytesIn, detail.BytesIn);
-        Assert.Equal(Bytes(P("202609_wait_stats.parquet")), detail.BytesOut);
+        Assert.Equal(Bytes(P($"{Day[..6]}_wait_stats.parquet")), detail.BytesOut);
         Assert.Equal(0, detail.SortedAtSmallGroupBatches);
         Assert.Equal(0, detail.UnsortedFallbackBatches);
         Assert.Equal(0, detail.FilesRecut);
