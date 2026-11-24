@@ -193,6 +193,58 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         Assert.Equal(1, table.FilesNeedingRecut);
     }
 
+    /// <summary>
+    /// #9409. Text that repeats makes a group the byte bound cut read small in the footer, under half the bound, so the row and
+    /// byte rule alone would pick the sorted merge's own output on every pass. The merge stamps it, and the layout does not count
+    /// a stamped file as owing the re-cut, the same as the re-cut. The same shape without the stamp is counted.
+    /// </summary>
+    [Fact]
+    public void AStampedFileOfRepeatingText_IsNotCountedAsNeedingTheRecut_AndTheSameShapeUnstamped_Is()
+    {
+        var sourceDir = Path.Combine(_tempDir, "source");
+        var spillDir = Path.Combine(_tempDir, "spill").Replace("\\", "/");
+        Directory.CreateDirectory(sourceDir);
+        Directory.CreateDirectory(spillDir);
+        var source = Path.Combine(sourceDir, "source.parquet").Replace("\\", "/");
+        Exec($"COPY (SELECT i::BIGINT AS collection_id, TIMESTAMP '2026-09-28 00:00:00' + to_seconds(((i * 7919) % 20000)::BIGINT) AS collection_time, " +
+             $"(1 + i % {Servers})::INTEGER AS server_id, repeat(md5((i % 200)::VARCHAR), 128) AS payload FROM range(20000) t(i)) " +
+             $"TO '{source}' ({ParquetCompaction.BuildArchiveCopyOptions(ParquetCompaction.ArchiveRowGroupSize)})");
+
+        var stamped = P(DayFile);
+        ParquetCompaction.MergeBatchToFile("query_store_stats", [source], stamped, spillDir);
+
+        /* The shape the byte clause alone would pick: several groups, none near the row cap, all under half the byte bound. */
+        var groups = Scalar($"SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{stamped}')");
+        var maxRows = Scalar($"SELECT max(row_group_num_rows) FROM parquet_metadata('{stamped}')");
+        Assert.True(groups > 1, $"{groups} row group(s)");
+        Assert.True(maxRows < ParquetCompaction.RecutBelowRowGroupRows, $"groups of {maxRows} rows");
+        using (var con = new DuckDBConnection("DataSource=:memory:"))
+        {
+            con.Open();
+            Assert.True(ParquetCompaction.MaxRowGroupUncompressedBytes(con, stamped) < ParquetCompaction.SortedRowGroupBytes / 2);
+            Assert.False(ParquetCompaction.NeedsRecut(con, stamped));
+        }
+
+        var layout = NewReader().Read().Layout;
+
+        Assert.Equal(0, Assert.Single(layout!.Tables).FilesNeedingRecut);
+
+        /* The same rows at the same group size, without the stamp. */
+        var unstamped = P($"{DateTime.UtcNow.Date.AddDays(-4):yyyyMMdd}_query_store_stats.parquet");
+        Exec($"COPY (SELECT * FROM read_parquet('{stamped}')) TO '{unstamped}' ({ParquetCompaction.BuildArchiveCopyOptions((int)maxRows)})");
+        Assert.True(Scalar($"SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{unstamped}')") > 1);
+        Assert.True(Scalar($"SELECT max(row_group_num_rows) FROM parquet_metadata('{unstamped}')") < ParquetCompaction.RecutBelowRowGroupRows);
+        using (var con = new DuckDBConnection("DataSource=:memory:"))
+        {
+            con.Open();
+            Assert.True(ParquetCompaction.NeedsRecut(con, unstamped));
+        }
+
+        layout = NewReader().Read().Layout;
+
+        Assert.Equal(1, Assert.Single(layout!.Tables).FilesNeedingRecut);
+    }
+
     /// <summary>A file larger than the table's merge batch budget is named as skipped, with that reason.</summary>
     [Fact]
     public void AFileOverTheBatchBudget_IsSkippedWithThatReason()

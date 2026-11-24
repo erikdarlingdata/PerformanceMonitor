@@ -1726,6 +1726,11 @@ COPY (
                     batchOutputs.Add((TempPath: finalPath + ".tmp", FinalPath: finalPath));
                 }
 
+                /* The re-cut skips this merge's outputs call for (#9407). They are noted only once the swap has put the outputs
+                   in place: a swap that fails or is undone leaves the originals, and a file noted before it would stay out of
+                   the re-cut for the whole build. */
+                var pendingRecutSkips = new List<(RecutSkipReason Reason, string Path)>();
+
                 /* Run each batch's merge into its temp file. If any batch throws,
                    the catch below cleans up all temps and we leave the originals in
                    place for next cycle's retry. */
@@ -1746,7 +1751,7 @@ COPY (
                             stats.SortedAtSmallGroupBatches++;
                             /* The output is sorted but in 2,048-row groups: the re-cut below would sort it at the large size
                                and run out of memory again, so it leaves the file alone (#9407). */
-                            NoteRecutSkip(RecutSkipReason.MergeSortedAtSmallGroups, outputFinalPath, stats);
+                            pendingRecutSkips.Add((RecutSkipReason.MergeSortedAtSmallGroups, outputFinalPath));
                             _logger?.LogWarning(
                                 "Compaction of {Table}: the server-ordered merge ran out of memory or temp space at the large row-group size, so this batch of {Files} files is sorted again at {RowGroupRows}-row groups: {Error}",
                                 retryTable, files, ParquetCompaction.ArchiveRowGroupSize, error);
@@ -1756,7 +1761,7 @@ COPY (
                             stats.UnsortedFallbackBatches++;
                             /* The output is in the unsorted order at the small size: the re-cut below would sort it again
                                and fall back again, so it leaves the file alone (#9407). */
-                            NoteRecutSkip(RecutSkipReason.MergeFellBackUnsorted, outputFinalPath, stats);
+                            pendingRecutSkips.Add((RecutSkipReason.MergeFellBackUnsorted, outputFinalPath));
                             _logger?.LogWarning(
                                 "Compaction of {Table}: the server-ordered merge ran out of memory or temp space even at {RowGroupRows}-row groups, so this batch of {Files} files fell back to the unsorted order: {Error}",
                                 fallbackTable, ParquetCompaction.ArchiveRowGroupSize, files, error);
@@ -1785,6 +1790,11 @@ COPY (
                 using (_duckDb.AcquireWriteLock(WriteLockBudget))
                 {
                     var removed = SwapCompactionOutputs(month, table, sourcePaths, batchOutputs);
+
+                    foreach (var (reason, skippedPath) in pendingRecutSkips)
+                    {
+                        NoteRecutSkip(reason, skippedPath, stats);
+                    }
 
                     /* A swap that could not delete an input or a set-aside file leaves its journal. The group is unresolved
                        until a later pass finishes it, so the re-cut below must not start a swap of its own that would
@@ -2231,10 +2241,15 @@ COPY (
                     continue;
                 }
 
-                if (ParquetCompaction.RowCount(tempPath) != ParquetCompaction.RowCount(path))
+                var rowCount = ParquetCompaction.RowCount(path);
+                if (ParquetCompaction.RowCount(tempPath) != rowCount)
                 {
                     throw new InvalidOperationException("The re-cut file does not hold the source file's row count");
                 }
+
+                /* Read before the swap, for the line logged after it: the temp has no name afterwards. */
+                var shapeBefore = ParquetCompaction.RowGroupShape(probe, path);
+                var shapeAfter = ParquetCompaction.RowGroupShape(probe, tempPath);
 
                 AfterRecutMergedForTests?.Invoke(tempPath);
                 cancellationToken.ThrowIfCancellationRequested();
@@ -2255,6 +2270,9 @@ COPY (
 
                 recut++;
                 stats.FilesRecut++;
+                _logger?.LogInformation(
+                    "Re-cut {File}: {Rows} rows, {GroupsBefore} row groups (largest {MaxRowsBefore} rows) before, {GroupsAfter} row groups (largest {MaxRowsAfter} rows) after",
+                    Path.GetFileName(path), rowCount, shapeBefore.Groups, shapeBefore.MaxGroupRows, shapeAfter.Groups, shapeAfter.MaxGroupRows);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {

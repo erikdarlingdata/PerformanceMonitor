@@ -229,7 +229,8 @@ internal sealed class ArchiveLayoutReader
 
     /* The re-cut's own candidate rule (ArchiveService.RecutSmallRowGroupFiles): a compaction file of a table that merges in
        server order, not a day file of a table that merges monthly, whose shape NeedsRecut names. NeedsRecut is the re-cut's own
-       rule, the byte check included (#9455), so a file whose largest group already holds half the byte bound is not counted. */
+       rule, the byte check included (#9455), so a file whose largest group already holds half the byte bound is not counted, and
+       a file stamped with the current rule is not counted either (#9409). */
     private static bool DueForRecut(DuckDBConnection connection, string path, string fileName, string table, long groups, long maxRows)
     {
         var m = ArchiveService.s_recutFileName.Match(fileName);
@@ -240,7 +241,8 @@ internal sealed class ArchiveLayoutReader
 
         var period = m.Groups["period"].Value;
         return !(period.Length == 8 && !ParquetCompaction.IsDailyTable(table))
-            && ParquetCompaction.NeedsRecut(groups, maxRows, () => ParquetCompaction.MaxRowGroupUncompressedBytes(connection, path));
+            && ParquetCompaction.NeedsRecut(groups, maxRows, () => ParquetCompaction.SortedCutStamp(connection, path),
+                () => ParquetCompaction.MaxRowGroupUncompressedBytes(connection, path));
     }
 
     private string? RecutSkipReason(Dictionary<string, string> skipList, string path, string fileName, string table, long bytes, long? free, long reserve)
