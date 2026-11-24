@@ -102,6 +102,41 @@ public sealed class DarlingMcpQueryStoreClutterTools
     /// bound without waiting for it. Unset in production.</summary>
     internal static readonly AsyncLocal<Func<CancellationTokenSource, Task>?> FleetReadSeam = new();
 
+    /// <summary>Test seam (#8570): runs at the start of each of the three reads that start together ("waits", "clerk",
+    /// "discontinuities") and is handed the read's name and its token, so a test can hold the three in flight at once or
+    /// fail one. Unset in production.</summary>
+    internal static readonly AsyncLocal<Func<string, CancellationToken, Task>?> IndependentReadSeam = new();
+
+    /// <summary>#8570: one of the reads that need only the server id and the window. Each takes its own pooled connection and
+    /// touches no state the other reads share, so they start together and the call waits as long as the slowest rather than the sum.</summary>
+    private static async Task<T> RunIndependentReadAsync<T>(string name, Func<CancellationToken, Task<T>> read, CancellationToken cancellationToken)
+    {
+        if (IndependentReadSeam.Value is { } seam) await seam(name, cancellationToken);
+        return await read(cancellationToken);
+    }
+
+    /// <summary>#8570: stops the started reads and waits for them, so none outlives the call and none leaves an unobserved
+    /// exception behind. A read already awaited is finished and costs nothing here. What a read threw is dropped: the call is
+    /// either returning its own answer or already carrying a failure that came first.</summary>
+    private static async Task SettleIndependentReadsAsync(CancellationTokenSource? source, params Task?[] reads)
+    {
+        if (source is null) return;
+        try
+        {
+            source.Cancel();
+            foreach (var read in reads)
+            {
+                if (read is null) continue;
+                try { await read; }
+                catch (Exception) { /* observed; see the summary */ }
+            }
+        }
+        finally
+        {
+            source.Dispose();
+        }
+    }
+
     /// <summary>True when the fleet budget fired and the caller did not: the cancellation, or the PostgreSQL <c>57014</c> that
     /// the cancel request raises. The caller's own cancellation is not an overrun and propagates as before.</summary>
     private static bool IsFleetOverrun(Exception ex, CancellationToken caller, CancellationToken fleet)
@@ -204,6 +239,12 @@ public sealed class DarlingMcpQueryStoreClutterTools
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
         if (validation != null) return validation;
 
+        /* #8570: the three reads that need only the server id and the window start before the per-database reads and are awaited
+           where each used to run. The source is the one the finally below cancels, so a return or a throw never leaves one running. */
+        var independent = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task? waitsRead = null;
+        Task? clerkRead = null;
+        Task? discontinuitiesRead = null;
         try
         {
             var now = windowEnd;
@@ -215,15 +256,28 @@ public sealed class DarlingMcpQueryStoreClutterTools
             /* #5633 review (finding D): the reads omit a database the server no longer lists; the names they left out ride the envelope of
                an empty page and of a page with rows, and an empty page does not read as "Query Store is off everywhere". */
             var omitted = new HashSet<string>(StringComparer.Ordinal);
+
+            /* #8570: waits, clerk and baseline markers share no state with each other or with the reads below (each takes its own pooled
+               connection) and none touches `omitted`, which the next three reads fill one after another. */
+            var independentToken = independent.Token;
+            var waitsTask = RunIndependentReadAsync("waits", t => DarlingQueryStoreClutterReader.GetQdsWaitsAsync(postgres, serverIds, requestedStart, now, t), independentToken);
+            waitsRead = waitsTask;
+            var clerkTask = RunIndependentReadAsync("clerk", t => DarlingQueryStoreClutterReader.GetQueryStoreClerkAsync(postgres, resolved.ServerId, requestedStart, now, t), independentToken);
+            clerkRead = clerkTask;
+            var discontinuitiesTask = RunIndependentReadAsync("discontinuities", t => DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, requestedStart, now, t), independentToken);
+            discontinuitiesRead = discontinuitiesTask;
+
             var readCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, serverIds, requestedStart, now, databaseFilter, asOfUtc, omitted, logger, cancellationToken);
             var planChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, serverIds, requestedStart, now, databaseFilter, asOfUtc, omitted, logger, cancellationToken);
             var config = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, serverIds, requestedStart, now, databaseFilter, asOfUtc, omitted, logger, cancellationToken);
             var leftOut = DatabasesLeftOut.Distinct(omitted);
-            var waits = await DarlingQueryStoreClutterReader.GetQdsWaitsAsync(postgres, serverIds, requestedStart, now, cancellationToken);
-            var clerk = await DarlingQueryStoreClutterReader.GetQueryStoreClerkAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+            var waits = await waitsTask;
+            var clerk = await clerkTask;
 
             if (readCost.Count == 0 && planChurn.Count == 0 && config.Count == 0)
             {
+                /* #8570: the baseline markers are not part of an empty answer; stop that read now rather than after the ladder below. */
+                independent.Cancel();
                 /* The same ladder get_query_store_top climbs: the collector cannot run on this engine; the
                    store's recorded Query Store configuration says the databases are not recording; the
                    collector's own last run recorded a precondition; and only then the plain miss. Waits and
@@ -273,7 +327,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
             var effectiveStart = RawWindowFloor.EffectiveStart(planChurnTruncated ? planChurnStart : waitTruncated ? waitFloor : null, requestedStart);
             var truncationNote = windowTruncated ? WindowTruncationNote(planChurnTruncated ? planChurnStart : null, waitTruncated ? waitFloor : null, now) : null;
 
-            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
+            var discontinuities = await discontinuitiesTask;
 
             var composed = QueryStoreClutter.Compose(readCost, planChurn, config);
             var (page, truncated) = McpHelpers.BoundPage(composed, limit);
@@ -513,6 +567,10 @@ public sealed class DarlingMcpQueryStoreClutterTools
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_query_store_clutter", ex);
+        }
+        finally
+        {
+            await SettleIndependentReadsAsync(independent, waitsRead, clerkRead, discontinuitiesRead);
         }
     }
 
