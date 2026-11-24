@@ -34,6 +34,7 @@ public static class MigrationObjectKind
     public const string Function = "function";
     public const string Hypertable = "hypertable";
     public const string Policy = "policy";
+    public const string Constraint = "constraint";
 
     /// <summary>The marker row's kind: it stands for the whole ladder, not an object.</summary>
     public const string Ladder = "ladder";
@@ -44,7 +45,7 @@ public static class MigrationObjectAction
 {
     public const string Create = "create";
 
-    /// <summary>A column's type changed, an index was redefined, a function's body changed, or a policy's settings changed.</summary>
+    /// <summary>A column's type, nullability or default changed, an index was redefined, a constraint was redefined, a view's or function's body changed, or a policy's settings changed.</summary>
     public const string Alter = "alter";
 
     public const string Drop = "drop";
@@ -61,9 +62,9 @@ public static class MigrationObjectAction
 /// not one. A catalog read needs no privilege.</para>
 ///
 /// <para><b>What it covers.</b> The <c>collect</c> and <c>config</c> schemas only: tables (plain and partitioned), views and materialized views, their
-/// columns with their types, indexes with their definitions, functions and procedures with their identity arguments and a hash of their body, and,
+/// columns with their types, nullability and defaults, indexes and constraints with their definitions, views with a hash of their body, functions and procedures with their identity arguments and a hash of their body, and,
 /// when TimescaleDB is installed, hypertables and their compression and retention policies. Chunks and other TimescaleDB internals live in
-/// <c>_timescaledb_*</c> schemas and are never read. A column's nullability and default, and a constraint, are not covered.</para>
+/// <c>_timescaledb_*</c> schemas and are never read.</para>
 ///
 /// <para><b>A column or index of a table the same rung created or dropped is not listed:</b> the table row says it already, and a new table would
 /// otherwise list every column and index.</para>
@@ -84,14 +85,16 @@ FROM pg_class AS c
 JOIN pg_namespace AS n ON n.oid = c.relnamespace
 WHERE n.nspname IN (" + SchemaList + @") AND c.relkind IN ('r', 'p') AND NOT c.relispartition
 UNION ALL
-SELECT 'view', n.nspname, c.relname, NULL, NULL, c.relkind::text
+SELECT 'view', n.nspname, c.relname, NULL, NULL, c.relkind::text || ':' || md5(pg_get_viewdef(c.oid))
 FROM pg_class AS c
 JOIN pg_namespace AS n ON n.oid = c.relnamespace
 WHERE n.nspname IN (" + SchemaList + @") AND c.relkind IN ('v', 'm')
 UNION ALL
-SELECT 'column', n.nspname, c.relname, c.relname, a.attname::text, format_type(a.atttypid, a.atttypmod)
+SELECT 'column', n.nspname, c.relname, c.relname, a.attname::text,
+       format_type(a.atttypid, a.atttypmod) || '|' || a.attnotnull::text || '|' || coalesce(md5(pg_get_expr(d.adbin, d.adrelid)), '')
 FROM pg_attribute AS a
 JOIN pg_class AS c ON c.oid = a.attrelid
+LEFT JOIN pg_attrdef AS d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 JOIN pg_namespace AS n ON n.oid = c.relnamespace
 WHERE n.nspname IN (" + SchemaList + @") AND c.relkind IN ('r', 'p', 'v', 'm') AND NOT c.relispartition
 AND a.attnum > 0 AND NOT a.attisdropped
@@ -102,6 +105,12 @@ JOIN pg_class AS ci ON ci.oid = i.indexrelid
 JOIN pg_class AS t ON t.oid = i.indrelid
 JOIN pg_namespace AS n ON n.oid = t.relnamespace
 WHERE n.nspname IN (" + SchemaList + @") AND NOT ci.relispartition
+UNION ALL
+SELECT 'constraint', n.nspname, t.relname || '.' || k.conname, t.relname, NULL, k.contype::text || ':' || md5(pg_get_constraintdef(k.oid))
+FROM pg_constraint AS k
+JOIN pg_class AS t ON t.oid = k.conrelid
+JOIN pg_namespace AS n ON n.oid = t.relnamespace
+WHERE n.nspname IN (" + SchemaList + @") AND NOT t.relispartition AND k.contype <> 'n'
 UNION ALL
 SELECT 'function', n.nspname, p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', NULL, NULL, md5(p.prosrc)
 FROM pg_proc AS p
@@ -184,8 +193,8 @@ WHERE j.hypertable_schema IN (" + SchemaList + @") AND j.proc_name IN ('policy_c
 
     /// <summary>
     /// What changed from <paramref name="before"/> to <paramref name="after"/>: an object only in <paramref name="after"/> is created, one only in
-    /// <paramref name="before"/> is dropped, and one in both whose signature differs (a column's type, an index's definition, a function's body hash, a
-    /// policy's settings) is altered. The columns and indexes of a table or view that was created or dropped are left out. Sorted by kind, then name.
+    /// <paramref name="before"/> is dropped, and one in both whose signature differs (a column's type, nullability or default, an index's or constraint's definition, a view's or
+    /// function's body hash, a policy's settings) is altered. The columns, indexes and constraints of a table or view that was created or dropped are left out. Sorted by kind, then name.
     /// </summary>
     public static IReadOnlyList<MigrationObjectChange> Diff(MigrationCatalogSnapshot before, MigrationCatalogSnapshot after)
     {
@@ -219,7 +228,7 @@ WHERE j.hypertable_schema IN (" + SchemaList + @") AND j.proc_name IN ('policy_c
             .ToHashSet();
 
         return changes
-            .Where(c => !((c.Key.Kind == MigrationObjectKind.Column || c.Key.Kind == MigrationObjectKind.Index)
+            .Where(c => !((c.Key.Kind == MigrationObjectKind.Column || c.Key.Kind == MigrationObjectKind.Index || c.Key.Kind == MigrationObjectKind.Constraint)
                           && c.Parent is not null && wholeRelations.Contains((c.Key.Schema, c.Parent))))
             .OrderBy(c => KindRank(c.Key.Kind))
             .ThenBy(c => c.Key.Schema, StringComparer.Ordinal)
@@ -235,6 +244,7 @@ WHERE j.hypertable_schema IN (" + SchemaList + @") AND j.proc_name IN ('policy_c
         MigrationObjectKind.Table => 0,
         MigrationObjectKind.Column => 1,
         MigrationObjectKind.Index => 2,
+        MigrationObjectKind.Constraint => 7,
         MigrationObjectKind.View => 3,
         MigrationObjectKind.Function => 4,
         MigrationObjectKind.Hypertable => 5,

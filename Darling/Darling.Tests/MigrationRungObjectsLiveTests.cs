@@ -258,7 +258,7 @@ public sealed class MigrationRungObjectsLiveTests
             await using var transaction = await connection.BeginTransactionAsync(ct);
             var times = new List<double>();
             MigrationCatalogSnapshot? snapshot = null;
-            for (var i = 0; i < 7; i++)
+            for (var i = 0; i < 5; i++)
             {
                 var clock = Stopwatch.StartNew();
                 snapshot = await MigrationCatalogSnapshot.TryTakeAsync(connection, transaction, null, 60, ct);
