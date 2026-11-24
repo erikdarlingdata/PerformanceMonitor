@@ -444,18 +444,24 @@ public static class AlwaysOnXeSessions
            cancelled ends with an rpc_completed or sql_batch_completed carrying its elapsed duration, its object or statement
            and the same actions. SQL Server 2016 to 2022 end it with result Abort, 2025 with result Error, so the predicate keeps
            an Abort, and an Error that ran at least 0.9 s (a command timeout is whole seconds in every driver). A cancel that
-           arrives after the command finished raises no such event. */
+           arrives after the command finished raises no such event.
+           The two completed events keep their statement and batch_text fields OFF (the SET lines). rpc_completed's statement
+           carries the call's parameter values, which sensitive-statement withholding does not strip, and the engine copies the
+           field on every call of every monitored server before the predicate drops the event. The sql_text action carries the
+           text without values, so the collector reads that. */
         return "ADD EVENT sqlserver.attention\n"
             + "(\n"
             + actionBlock
             + "),\n"
             + "ADD EVENT sqlserver.rpc_completed\n"
             + "(\n"
+            + "    SET collect_statement = (0)\n"
             + actionBlock
             + abortPredicate
             + "),\n"
             + "ADD EVENT sqlserver.sql_batch_completed\n"
             + "(\n"
+            + "    SET collect_batch_text = (0)\n"
             + actionBlock
             + abortPredicate
             + ")\n";
