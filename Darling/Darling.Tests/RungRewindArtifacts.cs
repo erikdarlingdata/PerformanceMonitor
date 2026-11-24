@@ -988,6 +988,9 @@ ALTER TABLE config.store_statement_baseline DROP COLUMN IF EXISTS shared_blks_di
         // V305 (#9419): the WAL columns on collect.store_metrics. wal_stats_reset is the probe's newest sentinel. The rewind drops the eleven columns, so a re-run of V305
         // adds them again. Safe on a store that never had them.
         new(305, "hasStoreWalFigures", @"ALTER TABLE collect.store_metrics DROP COLUMN IF EXISTS wal_records, DROP COLUMN IF EXISTS wal_fpi, DROP COLUMN IF EXISTS wal_bytes, DROP COLUMN IF EXISTS wal_buffers_full, DROP COLUMN IF EXISTS wal_write_count, DROP COLUMN IF EXISTS wal_sync_count, DROP COLUMN IF EXISTS wal_write_ms, DROP COLUMN IF EXISTS wal_sync_ms, DROP COLUMN IF EXISTS wal_stats_reset, DROP COLUMN IF EXISTS wal_dir_bytes, DROP COLUMN IF EXISTS wal_dir_files;"),
+        // V306 (#9411): the background pass step history table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V306 creates it empty. Safe on a store
+        // that never had it.
+        new(306, "hasStorePassSteps", @"DROP TABLE IF EXISTS collect.store_pass_steps;"),
     ];
 
     /// <summary>

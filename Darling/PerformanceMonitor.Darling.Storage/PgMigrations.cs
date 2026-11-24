@@ -4073,6 +4073,10 @@ END $$;";
         /* V305 (#9419): the store's own WAL figures, eleven nullable columns on collect.store_metrics filled on the object_kind = 'wal' row only. No data moves
            and existing rows keep NULL. An older build ignores the columns and the row: its store reads list only the kinds it knows. */
         new Migration(StoreWalFigures.Version, "store-wal-figures", StoreWalFigures.AddColumnsSql),
+        /* V306 (#9411): the background pass step history (collect.store_pass_steps), one row per step of the hourly store-maintenance tick, the Query Store compose
+           rollup and the store self-metrics tick. One plain table and its newest-first index created empty: no data moves. An older build ignores it and records
+           nothing there. */
+        new Migration(StorePassSteps.Version, "store-pass-steps", StorePassSteps.CreateSql),
     };
 
     /// <summary>
