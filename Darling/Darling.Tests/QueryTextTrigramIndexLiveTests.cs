@@ -259,7 +259,9 @@ public sealed class QueryTextTrigramIndexLiveTests
 
     /* The limit change takes ACCESS EXCLUSIVE on the index, so with a long search holding the index it queues, and every insert queues
        behind it. The change runs under a 2 second lock timeout, a timeout is a quiet skip, and the clean still empties the list. With the
-       lock timeout removed the clean waits for the search and the insert waits behind it, so neither finishes inside the window. */
+       lock timeout removed the clean waits for the search and the insert waits behind it, so neither finishes inside the window. The insert
+       is released at the same lock timeout as the clean, so it can land in the pending list after the clean emptied it: the 200 seeded rows
+       are gone and at most that one row is pending. */
     [Fact]
     public async Task ACleanWithASearchHoldingTheIndex_SkipsTheLimitChangeAtTheLockTimeout_AndNeverBlocksAnInsertPastIt()
     {
@@ -311,7 +313,7 @@ public sealed class QueryTextTrigramIndexLiveTests
         await clean;
 
         Assert.NotEqual(QueryTextTrigramIndex.PendingListLimitKb, await PendingListLimitAsync(admin, ct));
-        Assert.Equal(0L, await PendingTuplesAsync(admin, ct));
+        Assert.InRange(await PendingTuplesAsync(admin, ct), 0L, 1L);
 
         await ExecAsync(reader, "COMMIT", ct);
         await QueryTextTrigramIndex.CleanPendingListAsync(data, () => true, NullLogger.Instance, ct);
