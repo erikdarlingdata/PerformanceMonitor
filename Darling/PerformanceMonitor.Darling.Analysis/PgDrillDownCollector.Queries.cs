@@ -456,7 +456,7 @@ AND   q.collection_time >= $2
 AND   q.collection_time <= $3
 AND   q.delta_execution_count > 0
 AND   (q.query_hash = ANY($5::text[]) OR q.query_hash IS NULL)
-ORDER BY q.database_name, q.query_hash, q.query_plan_hash, q.collection_time DESC";
+ORDER BY q.database_name, q.query_hash, q.query_plan_hash, q.collection_time DESC, q.collection_id DESC";
 
     /// <summary>
     /// The statement text of the parameter-sensitive plans the reader keeps, by digest (#3902, #4821): one
