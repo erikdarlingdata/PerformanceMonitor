@@ -239,6 +239,7 @@ public sealed class StoreHousekeepingHistory
         && c.FilesRecut == 0
         && c.RecutSkippedLiveJournal == 0
         && c.RecutSkippedTimeBudget == 0
+        && !c.RecutSkippedTimeBudgetIsLowerBound
         && (c.RecutSkips is null || c.RecutSkips.Values.All(n => n == 0))
         && c.SortedAtSmallGroupBatches == 0
         && c.UnsortedFallbackBatches == 0;
