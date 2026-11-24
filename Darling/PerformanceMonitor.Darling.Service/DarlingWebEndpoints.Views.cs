@@ -1150,7 +1150,7 @@ public static partial class DarlingWebEndpoints
     /// initializers run in textual order. A name in both throws when this is built.</summary>
     internal static readonly IReadOnlyDictionary<string, CatalogRead> CatalogDescriptors = BuildCatalogDescriptors();
 
-    private static IReadOnlyDictionary<string, CatalogRead> BuildCatalogDescriptors()
+    private static Dictionary<string, CatalogRead> BuildCatalogDescriptors()
     {
         var descriptors = new Dictionary<string, CatalogRead>(SharedCatalogDescriptors, StringComparer.Ordinal);
         ReadToolRegistrations.AddTo(descriptors, ReadToolRegistrations.All, r => r.Catalog);
