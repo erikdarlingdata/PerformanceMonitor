@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 
 namespace PerformanceMonitor.Common;
@@ -38,6 +39,23 @@ public static class AttentionWindowSql
 
     /// <summary>The <c>event_kind</c> of a kept ring-buffer event.</summary>
     public const string KindSample = "sample";
+
+    /// <summary>The <c>event_kind</c> of one captured call that ended aborted: a command the client cancelled while it still ran (#9507).
+    /// Its <c>interrupt_duration_us</c> is the call's elapsed time, which is the length of the command timeout.</summary>
+    public const string KindAborted = "aborted";
+
+    /// <summary>How long BEFORE an attention event a captured call may end and still be matched to it (#9507). The two events are
+    /// stamped by different threads of the same session, so the call can read a few milliseconds early.</summary>
+    public static readonly TimeSpan MatchCallToleranceBefore = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>How long AFTER an attention event a captured call may end and still be matched to it (#9507). A command that is still
+    /// running when the client cancels ends within moments of the cancel. A cancel that arrives after the command finished raises no
+    /// captured call at all, so nothing matches it.</summary>
+    public static readonly TimeSpan MatchCallWindowAfter = TimeSpan.FromSeconds(2);
+
+    private static readonly string MatchCallToleranceBeforeSql = $"INTERVAL '{(long)MatchCallToleranceBefore.TotalMilliseconds} milliseconds'";
+
+    private static readonly string MatchCallWindowAfterSql = $"INTERVAL '{(long)MatchCallWindowAfter.TotalMilliseconds} milliseconds'";
 
     /// <summary>How many entries each top list holds.</summary>
     public const int TopCount = 5;
@@ -145,6 +163,75 @@ public static class AttentionWindowSql
         $"((client_app_name ILIKE '{LikeEscape(SsmsIntelliSensePrefix)}%' ESCAPE '\\' AND rtrim(client_app_name) ILIKE '%{LikeEscape(SsmsIntelliSenseSuffix)}' ESCAPE '\\')"
         + $" OR lower(trim(client_app_name)) IN ({string.Join(", ", VsCodeMetadataApps.Select(a => $"'{SqlQuote(a.ToLowerInvariant())}'"))}))";
 
+    /// <summary>
+    /// The captured calls (#9507): one row per <c>aborted</c> event with what a match needs (session, database, time) and whether the call is
+    /// Azure Data Studio or dbatools metadata work, judged on the CALL's own statement (the attention row carries none, so the call is the
+    /// only place the statement can be told apart). <paramref name="range"/> is the collection_time cut, written with the prefix passed in.
+    /// A call is collected with its attention event or just after it, so it takes the same floor and ceiling as the samples.
+    /// </summary>
+    private static string CallsCte(string eventsRelation, string range) => $"""
+calls AS (
+    SELECT
+        attention_event_id AS id,
+        session_id,
+        database_name,
+        event_time,
+        COALESCE({AzdataMetadataPredicate}, FALSE) AS azdata_metadata,
+        COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) AS dbatools_metadata
+    FROM {eventsRelation}
+    WHERE server_id = $1
+    AND   {range}
+    AND   event_kind = '{KindAborted}'
+    AND   session_id IS NOT NULL
+    AND   event_time IS NOT NULL
+)
+""";
+
+    /// <summary>
+    /// The match rule (#9507): a call belongs to an attention event when it is the same session and database and the call ended from the
+    /// tolerance before the attention to the window after it. <paramref name="call"/> and <paramref name="sample"/> are the aliases.
+    /// A NULL database matches a NULL database.
+    /// </summary>
+    private static string MatchOn(string call, string sample) => $"""
+{call}.session_id = {sample}.session_id
+    AND   {call}.database_name IS NOT DISTINCT FROM {sample}.database_name
+    AND   {call}.event_time >= {sample}.event_time - {MatchCallToleranceBeforeSql}
+    AND   {call}.event_time <= {sample}.event_time + {MatchCallWindowAfterSql}
+""";
+
+    /// <summary>
+    /// The under-floor samples that match a captured call, one row per sample id (#9507). A join, never a correlated EXISTS: the baseline reads
+    /// seven days of samples. Only samples under the floor are looked at, because a sample at or over the floor is judged anyway. Columns: id,
+    /// azdata_metadata and dbatools_metadata (the matched call is that tool's metadata work). On a store with no <c>aborted</c> rows the join
+    /// is empty and the read gives today's numbers.
+    /// </summary>
+    private static string MatchedCte(string eventsRelation, string range) => $"""
+matched AS (
+    SELECT
+        s.attention_event_id AS id,
+        bool_or(c.azdata_metadata) AS azdata_metadata,
+        bool_or(c.dbatools_metadata) AS dbatools_metadata
+    FROM {eventsRelation} AS s
+    INNER JOIN calls AS c
+        ON {MatchOn("c", "s")}
+    WHERE s.server_id = $1
+    AND   {range.Replace("collection_time", "s.collection_time")}
+    AND   s.event_kind = '{KindSample}'
+    AND   s.interrupt_duration_us < {MinInterruptDurationUs}
+    GROUP BY s.attention_event_id
+)
+""";
+
+    /// <summary>A sample under the floor that no captured call explains: what <see cref="ShortDurationPredicate"/> alone used to mean (#9507).
+    /// Written against the <c>matched</c> CTE joined as <c>m</c>.</summary>
+    private static readonly string UnmatchedShortPredicate = $"(COALESCE({ShortDurationPredicate}, FALSE) AND m.id IS NULL)";
+
+    /// <summary>A sample of Azure Data Studio metadata work, by its own statement or by the call matched to it (#9507).</summary>
+    private static readonly string AzdataEffectivePredicate = $"(COALESCE({AzdataMetadataPredicate}, FALSE) OR COALESCE(m.azdata_metadata, FALSE))";
+
+    /// <summary>A sample of dbatools SMO metadata work, by its own statement or by the call matched to it (#9507).</summary>
+    private static readonly string DbatoolsEffectivePredicate = $"(COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) OR COALESCE(m.dbatools_metadata, FALSE))";
+
     /// <summary>The read-surface ceiling (#5640, get_client_timeouts): <c>$3</c> = the naive-UTC end of the window, so an <c>as_of</c> read
     /// does not count what happened after it. The alert's counts and sample groups pass <c>bounded: false</c> and have no ceiling; its top lists pass <c>true</c> since the final round of #5714 (L2).</summary>
     public static string Ceiling(bool bounded) => bounded ? "\nAND   collection_time <= $3" : "";
@@ -188,7 +275,11 @@ ORDER BY collection_time DESC
     /// of this one server.
     /// </summary>
     public static string BaselineMinutes(string logRelation, string eventsRelation) => $"""
-WITH runs AS (
+WITH {CallsCte(eventsRelation, "collection_time >= $2
+    AND   collection_time < $3")},
+{MatchedCte(eventsRelation, "collection_time >= $2
+    AND   collection_time < $3")},
+runs AS (
     SELECT date_trunc('minute', collection_time) AS minute
     FROM {logRelation}
     WHERE server_id = $1
@@ -213,8 +304,10 @@ samples AS (
     SELECT
         date_trunc('minute', collection_time) AS minute,
         CAST(COUNT(*) AS BIGINT) AS kept,
-        CAST(COUNT(*) FILTER (WHERE COALESCE({ShortDurationPredicate}, FALSE) OR COALESCE({AzdataMetadataPredicate}, FALSE) OR COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) OR COALESCE({ExcludedAppPredicate}, FALSE)) AS BIGINT) AS left_out
+        CAST(COUNT(*) FILTER (WHERE {UnmatchedShortPredicate} OR {AzdataEffectivePredicate} OR {DbatoolsEffectivePredicate} OR COALESCE({ExcludedAppPredicate}, FALSE)) AS BIGINT) AS left_out
     FROM {eventsRelation}
+    LEFT JOIN matched AS m
+        ON m.id = attention_event_id
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time < $3
@@ -250,19 +343,25 @@ ORDER BY collection_time DESC
 """;
 
     /// <summary>The sample rows counted per (run, database, application). Columns: collection_time, database_name, client_app_name, samples (bigint),
-    /// short_samples (bigint: the part under the duration floor, <see cref="ShortDurationPredicate"/>), azdata_metadata_samples (bigint: the part
-    /// that is Azure Data Studio metadata work and NOT already short, <see cref="AzdataMetadataPredicate"/>), dbatools_metadata_samples (bigint: the part that is
-    /// dbatools SMO metadata work and NOT already short, <see cref="DbatoolsSmoMetadataPredicate"/>; the three parts never overlap).</summary>
+    /// short_samples (bigint: the part under the duration floor, <see cref="ShortDurationPredicate"/>, that NO captured call explains, #9507), azdata_metadata_samples (bigint: the part
+    /// that is Azure Data Studio metadata work and NOT already short, <see cref="AzdataMetadataPredicate"/> or the matched call's own statement), dbatools_metadata_samples (bigint: the part that is
+    /// dbatools SMO metadata work and NOT already short, <see cref="DbatoolsSmoMetadataPredicate"/> or the matched call's own statement; the three parts never overlap), matched_samples (bigint, #9507: the part under the floor
+    /// that matches a captured call, <see cref="MatchOn"/>, and is not Azure Data Studio or dbatools metadata work. Such a sample is judged, not left out: the attention event timed the cancel, the call is what ran).</summary>
     public static string SampleGroups(string eventsRelation, bool bounded = false) => $"""
+WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))},
+{MatchedCte(eventsRelation, "collection_time >= $2" + Ceiling(bounded))}
 SELECT
     collection_time,
     database_name,
     client_app_name,
     CAST(COUNT(*) AS BIGINT) AS samples,
-    CAST(COUNT(*) FILTER (WHERE {ShortDurationPredicate}) AS BIGINT) AS short_samples,
-    CAST(COUNT(*) FILTER (WHERE NOT COALESCE({ShortDurationPredicate}, FALSE) AND COALESCE({AzdataMetadataPredicate}, FALSE)) AS BIGINT) AS azdata_metadata_samples,
-    CAST(COUNT(*) FILTER (WHERE NOT COALESCE({ShortDurationPredicate}, FALSE) AND COALESCE({DbatoolsSmoMetadataPredicate}, FALSE)) AS BIGINT) AS dbatools_metadata_samples
+    CAST(COUNT(*) FILTER (WHERE {UnmatchedShortPredicate}) AS BIGINT) AS short_samples,
+    CAST(COUNT(*) FILTER (WHERE NOT {UnmatchedShortPredicate} AND {AzdataEffectivePredicate}) AS BIGINT) AS azdata_metadata_samples,
+    CAST(COUNT(*) FILTER (WHERE NOT {UnmatchedShortPredicate} AND {DbatoolsEffectivePredicate}) AS BIGINT) AS dbatools_metadata_samples,
+    CAST(COUNT(*) FILTER (WHERE COALESCE({ShortDurationPredicate}, FALSE) AND m.id IS NOT NULL AND NOT {AzdataEffectivePredicate} AND NOT {DbatoolsEffectivePredicate}) AS BIGINT) AS matched_samples
 FROM {eventsRelation}
+LEFT JOIN matched AS m
+    ON m.id = attention_event_id
 WHERE server_id = $1
 AND   collection_time >= $2{Ceiling(bounded)}
 AND   event_kind = '{KindSample}'
@@ -329,25 +428,95 @@ LIMIT {TopCount}
     /// statement_fingerprint, statement_text, below_duration_floor (boolean), azdata_metadata (boolean), dbatools_metadata (boolean). Always bounded: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive row ceiling (see <see cref="SpanFloor"/>). Newest first, ties broken by the table's unique id so a page edge is stable. <paramref name="limit"/> is a validated integer, never caller text.
     /// </summary>
     public static string Samples(string eventsRelation, int limit) => $"""
+WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(true))},
+newest AS (
+    SELECT
+        attention_event_id,
+        event_time,
+        collection_time,
+        database_name,
+        client_app_name,
+        client_hostname,
+        session_id,
+        interrupt_duration_us,
+        statement_fingerprint,
+        statement_text,
+        COALESCE({ShortDurationPredicate}, FALSE) AS short_duration,
+        COALESCE({AzdataMetadataPredicate}, FALSE) AS azdata_own,
+        COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) AS dbatools_own
+    FROM {eventsRelation}
+    WHERE server_id = $1
+    AND   collection_time > $2
+    AND   collection_time <= $3
+    AND   event_kind = '{KindSample}'
+    ORDER BY collection_time DESC, event_time DESC NULLS LAST, attention_event_id DESC
+    LIMIT {limit}
+)
 SELECT
-    event_time,
-    collection_time,
-    database_name,
-    client_app_name,
-    client_hostname,
-    session_id,
-    interrupt_duration_us,
-    statement_fingerprint,
-    statement_text,
-    COALESCE({ShortDurationPredicate}, FALSE) AS below_duration_floor,
-    COALESCE({AzdataMetadataPredicate}, FALSE) AS azdata_metadata,
-    COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) AS dbatools_metadata
-FROM {eventsRelation}
-WHERE server_id = $1
-AND   collection_time > $2
-AND   collection_time <= $3
-AND   event_kind = '{KindSample}'
-ORDER BY collection_time DESC, event_time DESC NULLS LAST, attention_event_id DESC
+    n.event_time,
+    n.collection_time,
+    n.database_name,
+    n.client_app_name,
+    n.client_hostname,
+    n.session_id,
+    n.interrupt_duration_us,
+    n.statement_fingerprint,
+    n.statement_text,
+    (n.short_duration AND m.azdata_metadata IS NULL) AS below_duration_floor,
+    (n.azdata_own OR COALESCE(m.azdata_metadata, FALSE)) AS azdata_metadata,
+    (n.dbatools_own OR COALESCE(m.dbatools_metadata, FALSE)) AS dbatools_metadata,
+    (m.azdata_metadata IS NOT NULL) AS matched_call
+FROM newest AS n
+LEFT JOIN LATERAL (
+    SELECT c.azdata_metadata, c.dbatools_metadata
+    FROM calls AS c
+    WHERE n.short_duration
+    AND   {MatchOn("c", "n")}
+    ORDER BY c.event_time
+    LIMIT 1
+) AS m ON TRUE
+ORDER BY n.collection_time DESC, n.event_time DESC NULLS LAST, n.attention_event_id DESC
+""";
+
+    /// <summary>
+    /// The captured calls that match an under-floor sample in the span, for the read surface only (#9507): one row per call, newest first, with
+    /// what the call itself says about the timeout. Columns: event_time, collection_time, database_name, client_app_name, client_hostname,
+    /// session_id, interrupt_duration_us (the call's elapsed time), statement_text (the object name, then a colon and the statement for an RPC).
+    /// A call that is Azure Data Studio or dbatools metadata work is left out, as its sample is not judged. Always bounded, the way <see cref="Samples"/>
+    /// is: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive ceiling.
+    /// </summary>
+    public static string MatchedCalls(string eventsRelation, int limit) => $"""
+WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(true))},
+hit AS (
+    SELECT DISTINCT c.id
+    FROM {eventsRelation} AS s
+    INNER JOIN calls AS c
+        ON {MatchOn("c", "s")}
+    WHERE s.server_id = $1
+    AND   s.collection_time > $2
+    AND   s.collection_time <= $3
+    AND   s.event_kind = '{KindSample}'
+    AND   s.interrupt_duration_us < {MinInterruptDurationUs}
+    AND   NOT c.azdata_metadata
+    AND   NOT c.dbatools_metadata
+)
+SELECT
+    e.event_time,
+    e.collection_time,
+    e.database_name,
+    e.client_app_name,
+    e.client_hostname,
+    e.session_id,
+    e.interrupt_duration_us,
+    e.statement_text
+FROM {eventsRelation} AS e
+INNER JOIN hit AS h
+    ON h.id = e.attention_event_id
+WHERE e.server_id = $1
+AND   e.collection_time >= $2
+AND   e.collection_time <= $3
+AND   e.event_kind = '{KindAborted}'
+ORDER BY e.collection_time DESC, e.event_time DESC NULLS LAST, e.attention_event_id DESC
 LIMIT {limit}
 """;
 }

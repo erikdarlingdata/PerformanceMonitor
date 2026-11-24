@@ -35,7 +35,7 @@ public sealed class DarlingMcpClientTimeoutTools
 {
     private const string Collector = "attention";
 
-    [McpServerTool(Name = "get_client_timeouts"), Description("Gets client timeouts (queries a client cancelled or timed out) for one server over a time range: exact count and rate per minute, plus sampled top statements, databases, client apps and recent events. Samples are a subset, never the total. empty = collector ran, none counted; unavailable = no recent run; not_collected = engine without the collector; precondition = capture session missing. hours_back is whole hours (minimum 1): for a short alert window set as_of to its end and read sampled_events' event_time. <<GUIDE>> Reading guide for get_client_timeouts. count is exact: it is the sum of the attention collector's event_counter deltas, one per run, so it holds every client cancel or timeout the capture session counted, however many events the ring buffer kept. top_statements, top_databases, top_client_apps and sampled_events come from the ring buffer, which keeps at most 1,000 events and can miss some: they are a subset, they show what the timeouts looked like and never how many there were (samples_note says so on every answer). limit cuts only sampled_events (sampled_events_truncated says it did), never count or the top lists. rate_per_minute is count divided by minutes_covered, the minutes between the oldest and newest collector run the read used, not the whole hours_back window, so minutes the collector did not cover do not dilute the rate. Status words: empty means the collector ran across the window and its counter did not move, a true zero; unavailable means no recent successful run (the newest is outside the freshness window, or fewer than two runs), so no count is claimed, because an absent row is not a zero, and get_collection_health shows why; not_collected means the collector does not run on this server's engine, which is permanent and needs no fix; precondition means the collector's latest run recorded a missing or denied capture session, and the message names the fix. An attention is a client cancel or timeout, so a high rate is a client-side symptom (the client gave up waiting), not proof the server failed: look at top_statements and their waits next (get_wait_stats, get_waiting_tasks, get_active_queries).")]
+    [McpServerTool(Name = "get_client_timeouts"), Description("Gets client timeouts (queries a client cancelled or timed out) for one server over a time range: exact count and rate per minute, plus sampled top statements, databases, client apps and recent events. Samples are a subset, never the total. empty = collector ran, none counted; unavailable = no recent run; not_collected = engine without the collector; precondition = capture session missing. hours_back is whole hours (minimum 1): for a short alert window set as_of to its end and read sampled_events' event_time. <<GUIDE>> Reading guide for get_client_timeouts. count is exact: it is the sum of the attention collector's event_counter deltas, one per run, so it holds every client cancel or timeout the capture session counted, however many events the ring buffer kept. top_statements, top_databases, top_client_apps and sampled_events come from the ring buffer, which keeps at most 1,000 events and can miss some: they are a subset, they show what the timeouts looked like and never how many there were (samples_note says so on every answer). limit cuts only sampled_events and matched_calls (sampled_events_truncated and matched_calls_truncated say it did), never count or the top lists. A sampled attention that lasted under 1 s used to be left out of the rate as too short to be a client timeout. It is now matched to a captured call that ended aborted (same session and database, the call ending within moments of the attention): that call is the command the client cancelled, and the attention only timed the cancel, so its length is not the timeout's length. A matched sample is judged and shows matched_call: true, matched_calls in excluded_from_alert counts them, and the top-level matched_calls lists each call with how long it ran (elapsed_seconds) and its object or statement. below_duration_floor_events now counts only the samples no call matched. rate_per_minute is count divided by minutes_covered, the minutes between the oldest and newest collector run the read used, not the whole hours_back window, so minutes the collector did not cover do not dilute the rate. Status words: empty means the collector ran across the window and its counter did not move, a true zero; unavailable means no recent successful run (the newest is outside the freshness window, or fewer than two runs), so no count is claimed, because an absent row is not a zero, and get_collection_health shows why; not_collected means the collector does not run on this server's engine, which is permanent and needs no fix; precondition means the collector's latest run recorded a missing or denied capture session, and the message names the fix. An attention is a client cancel or timeout, so a high rate is a client-side symptom (the client gave up waiting), not proof the server failed: look at top_statements and their waits next (get_wait_stats, get_waiting_tasks, get_active_queries).")]
     public static async Task<string> GetClientTimeouts(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -167,7 +167,8 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.GetInt64(3),
                     r.GetInt64(4),
                     r.GetInt64(5),
-                    r.GetInt64(6)));
+                    r.GetInt64(6),
+                    r.GetInt64(7)));
 
             /* No span (fewer than two runs) is "not observed": the answer never shows the detail, so it is not read. */
             var span = ClientTimeoutsRead.DetailSpan(runs);
@@ -200,9 +201,20 @@ public sealed class DarlingMcpClientTimeoutTools
                     r.IsDBNull(8) ? null : r.GetString(8),
                     r.GetBoolean(9),
                     r.GetBoolean(10),
-                    r.GetBoolean(11)));
+                    r.GetBoolean(11),
+                    r.GetBoolean(12)));
+            var matchedCalls = await Query(AttentionWindowSql.MatchedCalls(events, sampleLimit + 1), spanFloor, spanCeiling,
+                r => new ClientTimeoutMatchedCall(
+                    r.IsDBNull(0) ? null : r.GetDateTime(0),
+                    r.GetDateTime(1),
+                    r.IsDBNull(2) ? null : r.GetString(2),
+                    r.IsDBNull(3) ? null : r.GetString(3),
+                    r.IsDBNull(4) ? null : r.GetString(4),
+                    r.IsDBNull(5) ? null : r.GetInt32(5),
+                    r.IsDBNull(6) ? null : r.GetInt64(6),
+                    r.IsDBNull(7) ? null : r.GetString(7)));
 
-            return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts), samples);
+            return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts, MatchedCallList: matchedCalls), samples);
         }, cancellationToken);
     }
 }
