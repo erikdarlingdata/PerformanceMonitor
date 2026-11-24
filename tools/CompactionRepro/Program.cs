@@ -104,9 +104,10 @@ var table = GetArg(args, "--table", "query_snapshots");
 var memoryLimitArg = GetArg(args, "--memory-limit", "");
 string? memoryLimit = memoryLimitArg.Length > 0 ? memoryLimitArg : null;
 int? threads = args.Contains("--threads") ? int.Parse(GetArg(args, "--threads", "")) : null;
-var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", (ParquetCompaction.ServerOrderByFor(table) is null ? ParquetCompaction.ArchiveRowGroupSize : ParquetCompaction.SortedArchiveRowGroupSize).ToString()));
-var rowGroupBytesMb = long.Parse(GetArg(args, "--row-group-bytes-mb", (ParquetCompaction.RowGroupBytesFor(table) / (1024 * 1024)).ToString()));
-var rowGroupBytes = rowGroupBytesMb * 1024L * 1024L;
+/* Absent means null, so MergeBatchToFile picks what production does: 122,880-row groups for a sorted table, and for its
+   unsorted fallback 2,048-row groups with the table's byte bound. Passing a size here fixes it for the fallback too. */
+int? rowGroupSize = args.Contains("--row-group-size") ? int.Parse(GetArg(args, "--row-group-size", "")) : null;
+long? rowGroupBytes = args.Contains("--row-group-bytes-mb") ? long.Parse(GetArg(args, "--row-group-bytes-mb", "")) * 1024L * 1024L : null;
 var copies = int.Parse(GetArg(args, "--copies", "1"));
 var repeatPlans = int.Parse(GetArg(args, "--repeat-plans", "1"));
 var repeatColumns = GetArg(args, "--repeat-columns", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -185,7 +186,7 @@ if (sweep)
 }
 else
 {
-    Console.WriteLine($"Settings: memory_limit={memoryLimit ?? "default"}, threads={(threads?.ToString() ?? "production pick")}, ROW_GROUP_SIZE={rowGroupSize}, ROW_GROUP_SIZE_BYTES={(rowGroupBytes > 0 ? rowGroupBytesMb + " MiB" : "none")}, max-batch={maxBatchMb} MB");
+    Console.WriteLine($"Settings: memory_limit={memoryLimit ?? "default"}, threads={(threads?.ToString() ?? "production pick")}, ROW_GROUP_SIZE={(rowGroupSize?.ToString() ?? "production pick")}, ROW_GROUP_SIZE_BYTES={(rowGroupBytes is null ? "production pick" : rowGroupBytes > 0 ? rowGroupBytes / (1024 * 1024) + " MiB" : "none")}, max-batch={maxBatchMb} MB");
 }
 if (mergeFiles.Count == 0)
     Console.WriteLine($"Splitting source into {numFiles} chunks");
@@ -259,7 +260,7 @@ try
        given config. Never throws — a merge OOM is caught and returned as
        Ok=false so a sweep can carry on to the next config. */
     (bool Ok, double StartMb, double PeakMb, double Sec, int Batches, string? Fail, List<string> Outputs)
-        RunOneConfig(int rgs, long batchBytes, string? memLimit, int? thr, bool verbose)
+        RunOneConfig(int? rgs, long batchBytes, string? memLimit, int? thr, bool verbose)
     {
         var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, batchBytes);
         if (verbose)
@@ -313,7 +314,10 @@ try
                 ParquetCompaction.MergeBatchToFile(table, batches[i], outPath, spillDir, memLimit, thr, rgs, rowGroupBytes,
                     onSortFallback: (fallbackTable, files, error) => Console.WriteLine(
                         $"        [sort fallback] {fallbackTable}: the server-ordered merge of {files} file(s) ran out of memory or temp space, " +
-                        $"so this batch fell back to the unsorted order: {(error.Length > 160 ? error[..160] + "..." : error).Replace("\r", " ").Replace("\n", " ")}"));
+                        $"so this batch fell back to the unsorted order: {(error.Length > 160 ? error[..160] + "..." : error).Replace("\r", " ").Replace("\n", " ")}"),
+                    onSortedAtSmallGroups: (retryTable, files, error) => Console.WriteLine(
+                        $"        [sorted at {ParquetCompaction.ArchiveRowGroupSize} rows] {retryTable}: the server-ordered merge of {files} file(s) ran out of memory or temp space at the large row-group size, " +
+                        $"so this batch was sorted again at {ParquetCompaction.ArchiveRowGroupSize}-row groups: {(error.Length > 160 ? error[..160] + "..." : error).Replace("\r", " ").Replace("\n", " ")}"));
                 bsw.Stop();
 
                 process.Refresh();

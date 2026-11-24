@@ -51,11 +51,9 @@ public sealed record StoreHousekeepingEvent(
 /// <param name="SortedAtSmallGroupBatches">Batches whose sorted merge ran out of memory at the large row-group size and were sorted again in 2,048-row groups.</param>
 /// <param name="UnsortedFallbackBatches">Batches that ran out of memory even then and were written in the unsorted order.</param>
 /// <param name="FilesRecut">Files the one-time re-cut rewrote sorted by server.</param>
-/// <param name="RecutSkippedOverBatchBudget">Files due for the re-cut but larger than the table's merge batch budget.</param>
-/// <param name="RecutSkippedFreeDisk">Files due for the re-cut that the free disk space could not hold.</param>
-/// <param name="RecutSkippedLiveJournal">Files due for the re-cut whose swap journal or archive-pending journal was still live.</param>
-/// <param name="RecutSkippedSortOutOfMemory">Files whose re-cut sort ran out of memory or temp space, so the file stays as it was.</param>
+/// <param name="RecutSkippedLiveJournal">Files due for the re-cut whose swap journal was still live.</param>
 /// <param name="RecutSkippedTimeBudget">Files due for the re-cut that the pass's time budget left for the next pass.</param>
+/// <param name="RecutSkips">Files the re-cut left alone in this pass, counted by reason name (the values of <c>ArchiveService.RecutSkipReason</c>). A reason with no file is absent.</param>
 /// <param name="ViewRebuildMs">Milliseconds the pass spent rebuilding the archive views after its swaps.</param>
 /// <param name="ProcessPeakWorkingSetBytes">The highest working set of the whole Lite process, sampled every 75 ms while the pass ran. Collection and the UI share the process, so it can include their memory.</param>
 /// <param name="DuckDbPeakMemoryBytes">The highest memory DuckDB reported for the merge connections (duckdb_memory(), sampled every 50 ms). Null when no merge ran or nothing was sampled.</param>
@@ -71,11 +69,9 @@ public sealed record CompactionPassDetail(
     int SortedAtSmallGroupBatches = 0,
     int UnsortedFallbackBatches = 0,
     int FilesRecut = 0,
-    int RecutSkippedOverBatchBudget = 0,
-    int RecutSkippedFreeDisk = 0,
     int RecutSkippedLiveJournal = 0,
-    int RecutSkippedSortOutOfMemory = 0,
     int RecutSkippedTimeBudget = 0,
+    Dictionary<string, int>? RecutSkips = null,
     long ViewRebuildMs = 0,
     long? ProcessPeakWorkingSetBytes = null,
     long? DuckDbPeakMemoryBytes = null,

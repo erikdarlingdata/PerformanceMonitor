@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Diagnostics;
 using System.Threading;
 using PerformanceMonitorLite.Database;
@@ -36,11 +38,19 @@ internal sealed class CompactionPassStats
     public int SortedAtSmallGroupBatches { get; set; }
     public int UnsortedFallbackBatches { get; set; }
     public int FilesRecut { get; set; }
-    public int RecutSkippedOverBatchBudget { get; set; }
-    public int RecutSkippedFreeDisk { get; set; }
     public int RecutSkippedLiveJournal { get; set; }
-    public int RecutSkippedSortOutOfMemory { get; set; }
     public int RecutSkippedTimeBudget { get; set; }
+
+    /* The re-cut's skips by reason: the one place a count by ArchiveService.RecutSkipReason is kept, bumped by
+       ArchiveService.NoteRecutSkip, where every skip of that kind goes. Sized by the enum, so a new reason has a slot. */
+    private readonly int[] _recutSkips = new int[Enum.GetValues<ArchiveService.RecutSkipReason>().Length];
+
+    public void NoteRecutSkip(ArchiveService.RecutSkipReason reason) => _recutSkips[(int)reason]++;
+
+    private Dictionary<string, int> RecutSkipsByName() =>
+        Enum.GetValues<ArchiveService.RecutSkipReason>()
+            .Where(r => _recutSkips[(int)r] > 0)
+            .ToDictionary(r => r.ToString(), r => _recutSkips[(int)r]);
     public long ViewRebuildMs { get; set; }
     public int FailedGroups { get; set; }
     public string? FirstError { get; set; }
@@ -67,7 +77,7 @@ internal sealed class CompactionPassStats
     public CompactionPassDetail ToDetail(double seconds, long? processPeakBytes) => new(
         StartUtc, seconds, GroupsMerged, FilesIn, FilesOut, BytesIn, BytesOut,
         SortedAtSmallGroupBatches, UnsortedFallbackBatches, FilesRecut,
-        RecutSkippedOverBatchBudget, RecutSkippedFreeDisk, RecutSkippedLiveJournal, RecutSkippedSortOutOfMemory, RecutSkippedTimeBudget,
+        RecutSkippedLiveJournal, RecutSkippedTimeBudget, RecutSkipsByName(),
         ViewRebuildMs, processPeakBytes, DuckDbPeakBytes > 0 ? DuckDbPeakBytes : null, MemorySourceText);
 }
 

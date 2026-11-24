@@ -25,6 +25,10 @@ public sealed class ArchiveLayoutReadTests : IDisposable
 {
     private const int Servers = 6;
 
+    /* Dated a few days back, not fixed: the layout names a file that retention deletes within a day, which a fixed date
+       would become once it aged out. */
+    private static readonly string DayFile = $"{DateTime.UtcNow.Date.AddDays(-3):yyyyMMdd}_query_store_stats.parquet";
+
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
     private readonly string _archiveDir;
     private readonly DuckDbInitializer _duckDb;
@@ -146,7 +150,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
     [Fact]
     public void AFileDueForTheRecut_WithNothingInItsWay_IsCountedWithNoSkip()
     {
-        WriteMixed("20260928_query_store_stats.parquet", 30_000);
+        WriteMixed(DayFile, 30_000);
 
         var layout = NewReader().Read().Layout;
 
@@ -159,7 +163,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
     [Fact]
     public void AFileOverTheBatchBudget_IsSkippedWithThatReason()
     {
-        var file = WriteMixed("20260928_query_store_stats.parquet", 30_000);
+        var file = WriteMixed(DayFile, 30_000);
         var reader = NewReader();
         reader.LayoutBatchBudgetForTests = _ => new FileInfo(file).Length - 1;
 
@@ -169,6 +173,79 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         var skip = Assert.Single(table.RecutSkips);
         Assert.Equal(ArchiveLayoutReader.ReasonOverBatchBudget, skip.Reason);
         Assert.Equal(1, skip.Files);
+    }
+
+    /// <summary>
+    /// A file the re-cut passes over at this build, on the persisted skip list (a failed re-cut, a sort that ran out of memory, a
+    /// merge that wrote it at small groups), shows as skipped. The same entry under another build does not, since a new build
+    /// tries the file again.
+    /// </summary>
+    [Fact]
+    public void AFileOnThePersistedSkipList_ShowsAsSkippedAtThisBuild()
+    {
+        WriteMixed(DayFile, 30_000);
+        var listPath = P("recut-skipped.txt");
+        File.WriteAllText(listPath, DayFile + "\t" + ArchiveService.CurrentBuildId() + "\n");
+
+        var table = Assert.Single(NewReader().Read().Layout!.Tables);
+
+        Assert.Equal(1, table.FilesNeedingRecut);
+        var skip = Assert.Single(table.RecutSkips);
+        Assert.Equal(ArchiveLayoutReader.ReasonSortFailed, skip.Reason);
+        Assert.Equal(1, skip.Files);
+
+        File.WriteAllText(listPath, DayFile + "\t" + ArchiveService.CurrentBuildId() + "-older\n");
+
+        var later = Assert.Single(NewReader().Read().Layout!.Tables);
+
+        Assert.Equal(1, later.FilesNeedingRecut);
+        Assert.Empty(later.RecutSkips);
+    }
+
+    /// <summary>A file the persisted list names reads the same list the re-cut wrote, not a copy of its rule: the service's own entry shows.</summary>
+    [Fact]
+    public void AFileTheRecutSkipped_ShowsAsSkippedInTheLayout()
+    {
+        WriteMixed(DayFile, 30_000);
+        var service = new ArchiveService(_duckDb, _archiveDir);
+        service.NoteRecutSkip(ArchiveService.RecutSkipReason.RecutFailed, P(DayFile), new CompactionPassStats());
+
+        var table = Assert.Single(NewReader().Read().Layout!.Tables);
+
+        var skip = Assert.Single(table.RecutSkips);
+        Assert.Equal(ArchiveLayoutReader.ReasonSortFailed, skip.Reason);
+    }
+
+    /// <summary>A file retention deletes within a day is skipped by the re-cut, and the layout says so.</summary>
+    [Fact]
+    public void AFileNearRetention_IsSkippedWithThatReason()
+    {
+        var cutoff = RetentionService.ArchiveCutoff(DateTime.UtcNow);
+        WriteMixed($"{cutoff.Date.AddDays(1):yyyyMMdd}_query_store_stats.parquet", 30_000);
+
+        var table = Assert.Single(NewReader().Read().Layout!.Tables);
+
+        Assert.Equal(1, table.FilesNeedingRecut);
+        var skip = Assert.Single(table.RecutSkips);
+        Assert.Equal(ArchiveLayoutReader.ReasonExpiresSoon, skip.Reason);
+    }
+
+    /// <summary>
+    /// The free-disk rule is the re-cut's own: a file the merge's rule would fit (about twice the file) but the re-cut's sort
+    /// spill (several times the file) would not is named as skipped for free disk.
+    /// </summary>
+    [Fact]
+    public void AFileTheRecutsSpillCannotFit_IsSkippedForFreeDisk()
+    {
+        var file = WriteMixed(DayFile, 30_000);
+        var bytes = new FileInfo(file).Length;
+        var reserve = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
+        _duckDb.AvailableFreeBytesProvider = _ => 3 * bytes + reserve;
+
+        var table = Assert.Single(NewReader().Read().Layout!.Tables);
+
+        var skip = Assert.Single(table.RecutSkips);
+        Assert.Equal(ArchiveLayoutReader.ReasonFreeDisk, skip.Reason);
     }
 
     /// <summary>A file removed while the layout is being read is skipped: the call succeeds and the file is not counted.</summary>

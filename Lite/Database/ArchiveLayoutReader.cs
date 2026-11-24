@@ -54,7 +54,8 @@ internal sealed class ArchiveLayoutReader
     public const string ReasonOverBatchBudget = "larger than the table's merge batch budget";
     public const string ReasonFreeDisk = "not enough free disk space";
     public const string ReasonLiveJournal = "a swap journal for its period is still live";
-    public const string ReasonSortFailed = "an earlier sort of it ran out of memory or failed (retried after a restart)";
+    public const string ReasonSortFailed = "skipped at this build after an earlier failure or a merge that sorted it at small groups or unsorted (tried again at the next build)";
+    public const string ReasonExpiresSoon = "retention deletes it within a day";
 
     private static readonly Regex s_tableName = new(
         @"^(imported_)?((\d{8}_\d{4}_)|(\d{8}_)|(\d{6}_)|(\d{4}-\d{2}_)|(all_))?(?<table>.+?)(_pt\d{3})?$", RegexOptions.Compiled);
@@ -63,6 +64,7 @@ internal sealed class ArchiveLayoutReader
     private readonly string _databasePath;
     private readonly Func<string, long?> _freeBytes;
     private readonly TimeSpan _budget;
+    private readonly string _buildId;
 
     /* Tests only: called with a file's path just before its footer is read, so a test can remove the file under the read. */
     internal Action<string>? BeforeFileReadForTests { get; set; }
@@ -70,8 +72,9 @@ internal sealed class ArchiveLayoutReader
     /* Tests only: the merge batch budget of a table, null for the production budgets. */
     internal Func<string, long>? BatchBudgetForTests { get; set; }
 
-    public ArchiveLayoutReader(string archivePath, string databasePath, Func<string, long?> freeBytes, TimeSpan budget)
+    public ArchiveLayoutReader(string archivePath, string databasePath, Func<string, long?> freeBytes, TimeSpan budget, string? buildId = null)
     {
+        _buildId = buildId ?? ArchiveService.CurrentBuildId();
         _archivePath = archivePath;
         _databasePath = databasePath;
         _freeBytes = freeBytes;
@@ -122,6 +125,7 @@ internal sealed class ArchiveLayoutReader
             /* The free-space figure is a hint for the skip reasons: without it no file is called out for lack of space. */
         }
 
+        var skipList = ArchiveService.ReadRecutSkipList(_archivePath);
         var perTable = new Dictionary<string, TableAcc>(StringComparer.OrdinalIgnoreCase);
         foreach (var f in files)
         {
@@ -185,7 +189,7 @@ internal sealed class ArchiveLayoutReader
                 if (due)
                 {
                     acc.NeedingRecut++;
-                    var reason = RecutSkipReason(f.Path, f.Name, f.Table, f.Bytes, free, reserve);
+                    var reason = RecutSkipReason(skipList, f.Path, f.Name, f.Table, f.Bytes, free, reserve);
                     if (reason is not null)
                     {
                         acc.Skips[reason] = acc.Skips.GetValueOrDefault(reason) + 1;
@@ -237,7 +241,7 @@ internal sealed class ArchiveLayoutReader
             && ParquetCompaction.NeedsRecut(groups, maxRows);
     }
 
-    private string? RecutSkipReason(string path, string fileName, string table, long bytes, long? free, long reserve)
+    private string? RecutSkipReason(IReadOnlyDictionary<string, string> skipList, string path, string fileName, string table, long bytes, long? free, long reserve)
     {
         var m = ArchiveService.s_recutFileName.Match(fileName);
         var period = m.Groups["period"].Value;
@@ -246,9 +250,15 @@ internal sealed class ArchiveLayoutReader
             return ReasonLiveJournal;
         }
 
-        if (ArchiveService.IsRecutSkipped(path))
+        /* The persisted skip list the re-cut keeps: an entry naming this build means the re-cut passes the file over. */
+        if (skipList.TryGetValue(fileName, out var skippedAt) && string.Equals(skippedAt, _buildId, StringComparison.Ordinal))
         {
             return ReasonSortFailed;
+        }
+
+        if (RetentionService.ExpiresWithin(fileName, ArchiveService.RecutRetentionWindow, DateTime.UtcNow))
+        {
+            return ReasonExpiresSoon;
         }
 
         if (bytes > (BatchBudgetForTests?.Invoke(table) ?? ParquetCompaction.BatchInputBytesFor(table)))
@@ -256,7 +266,7 @@ internal sealed class ArchiveLayoutReader
             return ReasonOverBatchBudget;
         }
 
-        return free is long f && 2 * bytes + reserve > f ? ReasonFreeDisk : null;
+        return ArchiveService.RecutLacksDiskSpace(bytes, free, reserve) ? ReasonFreeDisk : null;
     }
 
     private List<string> EnumerateOrEmpty(string pattern)

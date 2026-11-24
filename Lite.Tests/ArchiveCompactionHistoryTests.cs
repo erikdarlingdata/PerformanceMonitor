@@ -26,11 +26,16 @@ namespace PerformanceMonitorLite.Tests;
 public sealed class ArchiveCompactionHistoryTests : IDisposable
 {
     private const int Servers = 6;
+    /* Dated a few days back, not fixed: the re-cut leaves a file alone that retention deletes within a day, which a fixed
+       date would become once it aged out. */
+    private static readonly string Day = DateTime.UtcNow.Date.AddDays(-3).ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+    private static readonly string PreviousDay = DateTime.UtcNow.Date.AddDays(-4).ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
 
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
     private readonly string _archiveDir;
     private readonly StoreHousekeepingHistory _history;
     private readonly List<DuckDbInitializer> _initializers = [];
+    private DuckDbInitializer? _lastInitializer;
 
     public ArchiveCompactionHistoryTests()
     {
@@ -83,6 +88,7 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
     {
         var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
         _initializers.Add(initializer);
+        _lastInitializer = initializer;
         return new ArchiveService(initializer, _archiveDir) { History = _history };
     }
 
@@ -102,7 +108,7 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
     [Fact]
     public void APassThatMerges_WritesOneRowWithItsCounts()
     {
-        var inputs = new[] { "20260928_1000_wait_stats.parquet", "20260928_1100_wait_stats.parquet", "20260928_1200_wait_stats.parquet" }
+        var inputs = new[] { $"{Day}_1000_wait_stats.parquet", $"{Day}_1100_wait_stats.parquet", $"{Day}_1200_wait_stats.parquet" }
             .Select(n => WriteUnsorted(n, 40_000, payloadCopies: 2)).ToList();
         var bytesIn = inputs.Sum(Bytes);
 
@@ -144,7 +150,7 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
     [Fact]
     public void AnUnsortedFallback_IsCounted()
     {
-        WriteUnsorted("20260928_1000_query_store_stats.parquet", 60_000, payloadCopies: 4);
+        WriteUnsorted($"{Day}_1000_query_store_stats.parquet", 60_000, payloadCopies: 4);
         var service = NewService();
         service.MergeMemoryLimit = "2MB";
 
@@ -154,13 +160,14 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
         Assert.Equal(1, detail.GroupsMerged);
         Assert.Equal(1, detail.UnsortedFallbackBatches);
         Assert.Equal(0, detail.SortedAtSmallGroupBatches);
+        Assert.Equal(1, Skips(detail, ArchiveService.RecutSkipReason.MergeFellBackUnsorted));
     }
 
     /// <summary>A sorted merge that outgrows the cap at the large row-group size and is sorted again at 2,048 rows is counted apart.</summary>
     [Fact]
     public void ASortedAgainAt2048Rows_IsCounted()
     {
-        WriteUnsorted("20260928_1000_query_store_stats.parquet", 125_000, payloadCopies: 8);
+        WriteUnsorted($"{Day}_1000_query_store_stats.parquet", 125_000, payloadCopies: 8);
         var service = NewService();
         service.MergeMemoryLimit = "128MB";
 
@@ -169,6 +176,7 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
         var detail = OnlyCompactionRow(out _);
         Assert.Equal(1, detail.SortedAtSmallGroupBatches);
         Assert.Equal(0, detail.UnsortedFallbackBatches);
+        Assert.Equal(1, Skips(detail, ArchiveService.RecutSkipReason.MergeSortedAtSmallGroups));
     }
 
     /// <summary>
@@ -178,8 +186,8 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
     [Fact]
     public void ASkippedRecut_IsCountedByReason()
     {
-        var small = WriteUnsorted("20260928_query_store_stats.parquet", 12_000);
-        var big = WriteUnsorted("20260927_query_store_stats.parquet", 90_000, payloadCopies: 3);
+        var small = WriteUnsorted($"{Day}_query_store_stats.parquet", 12_000);
+        var big = WriteUnsorted($"{PreviousDay}_query_store_stats.parquet", 90_000, payloadCopies: 3);
         var budget = (Bytes(small) + Bytes(big)) / 2;
         var service = NewService();
         service.CompactionBatchInputBytes = budget;
@@ -191,7 +199,7 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
         var detail = OnlyCompactionRow(out _);
         Assert.Equal(0, detail.GroupsMerged);
         Assert.Equal(1, detail.FilesRecut);
-        Assert.Equal(1, detail.RecutSkippedOverBatchBudget);
+        Assert.Equal(1, detail.RecutSkips![nameof(ArchiveService.RecutSkipReason.OverBatchBudget)]);
         Assert.Equal(0, detail.RecutSkippedTimeBudget);
         Assert.True(detail.DuckDbPeakMemoryBytes > 0, "the cut's sort reported no DuckDB peak");
     }
@@ -200,8 +208,8 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
     [Fact]
     public void ARecutLeftForTheNextPass_IsCountedAsTheTimeBudget()
     {
-        WriteUnsorted("20260928_query_store_stats.parquet", 12_000);
-        WriteUnsorted("20260927_query_store_stats.parquet", 12_000);
+        WriteUnsorted($"{Day}_query_store_stats.parquet", 12_000);
+        WriteUnsorted($"{PreviousDay}_query_store_stats.parquet", 12_000);
         var service = NewService();
         service.DailyCompactionPassBudget = TimeSpan.Zero;
 
@@ -212,11 +220,122 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
         Assert.Equal(1, detail.RecutSkippedTimeBudget);
     }
 
+    private static int Skips(CompactionPassDetail detail, ArchiveService.RecutSkipReason reason) =>
+        detail.RecutSkips is { } m && m.TryGetValue(reason.ToString(), out var n) ? n : 0;
+
+    /// <summary>
+    /// Every value of <see cref="ArchiveService.RecutSkipReason"/> that goes through the re-cut's one skip note lands in the pass
+    /// row's counts, survives the history file and shows in the text of get_store_health. A reason added later with no count fails
+    /// here.
+    /// </summary>
+    [Fact]
+    public void EveryRecutSkipReason_IsCountedOnThePassRow()
+    {
+        var service = NewService();
+        var reasons = Enum.GetValues<ArchiveService.RecutSkipReason>();
+        Assert.NotEmpty(reasons);
+        var stats = new CompactionPassStats();
+        for (var i = 0; i < reasons.Length; i++)
+        {
+            /* A different count per reason, so one reason's count cannot stand in for another's. */
+            for (var n = 0; n <= i; n++)
+            {
+                service.NoteRecutSkip(reasons[i], P($"{Day}_query_store_stats_pt{i + 1:000}.parquet"), stats);
+            }
+        }
+
+        _history.Record(new StoreHousekeepingEvent(
+            DateTime.UtcNow, StoreHousekeepingHistory.KindCompaction, StoreHousekeepingHistory.OutcomeOk,
+            Compaction: stats.ToDetail(1, null)));
+        var detail = OnlyCompactionRow(out _);
+
+        for (var i = 0; i < reasons.Length; i++)
+        {
+            Assert.Equal(i + 1, Skips(detail, reasons[i]));
+        }
+
+        Assert.Equal(reasons.Length, detail.RecutSkips!.Count);
+        var text = StoreHealthReader.CompactionSummary(detail);
+        Assert.Contains($"skipped {Enumerable.Range(1, reasons.Length).Sum():N0} (", text);
+    }
+
+    /// <summary>
+    /// A pass that cuts one file and then finds the store busy for the whole lock budget counts a lock timeout, stops there
+    /// (the third file is not tried), and is not reported incomplete. The first file's cut keeps the pass worth a row.
+    /// </summary>
+    [Fact]
+    public void ARecutLockTimeout_IsCountedOnThePassRow_AndStopsTheLoop()
+    {
+        var newest = WriteUnsorted($"{Day}_query_store_stats.parquet", 12_000);
+        WriteUnsorted($"{PreviousDay}_query_store_stats.parquet", 12_000);
+        var third = WriteUnsorted($"{DateTime.UtcNow.Date.AddDays(-5):yyyyMMdd}_query_store_stats.parquet", 12_000);
+        var thirdBytes = File.ReadAllBytes(third);
+        var service = NewService();
+        service.WriteLockBudget = TimeSpan.FromMilliseconds(300);
+        var cuts = 0;
+        using var release = new System.Threading.ManualResetEventSlim(false);
+        System.Threading.Thread? reader = null;
+        service.AfterRecutMergedForTests = _ =>
+        {
+            if (++cuts != 2)
+            {
+                return;
+            }
+
+            /* The second file's sort is done: a read of the store now holds it, so its swap cannot take the write lock. */
+            using var taken = new System.Threading.ManualResetEventSlim(false);
+            reader = new System.Threading.Thread(() =>
+            {
+                using (_lastInitializer!.AcquireReadLock())
+                {
+                    taken.Set();
+                    release.Wait();
+                }
+            }) { IsBackground = true };
+            reader.Start();
+            Assert.True(taken.Wait(TimeSpan.FromSeconds(10)), "the read lock was not taken");
+        };
+
+        try
+        {
+            service.CompactParquetFiles();
+        }
+        finally
+        {
+            release.Set();
+            reader?.Join(TimeSpan.FromSeconds(10));
+        }
+
+        var detail = OnlyCompactionRow(out var row);
+        Assert.Equal(StoreHousekeepingHistory.OutcomeOk, row.Outcome);
+        Assert.Equal(1, detail.FilesRecut);
+        Assert.Equal(1, Skips(detail, ArchiveService.RecutSkipReason.LockTimeout));
+        Assert.Equal(2, cuts);
+        Assert.True(thirdBytes.AsSpan().SequenceEqual(File.ReadAllBytes(third)), "the loop went on to a third file after the timeout");
+        Assert.True(File.Exists(newest));
+    }
+
+    /// <summary>A file retention deletes within a day is counted as skipped for that reason, beside the file the pass cut.</summary>
+    [Fact]
+    public void AFileNearRetention_IsCountedOnThePassRow()
+    {
+        var cutoff = RetentionService.ArchiveCutoff(DateTime.UtcNow);
+        WriteUnsorted($"{cutoff.Date.AddDays(1):yyyyMMdd}_query_store_stats.parquet", 12_000);
+        WriteUnsorted($"{cutoff.Date.AddDays(5):yyyyMMdd}_query_store_stats.parquet", 12_000);
+
+        NewService().CompactParquetFiles();
+
+        var detail = OnlyCompactionRow(out _);
+        Assert.Equal(1, detail.FilesRecut);
+        Assert.Equal(1, Skips(detail, ArchiveService.RecutSkipReason.ExpiresSoon));
+    }
+
+
     /// <summary>A group whose merge throws writes a failed row with the error text, and the pass still returns.</summary>
     [Fact]
     public void AFailedMerge_WritesAFailedRowWithTheError()
     {
-        File.WriteAllText(P("20260928_1000_wait_stats.parquet"), "this is not a parquet file");
+        File.WriteAllText(P($"{Day}_1000_wait_stats.parquet"), "this is not a parquet file");
 
         NewService().CompactParquetFiles();
 

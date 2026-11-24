@@ -303,6 +303,20 @@ public static class StoreHealthText
             : string.Create(CultureInfo.InvariantCulture, $"{rows:N0} rows in {files:N0} files");
     }
 
+    /// <summary>A re-cut skip reason in plain words (#9422). A reason this does not name yet prints as its own name.</summary>
+    internal static string RecutSkipLabel(ArchiveService.RecutSkipReason reason) => reason switch
+    {
+        ArchiveService.RecutSkipReason.SortRanOutOfResources => "sort ran out of memory or temp space",
+        ArchiveService.RecutSkipReason.RecutFailed => "re-cut failed",
+        ArchiveService.RecutSkipReason.MergeSortedAtSmallGroups => "written by the merge at 2,048-row groups",
+        ArchiveService.RecutSkipReason.MergeFellBackUnsorted => "written by the merge in the unsorted order",
+        ArchiveService.RecutSkipReason.LockTimeout => "store busy (lock timeout)",
+        ArchiveService.RecutSkipReason.ExpiresSoon => "retention deletes it within a day",
+        ArchiveService.RecutSkipReason.LowDiskSpace => "free disk",
+        ArchiveService.RecutSkipReason.OverBatchBudget => "over the batch budget",
+        _ => reason.ToString(),
+    };
+
     /// <summary>What one compaction pass did, in plain words (#9422, #9424).</summary>
     public static string CompactionSummary(CompactionPassDetail c)
     {
@@ -314,13 +328,20 @@ public static class StoreHealthText
             sb.Append(ci, $"; {c.SortedAtSmallGroupBatches:N0} batches sorted again at 2,048-row groups, {c.UnsortedFallbackBatches:N0} batches fell back to unsorted");
         }
 
-        var skipped = c.RecutSkippedOverBatchBudget + c.RecutSkippedFreeDisk + c.RecutSkippedLiveJournal + c.RecutSkippedSortOutOfMemory + c.RecutSkippedTimeBudget;
+        var byReason = Enum.GetValues<ArchiveService.RecutSkipReason>()
+            .Select(r => (Reason: r, Count: c.RecutSkips is { } m && m.TryGetValue(r.ToString(), out var n) ? n : 0))
+            .Where(x => x.Count > 0)
+            .ToList();
+        var skipped = byReason.Sum(x => x.Count) + c.RecutSkippedLiveJournal + c.RecutSkippedTimeBudget;
         if (c.FilesRecut > 0 || skipped > 0)
         {
             sb.Append(ci, $"; re-cut {c.FilesRecut:N0} files");
             if (skipped > 0)
             {
-                sb.Append(ci, $", skipped {skipped:N0} (over the batch budget {c.RecutSkippedOverBatchBudget:N0}, free disk {c.RecutSkippedFreeDisk:N0}, live journal {c.RecutSkippedLiveJournal:N0}, sort ran out of memory {c.RecutSkippedSortOutOfMemory:N0}, time budget {c.RecutSkippedTimeBudget:N0})");
+                var parts = byReason.Select(x => string.Create(ci, $"{RecutSkipLabel(x.Reason)} {x.Count:N0}")).ToList();
+                if (c.RecutSkippedLiveJournal > 0) parts.Add(string.Create(ci, $"live swap journal {c.RecutSkippedLiveJournal:N0}"));
+                if (c.RecutSkippedTimeBudget > 0) parts.Add(string.Create(ci, $"time budget {c.RecutSkippedTimeBudget:N0}"));
+                sb.Append(ci, $", skipped {skipped:N0} (").Append(string.Join(", ", parts)).Append(')');
             }
         }
 

@@ -84,7 +84,7 @@ public class RetentionService
             return 0;
         }
 
-        var cutoffDate = DateTime.UtcNow.AddMonths(-retentionMonths);
+        var cutoffDate = ArchiveCutoff(DateTime.UtcNow, retentionMonths);
         var deleted = 0;
         string? firstError = null;
 
@@ -101,6 +101,14 @@ public class RetentionService
                     _logger?.LogInformation("Deleted expired archive: {File}", file);
                 }
             }
+            catch (IOException ex) when (IsFileInUse(ex))
+            {
+                /* A sort or a read has the file open (Windows refuses the delete). The file is expired either way and the next run
+                   deletes it once it is free, so this is logged as information, not as an error (#9407). Store Health still
+                   records that this run could not delete it (#8788). */
+                _logger?.LogInformation("Expired archive {File} is in use, so its delete waits for the next retention run", file);
+                firstError ??= $"{Path.GetFileName(file)}: {ex.Message}";
+            }
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Failed to evaluate/delete archive file: {File}", file);
@@ -111,6 +119,22 @@ public class RetentionService
         LastCleanupError = firstError;
         return deleted;
     }
+
+    /// <summary>
+    /// The instant before which <see cref="CleanupOldArchives"/> deletes a file: one whose name's date is earlier than this.
+    /// </summary>
+    internal static DateTime ArchiveCutoff(DateTime utcNow, int retentionMonths = ArchiveRetentionMonths) =>
+        utcNow.AddMonths(-retentionMonths);
+
+    /// <summary>
+    /// Whether <see cref="CleanupOldArchives"/> deletes the file, or will within <paramref name="window"/>: the archive
+    /// re-cut leaves such a file alone (#9407). A name with no date never expires.
+    /// </summary>
+    internal static bool ExpiresWithin(string path, TimeSpan window, DateTime utcNow, int retentionMonths = ArchiveRetentionMonths) =>
+        TryParseArchiveFileDate(path) is { } fileDate && fileDate < ArchiveCutoff(utcNow, retentionMonths) + window;
+
+    /* The Windows sharing violation and lock violation: another handle has the file open without allowing a delete. */
+    private static bool IsFileInUse(IOException ex) => (ex.HResult & 0xFFFF) is 32 or 33;
 
     /// <summary>
     /// The date an archive file's name carries (#8788: shared by the cleanup and the Store Health read, so both read a name the same
