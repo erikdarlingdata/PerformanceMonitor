@@ -398,7 +398,9 @@ public static partial class DarlingWebEndpoints
             ["get_store_table_health"] = (c, pg, an) => DarlingMcpStoreTableHealthTools.GetStoreTableHealth(pg, Rows(c, "top", DarlingMcpStoreTableHealthTools.DefaultTop), QueryBool(c, "candidates_only", false), First(c, "section"), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["measure_store_table"] = (c, pg, an) => DarlingMcpStoreTableMeasureTools.MeasureStoreTable(pg, Str(c, "table"), c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, query_id: Str(c, "query_id"), responseByteBudget: null, c.RequestAborted),
-            ["get_service_starts"] = (c, pg, an) => DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), c.RequestAborted),
+            ["get_service_starts"] = (c, pg, an) => !OptionalInt(c, "rung", out var startsRung) ? UnparseableParam("rung")
+                : !OptionalInt(c, "hours_back", out var startsHours) ? UnparseableParam("hours_back")
+                : DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), startsRung, startsHours, c.RequestAborted),
             ["get_store_checkpoints"] = (c, pg, an) => DarlingMcpStoreCheckpointTools.GetStoreCheckpoints(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreCheckpointTools.DefaultLimit), AsOf(c), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["get_store_pass_steps"] = (c, pg, an) => DarlingMcpStorePassStepsTools.GetStorePassSteps(pg, Hours(c, 24), Str(c, "pass"), Str(c, "step"), Rows(c, "limit", DarlingMcpStorePassStepsTools.DefaultLimit), AsOf(c), responseByteBudget: null, c.RequestAborted),
             ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), Str(c, "order_by"), logger: logger, cancellationToken: c.RequestAborted),
@@ -408,7 +410,7 @@ public static partial class DarlingWebEndpoints
                static reference, not a new BuildReadDispatch parameter (round-1 review, Medium 2) — unlike
                postgresConfig, the cache instance never varies by caller, so no threading is needed. #4203:
                c.RequestAborted now reaches the gather via GetOrGatherAsync's linked token. */
-            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, StoreProcessOwnership.Shared, c.RequestAborted),
+            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, StoreProcessOwnership.Shared, QueryDouble(c, "free_floor_percent", DarlingMcpStoreHostTools.DefaultFreeFloorPercent), c.RequestAborted),
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), null, c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),

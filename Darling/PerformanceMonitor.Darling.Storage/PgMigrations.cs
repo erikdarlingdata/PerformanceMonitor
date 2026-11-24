@@ -4091,6 +4091,9 @@ END $$;";
         /* V310 (#9452): the partial index of the oversized-plan backlog's pending rows, on (server_id), for the sightings statement's per-cycle pending count.
            An older build never reads it, and keeps writing rows that the index follows. */
         new Migration(OversizedPlanBacklog.PendingIndexVersion, "oversized-plan-backlog-pending-index", OversizedPlanBacklog.CreatePendingIndexSql),
+        /* V311 (#9438): what each migration rung created, changed or dropped (collect.service_start_rung_objects): one row per object, a child of the rung
+           row V307 made. One plain table and its by-rung index created empty: no data moves. An older build ignores it and records no object rows. */
+        new Migration(ServiceStartRungObjects.Version, "service-start-rung-objects", ServiceStartRungObjects.CreateSql),
     };
 
     /// <summary>
@@ -12069,6 +12072,9 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
 
         observer?.LadderStarted(currentVersion);
 
+        var recordObjects = observer is not null && currentVersion > 0;
+        /* The catalog after one rung is the catalog before the next, because the advisory lock keeps every other migrator out, so each rung costs one read, not two. */
+        MigrationCatalogSnapshot? carried = null;
         var applied = 0;
         foreach (var migration in ladder)
         {
@@ -12094,9 +12100,20 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             var rungStartedUtc = DateTime.UtcNow;
             var rungClock = System.Diagnostics.Stopwatch.StartNew();
             using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            IReadOnlyList<MigrationObjectChange>? objectChanges = null;
+            MigrationCatalogSnapshot? afterObjects = null;
 
             try
             {
+                /* #9438: the catalog before and after the rung, in the rung's own transaction, so the diff is what this rung and nothing else did.
+                   Only for a store that already had a version: a ladder from an empty store would list every object as created. Each read is under a
+                   savepoint, so a failed read costs the rung's object rows, never the rung. The rung's elapsed time in the start history includes
+                   both reads. */
+                var before = recordObjects
+                    ? carried ?? await MigrationCatalogSnapshot.TryTakeAsync(connection, transaction, logger, MigrationCommandTimeoutSeconds, cancellationToken)
+                    : null;
+                carried = null;
+
                 try
                 {
                     using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = rungTimeoutSeconds };
@@ -12110,6 +12127,13 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                     await TryRollbackAsync(transaction);
                     await LogLockHoldersAsync(connection, logger, migration.Version, migration.Name, ex.MessageText, cancellationToken);
                     throw;
+                }
+
+                if (before is not null)
+                {
+                    var after = await MigrationCatalogSnapshot.TryTakeAsync(connection, transaction, logger, MigrationCommandTimeoutSeconds, cancellationToken);
+                    objectChanges = after is null ? null : MigrationCatalogSnapshot.Diff(before, after);
+                    afterObjects = after;
                 }
 
                 using (var stamp = new NpgsqlCommand(
@@ -12133,6 +12157,13 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
 
             observer?.RungFinished(migration.Version, migration.Name, rungStartedUtc, rungClock.ElapsedMilliseconds,
                 MigrationRungOutcome.Applied, null);
+            if (objectChanges is not null)
+            {
+                observer?.RungObjects(migration.Version, objectChanges);
+            }
+
+            carried = afterObjects;
+
             applied++;
         }
 
