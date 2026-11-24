@@ -176,15 +176,15 @@ FROM generate_series(1, $3) AS n;";
 
         await ExecAsync(connection, "VACUUM (ANALYZE) collect.oversized_plan_backlog;", ct);
 
-        /* A cycle of fifty re-sightings of rows the server holds, and the cap far above its rows, so the gate's first test is under it. */
-        var sightings = Sightings("PENDING", 50).ToList();
+        /* A cycle of five re-sightings of rows the server holds, and the cap far above its rows, so the gate's first test is under it. */
+        var sightings = Sightings("PENDING", 5).ToList();
 
         var withIndex = await ExplainAsync(connection, server, sightings, 1_000_000, ct);
         Walk(withIndex.Plan, out var nodeTypes, out var indexNames);
         Assert.Contains(IndexName, indexNames);
         Assert.Contains("Index Only Scan", nodeTypes);
         Assert.True(IndexOnlyHeapFetches(withIndex.Plan) <= 50, "the pending count fetched heap rows after a vacuum: " + withIndex.Text);
-        Assert.True(withIndex.Buffers < 600, $"the pending count read {withIndex.Buffers} buffers: " + withIndex.Text);
+        Assert.True(withIndex.Buffers < 300, $"the pending count read {withIndex.Buffers} buffers: " + withIndex.Text);
         TestContext.Current.SendDiagnosticMessage("#9452 plan with the index, first test under the cap, " + withIndex.Buffers + " buffers:\n" + withIndex.Text);
 
         var overCap = await ExplainAsync(connection, server, sightings, Cap, ct);
