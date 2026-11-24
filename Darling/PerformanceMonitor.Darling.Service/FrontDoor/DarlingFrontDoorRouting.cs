@@ -114,6 +114,7 @@ internal static class DarlingFrontDoorRouting
         "get_query_fleet_summary",
         "get_read_latency",
         "get_server_actions",
+        "get_service_starts",
         "get_store_host",
         "get_store_log",
         "get_store_metrics",

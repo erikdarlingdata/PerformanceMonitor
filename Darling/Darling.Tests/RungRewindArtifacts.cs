@@ -991,6 +991,10 @@ ALTER TABLE config.store_statement_baseline DROP COLUMN IF EXISTS shared_blks_di
         // V306 (#9411): the background pass step history table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V306 creates it empty. Safe on a store
         // that never had it.
         new(306, "hasStorePassSteps", @"DROP TABLE IF EXISTS collect.store_pass_steps;"),
+        // V307 (#9415): the service start history's two tables. The pair is the probe's newest sentinel. The rewind drops both, so a re-run of V307 creates them empty. Safe on a
+        // store that never had them.
+        new(307, "hasServiceStartHistory", @"DROP TABLE IF EXISTS collect.service_start_rungs;
+DROP TABLE IF EXISTS collect.service_starts;"),
     ];
 
     /// <summary>

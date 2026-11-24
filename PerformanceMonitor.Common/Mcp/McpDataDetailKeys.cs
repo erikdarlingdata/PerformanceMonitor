@@ -105,6 +105,9 @@ public static class McpDataDetailKeys
             // list_servers and get_collection_health (#7590): why the service could not connect to a server, which is the
             // connect exception's message, so it can quote the host, the port or the login the server refused.
             "last_connect_error",
+            // get_service_starts (#9415): why a migration rung failed, the database error's message, which can quote a connection detail or
+            // a value from the statement that failed.
+            "error_text",
             // Free text that can quote collected text: the generic "message" key (a tool's status sentence, which can
             // quote what the monitored server said) and the job-failure alert context label "Message" (the step's
             // output, normalized to the same entry).

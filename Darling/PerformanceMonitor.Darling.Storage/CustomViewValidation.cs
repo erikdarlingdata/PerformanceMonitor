@@ -156,6 +156,7 @@ public static partial class CustomViewValidation
         "measure_store_table",
         "get_store_maintenance_readiness",
         "get_store_log",
+        "get_service_starts",
         "get_store_pass_steps",
         "get_store_query_history",
         "get_store_query_stats",
