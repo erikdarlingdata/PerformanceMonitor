@@ -69,6 +69,8 @@ public static class InvestigationFamily
         [AlertFamily.ClientTimeoutsMetric] = QueryPerformance,
 
         ["High CPU"] = Resources,
+        /* #9501: capacity held at the configured ceiling with low instance CPU is resource pressure (memory and buffer cache). */
+        [AlertFamily.CapacityAtCeilingMetric] = Resources,
         ["Poison Wait"] = Resources,
         /* Not in the draft: the scheduler queue is CPU pressure, read the other way round. */
         ["Runnable Queue"] = Resources,
