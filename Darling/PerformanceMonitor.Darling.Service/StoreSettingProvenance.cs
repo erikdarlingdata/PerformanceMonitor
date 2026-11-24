@@ -24,7 +24,8 @@ internal readonly record struct UnappliedFileSetting(string? File, int? Line, st
 /// line of the winning value, whether it waits for a restart, and every <c>pg_file_settings</c> line for the same
 /// name that is not applied. <see cref="SourceFile"/> and <see cref="SourceLine"/> are null when the role cannot
 /// read them (see <see cref="SettingProvenanceRead.SourceColumnsReadable"/>), and when the value does not come
-/// from a file at all.</summary>
+/// from a file at all. <see cref="AppliedFileValue"/> is the text the winning file line carries (for example
+/// <c>77MB</c>), where <c>pg_settings.setting</c> only has the normalized figure (<c>78848</c> kB).</summary>
 internal sealed record SettingProvenance(
     string Name,
     string Setting,
@@ -33,7 +34,8 @@ internal sealed record SettingProvenance(
     string? SourceFile,
     int? SourceLine,
     bool PendingRestart,
-    IReadOnlyList<UnappliedFileSetting> UnappliedFileRows)
+    IReadOnlyList<UnappliedFileSetting> UnappliedFileRows,
+    string? AppliedFileValue = null)
 {
     /// <summary>The running value as <c>pg_settings</c> reports it, with its unit when it has one.</summary>
     public string ValueDisplay => string.IsNullOrEmpty(Unit) ? Setting : Setting + Unit;
@@ -65,11 +67,10 @@ SELECT name, setting, unit, source, sourcefile, sourceline, pending_restart
 FROM pg_settings
 WHERE name = ANY($1)";
 
-    internal const string UnappliedFileRowsSql = @"
-SELECT name, sourcefile, sourceline, setting, error
+    internal const string FileRowsSql = @"
+SELECT name, sourcefile, sourceline, setting, error, coalesce(applied, false)
 FROM pg_file_settings
 WHERE name = ANY($1)
-AND   NOT coalesce(applied, false)
 ORDER BY name, seqno";
 
     /// <summary>How many unapplied lines one setting's sentence names before it says how many more there are. A
@@ -96,14 +97,21 @@ ORDER BY name, seqno";
         }
 
         var unapplied = new Dictionary<string, List<UnappliedFileSetting>>(StringComparer.Ordinal);
+        var appliedValue = new Dictionary<string, string?>(StringComparer.Ordinal);
         if (fileReadable)
         {
-            await using var cmd = new NpgsqlCommand(UnappliedFileRowsSql, connection) { CommandTimeout = commandTimeoutSeconds };
+            await using var cmd = new NpgsqlCommand(FileRowsSql, connection) { CommandTimeout = commandTimeoutSeconds };
             cmd.Parameters.AddWithValue(nameArray);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
                 var name = reader.GetString(0);
+                if (reader.GetBoolean(5))
+                {
+                    appliedValue[name] = reader.IsDBNull(3) ? null : reader.GetString(3);
+                    continue;
+                }
+
                 if (!unapplied.TryGetValue(name, out var list))
                 {
                     unapplied[name] = list = [];
@@ -133,7 +141,8 @@ ORDER BY name, seqno";
                     reader.IsDBNull(4) ? null : reader.GetString(4),
                     reader.IsDBNull(5) ? null : reader.GetInt32(5),
                     !reader.IsDBNull(6) && reader.GetBoolean(6),
-                    unapplied.TryGetValue(name, out var rows) ? rows : []);
+                    unapplied.TryGetValue(name, out var rows) ? rows : [],
+                    appliedValue.GetValueOrDefault(name));
             }
         }
 
@@ -182,10 +191,14 @@ ORDER BY name, seqno";
         }
 
         var parts = new List<string>();
+        /* The file's own text first (77MB), then the running figure when it reads differently (78848kB). */
+        var value = provenance.AppliedFileValue is { } fileValue && fileValue != provenance.ValueDisplay
+            ? FormattableString.Invariant($"{fileValue} (running {provenance.ValueDisplay})")
+            : provenance.ValueDisplay;
         var winner = provenance.SourceFile is null
-            ? FormattableString.Invariant($"{provenance.Name} is {provenance.ValueDisplay} (source: {provenance.Source ?? "unknown"})")
+            ? FormattableString.Invariant($"{provenance.Name} is {value} (source: {provenance.Source ?? "unknown"})")
             : FormattableString.Invariant(
-                $"{provenance.Name} is {provenance.ValueDisplay} (source: {provenance.Source ?? "unknown"}, {formatFile(provenance.SourceFile)} line {provenance.SourceLine?.ToString(CultureInfo.InvariantCulture) ?? "?"})");
+                $"{provenance.Name} is {value} (source: {provenance.Source ?? "unknown"}, {formatFile(provenance.SourceFile)} line {provenance.SourceLine?.ToString(CultureInfo.InvariantCulture) ?? "?"})");
         parts.Add(winner);
 
         var named = provenance.UnappliedFileRows.Take(MaxNamedFileRows)
