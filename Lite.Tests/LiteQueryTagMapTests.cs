@@ -540,7 +540,8 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         Sight(Snapshot(HashA), Snapshot(HashB));
         var cursors = new Dictionary<int, QueryTagMapCursor>();
         Assert.True((await _service.BuildQueryTagMapAsync(cursors)).Rebuilt);
-        var aged = DateTime.UtcNow.AddHours(-2);
+        /* Past the six-hour refresh width, so the plain re-sighting of HashA is due its backdated move (#9456). */
+        var aged = DateTime.UtcNow.AddHours(-7);
         await SetLastSeenAsync(HashA, aged);
         await SetLastSeenAsync(HashB, aged);
 
