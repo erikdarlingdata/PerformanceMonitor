@@ -9,10 +9,12 @@
 using System;
 using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -89,7 +91,7 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
             chunkRangeEnd = ((DateTime)(await range.ExecuteScalarAsync(ct))!).ToUniversalTime();
         }
 
-        using (var before = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, ct)))
+        using (var before = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, full_detail: true, cancellationToken: ct)))
         {
             var row = Row(before);
             Assert.Equal(1, row.GetProperty("eligible_uncompressed_chunks").GetInt32());
@@ -121,7 +123,7 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
             await run.ExecuteNonQueryAsync(ct);
         }
 
-        using (var after = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, ct)))
+        using (var after = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, full_detail: true, cancellationToken: ct)))
         {
             var row = Row(after);
             Assert.Equal(0, row.GetProperty("eligible_uncompressed_chunks").GetInt32());
@@ -152,7 +154,7 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, plainPostgres: true);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var doc = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, ct));
+        using var doc = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, full_detail: true, cancellationToken: ct));
         Assert.Equal("not_collected", doc.RootElement.GetProperty("status").GetString());
     }
 
@@ -369,7 +371,7 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
             .Select(h => h.GetProperty("job"))
             .Single(j => j.GetProperty("job_id").GetInt32() == jobId);
 
-        using (var asOwner = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(owner, ct)))
+        using (var asOwner = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(owner, full_detail: true, cancellationToken: ct)))
         {
             var job = Job(asOwner);
             Assert.Equal("Failed", job.GetProperty("last_run_status").GetString());
@@ -397,7 +399,7 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
 
             /* The store's mcp role is neither the job's owner nor in the database owner's role: the view would hide the row, so the
                read says so instead of reporting no error. The status still comes from job_stats, which every role can read. */
-            using var viewed = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(asRole, ct));
+            using var viewed = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(asRole, full_detail: true, cancellationToken: ct));
             var job = Job(viewed);
             Assert.Equal("Failed", job.GetProperty("last_run_status").GetString());
             Assert.False(job.GetProperty("last_error_readable").GetBoolean());
@@ -429,7 +431,7 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
                 Pooling = false,
             }.ConnectionString);
 
-            using var refused = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(asMember, ct));
+            using var refused = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(asMember, full_detail: true, cancellationToken: ct));
             var refusedJob = Job(refused);
             Assert.Equal("Failed", refusedJob.GetProperty("last_run_status").GetString());
             Assert.True(refusedJob.GetProperty("last_error_readable").GetBoolean(), "a member of the job's owner is asked for the error");
@@ -457,7 +459,7 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
         Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the dev fixture is expected to have TimescaleDB installed");
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        using var doc = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, ct));
+        using var doc = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, full_detail: true, cancellationToken: ct));
         Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
     }
 
@@ -491,6 +493,74 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
     [InlineData("Running", null, "scheduled")]
     public void NextStartState_SeparatesAParkedJobFromACrashBackoff(string? jobStatus, string? sentinel, string expected) =>
         Assert.Equal(expected, DarlingStoreCompressionHealthReader.NextStartStateFor(jobStatus, sentinel));
+
+    /* #9527: the answer grew a ~400 B object per hypertable, healthy or not, and passed the default reply budget. A hypertable that is
+       keeping up is a name in one list now. The scratch store already holds every collector hypertable, so the extra ones here
+       make the full answer larger than the budget on any store this runs against. */
+    [Fact]
+    public async Task CompressionHealth_ListsAHealthyHypertableByNameOnly_AndKeepsTheFullRowForOneWithABacklog_UnderTheReplyBudget()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the #9527 live test.");
+        var ct = TestContext.Current.CancellationToken;
+        const int healthyCount = 90;
+        const string backlogTable = "ch9527_backlog";
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the dev fixture is expected to have TimescaleDB installed");
+        await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var healthyNames = Enumerable.Range(0, healthyCount).Select(i => $"ch9527_h{i:D3}").ToList();
+        foreach (var name in healthyNames.Append(backlogTable))
+        {
+            await ExecAsync(connection, $"CREATE TABLE collect.{name} (collection_time timestamp NOT NULL, server_id integer NOT NULL, value bigint)", ct);
+            await ExecAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{name}", "collection_time"), ct);
+            await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{name}"), ct);
+            await ExecAsync(connection, TimescaleSupport.AddCompressionPolicySql($"collect.{name}"), ct);
+        }
+
+        /* Five days back: its chunk is a whole day past the policy's one-day delay, so this one hypertable has a backlog. The others hold no rows. */
+        await ExecAsync(connection,
+            $"INSERT INTO collect.{backlogTable} SELECT date_trunc('day', now()::timestamp) - INTERVAL '5 days' + INTERVAL '12 hours' + (g || ' seconds')::interval, 1, g FROM generate_series(1, 50) g", ct);
+
+        var defaultAnswer = await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, cancellationToken: ct);
+        var fullAnswer = await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, full_detail: true, cancellationToken: ct);
+
+        Assert.True(Encoding.UTF8.GetByteCount(fullAnswer) > McpResponseBudget.DefaultBytes, "the fixture is big enough that the full answer alone would pass the budget");
+        Assert.True(Encoding.UTF8.GetByteCount(defaultAnswer) <= McpResponseBudget.DefaultBytes, "the default answer stays under the reply budget");
+
+        using var doc = JsonDocument.Parse(defaultAnswer);
+        var root = doc.RootElement;
+        var detailed = root.GetProperty("hypertables").EnumerateArray().ToList();
+        var listed = root.GetProperty("healthy_hypertables").EnumerateArray().Select(e => e.GetString()).ToList();
+
+        /* The backlog hypertable keeps its whole row. No healthy one has a row, and each is in the name list. */
+        var backlogRow = Assert.Single(detailed, h => h.GetProperty("hypertable").GetString() == backlogTable);
+        Assert.Equal(1, backlogRow.GetProperty("eligible_uncompressed_chunks").GetInt32());
+        Assert.Equal("scheduled", backlogRow.GetProperty("job").GetProperty("next_start_state").GetString());
+        Assert.DoesNotContain(detailed, h => healthyNames.Contains(h.GetProperty("hypertable").GetString()!));
+        Assert.All(healthyNames, name => Assert.Contains(name, listed));
+        Assert.DoesNotContain(backlogTable, listed);
+
+        /* The summary counts both lists, and every row left in hypertables is one that needs a look. */
+        var summary = root.GetProperty("summary");
+        Assert.Equal(detailed.Count + listed.Count, summary.GetProperty("hypertables").GetInt32());
+        Assert.Equal(listed.Count, summary.GetProperty("healthy_hypertables").GetInt32());
+        Assert.All(detailed, h => Assert.True(
+            h.GetProperty("eligible_uncompressed_chunks").GetInt64() > 0
+            || h.GetProperty("job").GetProperty("last_run_status").ValueKind == JsonValueKind.String
+            || h.GetProperty("job").GetProperty("status").GetString() != "Scheduled"));
+
+        /* full_detail=true is the old answer: every hypertable with its row, no name list. */
+        using var full = JsonDocument.Parse(fullAnswer);
+        Assert.Equal(JsonValueKind.Null, full.RootElement.GetProperty("healthy_hypertables").ValueKind);
+        var fullRows = full.RootElement.GetProperty("hypertables").EnumerateArray().ToList();
+        Assert.Equal(full.RootElement.GetProperty("summary").GetProperty("hypertables").GetInt32(), fullRows.Count);
+        Assert.All(healthyNames.Append(backlogTable), name => Assert.Single(fullRows, h => h.GetProperty("hypertable").GetString() == name));
+    }
 
     [Fact]
     public void CrashBackoffNote_SaysTheSchedulerClearsItOnlyFromTheFixedVersion()

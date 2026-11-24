@@ -2539,6 +2539,25 @@ ALTER TABLE config.store_statement_baseline
     ADD COLUMN IF NOT EXISTS wal_fpi bigint;";
 
     /// <summary>
+    /// V317 (#9433): <c>collect.slow_reads</c> gains <c>reply_bytes</c>, the size in bytes of the reply the caller received, and
+    /// <c>collect.read_latency</c> gains <c>reply_bytes_total</c>, the sum of those sizes, and <c>reply_bytes_count</c>, how many reads of
+    /// the row were measured. All three are nullable <c>bigint</c> with no default: a row written before this rung has no size, and a NULL
+    /// says so where a 0 would claim an empty reply. A read whose size was never taken (it threw, a plain-sentence answer, a composed
+    /// panel) adds to neither column, so the average is the total over the count and a bucket that mixes measured and unmeasured reads
+    /// averages its measured reads only. The tables are plain and small, so <c>ADD COLUMN</c> holds its lock for an instant.
+    ///
+    /// <para><b>An older build ignores the columns.</b> Its writer names its own column list and its reads name theirs, so it neither fills
+    /// nor reads them.</para>
+    /// </summary>
+    private const string V317Sql = @"
+ALTER TABLE collect.slow_reads
+    ADD COLUMN IF NOT EXISTS reply_bytes bigint;
+
+ALTER TABLE collect.read_latency
+    ADD COLUMN IF NOT EXISTS reply_bytes_total bigint,
+    ADD COLUMN IF NOT EXISTS reply_bytes_count bigint;";
+
+    /// <summary>
     /// V221 (#6800): <c>collect.query_store_hash_hourly</c>, the narrow hourly source of the fleet tag roll-up, its <c>(hour, server_id)</c>
     /// index, and <c>hash_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text, the column map and the reasoning are on
     /// <see cref="QueryStoreComposeStamp.HashHourlyCreateSql"/>. The service's hourly tick (V173's builder) fills the table in the stamp's
@@ -4112,6 +4131,8 @@ END $$;";
         /* V316 (#9439): collect.store_lock_waits, one empty plain table and two indexes, filled by the hourly store log sweep from the lock waits the log records. No data
            moves. An older build never reads or names it. */
         new Migration(StoreLockWaits.Version, "store-lock-waits", StoreLockWaits.CreateSql),
+        /* V317 (#9433): the reply size in bytes on the slow read record and the read latency histogram, two nullable columns. No data moves and old rows keep NULL. An older build ignores the columns. */
+        new Migration(ReadReplyBytes.Version, "read-reply-bytes", V317Sql),
     };
 
     /// <summary>

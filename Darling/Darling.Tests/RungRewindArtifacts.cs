@@ -1023,6 +1023,10 @@ DROP TABLE IF EXISTS collect.store_setting_state;"),
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'collect.read_latency'::regclass AND contype = 'p') THEN ALTER TABLE collect.read_latency ADD CONSTRAINT read_latency_pkey PRIMARY KEY (metric_time, surface, route, outcome, window_band); END IF; END $$;"),
         // V316 (#9439): collect.store_lock_waits, the probe's newest sentinel. The rewind drops the table, so a re-run of V316 creates it again, empty. Safe on a store that never had it.
         new(316, "hasStoreLockWaits", @"DROP TABLE IF EXISTS collect.store_lock_waits;"),
+        // V317 (#9433): the reply size on the slow read record and the read latency histogram. The slow read column is the probe's newest sentinel. The rewind drops both columns, so a re-run of V317 adds them again, empty. Safe on a store that never had them.
+        new(317, "hasReadReplyBytes", @"ALTER TABLE collect.slow_reads DROP COLUMN IF EXISTS reply_bytes;
+ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS reply_bytes_total;
+ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS reply_bytes_count;"),
     ];
 
     /// <summary>
