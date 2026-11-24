@@ -194,6 +194,11 @@ SELECT (SELECT count(*) FROM changed)::integer,
 DELETE FROM collect.store_setting_changes
 WHERE seen_at < $1";
 
+    /// <summary>Whether the rung's two tables exist, for a store the service has not migrated yet.</summary>
+    public const string ShapeSql = @"
+SELECT to_regclass('collect.store_setting_state') IS NOT NULL
+   AND to_regclass('collect.store_setting_changes') IS NOT NULL";
+
     /// <summary>
     /// The state's size and the time the first setting was tracked, the "watching since" a read gives. Zero rows is no baseline yet.
     /// </summary>

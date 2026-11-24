@@ -73,21 +73,25 @@ public sealed class DarlingMcpStoreSettingChangesTools
         {
             var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-days_back), DateTimeKind.Unspecified);
 
+            await using (var shape = postgres.CreateCommand(StoreSettingChanges.ShapeSql))
+            {
+                shape.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                if (!(bool)(await shape.ExecuteScalarAsync(cancellationToken))!)
+                {
+                    return McpHelpers.Status("unavailable",
+                        "This store has no setting history yet: it predates the tables that hold it. The service migrates the store at its next start, then captures a baseline within a minute.");
+                }
+            }
+
             int trackedSettings;
             DateTime? watchingSince;
-            try
+            await using (var state = postgres.CreateCommand(StoreSettingChanges.StateSql))
             {
-                await using var state = postgres.CreateCommand(StoreSettingChanges.StateSql);
                 state.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 await using var stateReader = await state.ExecuteReaderAsync(cancellationToken);
                 await stateReader.ReadAsync(cancellationToken);
                 trackedSettings = stateReader.GetInt32(0);
                 watchingSince = stateReader.IsDBNull(1) ? null : stateReader.GetDateTime(1);
-            }
-            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
-            {
-                return McpHelpers.Status("unavailable",
-                    "This store has no setting history yet: it predates the tables that hold it. The service migrates the store at its next start, then captures a baseline within a minute.");
             }
 
             if (trackedSettings == 0)
