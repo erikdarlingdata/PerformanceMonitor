@@ -206,7 +206,7 @@ public sealed class McpCallTimingRecorder
                 if (_tally.SplitKept)
                 {
                     archiveMs = (long)_tally.ArchiveSpan.TotalMilliseconds;
-                    hotMs = Math.Max(0, totalMs - archiveMs);
+                    hotMs = Math.Max(0L, totalMs - archiveMs.Value);
                     archiveFiles = _tally.ArchiveFiles;
                 }
 
