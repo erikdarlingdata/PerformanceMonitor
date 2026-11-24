@@ -28,12 +28,12 @@ public sealed record ReadPanelParam(string Name, bool Required);
 public static partial class CustomViewValidation
 {
     /// <summary>Every read name a v1 read panel may reference: the keys of the Service's read dispatch. The shared list plus the reads
-    /// the Service registered through <see cref="RegisterReads"/>.</summary>
+    /// each tool registers in its own file under <c>ReadParams/</c> (<see cref="IReadParamsRegistration"/>).</summary>
     public static IReadOnlyList<string> KnownReadNames => Reads.Names;
 
     private static readonly string[] SharedReadNames = new[]
     {
-        // New tools do NOT add names here: register them in the tool's own file (an IReadToolRegistration in the Service, #9477).
+        // New tools do NOT add names here. A new tool adds one file in the Service (handler and catalog entry) and one in Storage (ReadParams/, its parameters), #9477.
         "audit_config",
         "compare_analysis",
         "get_analysis_facts",

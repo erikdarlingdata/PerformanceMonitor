@@ -22,7 +22,7 @@ public static partial class CustomViewValidation
     private static readonly IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> SharedReadParams =
         new Dictionary<string, IReadOnlyList<ReadPanelParam>>(StringComparer.Ordinal)
         {
-            // New tools do NOT add entries here: register them in the tool's own file (an IReadToolRegistration in the Service, #9477).
+            // New tools do NOT add entries here. A new tool adds one file in the Service (handler and catalog entry) and one in Storage (ReadParams/, its parameters), #9477.
             ["audit_config"] = new ReadPanelParam[] { new("server", false) },
             ["compare_analysis"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("baseline_hours_back", false), new("as_of", false) },
             ["get_analysis_facts"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("source", false), new("min_severity", false), new("as_of", false) },
@@ -197,18 +197,15 @@ public static partial class CustomViewValidation
             ["get_finops"] = new ReadPanelParam[] { new("server", false), new("view", false), new("hours", false), new("limit", false), new("database_name", false), new("full_text", false), new("object_name", false) },
         };
 
-    /// <summary>The declared parameters of every read a v1 read panel may name: the shared list above plus the reads the Service
-    /// registered through <see cref="RegisterReads"/>.</summary>
+    /// <summary>The declared parameters of every read a v1 read panel may name: the shared list above plus the reads each tool registers in
+    /// its own file under <c>ReadParams/</c> (<see cref="IReadParamsRegistration"/>).</summary>
     public static IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> KnownReadParams => Reads.Params;
 
     /// <summary>The declared parameters of one read from <see cref="KnownReadParams"/>, null when the name is not a known read.</summary>
     public static IReadOnlyList<ReadPanelParam>? ReadParams(string read) =>
         KnownReadParams.TryGetValue(read, out var declared) ? declared : null;
 
-    /// <summary>
-    /// One consistent view of the known reads: the shared lists plus the registered ones. <see cref="RegisterReads"/> swaps the whole
-    /// object, so a validation never sees a name in one view and its parameters missing from another.
-    /// </summary>
+    /// <summary>One consistent view of the known reads: the shared lists plus the registered ones.</summary>
     private sealed class ReadSet
     {
         public ReadSet(IReadOnlyList<string> names, IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> parameters)
@@ -225,34 +222,13 @@ public static partial class CustomViewValidation
         public IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> Params { get; }
     }
 
-    // Lazy, because the shared lists live in two partial files and C# gives no order between their static initializers.
-    private static readonly Lazy<ReadSet> SharedReads = new(() => new ReadSet(SharedReadNames, SharedReadParams));
-
-    private static volatile ReadSet? _registeredReads;
-
-    private static ReadSet Reads => _registeredReads ?? SharedReads.Value;
-
-    /// <summary>
-    /// The Service's tools each register their read here from their own file (#9477), so the shared lists stay a place nobody adds to.
-    /// <paramref name="registered"/> is the whole set of registered reads: each call replaces the last, so calling it again with the same
-    /// set changes nothing. The Service calls it once, before the first validation. A name that is in the shared lists, or that appears
-    /// twice in <paramref name="registered"/>, throws and names the read; the previous set stays in force.
-    /// </summary>
-    public static void RegisterReads(IEnumerable<KeyValuePair<string, IReadOnlyList<ReadPanelParam>>> registered)
+    // Lazy, because the shared lists live in two partial files and C# gives no order between their static initializers. Built once, on
+    // first use, by reflection over this assembly, so no caller has to register anything first.
+    private static readonly Lazy<ReadSet> AllReads = new(() =>
     {
-        ArgumentNullException.ThrowIfNull(registered);
-        var names = new List<string>(SharedReadNames);
-        var parameters = new Dictionary<string, IReadOnlyList<ReadPanelParam>>(SharedReadParams, StringComparer.Ordinal);
-        foreach (var (name, declared) in registered)
-        {
-            if (!parameters.TryAdd(name, declared))
-            {
-                throw new InvalidOperationException($"The read '{name}' is registered twice, or is also in the shared read lists.");
-            }
+        var (names, parameters) = ReadParamsRegistrations.Merge(SharedReadNames, SharedReadParams, ReadParamsRegistrations.Discover());
+        return new ReadSet(names, parameters);
+    });
 
-            names.Add(name);
-        }
-
-        _registeredReads = new ReadSet(names, parameters);
-    }
+    private static ReadSet Reads => AllReads.Value;
 }

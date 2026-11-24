@@ -10,16 +10,16 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
-using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// What one read tool contributes to the web read surface (#9477): the handler the <c>/api/read/*</c> dispatch calls, and the catalog
 /// entry (category, description, parameters) the web catalog and Custom Views validation read. A tool registers these from its own
-/// file, so a new tool never edits the shared alphabetical lists in <c>DarlingWebEndpoints.WebReads.cs</c>,
-/// <c>DarlingWebEndpoints.Views.cs</c> and <c>CustomViewValidation.ReadParams.cs</c>. The Storage side's parameter list is derived
-/// from <see cref="Catalog"/>, so the two cannot disagree.
+/// file, so a new tool never edits the shared alphabetical lists in <c>DarlingWebEndpoints.WebReads.cs</c> and
+/// <c>DarlingWebEndpoints.Views.cs</c>. The Custom Views parameter list is the other half: a small class in the Storage project
+/// (<c>IReadParamsRegistration</c>) that Storage finds itself, so the Viewer, which has no Service, sees the same reads. A test pins
+/// the two parameter lists equal.
 /// </summary>
 internal sealed record ReadToolRegistration(
     string Name,
@@ -42,17 +42,14 @@ internal interface IReadToolRegistration
     ReadToolRegistration Read { get; }
 }
 
-/// <summary>Collects the registrations once, merges them into the three lists, and hands the Custom Views half to Storage.</summary>
+/// <summary>Collects the registrations once and merges them into the web dispatch and the catalog.</summary>
 internal static class ReadToolRegistrations
 {
     private static readonly Lazy<IReadOnlyList<ReadToolRegistration>> AllRegistrations = new(
-        () => Register(Collect(Discover())), LazyThreadSafetyMode.ExecutionAndPublication);
+        () => Collect(Discover()), LazyThreadSafetyMode.ExecutionAndPublication);
 
-    /// <summary>Every registered read. The first access also gives Storage its half, so touch this before any Custom View validation.</summary>
+    /// <summary>Every registered read.</summary>
     internal static IReadOnlyList<ReadToolRegistration> All => AllRegistrations.Value;
-
-    /// <summary>Same as <see cref="All"/>, named for the callers that only need the registration to have happened.</summary>
-    internal static void EnsureRegistered() => _ = All;
 
     private static IEnumerable<IReadToolRegistration> Discover() =>
         typeof(IReadToolRegistration).Assembly.GetTypes()
@@ -77,13 +74,6 @@ internal static class ReadToolRegistrations
         }
 
         return list;
-    }
-
-    private static IReadOnlyList<ReadToolRegistration> Register(IReadOnlyList<ReadToolRegistration> registrations)
-    {
-        CustomViewValidation.RegisterReads(registrations.Select(r => new KeyValuePair<string, IReadOnlyList<ReadPanelParam>>(
-            r.Name, r.Catalog.Params.Select(p => new ReadPanelParam(p.Name, p.Required)).ToList())));
-        return registrations;
     }
 
     /// <summary>Adds each registration's value to <paramref name="target"/>. A name already in it throws and names the tool.

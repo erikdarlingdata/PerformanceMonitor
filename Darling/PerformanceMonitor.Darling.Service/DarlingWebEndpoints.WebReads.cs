@@ -64,7 +64,7 @@ public static partial class DarlingWebEndpoints
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
-            // New tools do NOT add entries here: register them in the tool's own file (an IReadToolRegistration, #9477).
+            // New tools do NOT add entries here. A new tool adds one file in the Service (handler and catalog entry, an IReadToolRegistration) and one in Storage (its Custom Views parameters), #9477.
             /* ── analysis reads (take the DarlingAnalysisService) ── */
             ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c), c.RequestAborted),
             ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryNullableInt(c, "baseline_hours_back"), as_of: AsOf(c), cancellationToken: c.RequestAborted),

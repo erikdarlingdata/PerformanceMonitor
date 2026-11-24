@@ -772,18 +772,12 @@ public static partial class DarlingWebEndpoints
             : null;
 
     /// <summary>Validates a stored definition; the body lives in <see cref="CustomViewValidation.ValidateDefinition"/>.</summary>
-    internal static CustomViewValidation.DefinitionValidation ValidateDefinition(string? definitionJson)
-    {
-        ReadToolRegistrations.EnsureRegistered(); // Storage must know the registered reads before it checks a panel's read name (#9477).
-        return CustomViewValidation.ValidateDefinition(definitionJson, ReadPanelParams);
-    }
+    internal static CustomViewValidation.DefinitionValidation ValidateDefinition(string? definitionJson) =>
+        CustomViewValidation.ValidateDefinition(definitionJson, ReadPanelParams);
 
     /// <summary>Validates a notebook definition; the body lives in <see cref="CustomViewValidation.ValidateNotebookDefinition"/>.</summary>
-    internal static CustomViewValidation.DefinitionValidation ValidateNotebookDefinition(JsonObject rootObject)
-    {
-        ReadToolRegistrations.EnsureRegistered();
-        return CustomViewValidation.ValidateNotebookDefinition(rootObject, ReadPanelParams);
-    }
+    internal static CustomViewValidation.DefinitionValidation ValidateNotebookDefinition(JsonObject rootObject) =>
+        CustomViewValidation.ValidateNotebookDefinition(rootObject, ReadPanelParams);
 
     /// <summary>#7565: adds the validator's warnings to a saved view's reply as <c>warnings</c> (a list of text), only when it
     /// has some, so the builder shows what the validator said rather than judging the definition a second time.</summary>
@@ -819,32 +813,32 @@ public static partial class DarlingWebEndpoints
     /// <see cref="Params"/> (the exact query keys its dispatch lambda binds).</summary>
     internal sealed record CatalogRead(string Category, string Description, IReadOnlyList<CatalogParam> Params);
 
-    private const string TypeServer = "server";
-    private const string TypeInt = "int";
-    private const string TypeText = "text";
-    private const string TypeBool = "bool";
-    private const string TypeDouble = "double";
+    internal const string TypeServer = "server";
+    internal const string TypeInt = "int";
+    internal const string TypeText = "text";
+    internal const string TypeBool = "bool";
+    internal const string TypeDouble = "double";
 
-    private const string CatAnalysis = "Analysis";
-    private const string CatSessions = "Sessions";
-    private const string CatAlerts = "Alerts";
-    private const string CatBlocking = "Blocking & Deadlocks";
-    private const string CatConfig = "Configuration";
-    private const string CatData = "Data";
-    private const string CatTrends = "Trends";
+    internal const string CatAnalysis = "Analysis";
+    internal const string CatSessions = "Sessions";
+    internal const string CatAlerts = "Alerts";
+    internal const string CatBlocking = "Blocking & Deadlocks";
+    internal const string CatConfig = "Configuration";
+    internal const string CatData = "Data";
+    internal const string CatTrends = "Trends";
     internal const string CatOverview = "Overview";
-    private const string CatLatch = "Latch & Spinlock";
-    private const string CatMemoryGrants = "Memory Grants";
-    private const string CatObjects = "Objects & Indexes";
-    private const string CatPlanCache = "Plan Cache & Scheduler";
-    private const string CatJobs = "Jobs";
-    private const string CatPlans = "Plans";
-    private const string CatDefaultTrace = "Default Trace";
-    private const string CatSystemHealth = "System Health";
-    private const string CatFinOps = "FinOps";
+    internal const string CatLatch = "Latch & Spinlock";
+    internal const string CatMemoryGrants = "Memory Grants";
+    internal const string CatObjects = "Objects & Indexes";
+    internal const string CatPlanCache = "Plan Cache & Scheduler";
+    internal const string CatJobs = "Jobs";
+    internal const string CatPlans = "Plans";
+    internal const string CatDefaultTrace = "Default Trace";
+    internal const string CatSystemHealth = "System Health";
+    internal const string CatFinOps = "FinOps";
 
-    private static CatalogParam PServer() => new("server", TypeServer, false, null);
-    private static CatalogParam PHours(int def) => new("hours", TypeInt, false, def);
+    internal static CatalogParam PServer() => new("server", TypeServer, false, null);
+    internal static CatalogParam PHours(int def) => new("hours", TypeInt, false, def);
 
     /// <summary>
     /// The window ANCHOR (#2495): <c>?as_of=</c> moves the END of a <see cref="PHours"/> window off "now" so a
@@ -852,10 +846,10 @@ public static partial class DarlingWebEndpoints
     /// string on the wire — an ISO-8601 instant the tool parses and REFUSES if it cannot, which is where the
     /// error message belongs; a new type would only teach the picker to render a box it already renders.
     /// </summary>
-    private static CatalogParam PAsOf() => new("as_of", TypeText, false, null);
-    private static CatalogParam PLimit(int def) => new("limit", TypeInt, false, def);
-    private static CatalogParam PTop(int def) => new("top", TypeInt, false, def);
-    private static CatalogParam PText(string name) => new(name, TypeText, false, null);
+    internal static CatalogParam PAsOf() => new("as_of", TypeText, false, null);
+    internal static CatalogParam PLimit(int def) => new("limit", TypeInt, false, def);
+    internal static CatalogParam PTop(int def) => new("top", TypeInt, false, def);
+    internal static CatalogParam PText(string name) => new(name, TypeText, false, null);
 
     /// <summary>
     /// #5245: the catalog row of a read that takes the picker's database list. It is the same
@@ -868,13 +862,13 @@ public static partial class DarlingWebEndpoints
 
     /// <summary>A text param with a real default, unlike <see cref="PText(string)"/>'s always-null one — e.g.
     /// get_fleet_overview's detail (#4198), whose default "summary" is part of the contract, not an absence.</summary>
-    private static CatalogParam PTextDefault(string name, string def) => new(name, TypeText, false, def);
-    private static CatalogParam PReqText(string name) => new(name, TypeText, true, null);
+    internal static CatalogParam PTextDefault(string name, string def) => new(name, TypeText, false, def);
+    internal static CatalogParam PReqText(string name) => new(name, TypeText, true, null);
 
     /// <summary>A REQUIRED integer with no default — a point read's key (a Query Store <c>query_id</c>, a snapshot
     /// <c>session_id</c>), where there is no sensible value to fall back to.</summary>
-    private static CatalogParam PReqInt(string name) => new(name, TypeInt, true, null);
-    private static CatalogParam PInt(string name, int def) => new(name, TypeInt, false, def);
+    internal static CatalogParam PReqInt(string name) => new(name, TypeInt, true, null);
+    internal static CatalogParam PInt(string name, int def) => new(name, TypeInt, false, def);
 
     /// <summary>
     /// An optional integer with NO default — <see cref="PDouble(string)"/>'s shape for an int. Absent is a third
@@ -882,9 +876,9 @@ public static partial class DarlingWebEndpoints
     /// and advertising a default would tell a catalog consumer that sending nothing and sending that width are
     /// the same request.
     /// </summary>
-    private static CatalogParam PInt(string name) => new(name, TypeInt, false, null);
-    private static CatalogParam PBool(string name, bool def) => new(name, TypeBool, false, def);
-    private static CatalogParam PDouble(string name, double def) => new(name, TypeDouble, false, def);
+    internal static CatalogParam PInt(string name) => new(name, TypeInt, false, null);
+    internal static CatalogParam PBool(string name, bool def) => new(name, TypeBool, false, def);
+    internal static CatalogParam PDouble(string name, double def) => new(name, TypeDouble, false, def);
 
     /// <summary>
     /// A numeric FILTER, which carries no default — the <see cref="PText"/> shape rather than
@@ -895,9 +889,9 @@ public static partial class DarlingWebEndpoints
     /// catalog consumer that sending nothing and sending zero are the same request. Absent means no filter,
     /// which is a third state and not a number.</para>
     /// </summary>
-    private static CatalogParam PDouble(string name) => new(name, TypeDouble, false, null);
+    internal static CatalogParam PDouble(string name) => new(name, TypeDouble, false, null);
 
-    private static CatalogRead R(string category, string description, params CatalogParam[] parameters) =>
+    internal static CatalogRead R(string category, string description, params CatalogParam[] parameters) =>
         new(category, description, parameters);
 
     /// <summary>
@@ -911,7 +905,7 @@ public static partial class DarlingWebEndpoints
     private static readonly IReadOnlyDictionary<string, CatalogRead> SharedCatalogDescriptors =
         new Dictionary<string, CatalogRead>(StringComparer.Ordinal)
         {
-            // New tools do NOT add entries here: register them in the tool's own file (an IReadToolRegistration, #9477).
+            // New tools do NOT add entries here. A new tool adds one file in the Service (handler and catalog entry, an IReadToolRegistration) and one in Storage (its Custom Views parameters), #9477.
             /* ── analysis reads (AuditConfig/CompareAnalysis/GetAnalysisFacts/GetAnalysisFindings) ── */
             ["audit_config"] = R(CatAnalysis, "Configuration-audit findings for a server.", PServer()),
             ["compare_analysis"] = R(CatAnalysis, "Compare a window's analysis facts against an earlier baseline.", PServer(), PHours(4), PInt("baseline_hours_back"), PAsOf()),

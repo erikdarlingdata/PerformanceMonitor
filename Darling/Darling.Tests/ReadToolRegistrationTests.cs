@@ -37,6 +37,13 @@ public sealed class ReadToolRegistrationTests
             new(DarlingWebEndpoints.CatOverview, "test", Array.Empty<DarlingWebEndpoints.CatalogParam>()));
     }
 
+    private sealed class FakeParams(string read, params ReadPanelParam[] declared) : IReadParamsRegistration
+    {
+        public string Read => read;
+
+        public IReadOnlyList<ReadPanelParam> Params { get; } = declared;
+    }
+
     [Fact]
     public void ARegisteredTool_IsInTheDispatch_TheCatalog_AndCustomViewsValidation()
     {
@@ -58,7 +65,6 @@ public sealed class ReadToolRegistrationTests
     [Fact]
     public void TheViewerSideTable_CarriesTheRegisteredToolsParameters_InTheCatalogsOrder()
     {
-        ReadToolRegistrations.EnsureRegistered();
         var catalog = DarlingWebEndpoints.ReadPanelParams(MovedTool);
         Assert.NotNull(catalog);
         Assert.True(catalog!.SequenceEqual(CustomViewValidation.KnownReadParams[MovedTool]));
@@ -99,25 +105,43 @@ public sealed class ReadToolRegistrationTests
         Assert.Contains("get_wait_stats", ex.Message);
     }
 
+    /// <summary>The two halves of a registration are written in two projects, so this is what stops them drifting: every read either side
+    /// registers is registered by the other, with the same parameter names and required flags.</summary>
     [Fact]
-    public void StorageRefusesARegistration_ThatDuplicatesASharedRead_AndKeepsTheLastGoodSet()
+    public void EveryRegisteredRead_HasBothHalves_WithTheSameParameters()
     {
-        ReadToolRegistrations.EnsureRegistered();
-        var none = (IReadOnlyList<ReadPanelParam>)Array.Empty<ReadPanelParam>();
+        var service = ReadToolRegistrations.All.ToDictionary(r => r.Name, StringComparer.Ordinal);
+        var storage = ReadParamsRegistrations.Discover().ToDictionary(r => r.Read, StringComparer.Ordinal);
+
+        Assert.True(
+            new HashSet<string>(service.Keys, StringComparer.Ordinal).SetEquals(storage.Keys),
+            "The Service registers " + string.Join(", ", service.Keys) + " and Storage registers " + string.Join(", ", storage.Keys));
+        foreach (var (name, registration) in service)
+        {
+            var catalogParams = registration.Catalog.Params.Select(p => new ReadPanelParam(p.Name, p.Required)).ToList();
+            Assert.True(catalogParams.SequenceEqual(storage[name].Params), $"The catalog and Storage disagree on the parameters of '{name}'.");
+        }
+    }
+
+    [Fact]
+    public void StorageRefusesARegistration_ThatDuplicatesASharedRead_OrAnotherRegistration_AndNamesIt()
+    {
+        var sharedNames = new[] { "get_wait_stats" };
+        var sharedParams = new Dictionary<string, IReadOnlyList<ReadPanelParam>>(StringComparer.Ordinal)
+        {
+            ["get_wait_stats"] = Array.Empty<ReadPanelParam>(),
+        };
 
         var shared = Assert.Throws<InvalidOperationException>(() =>
-            CustomViewValidation.RegisterReads(new[] { new KeyValuePair<string, IReadOnlyList<ReadPanelParam>>("get_wait_stats", none) }));
+            ReadParamsRegistrations.Merge(sharedNames, sharedParams, new IReadParamsRegistration[] { new FakeParams("get_wait_stats") }));
         Assert.Contains("get_wait_stats", shared.Message);
 
         var twice = Assert.Throws<InvalidOperationException>(() =>
-            CustomViewValidation.RegisterReads(new[]
-            {
-                new KeyValuePair<string, IReadOnlyList<ReadPanelParam>>("get_twice", none),
-                new KeyValuePair<string, IReadOnlyList<ReadPanelParam>>("get_twice", none),
-            }));
+            ReadParamsRegistrations.Merge(sharedNames, sharedParams, new IReadParamsRegistration[] { new FakeParams("get_twice"), new FakeParams("get_twice") }));
         Assert.Contains("get_twice", twice.Message);
 
-        Assert.Contains(MovedTool, CustomViewValidation.KnownReadNames);
-        Assert.DoesNotContain("get_twice", CustomViewValidation.KnownReadNames);
+        var merged = ReadParamsRegistrations.Merge(sharedNames, sharedParams, new IReadParamsRegistration[] { new FakeParams("get_once", new ReadPanelParam("hours", true)) });
+        Assert.Equal(new[] { "get_wait_stats", "get_once" }, merged.Names);
+        Assert.True(merged.Params["get_once"].Single().Required);
     }
 }
