@@ -1768,6 +1768,10 @@ WHERE metric_time < $1";
             await retention.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* #9413: what each store table did this hour, as deltas. Its own rows and its own retention, so it adds nothing to the count above, and a failure
+           inside it is logged there and never fails the sweep. */
+        await StoreTableActivity.CaptureAsync(connection, timescaleAvailable, utcNow, logger, SweepTimeoutSeconds, cancellationToken);
+
         logger?.LogDebug("Store self-metrics sweep wrote {Rows} rows at {MetricTime}", written, metricTime);
         return written;
     }

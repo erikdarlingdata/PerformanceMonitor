@@ -90,6 +90,7 @@ public sealed class ReadAdmission
         ["get_collector_readiness"] = "health read: which due collectors have no good cycle since the service started",
         ["get_store_metrics"] = "health read: the store's own size and pressure",
         ["get_store_log"] = "health read: the store's own log",
+        ["get_store_pass_steps"] = "health read: the store's own pass steps",
         ["list_servers"] = "health read: the registry every other read names a server from",
     };
 
