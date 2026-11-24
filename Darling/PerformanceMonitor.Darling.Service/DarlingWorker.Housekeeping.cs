@@ -1404,11 +1404,11 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// down, a role that cannot read <c>pg_stat_activity</c>, the budget expiring) is a Debug line and a skipped minute. Never throws except
     /// for the service stopping.
     ///
-    /// <para>The host load is passed as null. The host profile the service reads for the store (<see cref="DarlingStoreHostProfile"/>) carries
-    /// total memory, the processor count and the data volume's free space, and no CPU percent, available memory or disk queue, so there is
-    /// nothing to hand over yet. The three columns stay NULL and the read says so once.</para>
+    /// <para>The host load is the managed store's available memory (<see cref="ReadStoreHostLoad"/>) and nothing else. A bring-your-own or
+    /// compose store runs on a host the service does not describe, so it passes null, and CPU percent and disk queue are not read for any store.
+    /// The columns left empty stay NULL and the read says so.</para>
     /// </summary>
-    private async Task SampleStoreConnectionsAsync(CancellationToken cancellationToken)
+    private async Task SampleStoreConnectionsAsync(bool managedStore, CancellationToken cancellationToken)
     {
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(s_checkpointSyncSampleBudget);
@@ -1416,13 +1416,31 @@ AND   j.hypertable_name = '{relation}'", connection))
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
-            await StoreConnectionSamples.CaptureAsync(connection, DateTime.UtcNow, hostLoad: null, budget.Token);
+            await StoreConnectionSamples.CaptureAsync(connection, DateTime.UtcNow, ReadStoreHostLoad(managedStore), budget.Token);
         }
         catch (Exception ex) when (ex is not OperationCanceledException
             || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
         {
             _logger.LogDebug(ex, "store connection sample failed and was skipped");
         }
+    }
+
+    /// <summary>
+    /// What the store's host offers the connection sample (#9437). A managed store runs on the service's own Windows machine, which is the
+    /// machine <see cref="DarlingStoreHostProfile"/> describes, so the memory it can still hand out (the <c>GlobalMemoryStatusEx</c> read the
+    /// profile already makes for total memory) is that host's. Any other store is on a host the service does not describe, and a failed read
+    /// gives nothing: both are null, never a made-up figure. CPU percent and disk queue are left null because the service has no reader for them.
+    /// </summary>
+    internal static StoreHostLoad? ReadStoreHostLoad(bool managedStore)
+    {
+        if (!managedStore || !OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        return DarlingManagedPostgres.TryReadWindowsMemoryStatus(out _, out var available, out _, out _)
+            ? new StoreHostLoad(null, available, null)
+            : null;
     }
 
     /// <summary>

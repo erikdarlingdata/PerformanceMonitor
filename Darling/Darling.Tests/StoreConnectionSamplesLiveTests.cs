@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -185,6 +186,45 @@ public sealed class StoreConnectionSamplesLiveTests
             var host = answer.GetProperty("minutes")[0].GetProperty("host");
             Assert.Equal(42.5, host.GetProperty("cpu_percent").GetDouble());
             Assert.Equal(1234567890L, host.GetProperty("available_memory_bytes").GetInt64());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
+    public async Task AManagedStoresCapture_StoresTheHostsAvailableMemory_AndTheReadReportsItAvailable_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The managed store's host reading is the Windows GlobalMemoryStatusEx read.");
+        var ct = TestContext.Current.CancellationToken;
+
+        /* A store the service does not manage has no host reading: null, never a made-up figure. */
+        Assert.Null(DarlingWorker.ReadStoreHostLoad(managedStore: false));
+
+        var managed = DarlingWorker.ReadStoreHostLoad(managedStore: true);
+        Assert.NotNull(managed);
+        Assert.True(managed!.Value.AvailableMemoryBytes > 0);
+        Assert.Null(managed.Value.CpuPercent);
+        Assert.Null(managed.Value.DiskQueueLength);
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var admin = new NpgsqlConnection(scratch.ConnectionString);
+            await admin.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(admin, ct);
+            await StoreConnectionSamples.CaptureAsync(admin, DateTime.UtcNow, managed, ct);
+
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var answer = await ReadAsync(source, ct);
+            Assert.Equal("available", answer.GetProperty("host_load").GetString());
+            var host = answer.GetProperty("minutes")[0].GetProperty("host");
+            Assert.True(host.GetProperty("available_memory_bytes").GetInt64() > 0);
+            Assert.Equal(JsonValueKind.Null, host.GetProperty("cpu_percent").ValueKind);
             bodySucceeded = true;
         }
         finally

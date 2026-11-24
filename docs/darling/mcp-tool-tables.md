@@ -20,7 +20,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 - The page was made by reading each tool's code down to the SQL that runs. It was not made from a store trace.
 
 
-## Tools that read collected data (154)
+## Tools that read collected data (155)
 
 | Tool | Store objects |
 |---|---|
@@ -212,6 +212,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_server_actions` | `config.config_monitored_servers`<br>`config.config_server_actions`<br>`collect.servers` |
 | `get_server_settings` | `config.config_monitored_servers` |
 | `get_slow_reads` | `collect.slow_reads` |
+| `get_store_connections` | `collect.store_connection_samples`<br>`collect.store_connection_slots` |
 | `get_store_host` | `collect.store_metrics` |
 | `get_store_log` | `collect.store_log_captures`<br>`collect.store_log_events` |
 | `get_store_metrics` | `collect.store_metrics`<br>`collect.query_store_compose_stamp_failures` |

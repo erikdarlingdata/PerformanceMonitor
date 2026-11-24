@@ -5116,6 +5116,13 @@ FROM (
     /// logger; <paramref name="win32Error"/> is <see cref="Marshal.GetLastWin32Error"/> on a clean false.
     /// </summary>
     internal static bool TryReadWindowsPhysicalMemoryBytes(out long totalPhysicalMemoryBytes, out int win32Error, out Exception? thrown)
+        => TryReadWindowsMemoryStatus(out totalPhysicalMemoryBytes, out _, out win32Error, out thrown);
+
+    /// <summary>
+    /// The same <c>GlobalMemoryStatusEx</c> read with the memory the machine can still hand out (<c>ullAvailPhys</c>) beside the total (#9437): the
+    /// struct already holds it, so the store connection sample's available-memory figure is no second call or P/Invoke.
+    /// </summary>
+    internal static bool TryReadWindowsMemoryStatus(out long totalPhysicalMemoryBytes, out long availablePhysicalMemoryBytes, out int win32Error, out Exception? thrown)
     {
         try
         {
@@ -5123,6 +5130,7 @@ FROM (
             if (GlobalMemoryStatusEx(status) && status.ullTotalPhys > 0)
             {
                 totalPhysicalMemoryBytes = (long)status.ullTotalPhys;
+                availablePhysicalMemoryBytes = (long)status.ullAvailPhys;
                 win32Error = 0;
                 thrown = null;
                 return true;
@@ -5134,12 +5142,14 @@ FROM (
         {
             thrown = ex;
             totalPhysicalMemoryBytes = 0;
+            availablePhysicalMemoryBytes = 0;
             win32Error = 0;
             return false;
         }
 
         thrown = null;
         totalPhysicalMemoryBytes = 0;
+        availablePhysicalMemoryBytes = 0;
         return false;
     }
 

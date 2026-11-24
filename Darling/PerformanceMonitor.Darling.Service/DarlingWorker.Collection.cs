@@ -1802,7 +1802,7 @@ public sealed partial class DarlingWorker
                 await SampleCheckpointSyncAsync(stoppingToken);
 
                 /* #9437: the same minute's store connection sample. A failed read is a Debug line and a skipped minute, never a stopped loop. */
-                await SampleStoreConnectionsAsync(stoppingToken);
+                await SampleStoreConnectionsAsync(config.Postgres.Managed, stoppingToken);
             }
 
             /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */

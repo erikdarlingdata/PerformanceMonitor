@@ -39,8 +39,8 @@ public sealed class DarlingMcpStoreConnectionsTools
 
     /// <summary>The <c>host_load</c> sentence when no returned minute carries a host figure.</summary>
     internal const string HostLoadNotAvailableText =
-        "The service reads no CPU percent, available memory or disk queue for the store's host, so those columns are empty. "
-        + "Only a managed store on the same host as the service could have them, and the host reader does not offer them yet.";
+        "No returned minute has a host figure. The service reads available memory only for a managed store on its own Windows host, "
+        + "and reads no CPU percent or disk queue for any store, so a bring-your-own or compose store has none of the three.";
 
     [McpServerTool(Name = "get_store_connections"), Description(
         "Gets the monitoring STORE's OWN connections a minute at a time, not a monitored server's; no server_name. Each minute: client backends by role, "
@@ -50,7 +50,7 @@ public sealed class DarlingMcpStoreConnectionsTools
         + "slots_available is stored raw and goes below zero when superusers use the reserved slots. A role that is not a superuser and not in pg_read_all_stats sees empty state and wait columns for other roles' backends: the counts stay right. "
         + "role and application are exact-match filters. With a filter, only minutes that have a matching group are returned, so limit counts those minutes, and each minute's slots block still describes the whole store. "
         + "group_by folds each minute's groups to role, application or state (sums of backends, the other columns null). none keeps the full grain. "
-        + "host_load says available or not_available for the returned minutes: cpu_percent, available_memory_bytes and disk_queue are filled only where the service reads them for a store on its own host, and are null otherwise. "
+        + "host_load says available or not_available for the returned minutes: available_memory_bytes is filled only for a managed store on the service's own host, cpu_percent and disk_queue are never read, and a figure not read is null. "
         + "truncated is true when more minutes lie in the window than limit. An out-of-range window, limit or group_by is refused, never clamped.")]
     public static async Task<string> GetStoreConnections(
         NpgsqlDataSource postgres,
