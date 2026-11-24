@@ -21,7 +21,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// row count, and <c>get_store_table_health</c> reads live counters that run from the last statistics reset, so neither could say
 /// which table an hourly pass wrote or read, or when that started.
 ///
-/// <para><b>Shape (V304).</b> <c>collect.store_table_activity</c> holds one row per store table per hour that table was active:
+/// <para><b>Shape (V308).</b> <c>collect.store_table_activity</c> holds one row per store table per hour that table was active:
 /// the tuples inserted, updated (and how many of those HOT) and deleted, heap and index blocks read and hit, sequential and index
 /// scans, vacuums and analyzes, and how many of the table's relations (chunks, compressed chunks, partitions) were scanned in
 /// the hour. The values are the hour's DIFFERENCES, not raw counters, which is the one place this table departs from the
@@ -53,9 +53,9 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class StoreTableActivity
 {
     /// <summary>The store schema version that adds the two tables. One constant so a renumber, when another rung lands first, is one edit.</summary>
-    public const int Version = 304;
+    public const int Version = 308;
 
-    /// <summary>The rung (V304): two empty plain tables, no data moves. An older build never reads them.</summary>
+    /// <summary>The rung (V308): two empty plain tables, no data moves. An older build never reads them.</summary>
     public const string CreateSql = @"
 CREATE TABLE IF NOT EXISTS collect.store_table_activity
 (
