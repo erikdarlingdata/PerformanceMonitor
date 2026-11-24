@@ -452,6 +452,80 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
         }
     }
 
+    /* #9455: rows with long text at the real sorted-merge limit. 250,000 rows of about 1 KB of text that never repeats ran
+       out of memory at 122,880-row groups on the 512MB limit before the sorted byte bound (a group of that many rows holds
+       over 120 MB, on top of the sort's own input). */
+    private const int LongTextRows = 250_000;
+    private const int LongTextCopies = 16;
+
+    private static long OrderInversions(string file) =>
+        Scalar($"SELECT count(*) FROM (SELECT server_id, collection_time, lag(server_id) OVER w AS prev_server, lag(collection_time) OVER w AS prev_time " +
+               $"FROM read_parquet('{file}', file_row_number = true) WINDOW w AS (ORDER BY file_row_number)) " +
+               "WHERE prev_server > server_id OR (prev_server = server_id AND prev_time > collection_time)");
+
+    /// <summary>
+    /// A sorted merge of rows with long text, at the real sorted-merge memory limit, writes groups larger than 2,048 rows
+    /// without the sorted-again-at-2,048 retry or the unsorted fallback, and the file is in server then time order. The
+    /// file is not one the re-cut picks.
+    /// </summary>
+    [Fact]
+    public void ASortedMergeOfLongText_AtTheRealLimit_WritesGroupsOverTheSmallSize_WithoutARetry()
+    {
+        var source = WriteUnsorted("long_text_source.parquet", LongTextRows, LongTextCopies);
+        var output = P("long_text_merged.parquet");
+        Directory.CreateDirectory(P("spill"));
+        var retries = new List<string>();
+        var fallbacks = new List<string>();
+
+        ParquetCompaction.MergeBatchToFile("query_stats", [source], output, P("spill"),
+            onSortFallback: (t, _, _) => fallbacks.Add(t), onSortedAtSmallGroups: (t, _, _) => retries.Add(t));
+
+        Assert.Empty(fallbacks);
+        Assert.Empty(retries);
+        Assert.Equal(LongTextRows, Scalar($"SELECT count(*) FROM read_parquet('{output}')"));
+        Assert.True(MaxGroupRows(output) > ParquetCompaction.ArchiveRowGroupSize, $"the largest row group holds {MaxGroupRows(output)} rows");
+        Assert.True(MaxGroupRows(output) < ParquetCompaction.SortedArchiveRowGroupSize, "the byte bound cut the groups");
+        Assert.Equal(0, OrderInversions(output));
+        using var con = new DuckDBConnection("DataSource=:memory:");
+        con.Open();
+        Assert.False(ParquetCompaction.NeedsRecut(con, output));
+    }
+
+    /// <summary>
+    /// Rows of a narrow table fill a group with far fewer bytes than the bound, so the merge still writes 122,880-row groups.
+    /// </summary>
+    [Fact]
+    public void ASortedMergeOfNarrowRows_StillWrites122880RowGroups()
+    {
+        var source = WriteUnsorted("narrow_source.parquet", 130_000);
+        var output = P("narrow_merged.parquet");
+        Directory.CreateDirectory(P("spill"));
+
+        ParquetCompaction.MergeBatchToFile("query_stats", [source], output, P("spill"));
+
+        Assert.Equal(ParquetCompaction.SortedArchiveRowGroupSize, MaxGroupRows(output));
+        Assert.Equal(2, Groups(output));
+        Assert.Equal(0, OrderInversions(output));
+    }
+
+    /// <summary>
+    /// A file whose groups hold the byte bound is at its target even with far fewer than 16,384 rows in a group, and a file
+    /// whose rows are so long that its target is 2,048 rows is never cut. The same row count of short rows is cut.
+    /// </summary>
+    [Fact]
+    public void AFileAtItsByteTarget_IsNotPickedForACut_AndAShortRowFileIs()
+    {
+        var wide = WriteUnsorted("wide_2048.parquet", 8192, payloadCopies: 120);
+        var narrow = WriteUnsorted("narrow_2048.parquet", 8192);
+        using var con = new DuckDBConnection("DataSource=:memory:");
+        con.Open();
+
+        Assert.Equal(ParquetCompaction.ArchiveRowGroupSize, MaxGroupRows(wide));
+        Assert.True(Groups(wide) > 1);
+        Assert.False(ParquetCompaction.NeedsRecut(con, wide));
+        Assert.True(ParquetCompaction.NeedsRecut(con, narrow));
+    }
+
     private const int WideRows = 125_000;
     private const int WideCopies = 8;
     /* Measured with this source: a sorted merge at 80 to 192 MB runs out of memory at 122,880-row groups and fits at 2,048. */
@@ -471,7 +545,8 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
         var retries = new List<string>();
         var fallbacks = new List<string>();
 
-        ParquetCompaction.MergeBatchToFile("query_store_stats", [source], output, P("spill"), memoryLimit: WideLimit,
+        /* rowGroupBytes 0 writes no byte bound, the shape of a DuckDB that ignores it. */
+        ParquetCompaction.MergeBatchToFile("query_store_stats", [source], output, P("spill"), memoryLimit: WideLimit, rowGroupBytes: 0,
             onSortFallback: (t, _, _) => fallbacks.Add(t), onSortedAtSmallGroups: (t, _, _) => retries.Add(t));
 
         Assert.Empty(fallbacks);

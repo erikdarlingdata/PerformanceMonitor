@@ -158,10 +158,12 @@ internal sealed class ArchiveLayoutReader
                 var acc = perTable[f.Table];
                 var serverOrdered = ParquetCompaction.ServerOrderByFor(f.Table) is not null;
                 long groups, maxRows, mixed;
+                bool due;
                 try
                 {
                     BeforeFileReadForTests?.Invoke(f.Path);
                     (groups, maxRows, mixed) = ReadFooter(connection, f.Path, serverOrdered);
+                    due = DueForRecut(connection, f.Path, f.Name, f.Table, groups, maxRows);
                 }
                 catch (Exception) when (!File.Exists(f.Path))
                 {
@@ -185,7 +187,6 @@ internal sealed class ArchiveLayoutReader
                     acc.Mixed = (acc.Mixed ?? 0) + mixed;
                 }
 
-                var due = DueForRecut(f.Name, f.Table, groups, maxRows);
                 if (due)
                 {
                     acc.NeedingRecut++;
@@ -227,8 +228,9 @@ internal sealed class ArchiveLayoutReader
     }
 
     /* The re-cut's own candidate rule (ArchiveService.RecutSmallRowGroupFiles): a compaction file of a table that merges in
-       server order, not a day file of a table that merges monthly, whose shape NeedsRecut names. */
-    private static bool DueForRecut(string fileName, string table, long groups, long maxRows)
+       server order, not a day file of a table that merges monthly, whose shape NeedsRecut names. NeedsRecut is the re-cut's own
+       rule, the byte check included (#9455), so a file whose largest group already holds half the byte bound is not counted. */
+    private static bool DueForRecut(DuckDBConnection connection, string path, string fileName, string table, long groups, long maxRows)
     {
         var m = ArchiveService.s_recutFileName.Match(fileName);
         if (!m.Success || ParquetCompaction.ServerOrderByFor(table) is null)
@@ -238,7 +240,7 @@ internal sealed class ArchiveLayoutReader
 
         var period = m.Groups["period"].Value;
         return !(period.Length == 8 && !ParquetCompaction.IsDailyTable(table))
-            && ParquetCompaction.NeedsRecut(groups, maxRows);
+            && ParquetCompaction.NeedsRecut(groups, maxRows, () => ParquetCompaction.MaxRowGroupUncompressedBytes(connection, path));
     }
 
     private string? RecutSkipReason(Dictionary<string, string> skipList, string path, string fileName, string table, long bytes, long? free, long reserve)

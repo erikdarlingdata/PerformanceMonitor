@@ -159,6 +159,40 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         Assert.Empty(table.RecutSkips);
     }
 
+    /* The same 2,048-row groups of long rows: each group holds more than half the sorted byte bound, so a cut would not
+       change it (#9455). */
+    private string WriteWide(string fileName, int rows)
+    {
+        var path = P(fileName);
+        var payload = string.Join(" || ", Enumerable.Repeat("md5(i::VARCHAR) || md5((i + 1)::VARCHAR)", 120));
+        Exec($"COPY (SELECT i::BIGINT AS collection_id, TIMESTAMP '2026-09-01 00:00:00' + to_seconds(i) AS collection_time, " +
+             $"(1 + i % {Servers})::INTEGER AS server_id, {payload} AS payload FROM range({rows}) t(i)) " +
+             $"TO '{path}' ({ParquetCompaction.BuildArchiveCopyOptions(ParquetCompaction.ArchiveRowGroupSize)})");
+        return path;
+    }
+
+    /// <summary>
+    /// A file of small row groups whose groups already hold half the byte bound is at its target, so the re-cut does not pick it
+    /// and the layout does not count it. The same row count of short rows is counted. Both agree with the re-cut's own rule.
+    /// </summary>
+    [Fact]
+    public void AFileAtItsByteTarget_IsNotCountedAsNeedingTheRecut()
+    {
+        var wide = WriteWide(DayFile, 4_096);
+        var narrow = WriteMixed($"{DateTime.UtcNow.Date.AddDays(-4):yyyyMMdd}_query_store_stats.parquet", 4_096);
+        using (var con = new DuckDBConnection("DataSource=:memory:"))
+        {
+            con.Open();
+            Assert.False(ParquetCompaction.NeedsRecut(con, wide));
+            Assert.True(ParquetCompaction.NeedsRecut(con, narrow));
+        }
+
+        var layout = NewReader().Read().Layout;
+
+        var table = Assert.Single(layout!.Tables);
+        Assert.Equal(1, table.FilesNeedingRecut);
+    }
+
     /// <summary>A file larger than the table's merge batch budget is named as skipped, with that reason.</summary>
     [Fact]
     public void AFileOverTheBatchBudget_IsSkippedWithThatReason()

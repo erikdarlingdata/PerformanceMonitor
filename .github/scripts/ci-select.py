@@ -1500,7 +1500,7 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
                max_drift: int = MAP_MAX_DRIFT, base_ref: str = "",
                named: "dict[str, set[str]] | None" = None, guard_stage_separate: bool = False,
                shared_diff: "str | None" = None, shared_dirs: "tuple[str, ...]" = SHARED_PROJECT_DIRS,
-               listed: "Callable[[str, str], bool] | None" = None) -> dict:
+               listed: "Callable[[str, str], bool] | None" = None, quiet: "set[str] | None" = None) -> dict:
     """Which test classes a pull request runs, from a class-to-file map. Pure: no file, git or clock access
     (`now` is the clock; `max_age_days=None` turns the age check off, for a replay of old runs).
 
@@ -1518,6 +1518,9 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
     scan_classes() returns it, which is how a class the map has never seen is found. `named` is `{suite: {Class, ...}}`:
     the test classes whose source names a symbol the pull request declares or changes (symbol_classes(), tight tokens
     only, #5776); None or empty adds nothing.
+    `quiet` (#9441) is the set of changed files no CI area knows and that are no build input (ci-plan.py's keeps_full): a file of it
+    that the map does not know, and no text pattern reads, selects nothing of its own instead of answering FULL. A file of it that
+    a class covers or a text pattern reads still selects those classes.
     `listed` is listed_checker()'s answer (#7739): a selected class the map has never seen is kept only when it says the test
     host lists it (not a private nested fixture, an abstract base, or a class declared inside a test's string). A class in the
     map ran, so it is never asked. None asks nothing.
@@ -1639,6 +1642,11 @@ def map_select(test_map: object, changed: list[str], drift: "list[str] | None", 
         if f in known:
             continue
         if any(isinstance(g, list) and any(matches(p, f) for p in g) for g in globs.values()):
+            continue
+        if quiet and f in quiet:
+            # #9441: a generated reference file, a repro tool or a workflow no test class reads. The area filters do not know it, so no
+            # product code depends on it, and no class reads it as text, or the pattern check above would have kept it.
+            unknown[f] = "no area knows it and no class reads it as text, so it selects nothing of its own"
             continue
         if f.endswith(".cs"):
             if _TEST_PROJECT_FILE.search(f) and new_classes:
