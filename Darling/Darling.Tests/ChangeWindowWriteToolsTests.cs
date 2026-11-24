@@ -108,7 +108,7 @@ VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now())", ct);
             var id = (long)answer["window_id"]!;
             Assert.Equal(2, answer["servers"]!.AsArray().Count);
             Assert.Equal(Iso(start.AddHours(2).AddMinutes(InvestigationChangeWindows.TailMinutes)), (string?)answer["tail_ends_at_utc"]);
-            Assert.Equal("{7,8}|patch night|True", await ScalarAsync(c,
+            Assert.Equal("{7,8}|patch night|true", await ScalarAsync(c,
                 $"SELECT server_ids::text || '|' || reason || '|' || (declared_by LIKE 'operator:%') FROM config.investigation_change_windows WHERE window_id = {id}"));
             Assert.Equal("declare_change_window|change_window", await ScalarAsync(c,
                 "SELECT (detail->>'tool') || '|' || (detail->>'kind') FROM config.investigation_journal WHERE event = 'action_called'"));
