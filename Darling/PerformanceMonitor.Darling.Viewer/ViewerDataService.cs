@@ -1940,9 +1940,6 @@ SELECT
         /* V301 (#9374): the last measured relation sizes and their measured time, created on every store and never dropped. Relation-existence
            sentinel, newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling
            through to 300 and showing a spurious upgrade banner on a store that is current. */
-        /* V302 (#8570): the partial index of failed Agent job outcomes on job_history, never dropped. Index-existence sentinel, newest-first, and the
-           TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 301 and showing a
-           spurious upgrade banner on a store that is current. */
         /* V307 (#9415): the service start history's two tables, created on every store and never dropped. Relation-existence sentinel, newest-first, and
            the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 306 and showing a spurious
            upgrade banner on a store that is current. */
@@ -1957,9 +1954,6 @@ SELECT
         {
             return 306;
         }
-        /* V303 (#9384): the clutter-day stamp, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
-           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 302 and showing a spurious upgrade
-           banner on a store that is current. */
         /* V305 (#9419): the WAL columns on collect.store_metrics, never dropped. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 304 and showing a spurious upgrade
            banner on a store that is current. */
@@ -1974,10 +1968,16 @@ SELECT
         {
             return StoreStatementHistory.WriteCountersVersion;
         }
+        /* V303 (#9384): the clutter-day stamp, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 302 and showing a spurious upgrade
+           banner on a store that is current. */
         if (hasClutterDayBuilt)
         {
             return 303;
         }
+        /* V302 (#8570): the partial index of failed Agent job outcomes on job_history, never dropped. Index-existence sentinel, newest-first, and the
+           TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 301 and showing a
+           spurious upgrade banner on a store that is current. */
         if (hasJobHistoryFailedIndex)
         {
             return 302;
