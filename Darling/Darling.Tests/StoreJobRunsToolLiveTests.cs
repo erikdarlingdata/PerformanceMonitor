@@ -48,7 +48,7 @@ public sealed class StoreJobRunsToolLiveTests
         return (T)(await command.ExecuteScalarAsync(ct))!;
     }
 
-    /// <summary>A scratch store with its background workers stopped, so TimescaleDB's scheduler does not race the runs a fact starts by hand.</summary>
+    /// <summary>A scratch store. The workers stay up on purpose: TimescaleDB writes a hand-run job's history row through them, so a fact that stopped them would find no row. The jobs a fact adds start 30 days out, so the scheduler never runs one by itself.</summary>
     private static async Task WithStoreAsync(Func<NpgsqlConnection, string, CancellationToken, Task> body)
     {
         var cs = ConnectionString;
@@ -57,7 +57,6 @@ public sealed class StoreJobRunsToolLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
-        await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
         var bodySucceeded = false;
         try
@@ -101,14 +100,33 @@ public sealed class StoreJobRunsToolLiveTests
         await ExecAsync(connection, $"SELECT create_hypertable('public.{table}', 'ts', chunk_time_interval => interval '1 day')", ct);
         await ExecAsync(connection, $"ALTER TABLE public.{table} SET (timescaledb.compress)", ct);
         await ExecAsync(connection, $"INSERT INTO public.{table} SELECT g, 1 FROM generate_series(now() - interval '6 days', now(), interval '6 hours') AS g", ct);
-        return await ScalarAsync<int>(connection, $"SELECT add_compression_policy('public.{table}', interval '2 days')", ct);
+        return await ScalarAsync<int>(connection, $"SELECT add_compression_policy('public.{table}', interval '2 days', initial_start => now() + interval '30 days')", ct);
     }
 
-    private static async Task RunJobAsync(NpgsqlConnection connection, int jobId, CancellationToken ct)
+    /// <summary>Runs the job by hand and waits for its finished history row, which TimescaleDB writes a moment after the call returns.</summary>
+    private static async Task RunJobAsync(NpgsqlConnection connection, int jobId, CancellationToken ct, bool failing = false)
     {
+        var before = await FinishedRowsAsync(connection, jobId, ct);
         await ExecAsync(connection, "SET client_min_messages = error", ct);
-        await ExecAsync(connection, $"CALL run_job({jobId})", ct);
+        try
+        {
+            await ExecAsync(connection, $"CALL run_job({jobId})", ct);
+            Assert.False(failing, "the job was meant to fail");
+        }
+        catch (PostgresException) when (failing)
+        {
+        }
+
+        for (var attempt = 0; attempt < 300 && await FinishedRowsAsync(connection, jobId, ct) <= before; attempt++)
+        {
+            await Task.Delay(100, ct);
+        }
+
+        Assert.True(await FinishedRowsAsync(connection, jobId, ct) > before, $"TimescaleDB wrote no finished history row for job {jobId}");
     }
+
+    private static Task<long> FinishedRowsAsync(NpgsqlConnection connection, int jobId, CancellationToken ct) =>
+        ScalarAsync<long>(connection, $"SELECT count(*) FROM timescaledb_information.job_history WHERE job_id = {jobId} AND finish_time IS NOT NULL", ct);
 
     private static async Task<int> FailingJobAsync(NpgsqlConnection connection, CancellationToken ct)
     {
@@ -179,10 +197,8 @@ public sealed class StoreJobRunsToolLiveTests
         await WithStoreAsync(async (connection, cs, ct) =>
         {
             var job = await FailingJobAsync(connection, ct);
-            await Assert.ThrowsAsync<PostgresException>(() => RunJobAsync(connection, job, ct));
+            await RunJobAsync(connection, job, ct, failing: true);
 
-            var direct = await ScalarAsync<string>(connection, "SELECT coalesce(string_agg(h.id || '/' || h.job_id || '/' || h.proc_name || '/' || h.start_time::text || '/' || coalesce(h.succeeded::text, 'null'), '; '), 'none') || ' now=' || now()::text || ' me=' || current_user || ' jobs=' || (SELECT count(*) FROM timescaledb_information.jobs) FROM timescaledb_information.job_history AS h", ct);
-            Assert.True(direct.Contains("jr9440_boom", StringComparison.Ordinal), "history rows: " + direct);
             var asOwner = await ReadAsync(cs, ct, kind: "jr9440_boom");
             var run = Assert.Single(Runs(asOwner));
             Assert.Equal("failed", run.GetProperty("outcome").GetString());
@@ -223,7 +239,7 @@ public sealed class StoreJobRunsToolLiveTests
             {
                 await RunJobAsync(connection, older, ct);
                 await RunJobAsync(connection, newer, ct);
-                await Assert.ThrowsAsync<PostgresException>(() => RunJobAsync(connection, failing, ct));
+                await RunJobAsync(connection, failing, ct, failing: true);
             }
             finally
             {
@@ -283,7 +299,7 @@ public sealed class StoreJobRunsToolLiveTests
         await WithStoreAsync(async (connection, cs, ct) =>
         {
             var job = await FailingJobAsync(connection, ct);
-            await Assert.ThrowsAsync<PostgresException>(() => RunJobAsync(connection, job, ct));
+            await RunJobAsync(connection, job, ct, failing: true);
             var oldest = await ScalarAsync<DateTime>(connection, "SELECT min(start_time) FROM timescaledb_information.job_history", ct);
 
             await using var postgres = NpgsqlDataSource.Create(cs);
