@@ -32,7 +32,7 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para>Nothing here throws except for a cancellation, and nothing here fails or delays the start.</para>
 /// </summary>
-internal sealed class ServiceStartRecorder : IMigrationRungObserver
+internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
 {
     /// <summary>How often the counts are written.</summary>
     internal static readonly TimeSpan FlushInterval = TimeSpan.FromMinutes(1);
@@ -75,6 +75,9 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver
         _processStartedUtc = processStartedUtc;
         _clock = clock ?? (() => DateTime.UtcNow);
     }
+
+    /// <summary>Releases the flush gate. Call after the flush loop has ended.</summary>
+    public void Dispose() => _flushGate.Dispose();
 
     /// <summary>This start's id.</summary>
     internal Guid StartId { get; }

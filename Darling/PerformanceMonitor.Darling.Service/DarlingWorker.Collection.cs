@@ -121,7 +121,7 @@ public sealed partial class DarlingWorker
         /* #9415: this start's row in the store's start history, and a row per migration rung it tries. The recorder hears the runner as it goes and
            holds what it hears until the history's tables exist (a rung makes them). It flushes when the store is ready, after a failed attempt (so a
            start that dies in a rung shows it), once a minute for the ERROR and WARN counts, and once more at shutdown. Never fails or delays the start. */
-        var startRecorder = ServiceStartRecorder.ForThisProcess(ServiceLogTally.Shared, ProcessStartUtc());
+        using var startRecorder = ServiceStartRecorder.ForThisProcess(ServiceLogTally.Shared, ProcessStartUtc());
         using var startHistoryStop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         var startHistoryFlusher = startRecorder.RunAsync(postgres, _logger, startHistoryStop.Token);
         /* #4508: set once, the first time the fast budget above runs out on a failure that is still
