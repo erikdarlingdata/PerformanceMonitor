@@ -19,10 +19,10 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>The key.</b> V148's primary key (rewritten by V182) cannot name a nullable column, and rows written before this rung
 /// have no start. So the primary key is dropped and a unique index with <c>NULLS NOT DISTINCT</c> takes its place: old rows keep
-/// NULL, two NULL rows of one key are still one key (an older build that still flushes writes NULL and keeps adding into its hour),
-/// and the flush's <c>ON CONFLICT</c> names the same six columns. <c>NULLS NOT DISTINCT</c> needs PostgreSQL 15, and the store
+/// NULL, two NULL rows of one key are still one key, and the flush's <c>ON CONFLICT</c> names the same six columns. <c>NULLS NOT DISTINCT</c> needs PostgreSQL 15, and the store
 /// minimum is 16. The table is a plain table that holds at most 90 days of hourly rows, so the index build is short and the
-/// column is catalog-only. <b>No Lite twin:</b> Lite records no read latency.</para>
+/// column is catalog-only. An older build's flush names the old five-column conflict key, which no unique index matches after this
+/// rung, so it fails (42P10) until the rollback statement in docs/darling/admin.md restores the primary key. <b>No Lite twin:</b> Lite records no read latency.</para>
 ///
 /// <para>Idempotent: the column is IF NOT EXISTS, the constraint drop is IF EXISTS, and the index is IF NOT EXISTS, so a second run
 /// does nothing.</para>
