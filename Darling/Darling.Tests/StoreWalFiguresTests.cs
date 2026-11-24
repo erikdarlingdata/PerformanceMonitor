@@ -69,7 +69,7 @@ public sealed class StoreWalFiguresTests
             Row(1, bytes: 9_000_000, records: 500, statsReset: Reset0.AddMinutes(30)),
         };
 
-        var points = DarlingStoreWalReader.BuildPoints(rows, T0);
+        var points = DarlingStoreWalReader.BuildPoints(rows, T0.AddMinutes(1));
 
         var point = Assert.Single(points);
         Assert.Equal(DarlingStoreWalReader.Reset, point.Status);
@@ -82,7 +82,7 @@ public sealed class StoreWalFiguresTests
     {
         var rows = new[] { Row(0, bytes: 9_000, records: 90), Row(1, bytes: 400, records: 5) };
 
-        var point = Assert.Single(DarlingStoreWalReader.BuildPoints(rows, T0));
+        var point = Assert.Single(DarlingStoreWalReader.BuildPoints(rows, T0.AddMinutes(1)));
 
         Assert.Equal(DarlingStoreWalReader.Reset, point.Status);
         Assert.Null(point.Records);
@@ -200,6 +200,8 @@ public sealed class StoreWalFiguresLiveTests
             var now = DateTime.UtcNow;
             await SweepAtAsync(connection, now.AddHours(-1), ct);
             await WriteWalAsync(connection, 20_000, ct);
+            /* A backend adds its WAL counters to pg_stat_wal when it has been idle for about a second, so the sweep reads them after the pause. */
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
             await SweepAtAsync(connection, now, ct);
 
             var stored = await StoredAsync(connection, ct);

@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>Why columns and not more rows of the checkpointer's shape.</b> The checkpointer row fits its three counters in columns
 /// the table already had. The WAL row needs eleven figures and a reset stamp, and no existing column means any of them. Borrowing
-/// <c>total_bytes</c> and <c>row_count</c> would also put the row into the inventory's byte sums. So V304 adds eleven nullable
+/// <c>total_bytes</c> and the row count column would also put the row into the inventory's byte sums. So V304 adds eleven nullable
 /// columns, and the row leaves <c>total_bytes</c> empty like the checkpointer's.</para>
 ///
 /// <para><b>Raw counters, the read takes the difference.</b> Same rule as the checkpointer row (<see cref="StoreSelfMetrics.CheckpointerInsertSql"/>
