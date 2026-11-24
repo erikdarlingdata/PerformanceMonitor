@@ -23,12 +23,11 @@ namespace Darling.Tests;
 /// bound by the host's own command builder, run twice. The first read arms the watermark. The second read must not return a
 /// statement that completed before it, and must return one that STARTED before the first read and COMPLETED after it.
 ///
-/// <para>The slow statement is one scalar function call that spins for a few seconds (a WAITFOR cannot sit inside a single
-/// statement), so the statement's <c>last_execution_time</c> is its start, before the watermark, and its counters move at the end.
+/// <para>The slow statement is one WAITFOR DELAY of eight seconds, so the statement's <c>last_execution_time</c> is its start, before the watermark, and its counters move at the end.
 /// A test on the start time alone would lose it. The second read is read raw, not through <c>ReadAsync</c>, because the host's idle
 /// filter would drop an idle row and hide the statement-level exclusion this proves.</para>
 ///
-/// <para>The test creates one throwaway database, with the function in it, and drops it, even on failure. Gated on
+/// <para>The test creates one throwaway database, and drops it, even on failure. Gated on
 /// <c>DARLING_TEST_SQL</c> (optional <c>DARLING_TEST_SQL_USER</c> and <c>DARLING_TEST_SQL_PASSWORD</c> for SQL auth).</para>
 /// </summary>
 public sealed class QueryStatsReadWatermarkLiveSqlTests
@@ -146,14 +145,6 @@ public sealed class QueryStatsReadWatermarkLiveSqlTests
             await using (var work = new SqlConnection(ConnectionString(database)))
             {
                 await work.OpenAsync(ct);
-                await ExecuteAsync(work, @"
-CREATE FUNCTION dbo.f_spin() RETURNS integer AS
-BEGIN
-    DECLARE @i integer = 0, @end datetime = DATEADD(SECOND, 8, GETDATE());
-    WHILE GETDATE() < @end SET @i += 1;
-    RETURN @i;
-END;", ct);
-
                 /* The spanning statement starts now and runs for eight seconds. */
                 var slowConnection = new SqlConnection(ConnectionString(database));
                 slow = Task.Run(async () =>
@@ -161,7 +152,7 @@ END;", ct);
                     await using (slowConnection)
                     {
                         await slowConnection.OpenAsync(ct);
-                        await using var command = new SqlCommand($"SELECT v = dbo.f_spin() /* {spanning} */;", slowConnection) { CommandTimeout = 60 };
+                        await using var command = new SqlCommand($"WAITFOR DELAY '00:00:08' /* {spanning} */;", slowConnection) { CommandTimeout = 60 };
                         await command.ExecuteScalarAsync(ct);
                     }
                 }, ct);
