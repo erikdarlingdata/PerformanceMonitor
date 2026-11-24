@@ -137,6 +137,7 @@ internal static class StoreServerCertificate
             var builder = new NpgsqlConnectionStringBuilder(connectionString)
             {
                 SslMode = SslMode.Require,
+                GssEncryptionMode = GssEncryptionMode.Disable,
                 RootCertificate = null,
                 Password = null,
                 Pooling = false,
@@ -179,7 +180,7 @@ internal static class StoreServerCertificate
         }
         catch (Exception ex)
         {
-            return Unavailable($"The store did not complete a TLS handshake ({ex.GetType().Name}), so its certificate could not be read. DEBUG {ex.ToString()[..Math.Min(700, ex.ToString().Length)]}");
+            return Unavailable($"The store did not complete a TLS handshake ({ex.GetType().Name}), so its certificate could not be read.");
         }
 
         if (server is null)
