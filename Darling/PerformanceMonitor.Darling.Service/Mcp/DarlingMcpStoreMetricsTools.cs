@@ -87,7 +87,7 @@ public sealed class DarlingMcpStoreMetricsTools
     public static async Task<string> GetStoreMetrics(
         NpgsqlDataSource postgres,
         [Description("Days of history the window deltas and series cover. Default 30; max 400 (the series' own retention).")] int days_back = 30,
-        [Description("List every object of this kind instead of the summary: hypertable, continuous_aggregate, dimension, table, other, system or background_job.")] string? object_kind = null,
+        [Description("List every object of this kind instead of the summary: hypertable, continuous_aggregate, dimension, table, other, system or background_job. Refused with table_activity.")] string? object_kind = null,
         [Description("An exact object name returns that object's daily series; otherwise the objects whose names contain it are listed. A name from inventory.largest_unenumerated answers with its size now and no series.")] string? object_name = null,
         [Description("Rows per list. Default 10, max 1000.")] int limit = DefaultLimit,
         [Description("Hours of the wal block's hourly series: one point per sweep, newest last. Default 24; max 168.")] int wal_hours_back = DarlingStoreWalReader.DefaultHoursBack,
@@ -104,6 +104,12 @@ public sealed class DarlingMcpStoreMetricsTools
 
         if (table_activity)
         {
+            /* The activity rows are the store's tables, not its self-metrics objects: object_kind has no column to filter them by, so it is refused and not accepted and ignored. */
+            if (!string.IsNullOrWhiteSpace(object_kind))
+            {
+                return McpHelpers.Refusal("object_kind", "object_kind lists the size answers' object kinds and does not filter table_activity, which ranks the store's tables: leave object_kind out, or set table_activity to false.");
+            }
+
             var activityLimitError = McpHelpers.ValidateTop(limit);
             if (activityLimitError != null)
             {

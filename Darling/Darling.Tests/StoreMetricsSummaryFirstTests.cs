@@ -634,6 +634,44 @@ public sealed class StoreMetricsSummaryFirstLivePostgresTests
         }
     }
 
+    /// <summary>
+    /// #9446 made the MCP read refuse as_of without table_activity, and the triage page adds as_of to every section
+    /// of a store alert opened more than a minute after the firing. Both store sections (size and jobs) are
+    /// not table_activity, so both answered invalid. The web read now forwards as_of only with table_activity:
+    /// the page's own query for each section, anchored at a past time, answers with data.
+    /// </summary>
+    [Fact]
+    public async Task TheStoreTriageSections_OpenedLater_AnswerWithData_NotInvalid_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_store_metrics triage as_of test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await SeedAsync(scratch.ConnectionString, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var dispatch = DarlingWebEndpoints.BuildReadDispatch();
+        var pastFiring = DateTime.UtcNow.AddHours(-3).ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+        var sections = DarlingTriageEndpoint.SectionsFor(DarlingSelfAlertEvaluator.JobCadenceMetric)
+            .Where(s => s.Read == "get_store_metrics")
+            .ToList();
+        Assert.Equal(2, sections.Count);
+
+        foreach (var section in sections)
+        {
+            var query = DarlingTriageEndpoint.BuildSectionQuery(section, DarlingSelfAlertEvaluator.StoreServerLabel, pastFiring);
+            Assert.Contains("as_of=", query, StringComparison.Ordinal);
+
+            using var answer = JsonDocument.Parse(await RunReadAsync(dispatch, query, dataSource));
+            var root = answer.RootElement;
+            Assert.False(McpHelpers.IsRefusalEnvelope(root.GetRawText()), $"section '{section.Title}' answered a refusal: {root.GetRawText()}");
+            Assert.Equal(
+                section.Params.ContainsKey("object_kind") ? "list" : "summary",
+                root.GetProperty("view").GetString());
+        }
+    }
+
     private const long Mib = 1L << 20;
 
     private static string StatusOf(string json)
