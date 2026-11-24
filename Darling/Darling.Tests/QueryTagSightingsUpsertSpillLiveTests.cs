@@ -188,9 +188,9 @@ FROM collect.query_tag_sightings ORDER BY {IdentityOrder}
             await RunAsync(store, sql, Rows(Flush(600, 0, 1, 300)), ct);
             Assert.Equal(600, await CountAsync(store, "SELECT count(*) FROM collect.query_tag_sightings", ct));
 
-            /* Flush 2 re-sights all 600 (fills for some, the keys ending in A are due for the hourly move, the rest unchanged) and adds 400 new keys. */
+            /* Flush 2 re-sights all 600 (fills for some, the keys ending in A are due for the six-hourly move, the rest unchanged) and adds 400 new keys. */
             await ExecAsync(store, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '10 minutes'", ct);
-            await ExecAsync(store, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '3 hours' WHERE key LIKE '%A'", ct);
+            await ExecAsync(store, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '7 hours' WHERE key LIKE '%A'", ct);
             await RunAsync(store, sql, Rows(Flush(600, 400, 2, 300)), ct);
             var afterSecond = await SnapshotAsync(store, ct);
 
