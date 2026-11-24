@@ -484,7 +484,7 @@ public sealed partial class DarlingWorker : BackgroundService
            the mcp and viewer logins see no row of that history themselves. Created here (not in a migration) so the roles it is granted to exist,
            and healed hourly like the statement readers above. Ungated: PL/pgSQL, so it is created on a store with no TimescaleDB too. */
         new("store job runs reader", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.InPlace,
-            async (connection, logger, ct) => await StoreJobRunsFunction.EnsureAsync(
+            async (connection, logger, ct) => await StoreJobRunsFunction.CreateAndGrantAsync(
                 connection,
                 PgSchemaGenerator.CollectSchema,
                 [DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.WebRoleName, DarlingManagedPostgres.McpRoleName],

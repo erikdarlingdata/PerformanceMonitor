@@ -157,7 +157,7 @@ DO {tag}{body}{tag};";
     }
 
     /// <summary>Creates or refreshes the function and grants it to the read roles that exist. Returns true when it is in place.</summary>
-    public static async Task<bool> EnsureAsync(
+    public static async Task<bool> CreateAndGrantAsync(
         NpgsqlConnection connection, string collectSchema, IReadOnlyList<string> readerRoles, ILogger? logger, CancellationToken cancellationToken)
     {
         if (connection is null)

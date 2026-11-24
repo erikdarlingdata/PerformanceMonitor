@@ -365,7 +365,7 @@ public sealed class StoreJobRunsToolLiveTests
             var reader = await ReaderLoginAsync(connection, ct);
             try
             {
-                Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [reader], null, ct));
+                Assert.True(await StoreJobRunsFunction.CreateAndGrantAsync(connection, "collect", [reader], null, ct));
 
                 var asReader = await ReadAsync(ConnectionFor(cs, reader), ct, kind: "jr9440_boom");
                 var seen = Runs(asReader);
@@ -405,7 +405,7 @@ public sealed class StoreJobRunsToolLiveTests
             var reader = await ReaderLoginAsync(connection, ct);
             try
             {
-                Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [], null, ct));
+                Assert.True(await StoreJobRunsFunction.CreateAndGrantAsync(connection, "collect", [], null, ct));
                 var call = $"SELECT count(*) FROM collect.store_job_runs(now() - interval '1 day', now(), NULL, NULL, 10)";
 
                 await using (var denied = new NpgsqlConnection(ConnectionFor(cs, reader)))
@@ -415,7 +415,7 @@ public sealed class StoreJobRunsToolLiveTests
                     Assert.Equal("42501", failure.SqlState);
                 }
 
-                Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [reader], null, ct));
+                Assert.True(await StoreJobRunsFunction.CreateAndGrantAsync(connection, "collect", [reader], null, ct));
                 await using var allowed = new NpgsqlConnection(ConnectionFor(cs, reader));
                 await allowed.OpenAsync(ct);
                 Assert.True(await ScalarAsync<long>(allowed, call, ct) >= 0);
@@ -442,7 +442,7 @@ public sealed class StoreJobRunsToolLiveTests
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
             await ExecAsync(connection, "CREATE SCHEMA IF NOT EXISTS collect", ct);
-            Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [], null, ct));
+            Assert.True(await StoreJobRunsFunction.CreateAndGrantAsync(connection, "collect", [], null, ct));
             Assert.Equal(0, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.store_job_runs(now() - interval '1 day', now(), NULL, NULL, 10)", ct));
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
@@ -465,7 +465,7 @@ public sealed class StoreJobRunsToolLiveTests
         {
             var boom = await FailingJobAsync(connection, ct);
             await RunByTheSchedulerAsync(connection, boom, 1, ct);
-            Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [], null, ct));
+            Assert.True(await StoreJobRunsFunction.CreateAndGrantAsync(connection, "collect", [], null, ct));
 
             const string window = "now() - interval '1 day', now() + interval '1 day'";
             Assert.Equal(0, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.store_job_runs({window}, 'compression', NULL, 5)", ct));
