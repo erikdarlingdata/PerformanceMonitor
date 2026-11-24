@@ -102,7 +102,9 @@ public sealed class DarlingMcpReadLatencyTools
         + "before and after, each with count, median_ms (a bucket upper bound like the percentiles, with median_is_at_least) and max_ms, "
         + "so a fix can be re-timed after a new build without comparing by hand. Each hourly bucket records the start instant of the service process "
         + "that wrote it, and a bucket counts as after when that process started at or after split_at, so the hour a new build started is divided "
-        + "exactly, because a restart inside an hour writes its own bucket. Pass the start of the build you want to judge, from the service start history when it has one. "
+        + "exactly, because a restart inside an hour writes its own bucket. Every answer lists process_starts: the distinct service start instants in the window, newest first, at most 20, each one a build or restart "
+        + "that wrote buckets. Copy one of those values into split_at to judge the build that started then; a start taken from a log line or a clock is seconds off and "
+        + "would put that build's own buckets before the split. "
         + "Buckets stored before the start was recorded have no start: they are placed by their hour, as after when the hour begins at or after split_at, "
         + "so the hour that holds split_at counts as before, and ambiguous_count says how many reads that is (they may belong to either side). "
         + "An unparsable split_at, one before the window starts or one in the future is refused, never moved. The split covers the same window, surface and route filters, "
@@ -140,6 +142,7 @@ public sealed class DarlingMcpReadLatencyTools
         try
         {
             var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, since, surface, route, splitAtUtc, cancellationToken);
+            var processStarts = (await DarlingReadLatencyReader.GetProcessStartsAsync(postgres, since, cancellationToken)).Select(FormatInstant).ToArray();
             if (rows.Count == 0)
             {
                 var emptyMessage = $"No read recorded {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}" +
@@ -149,9 +152,13 @@ public sealed class DarlingMcpReadLatencyTools
 
                 /* #5506 part 3: rows flush hourly, so a quiet store window can still have long reads running or queued right
                    now; the empty answer carries the live admission object too, under hints. */
-                return AdmissionObject(admission) is { } emptyAdmission
-                    ? McpHelpers.Status("empty", emptyMessage, new { admission = emptyAdmission })
-                    : McpHelpers.Status("empty", emptyMessage);
+                var emptyHints = new Dictionary<string, object?> { ["process_starts"] = processStarts };
+                if (AdmissionObject(admission) is { } emptyAdmission)
+                {
+                    emptyHints["admission"] = emptyAdmission;
+                }
+
+                return McpHelpers.Status("empty", emptyMessage, emptyHints);
             }
 
             var projected = rows.Select(r =>
@@ -212,13 +219,17 @@ public sealed class DarlingMcpReadLatencyTools
                 mean_reply_bytes = x.Row.MeanReplyBytes,
             }, x.Split)).ToArray();
 
-            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes, AdmissionObject(admission), splitAtUtc);
+            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes, AdmissionObject(admission), splitAtUtc, processStarts);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_read_latency", ex);
         }
     }
+
+    /// <summary>An instant spelled the way <c>split_at</c> reads it back, so a value copied from <c>process_starts</c> splits exactly there.</summary>
+    private static string FormatInstant(DateTime utc)
+        => utc.ToString("yyyy-MM-ddTHH:mm:ss.FFFFFFF'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>The spellings <c>split_at</c> accepts, the same four as <c>as_of</c> (see <see cref="McpHelpers.ResolveAsOf"/>): an
     /// allowlist, so <c>01/02/2026</c> is refused instead of read as a month the caller did not mean.</summary>
@@ -341,7 +352,7 @@ public sealed class DarlingMcpReadLatencyTools
     /// serialized and, while it is over budget with more than one row, the last row is dropped and it is
     /// serialized again — the envelope's own digits and the true/false spelling depend on the final page.
     /// </summary>
-    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes, object? admission = null, DateTime? splitAt = null)
+    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes, object? admission = null, DateTime? splitAt = null, IReadOnlyList<string>? processStarts = null)
     {
         /* Insertion order is the member order of the answer. split_at appears only when the read asked for a split, so a read without one
            is byte for byte what it was (#9434). */
@@ -355,7 +366,12 @@ public sealed class DarlingMcpReadLatencyTools
             };
             if (splitAt is { } at)
             {
-                answer["split_at"] = at.ToString("yyyy-MM-ddTHH:mm:ss.FFFFFFF'Z'", System.Globalization.CultureInfo.InvariantCulture);
+                answer["split_at"] = FormatInstant(at);
+            }
+
+            if (processStarts is not null)
+            {
+                answer["process_starts"] = processStarts;
             }
 
             answer["note"] = BucketEstimateNote;
