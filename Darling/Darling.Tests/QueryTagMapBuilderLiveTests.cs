@@ -151,7 +151,7 @@ public sealed class QueryTagMapBuilderLiveTests
     }
 
     [Fact]
-    public async Task AReSightingWithinTheHour_WritesNothing_SoTheCountAndLastSeenStay()
+    public async Task AReSightingWithinTheRefreshWidth_WritesNothing_SoTheCountAndLastSeenStay()
     {
         await WithStoreAsync(async env =>
         {
@@ -171,18 +171,18 @@ public sealed class QueryTagMapBuilderLiveTests
         CultureInfo.InvariantCulture, $"interval '{(long)QueryTagSightingWriter.ReSightingBackdate.TotalSeconds} seconds'");
 
     [Fact]
-    public async Task AReSightingOfARowOverAnHourPastTheBackdatedStamp_MovesLastSeenToTheBackdatedStamp_AndOneWithinTheHourDoesNot()
+    public async Task AReSightingOfARowOverTheRefreshWidthPastTheBackdatedStamp_MovesLastSeenToTheBackdatedStamp_AndOneWithinTheWidthDoesNot()
     {
         await WithStoreAsync(async env =>
         {
             await SightAsync(env, HashSightings("0xAA", "App"));
-            await ExecAsync(env, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {Backdate} - interval '59 minutes'");
+            await ExecAsync(env, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {Backdate} - interval '5 hours 59 minutes'");
             var stored = await ScalarAsync(env, "SELECT last_seen::text FROM collect.query_tag_sightings WHERE key = '0xAA'");
 
             await SightAsync(env, HashSightings("0xAA", "App"));
             Assert.Equal(stored, await ScalarAsync(env, "SELECT last_seen::text FROM collect.query_tag_sightings WHERE key = '0xAA'"));
 
-            await ExecAsync(env, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {Backdate} - interval '61 minutes'");
+            await ExecAsync(env, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {Backdate} - interval '6 hours 1 minute'");
             await SightAsync(env, HashSightings("0xAA", "App"));
 
             Assert.Equal("2", await ScalarAsync(env, "SELECT seen_count FROM collect.query_tag_sightings WHERE key = '0xAA'"));
@@ -201,7 +201,8 @@ public sealed class QueryTagMapBuilderLiveTests
             var builder = new QueryTagMapBuilder(env.Source);
             await SightAsync(env, HashSightings("0xAA", "App", text: ""), HashSightings("0xBB", "App"));
             Assert.True(await PassAsync(env, builder));
-            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '2 hours'");
+            /* Past the six-hour refresh width, so a plain re-sighting of 0xBB is due its backdated move (#9456). */
+            await ExecAsync(env, "UPDATE collect.query_tag_sightings SET last_seen = now() - interval '7 hours'");
 
             /* The next extend reads from the previous pass's clock less the overlap. */
             DateTime clock = await QueryTagMapStore.ClockAsync(env.Store, env.Ct);

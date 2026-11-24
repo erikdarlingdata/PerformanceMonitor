@@ -489,7 +489,7 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task AReSightingWithinTheHour_WritesNothing_SoTheCountAndLastSeenStay()
+    public async Task AReSightingWithinTheRefreshWidth_WritesNothing_SoTheCountAndLastSeenStay()
     {
         Sight(Snapshot(HashA));
         await SetLastSeenAsync(HashA, DateTime.UtcNow.AddMinutes(-10));
@@ -512,13 +512,13 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task AReSightingOfARowOverAnHourPastTheBackdatedStamp_MovesLastSeenToTheBackdatedStamp_AndOneWithinTheHourDoesNot()
+    public async Task AReSightingOfARowOverTheRefreshWidthPastTheBackdatedStamp_MovesLastSeenToTheBackdatedStamp_AndOneWithinTheWidthDoesNot()
     {
         var backdate = QueryTagSightingBuffer.ReSightingBackdate;
         Sight(Snapshot(HashA), Snapshot(HashB));
-        var within = DateTime.UtcNow - backdate - TimeSpan.FromMinutes(59);
+        var within = DateTime.UtcNow - backdate - TimeSpan.FromMinutes(5 * 60 + 59);
         await SetLastSeenAsync(HashA, within);
-        await SetLastSeenAsync(HashB, DateTime.UtcNow - backdate - TimeSpan.FromMinutes(61));
+        await SetLastSeenAsync(HashB, DateTime.UtcNow - backdate - TimeSpan.FromMinutes(6 * 60 + 1));
         var withinStored = await LastSeenAsync(HashA);
         var beforeFlush = DateTime.UtcNow;
 
@@ -540,7 +540,8 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
         Sight(Snapshot(HashA), Snapshot(HashB));
         var cursors = new Dictionary<int, QueryTagMapCursor>();
         Assert.True((await _service.BuildQueryTagMapAsync(cursors)).Rebuilt);
-        var aged = DateTime.UtcNow.AddHours(-2);
+        /* Past the six-hour refresh width, so the plain re-sighting of HashA is due its backdated move (#9456). */
+        var aged = DateTime.UtcNow.AddHours(-7);
         await SetLastSeenAsync(HashA, aged);
         await SetLastSeenAsync(HashB, aged);
 
