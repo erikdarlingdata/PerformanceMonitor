@@ -48,7 +48,7 @@ public sealed class StoreJobRunsToolLiveTests
         return (T)(await command.ExecuteScalarAsync(ct))!;
     }
 
-    /// <summary>A scratch store. The workers stay up on purpose: TimescaleDB writes a hand-run job's history row through them, so a fact that stopped them would find no row. The jobs a fact adds start 30 days out, so the scheduler never runs one by itself.</summary>
+    /// <summary>A scratch store. The workers stay up on purpose, because only the scheduler writes history rows. The jobs a fact adds start 30 days out, so the scheduler runs one only when the fact asks it to.</summary>
     private static async Task WithStoreAsync(Func<NpgsqlConnection, string, CancellationToken, Task> body)
     {
         var cs = ConnectionString;
@@ -103,26 +103,28 @@ public sealed class StoreJobRunsToolLiveTests
         return await ScalarAsync<int>(connection, $"SELECT add_compression_policy('public.{table}', interval '2 days', initial_start => now() + interval '30 days')", ct);
     }
 
-    /// <summary>Runs the job by hand and waits for its finished history row, which TimescaleDB writes a moment after the call returns.</summary>
-    private static async Task RunJobAsync(NpgsqlConnection connection, int jobId, CancellationToken ct, bool failing = false)
+    /// <summary>
+    /// Has TimescaleDB's scheduler run the job at least <paramref name="atLeast"/> times, then pauses it and returns how many finished runs it has.
+    /// <c>CALL run_job</c> runs a job in the foreground and writes no history row, so only a scheduled run proves the read. The job is paused
+    /// as soon as it has run enough, and the call waits for a run still in flight, so the count it returns is the final one.
+    /// </summary>
+    private static async Task<long> RunByTheSchedulerAsync(NpgsqlConnection connection, int jobId, int atLeast, CancellationToken ct)
     {
-        var before = await FinishedRowsAsync(connection, jobId, ct);
-        await ExecAsync(connection, "SET client_min_messages = error", ct);
-        try
-        {
-            await ExecAsync(connection, $"CALL run_job({jobId})", ct);
-            Assert.False(failing, "the job was meant to fail");
-        }
-        catch (PostgresException) when (failing)
-        {
-        }
-
-        for (var attempt = 0; attempt < 300 && await FinishedRowsAsync(connection, jobId, ct) <= before; attempt++)
+        await ExecAsync(connection, $"SELECT alter_job({jobId}, scheduled => true, schedule_interval => interval '1 second', retry_period => interval '1 second', next_start => now())", ct);
+        for (var attempt = 0; attempt < 300 && await FinishedRowsAsync(connection, jobId, ct) < atLeast; attempt++)
         {
             await Task.Delay(100, ct);
         }
 
-        Assert.True(await FinishedRowsAsync(connection, jobId, ct) > before, $"TimescaleDB wrote no finished history row for job {jobId}");
+        await ExecAsync(connection, $"SELECT alter_job({jobId}, scheduled => false)", ct);
+        for (var attempt = 0; attempt < 100 && await ScalarAsync<long>(connection, $"SELECT count(*) FROM timescaledb_information.job_history WHERE job_id = {jobId} AND finish_time IS NULL", ct) > 0; attempt++)
+        {
+            await Task.Delay(100, ct);
+        }
+
+        var finished = await FinishedRowsAsync(connection, jobId, ct);
+        Assert.True(finished >= atLeast, $"the scheduler finished {finished} runs of job {jobId}, wanted {atLeast}");
+        return finished;
     }
 
     private static Task<long> FinishedRowsAsync(NpgsqlConnection connection, int jobId, CancellationToken ct) =>
@@ -150,7 +152,7 @@ public sealed class StoreJobRunsToolLiveTests
         return runs.EnumerateArray().ToArray();
     }
 
-    /// <summary>The issue's own test: a compression job run by hand comes back with its start, end and outcome.</summary>
+    /// <summary>The issue's own test: a compression job the scheduler ran comes back with its start, end and outcome.</summary>
     [Fact]
     public async Task ACompressionJobRun_IsReturnedWithItsStartEndAndOutcome()
     {
@@ -158,10 +160,11 @@ public sealed class StoreJobRunsToolLiveTests
         {
             var job = await CompressionJobAsync(connection, "jr9440_a", ct);
             var before = DateTime.UtcNow.AddSeconds(-2);
+            long finished;
             await SetLoggingAsync(connection, true, ct);
             try
             {
-                await RunJobAsync(connection, job, ct);
+                finished = await RunByTheSchedulerAsync(connection, job, 1, ct);
             }
             finally
             {
@@ -170,22 +173,27 @@ public sealed class StoreJobRunsToolLiveTests
 
             var answer = await ReadAsync(cs, ct, kind: "compression", hypertable: "jr9440_a");
 
-            var run = Assert.Single(Runs(answer));
-            Assert.Equal(job, run.GetProperty("job_id").GetInt32());
-            Assert.Equal("policy_compression", run.GetProperty("procedure").GetString());
-            Assert.Equal("jr9440_a", run.GetProperty("hypertable").GetString());
-            Assert.Equal("succeeded", run.GetProperty("outcome").GetString());
+            var runs = Runs(answer);
+            Assert.Equal(finished, runs.Length);
+            Assert.All(runs, r =>
+            {
+                Assert.Equal(job, r.GetProperty("job_id").GetInt32());
+                Assert.Equal("policy_compression", r.GetProperty("procedure").GetString());
+                Assert.Equal("jr9440_a", r.GetProperty("hypertable").GetString());
+                Assert.Equal("succeeded", r.GetProperty("outcome").GetString());
+                Assert.Equal(JsonValueKind.Null, r.GetProperty("error").ValueKind);
+            });
+            var run = runs[0];
             var started = DateTime.Parse(run.GetProperty("started_at").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-            var finished = DateTime.Parse(run.GetProperty("finished_at").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-            Assert.True(started >= before, "the run started when the job was run, not at some other time");
-            Assert.True(finished >= started);
+            var ended = DateTime.Parse(run.GetProperty("finished_at").GetString()!, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+            Assert.True(started >= before, "the run started when the scheduler ran the job, not at some other time");
+            Assert.True(ended >= started);
             Assert.True(run.GetProperty("duration_seconds").GetDouble() >= 0);
-            Assert.Equal(JsonValueKind.Null, run.GetProperty("error").ValueKind);
             Assert.Equal(0, answer.GetProperty("access").GetProperty("jobs_hidden").GetInt32());
 
             /* The kind filter takes the procedure with or without its policy_ prefix. */
             var prefixed = await ReadAsync(cs, ct, kind: "policy_compression", hypertable: "jr9440_a");
-            Assert.Single(Runs(prefixed));
+            Assert.Equal(finished, Runs(prefixed).Length);
         });
     }
 
@@ -197,28 +205,29 @@ public sealed class StoreJobRunsToolLiveTests
         await WithStoreAsync(async (connection, cs, ct) =>
         {
             var job = await FailingJobAsync(connection, ct);
-            await RunJobAsync(connection, job, ct, failing: true);
+            await RunByTheSchedulerAsync(connection, job, 1, ct);
 
             var asOwner = await ReadAsync(cs, ct, kind: "jr9440_boom");
-            var run = Assert.Single(Runs(asOwner));
+            var run = Runs(asOwner)[0];
             Assert.Equal("failed", run.GetProperty("outcome").GetString());
             Assert.Equal("P0001", run.GetProperty("sqlstate").GetString());
             Assert.Contains("jr9440 deliberate failure", run.GetProperty("error").GetString(), StringComparison.Ordinal);
 
             var reader = "jr9440_" + Guid.NewGuid().ToString("N")[..8];
             await ExecAsync(connection, $"CREATE ROLE {reader} NOLOGIN", ct);
+            await ExecAsync(connection, $"GRANT USAGE ON SCHEMA timescaledb_information TO {reader}", ct);
             try
             {
                 var readerConnection = new NpgsqlConnectionStringBuilder(cs) { Options = $"-c role={reader}" }.ConnectionString;
                 await using var postgres = NpgsqlDataSource.Create(readerConnection);
-                var json = await DarlingMcpStoreJobRunsTools.GetStoreJobRuns(postgres, 24, "jr9440_boom", null, 50, null, ct);
+                var json = await DarlingMcpStoreJobRunsTools.GetStoreJobRuns(postgres, 24, "jr9440_boom", null, 50, null, null, ct);
 
                 var asReader = JsonDocument.Parse(json).RootElement;
                 Assert.Equal("precondition", asReader.GetProperty("status").GetString());
-                Assert.NotEqual("empty", asReader.GetProperty("status").GetString());
             }
             finally
             {
+                await ExecAsync(connection, $"DROP OWNED BY {reader}", ct);
                 await ExecAsync(connection, $"DROP ROLE {reader}", ct);
             }
         });
@@ -234,25 +243,28 @@ public sealed class StoreJobRunsToolLiveTests
             var older = await CompressionJobAsync(connection, "jr9440_older", ct);
             var newer = await CompressionJobAsync(connection, "jr9440_newer", ct);
             var failing = await FailingJobAsync(connection, ct);
+            long olderRuns;
             await SetLoggingAsync(connection, true, ct);
             try
             {
-                await RunJobAsync(connection, older, ct);
-                await RunJobAsync(connection, newer, ct);
-                await RunJobAsync(connection, failing, ct, failing: true);
+                olderRuns = await RunByTheSchedulerAsync(connection, older, 1, ct);
+                await RunByTheSchedulerAsync(connection, newer, 1, ct);
+                await RunByTheSchedulerAsync(connection, failing, 1, ct);
             }
             finally
             {
                 await SetLoggingAsync(connection, false, ct);
             }
 
-            var all = await ReadAsync(cs, ct, kind: "compression");
-            Assert.Equal(new[] { newer, older }, Runs(all).Select(r => r.GetProperty("job_id").GetInt32()).ToArray());
+            var all = Runs(await ReadAsync(cs, ct, kind: "compression")).Select(r => r.GetProperty("job_id").GetInt32()).ToArray();
+            Assert.Equal(newer, all[0]);
+            Assert.Equal(older, all[^1]);
+            Assert.DoesNotContain(failing, all);
 
             var oneTable = await ReadAsync(cs, ct, hypertable: "jr9440_older", limit: 1);
             var run = Assert.Single(Runs(oneTable));
             Assert.Equal(older, run.GetProperty("job_id").GetInt32());
-            Assert.False(oneTable.GetProperty("truncated").GetBoolean(), "the filter left one run, so a page of one is not cut");
+            Assert.Equal(olderRuns > 1, oneTable.GetProperty("truncated").GetBoolean());
 
             var failures = await ReadAsync(cs, ct, kind: "jr9440_boom", limit: 1);
             Assert.Equal(failing, Assert.Single(Runs(failures)).GetProperty("job_id").GetInt32());
@@ -266,25 +278,23 @@ public sealed class StoreJobRunsToolLiveTests
         await WithStoreAsync(async (connection, cs, ct) =>
         {
             var job = await CompressionJobAsync(connection, "jr9440_page", ct);
+            long runs;
             await SetLoggingAsync(connection, true, ct);
             try
             {
-                for (var run = 0; run < 3; run++)
-                {
-                    await RunJobAsync(connection, job, ct);
-                }
+                runs = await RunByTheSchedulerAsync(connection, job, 3, ct);
             }
             finally
             {
                 await SetLoggingAsync(connection, false, ct);
             }
 
-            var cut = await ReadAsync(cs, ct, hypertable: "jr9440_page", limit: 2);
-            Assert.Equal(2, Runs(cut).Length);
+            var cut = await ReadAsync(cs, ct, hypertable: "jr9440_page", limit: (int)runs - 1);
+            Assert.Equal(runs - 1, Runs(cut).Length);
             Assert.True(cut.GetProperty("truncated").GetBoolean());
 
-            var whole = await ReadAsync(cs, ct, hypertable: "jr9440_page", limit: 3);
-            Assert.Equal(3, Runs(whole).Length);
+            var whole = await ReadAsync(cs, ct, hypertable: "jr9440_page", limit: (int)runs);
+            Assert.Equal(runs, Runs(whole).Length);
             Assert.False(whole.GetProperty("truncated").GetBoolean());
 
             var newestFirst = Runs(whole).Select(r => r.GetProperty("started_at").GetString()!).ToArray();
@@ -299,7 +309,7 @@ public sealed class StoreJobRunsToolLiveTests
         await WithStoreAsync(async (connection, cs, ct) =>
         {
             var job = await FailingJobAsync(connection, ct);
-            await RunJobAsync(connection, job, ct, failing: true);
+            await RunByTheSchedulerAsync(connection, job, 1, ct);
             var oldest = await ScalarAsync<DateTime>(connection, "SELECT min(start_time) FROM timescaledb_information.job_history", ct);
 
             await using var postgres = NpgsqlDataSource.Create(cs);
