@@ -981,6 +981,9 @@ DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
         // V303 (#9384): the clutter-day stamp table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V303 creates it empty. Safe on a store
         // that never had it.
         new(303, "hasClutterDayBuilt", @"DROP TABLE IF EXISTS collect.query_store_clutter_day_built;"),
+        // V304 (#9419): the WAL columns on collect.store_metrics. wal_stats_reset is the probe's newest sentinel. The rewind drops the eleven columns, so a re-run of V304
+        // adds them again. Safe on a store that never had them.
+        new(304, "hasStoreWalFigures", @"ALTER TABLE collect.store_metrics DROP COLUMN IF EXISTS wal_records, DROP COLUMN IF EXISTS wal_fpi, DROP COLUMN IF EXISTS wal_bytes, DROP COLUMN IF EXISTS wal_buffers_full, DROP COLUMN IF EXISTS wal_write_count, DROP COLUMN IF EXISTS wal_sync_count, DROP COLUMN IF EXISTS wal_write_ms, DROP COLUMN IF EXISTS wal_sync_ms, DROP COLUMN IF EXISTS wal_stats_reset, DROP COLUMN IF EXISTS wal_dir_bytes, DROP COLUMN IF EXISTS wal_dir_files;"),
     ];
 
     /// <summary>

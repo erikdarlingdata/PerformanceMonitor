@@ -4039,6 +4039,9 @@ END $$;";
            after midnight and not wait for the grid's close. One plain table created empty: no data moves. An older build ignores it and serves a clutter day
            only from the grid's own stamp, so a day built from its hours is read from the hourly or raw rows there. */
         new Migration(QueryStoreClutterDayFold.Version, "query-store-clutter-day-built", QueryStoreClutterDayFold.CreateSql),
+        /* V304 (#9419): the store's own WAL figures, eleven nullable columns on collect.store_metrics filled on the object_kind = 'wal' row only. No data moves
+           and existing rows keep NULL. An older build ignores the columns and the row: its store reads list only the kinds it knows. */
+        new Migration(StoreWalFigures.Version, "store-wal-figures", StoreWalFigures.AddColumnsSql),
     };
 
     /// <summary>
