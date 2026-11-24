@@ -12,125 +12,73 @@ public partial class LocalDataService
 {
     /// <summary>The first half of the Query Store top read's ranking statement: the newest snapshot of each interval (#9195).</summary>
     internal static string QueryStoreTopRankHeadSql(string dbClause, string executionTypeClause) => @"
-WITH deduped AS (
-    /* LOAD-BEARING (correctness, not just perf) - #1841. query_store_stats rows are CUMULATIVE
+WITH latest AS (
+    /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
        per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every cycle
        as its last_execution_time advances, so the SAME interval is stored repeatedly with a growing
        execution_count. SUM(execution_count) over the raw rows reports 10 + 25 + 40 for an interval that
        reached 40, and the execution-weighted averages would count a re-collected interval again at its own
-       execution count. Keep the LATEST snapshot per interval.
+       execution count. Keep the LATEST snapshot per interval. The aggregate below projects nearly every
+       payload column, so they are listed in `deduped`; #5381: query_text and query_plan_text are NOT among them.
+       The text is read after the ranking, for the page's rows only (below).
 
        runtime_stats_interval_id is the REAL interval identity (tier 2), with first_execution_time kept
-       beside it as the tier-1 proxy for rows collected before it existed - see the slicer above for why
+       beside it as the tier-1 proxy for rows collected before it existed — see the slicer above for why
        both are in the key rather than a COALESCE of the two.
 
-       replica_role and execution_type_desc are in the key because the aggregate below is grouped
+       replica_role and execution_type_desc are in the partition because the aggregate below is grouped
        (or MAXed) on them: the dedup key must be at least as fine as the read's own row identity, or
        dedup would silently drop a row the grid is supposed to show rather than de-duplicate one.
 
-       #5381: query_text and query_plan_text are NOT carried. The text is read after the ranking, for the page's rows only (below).
-
-       #9195: ONE pass over the rows, one max() per interval key. This read used to take each interval's newest row by an arg_max on
-       the narrow columns and then scan the same rows a second time, wide, and join them back to that result on (collection_id,
-       collection_time): the second scan of the archive's Parquet was the largest operator of the read, with the join and the
-       group-by on the dedup after it. The newest snapshot of an interval is the largest (collection_time, execution_count,
-       collection_id), so max() of one struct that lists those first and the payload the ranking needs after them gives the winner
-       row's own fields, and nothing is read twice. execution_count is nullable and DuckDB orders a NULL above every value, so
-       COALESCE(execution_count, -1) sorts a NULL count lowest (a count is never below 0), which keeps the window's NULLS LAST order
-       on a count tie. collection_time cannot be NULL here, the bounds below drop those rows. collection_id is unique per row
-       (CollectionIdGenerator), so the struct picks one row: two rows of an interval with one (collection_time, execution_count)
-       used to give an arbitrary winner and give the higher collection_id now, and a row held by both the hot table and the archive
-       (as one can be between an archival's copy and its delete) is the same row twice and is counted once, where the join returned
-       it twice. */
+       #5381: the window runs over the NARROW columns only (the row's id and time), and the payload comes back by a
+       join on those two for the winning rows. Running the window over the payload sorted every column of every row
+       in the window, which is the part of this read that grows with the window, and DuckDB keeps a copy of it per
+       thread. The join's build side is one narrow row per interval. */
+    /* #9195: the newest snapshot per interval by a hash aggregate on the narrow columns, not ROW_NUMBER() over them: the window sorts
+       every row of the window (about 4x the aggregate's time on 480,000 rows) and a server-wide read has the most rows. arg_max picks
+       the greatest (collection_time, execution_count), the row the window's ORDER BY collection_time DESC, execution_count DESC put first,
+       and the NULL-safe grouping is the window partition's. execution_count is nullable and DuckDB orders a NULL struct field above every
+       value, so COALESCE(execution_count, -1) sorts a NULL count lowest (a count is never below 0), which keeps the window's NULLS LAST
+       order on an execution_count tie (#9195). collection_time cannot be NULL here, the bounds below drop those rows. */
     SELECT
-        database_name, query_id, plan_id,
-        replica_role, execution_type_desc, first_execution_time,
-        w.collection_time AS collection_time, w.execution_count AS execution_count, w.query_hash AS query_hash,
-        w.module_name AS module_name, w.last_execution_time AS last_execution_time, w.avg_duration_us AS avg_duration_us,
-        w.avg_cpu_time_us AS avg_cpu_time_us, w.avg_logical_io_reads AS avg_logical_io_reads, w.avg_logical_io_writes AS avg_logical_io_writes,
-        w.avg_physical_io_reads AS avg_physical_io_reads, w.avg_rowcount AS avg_rowcount, w.min_dop AS min_dop,
-        w.max_dop AS max_dop, w.query_plan_hash AS query_plan_hash, w.is_forced_plan AS is_forced_plan,
-        w.plan_forcing_type AS plan_forcing_type, w.avg_clr_time_us AS avg_clr_time_us, w.avg_tempdb_space_used AS avg_tempdb_space_used,
-        w.avg_log_bytes_used AS avg_log_bytes_used, w.plan_type AS plan_type, w.force_failure_count AS force_failure_count,
-        w.last_force_failure_reason AS last_force_failure_reason, w.compatibility_level AS compatibility_level, w.min_duration_us AS min_duration_us,
-        w.max_duration_us AS max_duration_us, w.min_cpu_time_us AS min_cpu_time_us, w.max_cpu_time_us AS max_cpu_time_us,
-        w.min_logical_io_reads AS min_logical_io_reads, w.max_logical_io_reads AS max_logical_io_reads, w.min_logical_io_writes AS min_logical_io_writes,
-        w.max_logical_io_writes AS max_logical_io_writes, w.min_physical_io_reads AS min_physical_io_reads, w.max_physical_io_reads AS max_physical_io_reads,
-        w.min_clr_time_us AS min_clr_time_us, w.max_clr_time_us AS max_clr_time_us, w.min_rowcount AS min_rowcount,
-        w.max_rowcount AS max_rowcount, w.min_log_bytes_used AS min_log_bytes_used, w.max_log_bytes_used AS max_log_bytes_used,
-        w.min_tempdb_space_used AS min_tempdb_space_used, w.max_tempdb_space_used AS max_tempdb_space_used, w.avg_query_max_used_memory AS avg_query_max_used_memory,
-        w.min_query_max_used_memory AS min_query_max_used_memory, w.max_query_max_used_memory AS max_query_max_used_memory, w.avg_num_physical_io_reads AS avg_num_physical_io_reads,
-        w.min_num_physical_io_reads AS min_num_physical_io_reads, w.max_num_physical_io_reads AS max_num_physical_io_reads
-    FROM
-    (
-        SELECT
-            database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role,
-            max(
-            {
-                'collection_time': collection_time,
-                'execution_rank': COALESCE(execution_count, -1),
-                'collection_id': collection_id,
-                'execution_count': execution_count,
-                'query_hash': query_hash,
-                'module_name': module_name,
-                'last_execution_time': last_execution_time,
-                'avg_duration_us': avg_duration_us,
-                'avg_cpu_time_us': avg_cpu_time_us,
-                'avg_logical_io_reads': avg_logical_io_reads,
-                'avg_logical_io_writes': avg_logical_io_writes,
-                'avg_physical_io_reads': avg_physical_io_reads,
-                'avg_rowcount': avg_rowcount,
-                'min_dop': min_dop,
-                'max_dop': max_dop,
-                'query_plan_hash': query_plan_hash,
-                'is_forced_plan': is_forced_plan,
-                'plan_forcing_type': plan_forcing_type,
-                'avg_clr_time_us': avg_clr_time_us,
-                'avg_tempdb_space_used': avg_tempdb_space_used,
-                'avg_log_bytes_used': avg_log_bytes_used,
-                'plan_type': plan_type,
-                'force_failure_count': force_failure_count,
-                'last_force_failure_reason': last_force_failure_reason,
-                'compatibility_level': compatibility_level,
-                'min_duration_us': min_duration_us,
-                'max_duration_us': max_duration_us,
-                'min_cpu_time_us': min_cpu_time_us,
-                'max_cpu_time_us': max_cpu_time_us,
-                'min_logical_io_reads': min_logical_io_reads,
-                'max_logical_io_reads': max_logical_io_reads,
-                'min_logical_io_writes': min_logical_io_writes,
-                'max_logical_io_writes': max_logical_io_writes,
-                'min_physical_io_reads': min_physical_io_reads,
-                'max_physical_io_reads': max_physical_io_reads,
-                'min_clr_time_us': min_clr_time_us,
-                'max_clr_time_us': max_clr_time_us,
-                'min_rowcount': min_rowcount,
-                'max_rowcount': max_rowcount,
-                'min_log_bytes_used': min_log_bytes_used,
-                'max_log_bytes_used': max_log_bytes_used,
-                'min_tempdb_space_used': min_tempdb_space_used,
-                'max_tempdb_space_used': max_tempdb_space_used,
-                'avg_query_max_used_memory': avg_query_max_used_memory,
-                'min_query_max_used_memory': min_query_max_used_memory,
-                'max_query_max_used_memory': max_query_max_used_memory,
-                'avg_num_physical_io_reads': avg_num_physical_io_reads,
-                'min_num_physical_io_reads': min_num_physical_io_reads,
-                'max_num_physical_io_reads': max_num_physical_io_reads
-            }) AS w
-        FROM v_query_store_stats
-        WHERE server_id = $1
-        /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (#1892), so a slice's rows are
-           the intervals its bars draw: collection_time trails the interval's start by up to its length, which showed an interval
-           collected inside the slice but started before it (no bar) and dropped the slice's last interval, collected after its end.
-           Legacy rows have no interval start and keep collection_time. The collection_time bounds are the slicer read's pruning
-           bounds (see GetQueryStoreSlicerDataAsync for the reasoning), not filters. */
-        AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-        AND   COALESCE(interval_start_time_utc, collection_time) < $3
-        AND   collection_time >= $2 - INTERVAL '1 day'
-        AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
+        arg_max(collection_id, (collection_time, COALESCE(execution_count, -1))) AS latest_id,
+        MAX(collection_time) AS latest_time
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    /* #7776: the window is the interval's own start, the expression the slicer's bars are keyed on (#1892), so a slice's rows are
+       the intervals its bars draw: collection_time trails the interval's start by up to its length, which showed an interval
+       collected inside the slice but started before it (no bar) and dropped the slice's last interval, collected after its end.
+       Legacy rows have no interval start and keep collection_time. The collection_time bounds are the slicer read's pruning
+       bounds (see GetQueryStoreSlicerDataAsync for the reasoning), not filters. */
+    AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+    AND   COALESCE(interval_start_time_utc, collection_time) < $3
+    AND   collection_time >= $2 - INTERVAL '1 day'
+    AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
 
-        GROUP BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
-    ) AS g
+    GROUP BY database_name, query_id, plan_id, runtime_stats_interval_id, first_execution_time, execution_type_desc, replica_role
+),
+deduped AS (
+    SELECT
+        database_name, query_id, plan_id, query_hash, replica_role, module_name, execution_type_desc,
+        runtime_stats_interval_id, first_execution_time, last_execution_time, collection_time,
+        execution_count, avg_duration_us, avg_cpu_time_us, avg_logical_io_reads, avg_logical_io_writes,
+        avg_physical_io_reads, avg_rowcount, min_dop, max_dop, query_plan_hash, is_forced_plan,
+        plan_forcing_type, avg_clr_time_us, avg_tempdb_space_used, avg_log_bytes_used, plan_type,
+        force_failure_count, last_force_failure_reason, compatibility_level, min_duration_us,
+        max_duration_us, min_cpu_time_us, max_cpu_time_us, min_logical_io_reads, max_logical_io_reads,
+        min_logical_io_writes, max_logical_io_writes, min_physical_io_reads, max_physical_io_reads,
+        min_clr_time_us, max_clr_time_us, min_rowcount, max_rowcount, min_log_bytes_used,
+        max_log_bytes_used, min_tempdb_space_used, max_tempdb_space_used, avg_query_max_used_memory,
+        min_query_max_used_memory, max_query_max_used_memory, avg_num_physical_io_reads,
+        min_num_physical_io_reads, max_num_physical_io_reads
+    FROM v_query_store_stats
+    INNER JOIN latest ON latest.latest_id = collection_id AND latest.latest_time = collection_time
+    WHERE server_id = $1
+    /* #7776: the same window as the ranking above; the join on (id, time) already picks the winning snapshots, so this only has to keep them. */
+    AND   COALESCE(interval_start_time_utc, collection_time) >= $2
+    AND   COALESCE(interval_start_time_utc, collection_time) < $3
+    AND   collection_time >= $2 - INTERVAL '1 day'
+    AND   collection_time <= $3 + INTERVAL '30 days'" + dbClause + executionTypeClause + @"
 ),
 ";
 
