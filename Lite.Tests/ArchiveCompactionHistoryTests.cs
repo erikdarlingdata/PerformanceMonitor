@@ -220,6 +220,54 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
         Assert.Equal(1, detail.RecutSkippedTimeBudget);
     }
 
+    /// <summary>
+    /// The count of files a spent time budget left reads one footer per file while the pass holds the archive lock (#9421), so it has a
+    /// short time cap. Past the cap it stops with the first file read and reports a lower bound, and the text of get_store_health says
+    /// "at least". With the cap not reached the same pass counts every file and says no such thing.
+    /// </summary>
+    [Fact]
+    public void TheCountOfFilesTheTimeBudgetLeft_StopsAtItsCap_AndIsALowerBound()
+    {
+        var thirdDay = DateTime.UtcNow.Date.AddDays(-5).ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+        WriteUnsorted($"{Day}_query_store_stats.parquet", 12_000);
+        WriteUnsorted($"{PreviousDay}_query_store_stats.parquet", 12_000);
+        WriteUnsorted($"{thirdDay}_query_store_stats.parquet", 12_000);
+        var service = NewService();
+        service.DailyCompactionPassBudget = TimeSpan.Zero;
+        service.RecutCountTimeCap = TimeSpan.Zero;
+        var probed = new List<string>();
+        service.BeforeRecutCountProbeForTests = probed.Add;
+
+        service.CompactParquetFiles();
+
+        var detail = OnlyCompactionRow(out _);
+        Assert.Equal(1, detail.FilesRecut);
+        Assert.Single(probed);
+        Assert.Equal(1, detail.RecutSkippedTimeBudget);
+        Assert.True(detail.RecutSkippedTimeBudgetIsLowerBound);
+        Assert.Contains("skipped at least 1 (time budget at least 1)", StoreHealthText.CompactionSummary(detail));
+    }
+
+    /// <summary>The same pass with the cap not reached counts every file the budget left, and its figure is exact.</summary>
+    [Fact]
+    public void TheCountOfFilesTheTimeBudgetLeft_IsExactWhenTheCapIsNotReached()
+    {
+        var thirdDay = DateTime.UtcNow.Date.AddDays(-5).ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+        WriteUnsorted($"{Day}_query_store_stats.parquet", 12_000);
+        WriteUnsorted($"{PreviousDay}_query_store_stats.parquet", 12_000);
+        WriteUnsorted($"{thirdDay}_query_store_stats.parquet", 12_000);
+        var service = NewService();
+        service.DailyCompactionPassBudget = TimeSpan.Zero;
+
+        service.CompactParquetFiles();
+
+        var detail = OnlyCompactionRow(out _);
+        Assert.Equal(1, detail.FilesRecut);
+        Assert.Equal(2, detail.RecutSkippedTimeBudget);
+        Assert.False(detail.RecutSkippedTimeBudgetIsLowerBound);
+        Assert.DoesNotContain("at least", StoreHealthText.CompactionSummary(detail));
+    }
+
     private static int Skips(CompactionPassDetail detail, ArchiveService.RecutSkipReason reason) =>
         detail.RecutSkips is { } m && m.TryGetValue(reason.ToString(), out var n) ? n : 0;
 

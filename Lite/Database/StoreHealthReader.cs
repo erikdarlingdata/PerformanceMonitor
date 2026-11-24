@@ -350,8 +350,8 @@ public static class StoreHealthText
             {
                 var parts = byReason.Select(x => string.Create(ci, $"{RecutSkipLabel(x.Reason)} {x.Count:N0}")).ToList();
                 if (c.RecutSkippedLiveJournal > 0) parts.Add(string.Create(ci, $"live swap journal {c.RecutSkippedLiveJournal:N0}"));
-                if (c.RecutSkippedTimeBudget > 0) parts.Add(string.Create(ci, $"time budget {c.RecutSkippedTimeBudget:N0}"));
-                sb.Append(ci, $", skipped {skipped:N0} (").Append(string.Join(", ", parts)).Append(')');
+                if (c.RecutSkippedTimeBudget > 0) parts.Add(string.Create(ci, $"time budget {(c.RecutSkippedTimeBudgetIsLowerBound ? "at least " : "")}{c.RecutSkippedTimeBudget:N0}"));
+                sb.Append(ci, $", skipped {(c.RecutSkippedTimeBudgetIsLowerBound ? "at least " : "")}{skipped:N0} (").Append(string.Join(", ", parts)).Append(')');
             }
         }
 

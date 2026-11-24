@@ -135,6 +135,12 @@ public class ArchiveService
        pass makes progress whatever this is set to. A merge already running is not interrupted. */
     internal TimeSpan DailyCompactionPassBudget { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>How long the count of re-cut files the time budget left may read footers while it holds the archive lock (#9421). Past it the count stops and is a lower bound.</summary>
+    internal TimeSpan RecutCountTimeCap { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /* Tests only (#9421): called with a file's path just before the count of left-over re-cut files reads its footer. */
+    internal Action<string>? BeforeRecutCountProbeForTests { get; set; }
+
     /* #5731: how long a periodic housekeeping step waits for the store's write lock before it skips its unit and
        retries on a later pass. The lock is a ReaderWriterLockSlim, and a waiting writer makes every NEW reader wait,
        so an unbounded wait behind one slow read held every collector off for as long as the read ran. Same number
@@ -2166,12 +2172,30 @@ COPY (
                 /* The files this pass did not reach that the re-cut would take: counted from their footers, so the history says
                    how much is left rather than how many candidates the folder holds. */
                 var reached = false;
+                var countClock = Stopwatch.StartNew();
+                var probed = 0;
                 foreach (var (_, later) in candidates
                     .OrderByDescending(c => c.Period.PadRight(8, '9'), StringComparer.Ordinal)
                     .ThenByDescending(c => c.Path, StringComparer.Ordinal))
                 {
                     if (later == path) reached = true;
-                    if (reached && RecutIsDue(probe, later))
+                    if (!reached)
+                    {
+                        continue;
+                    }
+
+                    /* This count runs under s_archiveLock, which the hourly archive and a store reset wait on, and it reads one footer per
+                       file. After its time cap it stops and reports what it has as a lower bound (#9421). The first file is always read,
+                       so the count never says nothing about a pass that left files. */
+                    if (probed > 0 && countClock.Elapsed >= RecutCountTimeCap)
+                    {
+                        stats.RecutSkippedTimeBudgetIsLowerBound = true;
+                        break;
+                    }
+
+                    probed++;
+                    BeforeRecutCountProbeForTests?.Invoke(later);
+                    if (RecutIsDue(probe, later))
                     {
                         stats.RecutSkippedTimeBudget++;
                     }

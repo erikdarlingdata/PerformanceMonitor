@@ -41,6 +41,9 @@ internal sealed class CompactionPassStats
     public int RecutSkippedLiveJournal { get; set; }
     public int RecutSkippedTimeBudget { get; set; }
 
+    /// <summary>True when counting the files the time budget left stopped at its time cap (#9421), so <see cref="RecutSkippedTimeBudget"/> is a lower bound.</summary>
+    public bool RecutSkippedTimeBudgetIsLowerBound { get; set; }
+
     /* The re-cut's skips by reason: the one place a count by ArchiveService.RecutSkipReason is kept, bumped by
        ArchiveService.NoteRecutSkip, where every skip of that kind goes. Sized by the enum, so a new reason has a slot. */
     private readonly int[] _recutSkips = new int[Enum.GetValues<ArchiveService.RecutSkipReason>().Length];
@@ -78,7 +81,7 @@ internal sealed class CompactionPassStats
         StartUtc, seconds, GroupsMerged, FilesIn, FilesOut, BytesIn, BytesOut,
         SortedAtSmallGroupBatches, UnsortedFallbackBatches, FilesRecut,
         RecutSkippedLiveJournal, RecutSkippedTimeBudget, RecutSkipsByName(),
-        ViewRebuildMs, processPeakBytes, DuckDbPeakBytes > 0 ? DuckDbPeakBytes : null, MemorySourceText);
+        ViewRebuildMs, processPeakBytes, DuckDbPeakBytes > 0 ? DuckDbPeakBytes : null, MemorySourceText, RecutSkippedTimeBudgetIsLowerBound);
 }
 
 /// <summary>

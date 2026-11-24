@@ -58,6 +58,7 @@ public sealed record StoreHousekeepingEvent(
 /// <param name="ProcessPeakWorkingSetBytes">The highest working set of the whole Lite process, sampled every 75 ms while the pass ran. Collection and the UI share the process, so it can include their memory.</param>
 /// <param name="DuckDbPeakMemoryBytes">The highest memory DuckDB reported for the merge connections (duckdb_memory(), sampled every 50 ms). Null when no merge ran or nothing was sampled.</param>
 /// <param name="MemorySource">Where the two memory figures came from, in words.</param>
+/// <param name="RecutSkippedTimeBudgetIsLowerBound">True when counting <paramref name="RecutSkippedTimeBudget"/> stopped at its short time cap, so the real number is at least that many.</param>
 public sealed record CompactionPassDetail(
     DateTime StartUtc,
     double Seconds,
@@ -75,7 +76,8 @@ public sealed record CompactionPassDetail(
     long ViewRebuildMs = 0,
     long? ProcessPeakWorkingSetBytes = null,
     long? DuckDbPeakMemoryBytes = null,
-    string? MemorySource = null);
+    string? MemorySource = null,
+    bool RecutSkippedTimeBudgetIsLowerBound = false);
 
 /// <summary>
 /// Lite's housekeeping history (#8788): the last <see cref="MaxEvents"/> timed archives, size resets and retention cleanups,
