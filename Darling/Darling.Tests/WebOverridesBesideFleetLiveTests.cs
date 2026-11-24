@@ -17,10 +17,12 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
