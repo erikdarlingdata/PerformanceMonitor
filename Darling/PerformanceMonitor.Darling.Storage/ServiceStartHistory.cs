@@ -371,7 +371,8 @@ ORDER BY start_id, attempt, started_at, rung_version;";
         var changes = new List<ServiceBuildChange>();
         await using var command = dataSource.CreateCommand(SelectBuildChangesSql);
         command.CommandTimeout = CommandTimeoutSeconds;
-        command.Parameters.Add(Instant(sinceUtc));
+        /* Always UTC, whatever the kind: the trend reads hold their window start as an unspecified-kind UTC value, which Naive would read as local time. */
+        command.Parameters.Add(Instant(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Utc)));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
