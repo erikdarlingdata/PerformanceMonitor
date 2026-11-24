@@ -79,9 +79,12 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
         await ExecAsync(connection,
             $"INSERT INTO collect.{Table} SELECT date_trunc('day', now()::timestamp) - INTERVAL '5 days' + INTERVAL '12 hours' + (g || ' seconds')::interval, 1, g FROM generate_series(1, 200) g", ct);
 
+        /* A row from now sits in today's chunk, which is not yet past the one-day delay: it must not count as backlog. */
+        await ExecAsync(connection, $"INSERT INTO collect.{Table} VALUES (now()::timestamp, 1, 0)", ct);
+
         DateTime chunkRangeEnd;
         await using (var range = new NpgsqlCommand(
-            $"SELECT range_end FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'", connection))
+            $"SELECT min(range_end) FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}'", connection))
         {
             chunkRangeEnd = ((DateTime)(await range.ExecuteScalarAsync(ct))!).ToUniversalTime();
         }
@@ -277,6 +280,92 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
         /* A store the service does not manage has no days figure: its volume is the service's own disk. An unread volume has none either. */
         Assert.Null(DarlingMcpStoreHostTools.ForecastDaysUntilFloor(sevenDays, now, Tb, 400 * Gb, true, false, 25d).DaysUntilFloor);
         Assert.Null(DarlingMcpStoreHostTools.ForecastDaysUntilFloor(sevenDays, now, 0, 0, false, true, 25d).DaysUntilFloor);
+    }
+
+    [Fact]
+    public async Task CompressionHealth_ShowsAFailedPolicyJobsError_ToItsOwner_AndOnlyTheStatusToARoleThatCannotReadErrors()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the #9428 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var roleName = "ch9428_reader_" + Guid.NewGuid().ToString("N")[..8];
+        const string RolePassword = "ch9428-test-pw";
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the dev fixture is expected to have TimescaleDB installed");
+        await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* A job the scheduler runs and that fails every time. The procedure's name carries "compression", which is how the read
+           finds a compression policy job. The job's owner is the connected owner role. */
+        await ExecAsync(connection, $"CREATE TABLE collect.{Table} (collection_time timestamp NOT NULL, server_id integer NOT NULL, value bigint)", ct);
+        await ExecAsync(connection, TimescaleSupport.CreateHypertableSql($"collect.{Table}", "collection_time"), ct);
+        await ExecAsync(connection, "CREATE PROCEDURE collect.fail_compression_9428(job_id integer, config jsonb) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'ch9428 boom'; END $$", ct);
+        int jobId;
+        await using (var add = new NpgsqlCommand("SELECT add_job('collect.fail_compression_9428', INTERVAL '1 hour', initial_start => now())", connection))
+        {
+            jobId = Convert.ToInt32((await add.ExecuteScalarAsync(ct))!, CultureInfo.InvariantCulture);
+        }
+
+        var failed = false;
+        for (var i = 0; i < 60 && !failed; i++)
+        {
+            await using var status = new NpgsqlCommand("SELECT count(*) FROM timescaledb_information.job_stats WHERE job_id = $1 AND last_run_status = 'Failed'", connection);
+            status.Parameters.AddWithValue(jobId);
+            failed = Convert.ToInt32(await status.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture) > 0;
+            if (!failed)
+            {
+                await Task.Delay(2000, ct);
+            }
+        }
+
+        Assert.True(failed, "the scheduler is expected to run the failing job within two minutes");
+
+        JsonElement Job(JsonDocument doc) => doc.RootElement.GetProperty("hypertables").EnumerateArray()
+            .Select(h => h.GetProperty("job"))
+            .Single(j => j.GetProperty("job_id").GetInt32() == jobId);
+
+        using (var asOwner = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(owner, ct)))
+        {
+            var job = Job(asOwner);
+            Assert.Equal("Failed", job.GetProperty("last_run_status").GetString());
+            Assert.True(job.GetProperty("last_error_readable").GetBoolean());
+            Assert.Equal("ch9428 boom", job.GetProperty("last_error").GetProperty("message").GetString());
+            Assert.Equal("P0001", job.GetProperty("last_error").GetProperty("sqlstate").GetString());
+            Assert.Equal(JsonValueKind.Null, asOwner.RootElement.GetProperty("errors_read_failure").ValueKind);
+        }
+
+        var bodySucceeded = false;
+        try
+        {
+            await ExecAsync(connection, $"CREATE ROLE {roleName} LOGIN NOSUPERUSER PASSWORD '{RolePassword}'", ct);
+            foreach (var statement in ViewerGrantReplay.StatementsFor(roleName, scratch.DatabaseName, "mcp"))
+            {
+                await ExecAsync(connection, statement, ct);
+            }
+
+            await using var asRole = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = roleName,
+                Password = RolePassword,
+                Pooling = false,
+            }.ConnectionString);
+
+            /* The store's mcp role is neither the job's owner nor in the database owner's role: the view would hide the row, so the
+               read says so instead of reporting no error. The status still comes from job_stats, which every role can read. */
+            using var viewed = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(asRole, ct));
+            var job = Job(viewed);
+            Assert.Equal("Failed", job.GetProperty("last_run_status").GetString());
+            Assert.False(job.GetProperty("last_error_readable").GetBoolean());
+            Assert.Equal(JsonValueKind.Null, job.GetProperty("last_error").ValueKind);
+            Assert.Equal(JsonValueKind.Null, viewed.RootElement.GetProperty("errors_read_failure").ValueKind);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+        }
     }
 
     private static string PolicyJobSql(string select) =>
