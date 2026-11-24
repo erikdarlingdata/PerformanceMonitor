@@ -86,7 +86,7 @@ public sealed class ServiceStartsReadLiveTests
             Assert.Equal(0, starts[0].GetProperty("rungs").GetArrayLength());
 
             var first = starts[1];
-            Assert.Equal(303, first.GetProperty("schema_version_before").GetInt32());
+            Assert.Equal(306, first.GetProperty("schema_version_before").GetInt32());
             Assert.Equal(307, first.GetProperty("schema_version_after").GetInt32());
             Assert.Equal(2, first.GetProperty("error_count").GetInt64());
             Assert.Equal(["boom one", "boom two"], first.GetProperty("first_errors").EnumerateArray().Select(e => e.GetString()).ToArray());
