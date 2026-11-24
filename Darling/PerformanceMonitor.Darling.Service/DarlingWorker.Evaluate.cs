@@ -3051,7 +3051,7 @@ LIMIT 1";
         DateTime? sampleTime = null;
         DateTime? sampleUtcOnly = null;
 
-        await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         /* #6968: the shared floor loop remembers where the newest row is; a bounded read that finds nothing means the row the
            bound came from is gone, so it asks again without one (the read that shipped before). */
         await _latestCpuFloor.ReadAsync(serverId, async since =>
@@ -3144,7 +3144,7 @@ LIMIT $3";
     {
         var samples = new List<AlertCpuSample>();
 
-        await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(
             RecentCpuSamplesSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);

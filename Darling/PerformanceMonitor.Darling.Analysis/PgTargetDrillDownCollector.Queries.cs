@@ -278,7 +278,7 @@ HAVING COUNT(*) > 0";
         if (badActorKeys.Count > 0)
         {
             var details = new Dictionary<string, object>(StringComparer.Ordinal);
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
             foreach (var key in badActorKeys)
             {
@@ -305,7 +305,7 @@ HAVING COUNT(*) > 0";
     private async Task<List<object>> ReadTempSpillStatementsAsync(AnalysisContext context)
     {
         var offenders = new List<object>(TempSpillStatementCap);
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(PgTargetTempSpillStatementsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);

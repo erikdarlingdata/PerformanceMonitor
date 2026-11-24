@@ -128,7 +128,7 @@ public sealed partial class DarlingWorker
         {
             try
             {
-                await using var migrateConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                await using var migrateConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
                 /* MigrateAsync (logger overload) also best-effort sets the database-default search_path to
                    collect/config for every future connection (V8 security split); a least-privilege BYO
                    login that cannot ALTER DATABASE is warned, not failed — the managed connection strings
@@ -423,7 +423,7 @@ public sealed partial class DarlingWorker
 
         try
         {
-            await using var timescaleConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var timescaleConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
             _timescaleAvailable = await TimescaleSupport.TryEnableAsync(timescaleConnection, _logger, stoppingToken);
             if (_timescaleAvailable)
             {
@@ -549,7 +549,7 @@ public sealed partial class DarlingWorker
            them. */
         try
         {
-            await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var fallbackConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
             /* #3817: segment three of the one convergence list — the two baseline steps, in the same order,
                off the same list, so the hourly pass runs them too. The UNGATED property is a property of this
                CALL SITE (after the TimescaleDB block's catch, on every path), not of the list: the steps are
@@ -573,7 +573,7 @@ public sealed partial class DarlingWorker
            fatal (the same optional-feature discipline as the TimescaleDB block above). */
         try
         {
-            await using var tuningConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var tuningConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
             /* #3817: segment four — the tuning pass, off the same list. The whole-block wrap the issue names
                (one failure costing every index in the pass) is unchanged HERE and unchanged on the hourly
                pass, because it is inside PgTableTuning.ApplyAsync's own per-statement isolation rather than
@@ -825,7 +825,7 @@ public sealed partial class DarlingWorker
             InvestigationDispatcher.WithLockTimeout(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(
-                        DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
+                        DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), StoreSessionNames.Investigation))));
         var investigationStore = new InvestigationRequestStore(
             investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         /* #5821: the generic webhook's {{investigation_json}} masks the stored brief at the level the MCP tools serve; an
@@ -2913,7 +2913,7 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.BaselineBackfill, stoppingToken);
             var backfilled = await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, _logger, stoppingToken);
             /* #8549: the daily wait totals, on the same connection and the same off-the-start-path run. */
             await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
@@ -2944,7 +2944,7 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RollupWarm, stoppingToken);
             await TimescaleSupport.WarmCollectionHealthHourlyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -2999,7 +2999,7 @@ public sealed partial class DarlingWorker
         _materializationHoleRepairRunning = true;
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.HoleRepair, stoppingToken);
 
             /* #4299: read BEFORE the repair runs, so the value stamped on a clean finish is the postmaster
                start this repair actually ran under, not whatever it is by the time the repair returns. A

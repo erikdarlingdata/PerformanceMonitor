@@ -1250,7 +1250,7 @@ AND   collection_time <= $2";
         {
             /* The table is one of the two coverage tables, and FleetRetentionDaysSql checks the name against the catalog. */
             var sql = $"SELECT MIN(collection_time), {DarlingRetentionHorizons.FleetRetentionDaysSql(coverageTable)} FROM {coverageTable} WHERE server_id = $1";
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, cancellationToken);
             using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
 
@@ -1538,7 +1538,7 @@ ORDER BY event_time_local";
         try
         {
             var snapshots = new List<ConfigChangeDiff.ServerConfigSnapshot>();
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken))
             {
                 using var cmd = new NpgsqlCommand(ServerConfigSnapshotsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
                 cmd.Parameters.AddWithValue(context.ServerId);
@@ -1638,7 +1638,7 @@ ORDER BY event_time_local";
     private async Task<List<ConfigChangeDiff.DatabaseConfigSnapshot>> ReadDatabaseConfigSnapshotsAsync(AnalysisContext context)
     {
         var rows = new List<ConfigChangeDiff.DatabaseConfigSnapshot>();
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
         using var cmd = new NpgsqlCommand(DatabaseConfigSnapshotsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeStart, DateTimeKind.Unspecified));
@@ -1668,7 +1668,7 @@ ORDER BY event_time_local";
     private async Task<List<DateTime>> ReadEmptyTraceFlagRunsAsync(AnalysisContext context)
     {
         var times = new List<DateTime>();
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
         using var cmd = new NpgsqlCommand(EmptyTraceFlagRunsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeStart, DateTimeKind.Unspecified));
@@ -1691,7 +1691,7 @@ ORDER BY event_time_local";
     private async Task<List<ConfigChangeDiff.TraceFlagSnapshot>> ReadTraceFlagSnapshotsAsync(AnalysisContext context)
     {
         var rows = new List<ConfigChangeDiff.TraceFlagSnapshot>();
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
         using var cmd = new NpgsqlCommand(TraceFlagSnapshotsForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeStart, DateTimeKind.Unspecified));
@@ -1730,7 +1730,7 @@ ORDER BY event_time_local";
             var windowEnd = DateTime.SpecifyKind(change.ChangeTime, DateTimeKind.Unspecified);
             var rows = new List<(DateTime? EventTimeLocal, string? TextData)>();
             ServerClock? clock = null;
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
             using var cmd = new NpgsqlCommand(ReconfigureTraceLinesForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(windowStart);
@@ -1799,7 +1799,7 @@ WHERE server_id = $1";
     /// </summary>
     internal async Task<(AnalysisEngineSet Engine, string? EngineKind)> ResolveEngineAsync(int serverId, CancellationToken cancellationToken)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, cancellationToken);
 
         using var cmd = new NpgsqlCommand(ServerEngineKindSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(serverId);
@@ -1836,7 +1836,7 @@ WHERE server_id = $1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, cancellationToken);
 
             using var cmd = new NpgsqlCommand(engine.DataSpanSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);

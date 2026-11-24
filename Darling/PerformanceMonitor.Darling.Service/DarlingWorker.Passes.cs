@@ -1116,7 +1116,7 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(stoppingToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.ModuleMap, stoppingToken);
             await DarlingModuleMap.RefreshRecentAsync(connection, _logger, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1199,7 +1199,7 @@ public sealed partial class DarlingWorker
         IReadOnlyList<QueryStoreComposeStamp.HourFailure> failures;
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.ComposeStuckCheck, cancellationToken);
             failures = await QueryStoreComposeStamp.ReadFailuresAsync(connection, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1457,7 +1457,7 @@ public sealed partial class DarlingWorker
             DateTime.UtcNow,
             async token =>
             {
-                await using var moduleMapConnection = await postgres.OpenConnectionAsync(token);
+                await using var moduleMapConnection = await postgres.OpenConnectionAsync(StoreSessionNames.ModuleMap, token);
                 var outcome = new ModuleMapRefreshOutcome();
                 await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, outcome, token);
                 return !outcome.Failed;
@@ -1476,7 +1476,7 @@ public sealed partial class DarlingWorker
                 var budgetBytes = await ResolveRawChunkIntervalBudgetBytesAsync(postgres, config, stoppingToken);
                 if (budgetBytes is double resolvedBudget)
                 {
-                    await using var reconcileConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                    await using var reconcileConnection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, stoppingToken);
                     await RawChunkIntervalReconciler.ReconcileAsync(
                         reconcileConnection, resolvedBudget, DateTime.UtcNow, _logger, stoppingToken);
                 }
@@ -1524,7 +1524,7 @@ public sealed partial class DarlingWorker
             return RawChunkIntervalPlanner.ManagedBudgetBytes(DarlingManagedPostgres.QuantizeRam(hostFacts.Memory.TotalBytes));
         }
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
         await using var command = new NpgsqlCommand(
             "SELECT pg_size_bytes(current_setting('shared_buffers')), pg_size_bytes(current_setting('effective_cache_size'))",
             connection)
@@ -1622,7 +1622,7 @@ public sealed partial class DarlingWorker
             List<RawPurgeNowEntry> rawTables;
             try
             {
-                await using var rawConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                await using var rawConnection = await postgres.OpenConnectionAsync(StoreSessionNames.PurgeNow, stoppingToken);
 
                 /* #4427 H1: read the clock BEFORE the trigger runs, on the SAME connection the trigger and the
                    report both use. RecordRawLastPurgeOutcomeAsync never throws (TimescaleSupport, logs at

@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Analysis.Baselines.AnomalyThresholds;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -447,7 +448,7 @@ LIMIT 6";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, cancellationToken);
 
             using var cmd = new NpgsqlCommand(HasBaselineDataSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(serverId);
@@ -1019,7 +1020,7 @@ LIMIT 6";
             if (isTiled)
                 WindowTiles.AddTileMetadata(metadata, tv!.Value, tiles, map!.WindowClock);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
             using (var contribCmd = WindowCommand(WaitContribWindowSql, connection, context))
             {
                 using var contribReader = await contribCmd.ExecuteReaderAsync(context.CancellationToken);
@@ -1059,7 +1060,7 @@ LIMIT 6";
     /// no rows.</summary>
     private async Task<(double PeakTps, double AvgTps, long TpsSamples, long Deadlocks, long DeadlockIntervals, string? TopDatabase, long TopCount)?> ReadDatabaseCounterWindowAsync(AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
         using var cmd = WindowCommand(DatabaseCounterWindowSql, connection, context);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (!await reader.ReadAsync(context.CancellationToken)) return null;
@@ -1107,7 +1108,7 @@ LIMIT 6";
         string sql, AnalysisContext context, BaselineBucketMap map, int peakOrdinal, int meanOrdinal, int samplesOrdinal, int peakTimeOrdinal = -1)
     {
         var tiles = new List<WindowTile>();
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
         using var cmd = WindowCommand(sql, connection, context);
         BindTileClock(cmd, map);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -1129,7 +1130,7 @@ LIMIT 6";
     {
         var tiles = new List<WindowTile>();
         var peakCpuPercentByTile = new Dictionary<DateTime, double>();
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
         using var cmd = WindowCommand(CpuTileWindowSql, connection, context);
         BindTileClock(cmd, map);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -1154,7 +1155,7 @@ LIMIT 6";
         var tiles = new List<WindowTile>();
         var totalWaitMsByTile = new Dictionary<DateTime, double>();
         var collectionCountByTile = new Dictionary<DateTime, long>();
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
         using var cmd = WindowCommand(WaitRateTileWindowSql, connection, context);
         BindTileClock(cmd, map);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

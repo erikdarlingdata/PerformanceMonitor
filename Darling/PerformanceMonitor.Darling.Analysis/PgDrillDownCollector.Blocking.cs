@@ -14,6 +14,7 @@ using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -51,7 +52,7 @@ LIMIT 200";
 
     private async Task CollectTopDeadlocks(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         var separate = context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
         using var cmd = new NpgsqlCommand(separate is null ? TopDeadlocksSql : TopDeadlocksSkippingSeparateSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
@@ -150,7 +151,7 @@ LIMIT 5";
 
     private async Task CollectTopBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         var separate = context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
         using var cmd = new NpgsqlCommand(separate is null ? TopBlockingChainsSql : TopBlockingChainsSkippingSeparateSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
@@ -223,7 +224,7 @@ AND   collection_time >= $4
     /// </summary>
     private async Task CollectReconstructedBlockingChains(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         /* #9346: a master target leaves out the pairs of databases monitored as their own targets, cut inside both reads before their 5,000-row cap. */
         var separate = context.SeparatelyMonitoredDatabases is { Count: > 0 } list ? list.ToArray() : null;
@@ -339,7 +340,7 @@ LIMIT 10";
 
     private async Task CollectLockModeBreakdown(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(LockModeBreakdownSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);

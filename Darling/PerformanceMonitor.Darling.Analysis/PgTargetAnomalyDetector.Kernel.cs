@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Analysis.Baselines.AnomalyThresholds;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -174,7 +175,7 @@ ORDER BY 1";
                so it rides beside the tile list keyed by the tile's own LocalHour. */
             var topQueryIdByTile = new Dictionary<DateTime, double>();
 
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken))
             {
                 using var cmd = WindowCommand(CpuBurnTileWindowSql, connection, context);
                 /* #3653 A8 option B (lane L3c): the tiled read's GROUP BY key (WindowTiles.LocalHourSql) binds
