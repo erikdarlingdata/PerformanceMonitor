@@ -559,6 +559,7 @@ public sealed class MigrationDataMovingRungCensusPins
             + "The build reads the heap once and keeps the rows its predicate admits, so it is the same shape as V258's and V260's indexes "
             + "on this table, whose measured builds took 58 ms at 2,000,000 rows and 7.2 s to 10.8 s at 3,000,000 rows. Not CONCURRENTLY, "
             + "inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
             315,
             SetsTheFloor: false,
             "#9434: CREATE UNIQUE INDEX on collect.read_latency (created V148), the new bucket key that also names the process start, after the "
