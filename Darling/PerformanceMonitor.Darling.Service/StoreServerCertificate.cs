@@ -179,7 +179,7 @@ internal static class StoreServerCertificate
         }
         catch (Exception ex)
         {
-            return Unavailable($"The store did not complete a TLS handshake ({ex.GetType().Name}), so its certificate could not be read.");
+            return Unavailable($"The store did not complete a TLS handshake ({ex.GetType().Name}), so its certificate could not be read. DEBUG {ex.ToString()[..Math.Min(700, ex.ToString().Length)]}");
         }
 
         if (server is null)
