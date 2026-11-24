@@ -440,6 +440,7 @@ public sealed class StoreJobRunsToolLiveTests
         {
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
             await connection.OpenAsync(ct);
+            await ExecAsync(connection, "CREATE SCHEMA IF NOT EXISTS collect", ct);
             Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [], null, ct));
             Assert.Equal(0, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.store_job_runs(now() - interval '1 day', now(), NULL, NULL, 10)", ct));
 

@@ -55,7 +55,7 @@ public static class StoreJobRunsFunction
         var body = $@"
 #variable_conflict use_column
 DECLARE
-    v_limit integer := pg_catalog.least(pg_catalog.greatest(COALESCE(p_limit, 50), 1), {MaxRows});
+    v_limit integer := LEAST(GREATEST(COALESCE(p_limit, 50), 1), {MaxRows});
     v_db_owner oid := (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database());
 BEGIN
     IF pg_catalog.to_regclass('timescaledb_information.job_history') IS NULL THEN

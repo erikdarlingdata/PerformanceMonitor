@@ -44,7 +44,9 @@ internal static class DarlingStoreJobRunsReader
     internal const string ProbeSql = @"
 SELECT (SELECT e.extversion FROM pg_catalog.pg_extension AS e WHERE e.extname = 'timescaledb'),
        pg_catalog.to_regclass('timescaledb_information.job_history') IS NOT NULL,
-       COALESCE(pg_catalog.has_function_privilege(pg_catalog.to_regprocedure('collect.store_job_runs(" + StoreJobRunsFunction.ArgumentTypes + @")')::oid, 'EXECUTE'), false)";
+       EXISTS (SELECT 1 FROM pg_catalog.pg_proc AS f JOIN pg_catalog.pg_namespace AS n ON n.oid = f.pronamespace
+               WHERE n.nspname = 'collect' AND f.proname = 'store_job_runs' AND f.pronargs = 5
+                 AND pg_catalog.has_schema_privilege(n.oid, 'USAGE') AND pg_catalog.has_function_privilege(f.oid, 'EXECUTE'))";
 
     /// <summary>
     /// How many of the jobs matching $1 (kind) and $2 (hypertable) this connection's role can read the history of. The two tests are the view's own:
