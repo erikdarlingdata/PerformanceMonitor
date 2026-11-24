@@ -227,7 +227,7 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
 
     /// <summary>Starts <see cref="RunAsync"/> and returns the handle that owns it: stopping or disposing the handle ends the loop, runs its last flush and waits for it.</summary>
     internal FlushLoop StartFlushLoop(NpgsqlDataSource postgres, ILogger logger, CancellationToken stoppingToken, TimeSpan? interval = null) =>
-        new(this, postgres, logger, stoppingToken, interval);
+        new(this, postgres, logger, interval, stoppingToken);
 
     /// <summary>
     /// A running flush loop and the means to end it. Declare it with <c>await using</c> AFTER the recorder and the data source the loop uses: every way out
@@ -239,7 +239,7 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
         private readonly CancellationTokenSource _stop;
         private int _disposed;
 
-        internal FlushLoop(ServiceStartRecorder recorder, NpgsqlDataSource postgres, ILogger logger, CancellationToken stoppingToken, TimeSpan? interval)
+        internal FlushLoop(ServiceStartRecorder recorder, NpgsqlDataSource postgres, ILogger logger, TimeSpan? interval, CancellationToken stoppingToken)
         {
             _stop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             Completion = recorder.RunAsync(postgres, logger, _stop.Token, interval);
