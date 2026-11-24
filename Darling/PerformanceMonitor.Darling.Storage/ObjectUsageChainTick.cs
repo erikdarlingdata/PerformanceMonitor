@@ -478,7 +478,7 @@ public static class ObjectUsageChainTick
     private static async Task<Plan> PlanServerAsync(
         NpgsqlDataSource dataSource, int serverId, DateTime newest, bool backfillPending, CancellationToken cancellationToken)
     {
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.ObjectUsageChain, cancellationToken);
 
         var watermarks = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         await using (var command = new NpgsqlCommand(WatermarksSql, connection) { CommandTimeout = CommandTimeoutSeconds })
@@ -524,7 +524,7 @@ public static class ObjectUsageChainTick
     private static async Task<List<(int ServerId, DateTime Newest)>> ReadServersAsync(NpgsqlDataSource dataSource, HashSet<int> pendingBackfill, CancellationToken cancellationToken)
     {
         var servers = new SortedDictionary<int, DateTime>();
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.ObjectUsageChain, cancellationToken);
         await using (var command = new NpgsqlCommand(ServersSql, connection) { CommandTimeout = CommandTimeoutSeconds })
         {
             command.Parameters.Add(new NpgsqlParameter<DateTime> { NpgsqlDbType = NpgsqlDbType.Timestamp, TypedValue = ListingWindowStart() });
@@ -564,7 +564,7 @@ public static class ObjectUsageChainTick
         /// <summary>The claim, or null when another session holds it.</summary>
         internal static async Task<StoreClaim?> TryTakeAsync(NpgsqlDataSource dataSource, CancellationToken cancellationToken)
         {
-            var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.ObjectUsageChain, cancellationToken);
             try
             {
                 await using var command = new NpgsqlCommand(ClaimLockSql, connection) { CommandTimeout = CommandTimeoutSeconds };
