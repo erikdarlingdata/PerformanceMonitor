@@ -659,6 +659,162 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.Contains("waited for the shell to start this refresh", line, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Describe_AnOverTheThresholdLoad_SplitsStoreAndRender_AndNamesRowsAndWindow()
+    {
+        /* #9426: the store share ends when the last read is in hand, the render share is the rest of the load. */
+        var phases = new List<(string Phase, long StartedMs, long EndedMs)> { ("grid read", 0, 900), ("slicer read", 100, 700) };
+        var line = ViewerLoadTimer.Describe("Top Queries", 2500, phases, window: "2026-11-24 08:00 to 2026-11-24 09:00 UTC", rows: 42);
+
+        Assert.NotNull(line);
+        Assert.Contains("took 2500 ms (store 900 ms, render 1600 ms, 42 rows, window 2026-11-24 08:00 to 2026-11-24 09:00 UTC)", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ALoadUnderTheThreshold_WritesNoLine()
+    {
+        var lines = new List<string>();
+        var timer = new ViewerLoadTimer();
+        timer.Track("grid read", Task.FromResult(new List<int> { 1, 2 }));
+
+        timer.FinishAndLog("Top Queries", lines.Add);
+
+        Assert.Empty(lines);
+    }
+
+    [Fact]
+    public async Task ALoadOverTheThreshold_WritesOneLine_WithTheRowsItsReadsReturned()
+    {
+        var lines = new List<string>();
+        var timer = new ViewerLoadTimer(0) { Window = "last hour" };
+        await timer.Track("grid read", Task.FromResult(new List<int> { 1, 2, 3 }));
+        await timer.Track("slicer read", Task.FromResult(new List<string> { "a", "b" }));
+        await timer.Track("no rows read", Task.FromResult(7));
+
+        timer.FinishAndLog("Top Queries", lines.Add);
+
+        var line = Assert.Single(lines);
+        Assert.Contains(", 5 rows, window last hour)", line, StringComparison.Ordinal);
+        Assert.Contains("store ", line, StringComparison.Ordinal);
+        Assert.Contains(" ms, render ", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASinkThatThrows_DoesNotFailTheLoadItDescribes()
+    {
+        var timer = new ViewerLoadTimer(0);
+        var called = 0;
+
+        timer.FinishAndLog("Top Queries", _ =>
+        {
+            called++;
+            throw new System.IO.IOException("the log file cannot be written");
+        });
+
+        Assert.Equal(1, called);
+    }
+
+    [Fact]
+    public void AServerTabLoad_OverTheThreshold_WritesOneLine_SplitIntoStoreAndRender_WithTheWindow()
+    {
+        /* #9426: through the server tab's shared load path, with a read that takes known time. */
+        const int readMs = 400;
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService(FailsAtOnceStore()),
+                new DarlingServer(1, "panel-timing", "panel-timing", true, null));
+            tab.CpuReadsOverride = new ViewerServerTab.CpuTabReads(
+                async (_, _) =>
+                {
+                    await Task.Delay(readMs);
+                    return new List<CpuUtilizationSample>();
+                },
+                (_, _) => Task.FromResult(new List<CpuSchedulerTrendPoint>()),
+                (_, _) => Task.FromResult<CpuSchedulerSnapshot?>(null));
+            tab.SlowLoadSink = lines.Add;
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.LoadInnerTabAsync(InnerTabIndexOf(tab, "CPU"), new ViewerLoadTimer(0));
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        var line = Assert.Single(lines);
+        var m = System.Text.RegularExpressions.Regex.Match(line, @"\(store (\d+) ms, render (\d+) ms, (\d+) rows, window ([^)]* UTC)\)");
+        Assert.True(m.Success, line);
+        Assert.True(long.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) >= readMs - 100, line);
+        Assert.StartsWith("[panel-timing] slow load: CPU took ", line, StringComparison.Ordinal);
+        /* The render share ends after the layout pass the load's binds queued, which the line books as its own client step. */
+        Assert.Contains("layout and render ", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AServerTabLoad_TheReaderCancelled_WritesNoLine()
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService(FailsAtOnceStore()),
+                new DarlingServer(1, "panel-timing", "panel-timing", true, null));
+            using var cts = new System.Threading.CancellationTokenSource();
+            tab.LoadStartHook = (_, _) =>
+            {
+                cts.Cancel();
+                return Task.CompletedTask;
+            };
+            tab.SlowLoadSink = lines.Add;
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.LoadInnerTabAsync(InnerTabIndexOf(tab, "CPU"), new ViewerLoadTimer(0), cts.Token);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Empty(lines);
+    }
+
+    [Fact]
+    public void AServerTabLoad_WhoseLogSinkThrows_StillEnds()
+    {
+        var called = 0;
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService(FailsAtOnceStore()),
+                new DarlingServer(1, "panel-timing", "panel-timing", true, null));
+            tab.SlowLoadSink = _ =>
+            {
+                called++;
+                throw new System.IO.IOException("the log file cannot be written");
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.LoadInnerTabAsync(InnerTabIndexOf(tab, "CPU"), new ViewerLoadTimer(0));
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Equal(1, called);
+    }
+
     private static int FreePort()
     {
         var listener = new TcpListener(IPAddress.Loopback, 0);

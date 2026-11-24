@@ -34,14 +34,15 @@ namespace PerformanceMonitor.Darling.Storage;
 /// came back after the previous capture, so its current counters are credited whole and the row is flagged as a lower
 /// bound. That second rule also covers a restart that leaves <c>stats_reset</c> unchanged.</para>
 ///
-/// <para><b>Bounded.</b> At most <see cref="TopStatements"/> statements are kept per hour, ranked by time spent in the
-/// interval. The capture row carries how many were active (<c>statements_seen</c>) and how many entries the extension
+/// <para><b>Bounded.</b> An hour keeps the <see cref="TopStatements"/> statements that spent the most time in the interval
+/// and the <see cref="TopStatementsByDirtied"/> that dirtied the most blocks (#9410), so at most the sum of the two, fewer when
+/// a statement is in both. A quick statement that dirties many pages is not lost to the time cut. The capture row carries how many were active (<c>statements_seen</c>) and how many entries the extension
 /// evicted (<c>dealloc_delta</c>), so a reader can tell when the cap or the eviction hid something. Rows older than
 /// <see cref="RetentionDays"/> are deleted by the pass itself. Statements without a query id (the extension hides
 /// other roles' ids from a caller that may not read them) are counted in <c>hidden_statements</c> and never keyed.</para>
 ///
 /// <para><b>Reads through the reader function.</b> The snapshot calls the SECURITY DEFINER
-/// <c>config.store_statement_stats()</c> and its info companion, which already restrict the rows to this database and
+/// <c>config.store_statement_stats_v2()</c> (#9410, the rows of <c>config.store_statement_stats()</c> without the text, plus the write counters) and its info companion, which already restrict the rows to this database and
 /// map users to role names, and never touches <c>pg_stat_statements</c> directly. If the functions are missing or the
 /// caller may not execute them, the extension is not loaded, or the role may not create temporary tables, the pass
 /// writes one capture with outcome <c>precondition</c> and no history.</para>
@@ -58,11 +59,24 @@ public static class StoreStatementHistory
     /// <summary>The snapshot's own slice of the hourly tick's budget, so a slow pass cannot cost the flushes after it.</summary>
     public static readonly TimeSpan SliceBudget = TimeSpan.FromSeconds(120);
 
+    /// <summary>
+    /// The store schema version that adds the write counters (#9410). The one place the number is written: the migration, the schema version
+    /// constant and the viewer's version map read it, so renumbering the rung is a change to this line.
+    /// </summary>
+    public const int WriteCountersVersion = 304;
+
     /// <summary>Per-command timeout, in seconds. The pass shares the hourly tick's budget with other self-telemetry.</summary>
     public const int SnapshotTimeoutSeconds = 60;
 
-    /// <summary>The most statements kept per snapshot, by time spent in the interval.</summary>
+    /// <summary>The most statements kept per snapshot by time spent in the interval.</summary>
     public const int TopStatements = 100;
+
+    /// <summary>
+    /// The most statements kept per snapshot by shared blocks dirtied in the interval (#9410), on top of the time ranking: a statement
+    /// kept by either ranking stays, so a snapshot holds at most <see cref="TopStatements"/> plus this many rows. Only statements that
+    /// dirtied a block take part, so a quiet hour does not fill the slots with ties at zero.
+    /// </summary>
+    public const int TopStatementsByDirtied = 100;
 
     /// <summary>How long history and capture rows are kept. The baseline is state and is never aged out.</summary>
     public const int RetentionDays = 90;
@@ -78,7 +92,7 @@ public static class StoreStatementHistory
 
     private const string Config = PgSchemaGenerator.ConfigSchema;
 
-    private const string Function = Config + "." + StoreStatementStats.FunctionName;
+    private const string Function = Config + "." + StoreStatementStats.WriteCounterFunctionName;
 
     private const string InfoFunction = Config + "." + StoreStatementStats.InfoFunctionName;
 
@@ -127,6 +141,10 @@ SELECT role_name,
        sum(shared_blks_hit)::bigint AS shared_blks_hit,
        sum(shared_blks_read)::bigint AS shared_blks_read,
        sum(temp_blks_written)::bigint AS temp_blks_written,
+       sum(shared_blks_dirtied)::bigint AS shared_blks_dirtied,
+       sum(shared_blks_written)::bigint AS shared_blks_written,
+       sum(wal_bytes)::numeric AS wal_bytes,
+       sum(wal_fpi)::bigint AS wal_fpi,
        count(*)::integer AS entries
 FROM " + Function + @"()
 GROUP BY role_name, queryid";
@@ -138,10 +156,13 @@ SELECT COALESCE(sum(entries) FILTER (WHERE queryid IS NULL), 0)::integer,
 FROM store_statement_cur";
 
     /// <summary>
-    /// Writes the interval's deltas and answers (statements active, statements kept). $1 capture time, $2 top,
+    /// Writes the interval's deltas and answers (statements active, statements kept). $1 capture time, $2 top by time,
     /// $3 previous capture time, $4 whether the baseline is valid (same epoch), $5 whether a reset happened inside
-    /// the interval, $6 the interval in seconds (computed once in C#, so the capture row agrees). With $4 false every row is credited whole. A counter below its baseline means the entry was
+    /// the interval, $6 the interval in seconds (computed once in C#, so the capture row agrees), $7 top by blocks dirtied. With $4 false every row is credited whole. A counter below its baseline means the entry was
     /// evicted and re-entered, so it is credited whole too and flagged. Ranked by time spent, then query id, then role name, so a tie cuts the same way every time.
+    /// A statement stays when it is in the top $2 by time OR in the top $7 by blocks dirtied (#9410), the second ranking over statements that dirtied
+    /// at least one block, by dirtied, then time, then query id, then role name. The four write counters are NULL for a statement whose baseline row
+    /// was written before they existed: nothing measured its earlier counters, so the difference is unknown and is not credited as the whole lifetime.
     /// </summary>
     public const string SnapshotSql = @"
 WITH joined AS
@@ -155,19 +176,31 @@ WITH joined AS
            c.shared_blks_hit,
            c.shared_blks_read,
            c.temp_blks_written,
+           c.shared_blks_dirtied,
+           c.shared_blks_written,
+           c.wal_bytes,
+           c.wal_fpi,
            b.queryid IS NOT NULL AS has_base,
            COALESCE(c.calls < b.calls
                     OR c.total_exec_ms < b.total_exec_ms
                     OR c.rows_returned < b.rows_returned
                     OR c.shared_blks_hit < b.shared_blks_hit
                     OR c.shared_blks_read < b.shared_blks_read
-                    OR c.temp_blks_written < b.temp_blks_written, false) AS fell,
+                    OR c.temp_blks_written < b.temp_blks_written
+                    OR c.shared_blks_dirtied < b.shared_blks_dirtied
+                    OR c.shared_blks_written < b.shared_blks_written
+                    OR c.wal_bytes < b.wal_bytes
+                    OR c.wal_fpi < b.wal_fpi, false) AS fell,
            b.calls AS b_calls,
            b.total_exec_ms AS b_total_exec_ms,
            b.rows_returned AS b_rows_returned,
            b.shared_blks_hit AS b_shared_blks_hit,
            b.shared_blks_read AS b_shared_blks_read,
-           b.temp_blks_written AS b_temp_blks_written
+           b.temp_blks_written AS b_temp_blks_written,
+           b.shared_blks_dirtied AS b_shared_blks_dirtied,
+           b.shared_blks_written AS b_shared_blks_written,
+           b.wal_bytes AS b_wal_bytes,
+           b.wal_fpi AS b_wal_fpi
     FROM store_statement_cur AS c
     LEFT JOIN config.store_statement_baseline AS b
       ON b.role_name = c.role_name
@@ -187,7 +220,11 @@ deltas AS
            j.rows_returned - CASE WHEN j.has_base AND NOT j.fell AND $4::boolean THEN j.b_rows_returned ELSE 0 END AS delta_rows,
            j.shared_blks_hit - CASE WHEN j.has_base AND NOT j.fell AND $4::boolean THEN j.b_shared_blks_hit ELSE 0 END AS delta_shared_blks_hit,
            j.shared_blks_read - CASE WHEN j.has_base AND NOT j.fell AND $4::boolean THEN j.b_shared_blks_read ELSE 0 END AS delta_shared_blks_read,
-           j.temp_blks_written - CASE WHEN j.has_base AND NOT j.fell AND $4::boolean THEN j.b_temp_blks_written ELSE 0 END AS delta_temp_blks_written
+           j.temp_blks_written - CASE WHEN j.has_base AND NOT j.fell AND $4::boolean THEN j.b_temp_blks_written ELSE 0 END AS delta_temp_blks_written,
+           j.shared_blks_dirtied - CASE WHEN j.has_base AND NOT j.fell AND $4::boolean THEN j.b_shared_blks_dirtied ELSE 0 END AS delta_shared_blks_dirtied,
+           j.shared_blks_written - CASE WHEN j.has_base AND NOT j.fell AND $4::boolean THEN j.b_shared_blks_written ELSE 0 END AS delta_shared_blks_written,
+           j.wal_bytes - CASE WHEN j.has_base AND NOT j.fell AND $4::boolean THEN j.b_wal_bytes ELSE 0 END AS delta_wal_bytes,
+           j.wal_fpi - CASE WHEN j.has_base AND NOT j.fell AND $4::boolean THEN j.b_wal_fpi ELSE 0 END AS delta_wal_fpi
     FROM joined AS j
 ),
 active AS
@@ -196,12 +233,21 @@ active AS
     FROM deltas
     WHERE delta_calls > 0
 ),
+ranked AS
+(
+    SELECT a.*,
+           row_number() OVER (ORDER BY a.delta_total_exec_ms DESC, a.queryid, a.role_name) AS time_rank,
+           row_number() OVER (PARTITION BY (a.delta_shared_blks_dirtied > 0)
+                              ORDER BY a.delta_shared_blks_dirtied DESC NULLS LAST, a.delta_total_exec_ms DESC, a.queryid, a.role_name) AS dirtied_rank
+    FROM active AS a
+),
 kept AS
 (
     INSERT INTO collect.store_statement_history
         (capture_time, interval_seconds, role_name, queryid, delta_calls, delta_total_exec_ms, delta_rows,
          delta_shared_blks_hit, delta_shared_blks_read, delta_temp_blks_written, max_exec_ms,
-         first_seen, entry_restarted, reset_in_interval)
+         first_seen, entry_restarted, reset_in_interval,
+         delta_shared_blks_dirtied, delta_shared_blks_written, delta_wal_bytes, delta_wal_fpi)
     SELECT $1::timestamp,
            $6::integer,
            a.role_name,
@@ -215,10 +261,14 @@ kept AS
            a.max_exec_ms,
            a.first_seen,
            a.entry_restarted,
-           $5::boolean
-    FROM active AS a
-    ORDER BY a.delta_total_exec_ms DESC, a.queryid, a.role_name
-    LIMIT $2::integer
+           $5::boolean,
+           a.delta_shared_blks_dirtied,
+           a.delta_shared_blks_written,
+           a.delta_wal_bytes,
+           a.delta_wal_fpi
+    FROM ranked AS a
+    WHERE a.time_rank <= $2::integer
+       OR (a.delta_shared_blks_dirtied > 0 AND a.dirtied_rank <= $7::integer)
     RETURNING 1
 )
 SELECT (SELECT count(*) FROM active)::integer,
@@ -231,8 +281,10 @@ DELETE FROM config.store_statement_baseline";
     /// <summary>Records every keyed statement's cumulative counters as the next baseline. $1 capture time.</summary>
     public const string BaselineInsertSql = @"
 INSERT INTO config.store_statement_baseline
-    (role_name, queryid, calls, total_exec_ms, rows_returned, shared_blks_hit, shared_blks_read, temp_blks_written, captured_at)
-SELECT role_name, queryid, calls, total_exec_ms, rows_returned, shared_blks_hit, shared_blks_read, temp_blks_written, $1::timestamp
+    (role_name, queryid, calls, total_exec_ms, rows_returned, shared_blks_hit, shared_blks_read, temp_blks_written,
+     shared_blks_dirtied, shared_blks_written, wal_bytes, wal_fpi, captured_at)
+SELECT role_name, queryid, calls, total_exec_ms, rows_returned, shared_blks_hit, shared_blks_read, temp_blks_written,
+       shared_blks_dirtied, shared_blks_written, wal_bytes, wal_fpi, $1::timestamp
 FROM store_statement_cur
 WHERE queryid IS NOT NULL";
 
@@ -381,6 +433,7 @@ WHERE capture_time < $1";
                 snapshot.Parameters.Add(new NpgsqlParameter { Value = epoch == Epoch.SameEpoch, NpgsqlDbType = NpgsqlDbType.Boolean });
                 snapshot.Parameters.Add(new NpgsqlParameter { Value = epoch == Epoch.ResetInsideInterval, NpgsqlDbType = NpgsqlDbType.Boolean });
                 snapshot.Parameters.Add(new NpgsqlParameter { Value = interval ?? 1, NpgsqlDbType = NpgsqlDbType.Integer });
+                snapshot.Parameters.Add(new NpgsqlParameter { Value = TopStatementsByDirtied, NpgsqlDbType = NpgsqlDbType.Integer });
                 await using var reader = await snapshot.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken))
                 {
