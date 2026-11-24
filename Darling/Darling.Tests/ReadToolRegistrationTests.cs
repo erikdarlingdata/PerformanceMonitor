@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// #9477: a read tool registers its web handler, catalog entry and Custom Views parameters from its own file. The moved tool
 /// (<c>get_store_maintenance_readiness</c>) is in none of the shared lists, so every assertion here proves the registration path.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class ReadToolRegistrationTests
 {
     private const string MovedTool = "get_store_maintenance_readiness";
