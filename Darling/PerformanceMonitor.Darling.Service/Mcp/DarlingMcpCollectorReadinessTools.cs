@@ -529,7 +529,7 @@ CROSS JOIN LATERAL (
             fixed_time_count = fixedTime,
             not_collected_count = notCollected,
             disabled_count = disabled,
-            waiting_truncated = ordered.Count > MaxWaitingRows,
+            truncated = ordered.Count > MaxWaitingRows,
             waiting = shownWaiting,
             done,
             note = "A collector counts as waiting only when it is enabled, collected on the server's engine, not on a fixed run time, and due: it never ran, was overdue at the start, or has reached the end of the interval it was waiting out. "

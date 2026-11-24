@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -77,7 +76,7 @@ GROUP BY server_id, collector_name";
 
             var serverCount = int.TryParse(Environment.GetEnvironmentVariable("DARLING_READINESS_SERVERS"), out var n) && n > 0 ? n : 5;
             var explainOut = Environment.GetEnvironmentVariable("DARLING_READINESS_EXPLAIN_OUT");
-            var now = DateTime.UtcNow;
+            var now = LiveClock.AnchoredEnd();
             now = new DateTime(now.Ticks - (now.Ticks % 10), DateTimeKind.Utc);
             var collectors = CollectorCatalog.All
                 .Select(d => d.Name)
@@ -105,9 +104,7 @@ GROUP BY server_id, collector_name";
             {
                 var label = start == windowStarts[0] ? "start 2 days back" : "start 10 minutes back";
                 var oldRows = await ReadOldAsync(postgres, start, now, ct);
-                var watch = Stopwatch.StartNew();
                 var firstGood = await DarlingMcpCollectorReadinessTools.ReadFirstGoodAsync(postgres, pairs, start, now, ct);
-                report.AppendLine($"{label}: first-good probe {watch.ElapsedMilliseconds} ms for {pairs.Count} pairs");
 
                 /* Same first good time for every pair, and no first good where the old scan had none. */
                 foreach (var pair in pairs)
@@ -125,9 +122,7 @@ GROUP BY server_id, collector_name";
                     oldWaiting.Select(p => (p.ServerId, p.Collector)).OrderBy(k => k).ToList(),
                     waiting.Select(p => (p.ServerId, p.Collector)).OrderBy(k => k).ToList());
                 Assert.NotEmpty(before.Keys.Concat(Enumerable.Empty<(int, string)>()).DefaultIfEmpty((0, "")));
-                watch.Restart();
                 var detail = await DarlingMcpCollectorReadinessTools.ReadDetailAsync(postgres, waiting, start, now, ct);
-                report.AppendLine($"{label}: detail read {watch.ElapsedMilliseconds} ms for {waiting.Count} waiting pairs");
                 foreach (var pair in waiting)
                 {
                     var old = oldRows.GetValueOrDefault((pair.ServerId, pair.Collector));
@@ -178,7 +173,7 @@ GROUP BY server_id, collector_name";
             await PgMigrations.MigrateAsync(connection, ct);
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-            var now = DateTime.UtcNow;
+            var now = LiveClock.Now();
             var start = now.AddMinutes(-10);
 
             /* Enough servers that every due collector waiting from the start is well past 200 rows. */
@@ -222,7 +217,7 @@ GROUP BY server_id, collector_name";
             var shown = root.GetProperty("waiting").EnumerateArray().ToList();
             Assert.True(root.GetProperty("waiting_count").GetInt32() > DarlingMcpCollectorReadinessTools.MaxWaitingRows);
             Assert.Equal(DarlingMcpCollectorReadinessTools.MaxWaitingRows, shown.Count);
-            Assert.True(root.GetProperty("waiting_truncated").GetBoolean());
+            Assert.True(root.GetProperty("truncated").GetBoolean());
 
             /* Oldest wait first, and the youngest wait is the one that fell off the end. */
             var stamps = shown.Select(w => DateTime.Parse(w.GetProperty("waiting_since").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind)).ToList();
@@ -379,7 +374,7 @@ VALUES ($1, $2, $2, TRUE, 15, $3, $3)
 ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE, sql_major_version = 15;", connection);
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(name);
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(LiveClock.Now(), DateTimeKind.Unspecified));
         await command.ExecuteNonQueryAsync(ct);
     }
 
