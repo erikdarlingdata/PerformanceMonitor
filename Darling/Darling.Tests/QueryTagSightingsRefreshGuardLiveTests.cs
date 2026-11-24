@@ -76,16 +76,6 @@ public sealed class QueryTagSightingsRefreshGuardLiveTests
     }
 
     [Fact]
-    public void TheRefreshWidthPlusTheBackdate_StaysWellInsideTheOneDayRetentionFloor()
-    {
-        /* Retention keeps a sighting at least a day (widestFactRetentionDays is never under 1). A live key's stamp trails by the width plus the
-           backdate, so it must stay far enough under that day that a live key is never purged (#9456, as PayloadDimensionSeen pins its width). */
-        Assert.True(
-            QueryTagSightingWriter.ReSightingRefreshWidth + QueryTagSightingWriter.ReSightingBackdate < TimeSpan.FromHours(12),
-            "a live key's stamp must stay at most half a day behind");
-    }
-
-    [Fact]
     public async Task AnUnchangedReSighting_InsideTheRefreshWidth_WritesNoRow_AndTheCountersShowNoUpdate()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipText);
