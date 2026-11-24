@@ -121,7 +121,7 @@ public sealed class McpInvestigationToolsTests : IDisposable
     /// <summary>#9511: the brief write times out on the store lock after the claim row is written. The agent gets an error with no
     /// claim_id, so the claim is released and journaled, or a re-claim would answer already_claimed for the whole lease.</summary>
     [Fact]
-    public async Task BriefWriteFailure_ReleasesTheClaim_JournalsBriefFailed_LogsTheStep_AndAReclaimSucceeds()
+    public async Task BriefWriteFailure_ReleasesTheClaim_JournalsAnswerFailed_LogsTheStep_AndAReclaimSucceeds()
     {
         var openedId = (await _store.OpenOrJoinAsync(Alert(), Ct)).RequestId!.Value;
         var faulting = new FaultingStore(_store) { SetBriefThrows = LockTimeout() };
@@ -132,7 +132,7 @@ public sealed class McpInvestigationToolsTests : IDisposable
         Assert.Equal("error", failed.GetProperty("status").GetString());
         Assert.Contains("released", failed.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
-        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:brief_failed'"));
+        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:answer_failed'"));
         Assert.Single(ErrorLines(openedId), l => l.Contains("step store_brief", StringComparison.Ordinal));
 
         var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
@@ -171,6 +171,7 @@ public sealed class McpInvestigationToolsTests : IDisposable
 
         Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
         Assert.Empty(ErrorLines(openedId));
+        Assert.Equal("0", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason LIKE 'claim:%failed'"));
 
         var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
         Assert.Equal("claimed", again.GetProperty("status").GetString());
@@ -201,7 +202,7 @@ public sealed class McpInvestigationToolsTests : IDisposable
         Assert.Contains(lines, l => l.Contains("brief write failed first", StringComparison.Ordinal));
         Assert.Contains(lines, l => l.Contains("release failed second", StringComparison.Ordinal));
         /* The refusal is still journaled after the failed release. */
-        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:brief_failed'"));
+        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:answer_failed'"));
     }
 
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;

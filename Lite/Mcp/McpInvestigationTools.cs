@@ -113,7 +113,7 @@ public sealed class McpInvestigationTools
 
     /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. The brief is composed
     /// UNLOCKED, between the claim and storing it; a compose failure releases the claim (it stays counted).
-    /// A failure after the claim row is written (the brief write, the answer build) releases it too and journals brief_failed or answer_failed (#9511).
+    /// A failure after the claim row is written releases it too and journals brief_failed (no brief to store) or answer_failed (the brief write or the answer build threw), and a cancel releases it (#9511).
     /// <paramref name="parseBrief"/> reads the stored brief back into the answer: a test passes one that throws, to drive the answer build's failure.</summary>
     internal static async Task<string> ClaimAsync(IInvestigationRequestStore store, InvestigationBriefComposer composer,
         string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken,
@@ -123,6 +123,7 @@ public sealed class McpInvestigationTools
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
 
         var step = "claim";
+        Guid? claimWritten = null;
         try
         {
             /* #8611: Lite journals its own refusals under invalid and unclaimed, so a claim as either name would make the claim's rows read as a
@@ -169,6 +170,7 @@ public sealed class McpInvestigationTools
                 return InvestigationToolCore.Status(InvestigationToolCore.ClaimStatus(claim.Outcome), InvestigationToolCore.ClaimMessage(claim));
 
             var claimId = claim.ClaimId!.Value;
+            claimWritten = claimId;
             string? brief;
             step = "compose_brief";
             try
@@ -186,20 +188,26 @@ public sealed class McpInvestigationTools
 
             /* #9511: from here the claim row is written. A failure that leaves the claim live gives the agent an error with no claim_id,
                and a re-claim answers already_claimed for the whole lease, so the claim is released and the failure journaled and logged.
-               A cancel of the caller's token releases it too (the release and the journal write use no token), and is not an error. */
-            var failedReason = "brief_failed";
+               A cancel of the caller's token releases it too, in the catch of the cancel below, and is not an error. */
             try
             {
                 step = "store_brief";
                 if (brief is null || !await store.SetBriefAsync(requestId, claimId, InvestigationFormats.BriefFormat, brief, cancellationToken))
                 {
-                    await store.ReleaseAsync(requestId, claimId, CancellationToken.None);
-                    return McpHelpers.FormatError("claim_investigation_request",
-                        new InvalidOperationException("the brief could not be stored under this claim, so the claim was released."));
+                    /* A null brief means no source row for the request, and a false store means the claim no longer holds it. Neither throws,
+                       so the log line and the journal row are written here, as they are for the throwing paths. */
+                    if (brief is null)
+                        step = "compose_brief";
+                    AppLogger.Error(LogSource, $"claim_investigation_request {requestId}: step {step} failed, the claim is released");
+                    var storedReleased = await TryAsync(() => store.ReleaseAsync(requestId, claimId, CancellationToken.None), requestId, step, "release the claim");
+                    await TryAsync(() => store.RecordRefusalAsync(requestId, agent_id, "claim", "brief_failed", null, CancellationToken.None),
+                        requestId, step, "journal the refusal");
+                    return McpHelpers.FormatError("claim_investigation_request", new InvalidOperationException(storedReleased
+                        ? "the brief could not be stored under this claim, so the claim was released."
+                        : "the brief could not be stored under this claim, and the claim could not be released."));
                 }
 
                 step = "build_answer";
-                failedReason = "answer_failed";
                 return JsonSerializer.Serialize(new
                 {
                     status = "claimed",
@@ -212,22 +220,24 @@ public sealed class McpInvestigationTools
                     brief = (parseBrief ?? (text => JsonNode.Parse(text)))(brief),
                 }, McpHelpers.JsonOptions);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                var cancelled = ex is OperationCanceledException;
-                if (!cancelled)
-                    AppLogger.Error(LogSource, $"claim_investigation_request {requestId}: step {step} failed, the claim is released", ex);
+                AppLogger.Error(LogSource, $"claim_investigation_request {requestId}: step {step} failed, the claim is released", ex);
 
                 var released = await TryAsync(() => store.ReleaseAsync(requestId, claimId, CancellationToken.None), requestId, step, "release the claim");
-                await TryAsync(() => store.RecordRefusalAsync(requestId, agent_id, "claim", failedReason, null, CancellationToken.None),
+                await TryAsync(() => store.RecordRefusalAsync(requestId, agent_id, "claim", "answer_failed", null, CancellationToken.None),
                     requestId, step, "journal the refusal");
-                if (cancelled)
-                    throw;
 
                 return McpHelpers.FormatError("claim_investigation_request", new InvalidOperationException(
-                    (failedReason == "brief_failed" ? "the brief could not be stored" : "the claim answer could not be built")
-                    + (released ? ", so the claim was released: " : ", and the claim could not be released: ") + ex.Message, ex));
+                    "the claim could not be completed" + (released ? ", so the claim was released: " : ", and the claim could not be released: ") + ex.Message, ex));
             }
+        }
+        catch (OperationCanceledException) when (claimWritten is not null)
+        {
+            /* #9511: the caller cancelled after the claim row was written. The claim would stay live until the lease lapses, so it is released with a
+               token that cannot be cancelled before the cancel goes on. A cancel is not a failure: no error is logged and nothing is journaled. */
+            await TryAsync(() => store.ReleaseAsync(requestId, claimWritten.Value, CancellationToken.None), requestId, step, "release the claim");
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
