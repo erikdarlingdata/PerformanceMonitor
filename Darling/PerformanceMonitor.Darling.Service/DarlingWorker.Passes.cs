@@ -1107,6 +1107,20 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// #9411: the recorder the passes write each step's row through (<see cref="StorePassSteps"/>). Made on first use, after the store is open, and
+    /// never fails or slows a step: a write that fails is logged and the pass goes on.
+    /// </summary>
+    private StorePassSteps.Recorder PassSteps => _passSteps ??= new StorePassSteps.Recorder(_postgres!, _logger, shutdown: _stoppingToken);
+
+    private StorePassSteps.Recorder? _passSteps;
+
+    /// <summary>#9411: the host's stopping token, kept so the step recorder can tell a shutdown from a step that ran out its own time slice.</summary>
+    private CancellationToken _stoppingToken;
+
+    /// <summary>#9411: the step row's note for builds a tick left to the next one, or null when it left none.</summary>
+    private static string? DeferredText(int deferred) => deferred > 0 ? $"{deferred} left for the next tick" : null;
+
+    /// <summary>
     /// The hourly store-maintenance tick's sixth tenant (#4605): the incremental module-map refresh, which keeps
     /// the <c>collect.module_map</c> watermark within about an hour of procedure_stats so a reader can trust the
     /// map up to it. Reads only the rows since the last watermark (<see cref="DarlingModuleMap.RefreshRecentAsync"/>),
@@ -1116,8 +1130,12 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.ModuleMap, stoppingToken);
-            await DarlingModuleMap.RefreshRecentAsync(connection, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "module_map_refresh", async () =>
+            {
+                await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.ModuleMap, stoppingToken);
+                var rows = await DarlingModuleMap.RefreshRecentAsync(connection, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: rows);
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1135,7 +1153,11 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await PgIoStatsHourlyBuilder.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "pg_io_stats_hourly", async () =>
+            {
+                var tick = await PgIoStatsHourlyBuilder.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: tick.Built, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1151,7 +1173,13 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await PlanRegressionDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "plan_regression_daily", async () =>
+            {
+                var tick = await PlanRegressionDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(
+                    Built: tick.Built + tick.BlocksBuilt, Removed: tick.DaysRemoved + tick.BlocksRemoved,
+                    Failed: tick.Failed + tick.BlocksFailed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1171,8 +1199,13 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await QueryStoreComposeStamp.RunTickAsync(
-                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.QueryStoreComposePass, "query_store_compose_stamp", async () =>
+            {
+                var tick = await QueryStoreComposeStamp.RunTickAsync(
+                    _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(
+                    Built: tick.Built + tick.DaysBuilt, Removed: tick.HoursRemoved, Failed: tick.Failed + tick.DaysFailed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1222,8 +1255,12 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await QueryStoreTopDaily.RunTickAsync(
-                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "query_store_top_daily", async () =>
+            {
+                var tick = await QueryStoreTopDaily.RunTickAsync(
+                    _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: tick.Built, Removed: tick.DaysRemoved, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1234,7 +1271,11 @@ public sealed partial class DarlingWorker
            same tick. Its own catch, so a failure here leaves the Query Store summary's work standing. */
         try
         {
-            await ObjectExecutionsDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "object_executions_daily", async () =>
+            {
+                var tick = await ObjectExecutionsDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: tick.Copied, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1245,7 +1286,11 @@ public sealed partial class DarlingWorker
            retention the pass above just applied, so it runs straight after it. Its own catch, so a failure here leaves the work above standing. */
         try
         {
-            await ObjectReferencesDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "object_references_daily", async () =>
+            {
+                var tick = await ObjectReferencesDaily.RunTickAsync(_postgres!, DateTime.UtcNow, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(Built: tick.Built, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1257,7 +1302,12 @@ public sealed partial class DarlingWorker
            with its own catch so a failure leaves their work standing. */
         try
         {
-            await JobOutcomeDaily.RunTickAsync(_postgres!, null, _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "job_outcome_daily", async () =>
+            {
+                var tick = await JobOutcomeDaily.RunTickAsync(_postgres!, null, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(
+                    Built: tick.Steps, Removed: tick.DaysRemoved, Failed: tick.Failed, Detail: tick.Deferred ? "the rest follows on the next tick" : null);
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1269,7 +1319,13 @@ public sealed partial class DarlingWorker
            bounded by its step cap and MaxTickDuration, with its own catch so a failure leaves their work standing. Never on a request path. */
         try
         {
-            var chain = await ObjectUsageChainTick.RunTickAsync(_postgres!, _logger, stoppingToken);
+            var chain = default(ObjectUsageChainTick.TickResult);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "object_usage_chain", async () =>
+            {
+                chain = await ObjectUsageChainTick.RunTickAsync(_postgres!, _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(
+                    Built: chain.Steps, Failed: chain.Failed, Detail: chain.Deferred ? "the rest follows on the next tick" : null);
+            });
             if (chain.Steps > 0 || chain.Failed > 0 || chain.Deferred)
             {
                 _logger.LogInformation(
@@ -1291,12 +1347,16 @@ public sealed partial class DarlingWorker
            query_stats' raw rows are purged on, resolved the way the purge resolves it. */
         try
         {
-            await QueryStatsHostHourly.RunTickAsync(
-                _postgres!,
-                DateTime.UtcNow,
-                DarlingRetention.EffectivePurgeRetentionDays("query_stats", StoreConfigProvider.ResolveFleetRetentionDays("query_stats", _scheduleOverrides)),
-                _logger,
-                stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "query_stats_host_hourly", async () =>
+            {
+                var tick = await QueryStatsHostHourly.RunTickAsync(
+                    _postgres!,
+                    DateTime.UtcNow,
+                    DarlingRetention.EffectivePurgeRetentionDays("query_stats", StoreConfigProvider.ResolveFleetRetentionDays("query_stats", _scheduleOverrides)),
+                    _logger,
+                    stoppingToken);
+                return new StorePassSteps.StepCounts(Built: tick.HoursBuilt, Removed: tick.RowsRemoved, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1313,10 +1373,16 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await QueryStoreClosedDayRollup.RunTickAsync(
-                _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays,
-                DarlingRetention.QueryStoreStatsPurgeRetentionDays(_scheduleOverrides),
-                _logger, stoppingToken);
+            await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "query_store_closed_day", async () =>
+            {
+                var tick = await QueryStoreClosedDayRollup.RunTickAsync(
+                    _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays,
+                    DarlingRetention.QueryStoreStatsPurgeRetentionDays(_scheduleOverrides),
+                    _logger, stoppingToken);
+                return new StorePassSteps.StepCounts(
+                    Built: tick.Built + tick.HoursBuilt + tick.ClutterDaysFolded, Removed: tick.DaysRemoved + tick.HoursRemoved,
+                    Failed: tick.Failed + tick.HoursFailed, Detail: DeferredText(tick.Deferred + tick.HoursDeferred));
+            });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -536,7 +536,9 @@ public sealed class PgLogEventMetricsRungTests
         Assert.Equal(72, TimescaleSupport.HypertableCount);
         Assert.Equal(29, CollectorCatalog.All.Count(c => c.TargetEngine == CollectorTargetEngine.PostgreSql));
         Assert.Equal(30, CollectorScheduleDefaults.All["pg_log_events"].RetentionDays);
-        Assert.Contains("thirty-five are the PostgreSQL reads", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs"), StringComparison.Ordinal);
+        Assert.Contains(
+            $"{DarlingMcpInstructions.RegisteredToolNames().Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal))} are the PostgreSQL reads",
+            DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
     [Fact]

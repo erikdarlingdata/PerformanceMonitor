@@ -574,7 +574,7 @@
       ]
     }
   ],
-  "generated_from": "15d1eb89c",
+  "generated_from": "209157b16",
   "mcp_tools": [
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
@@ -1592,6 +1592,11 @@
       "product": "Darling"
     },
     {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServiceStartTools.cs",
+      "name": "get_service_starts",
+      "product": "Darling"
+    },
+    {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs",
       "name": "get_session_stats",
       "product": "Darling"
@@ -1604,11 +1609,6 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpLatchSpinlockTools.cs",
       "name": "get_spinlock_stats",
-      "product": "Darling"
-    },
-    {
-      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreCompressionHealthTools.cs",
-      "name": "get_store_compression_health",
       "product": "Darling"
     },
     {
@@ -1629,6 +1629,11 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs",
       "name": "get_store_metrics",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStorePassStepsTools.cs",
+      "name": "get_store_pass_steps",
       "product": "Darling"
     },
     {
@@ -2633,9 +2638,9 @@
     }
   ],
   "migrations": {
-    "count": 304,
+    "count": 306,
     "file": "Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs",
-    "newest_version": 305
+    "newest_version": 307
   },
   "overview": [
     "This repository holds two products you can build and run. Darling is a headless collector service that keeps its data in PostgreSQL with TimescaleDB, and it comes with a WPF viewer and a web dashboard. Lite is a portable WPF app that keeps its data in DuckDB.",
@@ -2861,7 +2866,7 @@
     {
       "name": "Darling.Tests",
       "project": "Darling/Darling.Tests/Darling.Tests.csproj",
-      "test_classes": 3569
+      "test_classes": 3571
     },
     {
       "name": "PerformanceMonitor.Exporter.TestChild",

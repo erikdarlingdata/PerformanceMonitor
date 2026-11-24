@@ -184,6 +184,11 @@ ORDER BY sum(g.occurrences) DESC, g.event_class";
     /// <para><c>total_groups</c> is every row the window holds, counted over the grouped set before the LIMIT cuts it,
     /// so the page can say how much of the set it is (#8813).</para>
     ///
+    /// <para>$4 is the <c>query_id</c> filter (#9435), or NULL for none. A slow plan's message ends in
+    /// <c>queryid=&lt;id&gt;</c> and that text is the only place the id is kept (the row has no column for it), so the
+    /// filter is one exact test of the message's tail on the plan class ($5, passed so this text names no class), in the WHERE ahead of the LIMIT: an id that
+    /// is a prefix or suffix of another statement's does not match it.</para>
+    ///
     /// <para><c>message_text IS NOT NULL</c> is the whole predicate, and it is a structural test rather than
     /// a class list: the sweep writes text only for the classes the classifier retains, so asking for rows
     /// that HAVE text asks exactly the right population and cannot drift from the classifier's own decision
@@ -203,6 +208,8 @@ FROM collect.store_log_events AS e
 WHERE e.capture_time > $1
 AND   e.capture_time <= $2
 AND   e.message_text IS NOT NULL
+AND   ($4::text IS NULL
+       OR (e.event_class = $5 AND right(e.message_text, length($4::text)) = $4::text))
 GROUP BY e.event_class, e.severity, e.message_text
 ORDER BY max(e.capture_time) DESC,
          CASE WHEN e.severity IN ('WARNING', 'ERROR', 'FATAL', 'PANIC') THEN 0 ELSE 1 END,
@@ -800,6 +807,7 @@ WHERE e.sample_line IS NOT NULL";
         int limit,
         int offset,
         int? sampleLinePreviewLength,
+        long? queryId = null,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<RetainedEvent>();
@@ -813,6 +821,12 @@ WHERE e.sample_line IS NOT NULL";
         command.Parameters.AddWithValue(DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(windowEndUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(offset + limit);
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            Value = queryId is long id ? " queryid=" + id.ToString(CultureInfo.InvariantCulture) : DBNull.Value,
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text,
+        });
+        command.Parameters.AddWithValue(StoreLogClassifier.SlowPlanClass);
 
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         while (await reader.ReadAsync(cancellationToken))
