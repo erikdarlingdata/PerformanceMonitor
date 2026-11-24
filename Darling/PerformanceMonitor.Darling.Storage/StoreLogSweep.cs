@@ -336,7 +336,7 @@ FROM config.store_log_read_marker AS m";
 
     /// <summary><see cref="SweepAsync(NpgsqlConnection, DateTime, ILogger?, CancellationToken)"/> over a given set of log
     /// files; null reads the store's own log directory.</summary>
-    internal static async Task<List<FileCapture>> SweepAsync(
+    internal static Task<List<FileCapture>> SweepAsync(
         NpgsqlConnection connection,
         DateTime utcNow,
         ILogger? logger,
