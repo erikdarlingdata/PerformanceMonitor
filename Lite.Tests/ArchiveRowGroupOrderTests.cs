@@ -135,6 +135,19 @@ SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.
         return (groups, mixed, overlapping);
     }
 
+    /* A sum over every row's identity, so a rewrite that drops, repeats or alters a row changes it. */
+    private static long RowHash(string from) =>
+        Scalar($"SELECT sum((hash(collection_id, server_id, collection_time) % 1000000007)::BIGINT) FROM {from}");
+
+    private long HotRowHash()
+    {
+        using var connection = new DuckDBConnection($"Data Source={_dbPath}");
+        connection.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT sum((hash(collection_id, server_id, collection_time) % 1000000007)::BIGINT) FROM query_store_stats";
+        return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
     private string SingleQueryStoreFile() =>
         Directory.GetFiles(_archiveDir, "*_query_store_stats.parquet").Single().Replace('\\', '/');
 
@@ -207,32 +220,25 @@ SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.
         Assert.EndsWith("_query_store_stats.parquet", merged);
         Assert.Equal(rows, Scalar($"SELECT count(*) FROM read_parquet('{merged}')"));
 
-        /* The second reset of the same day: its export is a per-cycle YYYYMMDD_HHMM file, unsorted again. */
+        /* The second reset of the same day. The reset compacts what it exported before it returns, so the service that runs it
+           carries a budget no two files fit in: the merged file and the export are each a batch of one. The rows the pair holds
+           are read before the reset, from the merged file and the hot table. */
         await InsertHotAsync(rows, idBase: rows);
-        Assert.True(await new ArchiveService(initializer, _archiveDir).ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
-        var export = Directory.GetFiles(_archiveDir, "*_query_store_stats.parquet").Select(f => f.Replace('\\', '/')).Single(f => f != merged);
-        Assert.Matches(@"\d{8}_\d{4}_query_store_stats\.parquet$", export);
-
-        string RowSignature() => Scalar($@"
-SELECT count(*) FROM read_parquet('{P("*_query_store_stats*.parquet")}')") + "|" + Scalar($@"
-SELECT sum((hash(collection_id, server_id, collection_time) % 1000000007)::BIGINT) FROM read_parquet('{P("*_query_store_stats*.parquet")}')");
-        var rowsBefore = RowSignature();
+        var expectedHash = RowHash($"read_parquet('{merged}')") + HotRowHash();
         var mergedBytesBefore = File.ReadAllBytes(merged);
         var mergedWrittenBefore = File.GetLastWriteTimeUtc(merged);
 
-        var service = new ArchiveService(initializer, _archiveDir)
-        {
-            DailyCompactionBatchInputBytes = Math.Max(new FileInfo(merged).Length, new FileInfo(export).Length) + 1
-        };
-        service.CompactParquetFiles();
+        Assert.True(await new ArchiveService(initializer, _archiveDir) { DailyCompactionBatchInputBytes = 1 }
+            .ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
 
         Assert.True(File.Exists(merged), "the day's merged file is gone");
         Assert.Equal(mergedWrittenBefore, File.GetLastWriteTimeUtc(merged));
         Assert.True(mergedBytesBefore.AsSpan().SequenceEqual(File.ReadAllBytes(merged)), "the day's merged file was rewritten");
-        Assert.False(File.Exists(export), "the reset export was left unsorted beside the merged file");
+        Assert.Empty(Directory.GetFiles(_archiveDir, "????????_????_query_store_stats.parquet"));
         var part = Directory.GetFiles(_archiveDir, "*_query_store_stats_pt*.parquet").Single().Replace('\\', '/');
         Assert.Equal(rows, Scalar($"SELECT count(*) FROM read_parquet('{part}')"));
-        Assert.Equal(rowsBefore, RowSignature());
+        Assert.Equal(2 * rows, Scalar($"SELECT count(*) FROM read_parquet('{P("*_query_store_stats*.parquet")}')"));
+        Assert.Equal(expectedHash, RowHash($"read_parquet('{P("*_query_store_stats*.parquet")}')"));
 
         var (groups, mixed, overlapping) = Order(part);
         Assert.True(groups >= 8, $"{groups} row groups: too few to tell sorted from unsorted");
