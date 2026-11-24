@@ -49,6 +49,7 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
     private readonly object _gate = new();
     private readonly SemaphoreSlim _flushGate = new(1, 1);
     private readonly List<ServiceStartRung> _pending = new();
+    private readonly List<ServiceStartRungObject> _pendingObjects = new();
     private readonly ServiceLogTally _tally;
     private readonly Func<DateTime> _clock;
     private readonly string _serviceHost;
@@ -56,6 +57,7 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
     private readonly string? _commitId;
     private readonly DateTime _processStartedUtc;
     private int _attempt;
+    private bool _freshInstall;
     private int? _schemaBefore;
     private int? _schemaAfter;
     private DateTime? _storeReadyUtc;
@@ -120,7 +122,35 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
         lock (_gate)
         {
             _attempt++;
+            if (_schemaBefore is null && storeVersion == 0)
+            {
+                /* #9438: a ladder from an empty store lists no object rows, because every object would read as created. One marker row says so for the whole start. */
+                _freshInstall = true;
+                _pendingObjects.Add(new ServiceStartRungObject(
+                    StartId, ServiceStartRungObjects.MarkerRung, _attempt, 0, string.Empty, string.Empty, null,
+                    MigrationObjectKind.Ladder, MigrationObjectAction.FreshInstall));
+            }
+
             _schemaBefore ??= storeVersion;
+        }
+    }
+
+    /// <inheritdoc />
+    public void RungObjects(int version, IReadOnlyList<MigrationObjectChange> changes)
+    {
+        lock (_gate)
+        {
+            if (_freshInstall)
+            {
+                return;
+            }
+
+            var attempt = Math.Max(_attempt, 1);
+            for (var i = 0; i < changes.Count; i++)
+            {
+                var c = changes[i];
+                _pendingObjects.Add(new ServiceStartRungObject(StartId, version, attempt, i, c.Schema, c.Object, c.Column, c.Kind, c.Action));
+            }
         }
     }
 
@@ -168,6 +198,7 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
             var counts = _tally.Snapshot();
             ServiceStartRow row;
             List<ServiceStartRung> rungs;
+            List<ServiceStartRungObject> objects;
             lock (_gate)
             {
                 var elapsed = now - _processStartedUtc;
@@ -178,6 +209,7 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
                     PreviousStopUtc: null, now, counts.Errors, counts.Warns, counts.FirstErrors, counts.FirstWarns,
                     _snapshot10?.Errors, _snapshot10?.Warns, _snapshot30?.Errors, _snapshot30?.Warns);
                 rungs = new List<ServiceStartRung>(_pending);
+                objects = new List<ServiceStartRungObject>(_pendingObjects);
             }
 
             try
@@ -189,6 +221,15 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
                     lock (_gate)
                     {
                         _pending.RemoveRange(0, rungs.Count);
+                    }
+                }
+
+                if (objects.Count > 0)
+                {
+                    await ServiceStartRungObjects.InsertAsync(postgres, objects, cancellationToken).ConfigureAwait(false);
+                    lock (_gate)
+                    {
+                        _pendingObjects.RemoveRange(0, objects.Count);
                     }
                 }
 

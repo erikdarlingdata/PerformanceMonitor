@@ -995,6 +995,9 @@ ALTER TABLE config.store_statement_baseline DROP COLUMN IF EXISTS shared_blks_di
         // store that never had them.
         new(307, "hasServiceStartHistory", @"DROP TABLE IF EXISTS collect.service_start_rungs;
 DROP TABLE IF EXISTS collect.service_starts;"),
+        // V308 (#9438): the migration rung object table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V308 creates it empty. Safe on a store that never
+        // had it.
+        new(308, "hasServiceStartRungObjects", @"DROP TABLE IF EXISTS collect.service_start_rung_objects;"),
     ];
 
     /// <summary>

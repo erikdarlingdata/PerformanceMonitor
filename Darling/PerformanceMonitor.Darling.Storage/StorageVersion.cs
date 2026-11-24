@@ -16,5 +16,5 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class StorageVersion
 {
-    public const int SchemaVersion = ServiceStartHistory.Version;
+    public const int SchemaVersion = ServiceStartRungObjects.Version;
 }
