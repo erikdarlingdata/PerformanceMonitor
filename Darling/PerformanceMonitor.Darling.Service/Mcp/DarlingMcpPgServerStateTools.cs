@@ -96,11 +96,13 @@ public sealed class DarlingMcpPgServerStateTools
             }
 
             var newest = rows[0];
-            var pageBuffers = rows.Sum(r => r.Buffers);
+            /* #9508: a snapshot whose per-relation scan was skipped is one totals-only row, never a relation. */
+            var listed = rows.Where(r => !r.IsTotalsOnly).ToList();
+            var pageBuffers = listed.Sum(r => r.Buffers);
             /* #7455: counted in the read (relations_in_snapshot), not guessed from a full page. */
-            var truncated = rows.Count < newest.RelationsInSnapshot;
+            var truncated = listed.Count < newest.RelationsInSnapshot;
 
-            var relations = rows.Select(r => new
+            var relations = listed.Select(r => new
             {
                 database_name = r.DatabaseName,
                 relation_name = r.RelationName,
@@ -128,7 +130,12 @@ public sealed class DarlingMcpPgServerStateTools
                 /* #7010: the snapshot's own stamp and age (the read answers the newest snapshot, not a window). */
                 captured_at = newest.CaptureTime.ToString("o"),
                 age_seconds = LatestSnapshotStamp.AgeSeconds(newest.CaptureTime, windowEnd),
-                relation_count = rows.Count,
+                relation_count = listed.Count,
+                /* #9508: relations (the rows are the relations), skipped_over_cap (the pool was over the cap, so the scan was
+                   not run and there are no relation rows by design) or precondition (the same, and the target has no
+                   pg_buffercache_summary(), so the used count is unknown). */
+                relation_breakdown = newest.RelationBreakdown,
+                cap_buffers = PgBufferUsageCollector.PoolCapBuffers,
                 /* #7455: the real size of the snapshot this page was cut from, counted in the same read before
                    the cut and never inferred from a full page. A page of `limit` rows is not the pool. Only
                    relations of 8 buffers or more are stored, so this is the stored set. */
@@ -138,16 +145,21 @@ public sealed class DarlingMcpPgServerStateTools
                 /* 8 kB is PostgreSQL's near-universal block size but it IS a compile-time setting, so the
                    buffer COUNT is the measurement and the megabyte figure is a convenience beside it. */
                 pool_buffers_total = newest.PoolBuffersTotal,
-                pool_buffers_used = newest.PoolBuffersUsed,
+                /* #9508: null when the used count is unknown (relation_breakdown precondition), never a zero that reads as an empty pool. */
+                pool_buffers_used = newest.IsTotalsOnly && newest.RelationBreakdown == DarlingPgBufferUsageReader.Precondition
+                    ? (long?)null
+                    : newest.PoolBuffersUsed,
                 note = "Residency, not read volume: a small hot table and a large one scanned once can "
                      + "read alike and occupy the pool completely differently. avg_usage_count is what the "
                      + "clock-sweep eviction reads; buffer sizes assume the standard 8 kB block."
-                     + (truncated
-                         ? $" This page holds {rows.Count} of the {newest.RelationsInSnapshot} relations in the "
+                     + (newest.IsTotalsOnly
+                         ? " " + DarlingPgBufferUsageReader.BreakdownNote(newest.RelationBreakdown, newest.PoolBuffersTotal)
+                         : truncated
+                         ? $" This page holds {listed.Count} of the {newest.RelationsInSnapshot} relations in the "
                            + $"snapshot and leaves out {Math.Max(0, newest.SnapshotBuffers - pageBuffers)} buffers: "
                            + "raise limit to see the rest."
                          : " This page holds every relation in the snapshot.")
-                     + (rows.Any(r => r.NameLabel != null)
+                     + (listed.Any(r => r.NameLabel != null)
                          ? " A relation_name of null is not an error: the pool is cluster-wide and the collector "
                            + "names a relation only in the database it is connected to. relation_label says which "
                            + "kind it is. "

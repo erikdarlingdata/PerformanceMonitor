@@ -1359,10 +1359,20 @@ public partial class ViewerServerTab
 
         var rows = await Timed(timer, "PostgreSQL buffer usage read", _dataService.GetPgBufferUsageAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit));
 
-        ClientStep(timer, "PostgreSQL buffer usage grid build", () => PgBufferUsageGrid.ItemsSource = rows.Select(PgDisplay.BufferUsage).ToList());
+        /* #9508: a snapshot whose per-relation scan was skipped is one totals-only row; the grid lists relations only. */
+        ClientStep(timer, "PostgreSQL buffer usage grid build", () => PgBufferUsageGrid.ItemsSource = rows.Where(r => !r.IsTotalsOnly).Select(PgDisplay.BufferUsage).ToList());
 
         var total = rows.Count == 0 ? 0L : rows[0].PoolBuffersTotal;
         var used = rows.Count == 0 ? 0L : rows[0].PoolBuffersUsed;
+
+        if (rows.Count > 0 && rows[0].IsTotalsOnly)
+        {
+            PgBufferUsageNote.Text = DarlingPgBufferUsageReader.BreakdownNote(rows[0].RelationBreakdown, total)
+                + (rows[0].RelationBreakdown == DarlingPgBufferUsageReader.SkippedOverCap
+                    ? $" Latest snapshot: {used:N0} of {total:N0} buffers in use ({(total == 0 ? 0 : 100.0 * used / total):N1}% of the pool)."
+                    : string.Empty);
+            return;
+        }
 
         PgBufferUsageNote.Text = rows.Count == 0
             ? "Nothing recorded. This panel needs the pg_buffercache extension: without it the collector "

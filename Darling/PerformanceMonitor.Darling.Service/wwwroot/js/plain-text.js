@@ -136,7 +136,10 @@ function toolWords(name) {
 }
 
 /* #7670: what a count means, for the few a reader cannot work out from the label. The gate skips the XML read when the extended-events counter has not moved since the last run. */
-const COUNT_MEANINGS = { shred_gated: { 1: "no new events since the last run, so the XML was not read", 0: "the XML was read" } };
+const COUNT_MEANINGS = {
+  shred_gated: { 1: "no new events since the last run, so the XML was not read", 0: "the XML was read" },
+  relation_scan_skipped: { 1: "the pool is over the cap, so the per-relation scan was not run and the pool totals were read instead" },
+};
 
 /** One count in words: "events read: 0", and for a count in COUNT_MEANINGS its meaning after it ("shred gated: 1 (no new events ...)"). */
 function countText(label, value) {

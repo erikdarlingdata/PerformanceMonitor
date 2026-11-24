@@ -3352,6 +3352,7 @@ namespace PerformanceMonitor.Common
         {
             ("shred_gated", "1") => " (no new events since the last run, so the XML was not read)",
             ("shred_gated", "0") => " (the XML was read)",
+            ("relation_scan_skipped", "1") => " (the pool is over the cap, so the per-relation scan was not run and the pool totals were read instead)",
             _ => string.Empty,
         };
 

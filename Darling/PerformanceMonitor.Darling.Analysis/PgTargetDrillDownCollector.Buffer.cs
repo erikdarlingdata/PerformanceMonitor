@@ -102,7 +102,7 @@ totals AS (
         max(collection_time)                                                                   AS captured_at,
         CAST(coalesce(max(pool_buffers_total), 0) AS bigint)                                   AS pool_buffers_total,
         CAST(coalesce(max(pool_buffers_used), 0) AS bigint)                                    AS pool_buffers_used,
-        CAST(count(*) AS integer)                                                              AS relations_in_capture,
+        CAST(count(buffers) AS integer)                                                        AS relations_in_capture,
         CAST(coalesce(SUM(buffers), 0) AS bigint)                                              AS buffers_listed,
         CAST(coalesce(SUM(dirty_buffers), 0) AS bigint)                                        AS dirty_buffers_listed,
         CAST(coalesce(SUM(buffers) FILTER (WHERE relation_kind IN ('r', 'm')), 0) AS bigint)   AS heap_buffers,
@@ -131,7 +131,7 @@ SELECT
     t.cold_buffers
 FROM capture AS c
 CROSS JOIN totals AS t
-ORDER BY c.buffers DESC, c.relation_name NULLS LAST, c.database_name NULLS LAST
+ORDER BY c.buffers DESC NULLS LAST, c.relation_name NULLS LAST, c.database_name NULLS LAST
 LIMIT $4";
 
     /// <summary>
@@ -234,6 +234,13 @@ AND   e.extension_name = 'pg_buffercache'";
                 index = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14));
                 toast = reader.IsDBNull(15) ? 0 : Convert.ToInt64(reader.GetValue(15));
                 cold = reader.IsDBNull(16) ? 0 : Convert.ToInt64(reader.GetValue(16));
+
+                /* #9508: a capture whose per-relation scan was skipped is one totals-only row (buffers NULL): the pool totals
+                   above are its, and it is no relation. */
+                if (reader.IsDBNull(4))
+                {
+                    continue;
+                }
 
                 var relationName = reader.IsDBNull(1) ? null : reader.GetString(1);
                 var relationNameLength = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2));
