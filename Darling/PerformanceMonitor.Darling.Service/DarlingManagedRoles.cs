@@ -464,7 +464,7 @@ public static class DarlingManagedRoles
         }
 
         ComposeStoreFacts facts;
-        await using (var connection = await dataSource.OpenConnectionAsync(cancellationToken))
+        await using (var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.RoleProvisioning, cancellationToken))
         {
             facts = await ReadComposeStoreFactsAsync(connection, cancellationToken);
         }
@@ -795,7 +795,7 @@ LIMIT 1", connection, transaction) { CommandTimeout = ServiceCommandDeadlines.Se
         NpgsqlDataSource dataSource, string adminPassword, string viewerPassword, string mcpPassword, string webPassword,
         ProvisioningTarget target, ILogger logger, CancellationToken cancellationToken)
     {
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.RoleProvisioning, cancellationToken);
 
         /* #5560: the two reads, the plan and the batch all run inside the provisioning lock's transaction, so a sibling
            service's batch cannot rewrite the same catalog rows at once and what this one planned from is read after
@@ -1016,7 +1016,7 @@ ALTER ROLE {mcp}    SET log_parameter_max_length = 0;";
 
         try
         {
-            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.RoleProvisioning, cancellationToken);
             /* #5560: the same lock as provisioning, so a reload cannot rewrite a role row a starting sibling is
                rewriting. The wait is the serial-loop deadline, not the full provisioning wait, because this runs at
                the top of a sweep: a key something else is holding delays the reload by that wait, then the lines run
@@ -4538,7 +4538,7 @@ CREATE OR REPLACE TRIGGER trg_monitored_server_password_rules
 
         try
         {
-            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.RoleProvisioning, cancellationToken);
 
             /* #5560: the check and the CREATE OR REPLACE run under the provisioning lock, like the provisioning batch.
                Two services on one self-managed store would otherwise both find the function stale and both replace

@@ -646,6 +646,8 @@ public partial class ViewerServerTab : UserControl
         ViewerReadScope.Enter(cancel);
         try
         {
+            /* #9426: the slow-load line names the range this load asked for. */
+            timer.Window = WindowText();
             if (LoadStartHook is { } hook)
             {
                 await hook(tabIndex, cancel);
@@ -749,6 +751,10 @@ public partial class ViewerServerTab : UserControl
                     break;
             }
 
+            /* #9426: wait for the layout and render pass the load's binds queued (the dispatcher's Background priority, behind render and ahead
+               of idle), so the line's render share ends when the panel is drawn and not when the loader's own code returned. */
+            await timer.SettleLayoutAsync(Dispatcher);
+
             /* A loader that swallowed the cancel (a read it treats as best-effort) must not stamp or write a line either. */
             cancel.ThrowIfCancellationRequested();
 
@@ -776,15 +782,35 @@ public partial class ViewerServerTab : UserControl
         finally
         {
             /* Walk finding D15: a slow load (over ViewerLoadTimer.SlowLoadThresholdMs) names its tab and where the time went. */
-            var slow = timer.Finish(InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header));
+            var surfaceName = InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header);
             /* #5555: this load's clock is a local handed down to the loaders this method calls (Walk finding D15: a loader wraps each
                store read in Timed(timer, ...)), not a field. A read that starts outside this load (a Daily Summary drill into
                Top Queries, a slicer drag) passes null, so it cannot append its phases to this load's line, finished or live, or
                rename it. */
-            if (slow is not null && !cancelled)
+            if (cancelled)
             {
-                SlowLoadSink($"[{_server.DisplayName}] {slow}");
+                /* #9426: a load the reader replaced stops its clock and writes nothing, so no line carries a total that includes the wait for the newer one. */
+                timer.Finish(surfaceName);
             }
+            else
+            {
+                timer.FinishAndLog(surfaceName, slow => SlowLoadSink($"[{_server.DisplayName}] {slow}"));
+            }
+        }
+    }
+
+    /// <summary>#9426: the range the load reads, as the text the slow-load line shows: both bounds in UTC, never a server's own value.</summary>
+    private string WindowText()
+    {
+        try
+        {
+            var (startUtc, endUtc) = GetWindowUtc();
+            return string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{startUtc:yyyy-MM-dd HH:mm} to {endUtc:yyyy-MM-dd HH:mm} UTC");
+        }
+        catch (Exception)
+        {
+            /* A diagnostic: a picker that cannot say its range leaves the line without one and never fails the load. */
+            return "";
         }
     }
 

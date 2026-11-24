@@ -581,16 +581,21 @@ public sealed partial class ViewerDataService : IAsyncDisposable
            from disagreeing. */
         ViewerStorePool.Publish(effectiveConnectionString);
 
-        /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.ApplicationName,
-           set on the builder there); this is the BYO connection string's turn — set-if-absent, so an
+        /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.BuiltApplicationName,
+           set on the builder there, #9436); this is the BYO connection string's turn — set-if-absent, so an
            operator's own ApplicationName on a bring-your-own store wins. */
         _dataSource = NpgsqlDataSource.Create(
-            DarlingStoreConnection.PinSessionTimeZoneUtc(
-                DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)));
+            DarlingStoreConnection.PinSessionTimeZoneUtc(NameStoreConnection(effectiveConnectionString)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
         StoreConnectionIdentity = ViewerPasswordKey.StoreIdentityOf(connectionString);
         _alertClocks = new ServerClockCache(ct => GetServerClocksAsync(serverId: null, ct), AlertClockLifetime);
     }
+
+    /// <summary>
+    /// The viewer's name with its build (#4479, #9436), set on the string only when it has no <c>ApplicationName</c> of its own.
+    /// </summary>
+    internal static string NameStoreConnection(string effectiveConnectionString) =>
+        DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.BuiltApplicationName);
 
     /// <summary>
     /// Builds the data service, or says why the store connection string cannot be used. The constructor

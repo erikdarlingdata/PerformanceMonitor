@@ -2037,7 +2037,7 @@ LIMIT 1";
         string? isolationLevel = null;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.ActualPlanLookup, cancellationToken);
             await using var command = new NpgsqlCommand(ResolveActualPlanSql(request.Source), connection);
             command.CommandTimeout = ServiceCommandDeadlines.ActualPlanResolveSeconds;
             BindActualPlanResolveParameters(command, serverId, request);

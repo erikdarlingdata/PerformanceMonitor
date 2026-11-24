@@ -1041,7 +1041,8 @@ LIMIT 1;";
 
         try
         {
-            await using var command = postgres.CreateCommand(RecordSightingsSql);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.OversizedPlanIntake, cancellationToken).ConfigureAwait(false);
+            await using var command = new NpgsqlCommand(RecordSightingsSql, connection);
             command.CommandTimeout = CommandTimeoutSeconds;
 
             /* $1..$12 in statement order. One statement, so the whole batch is one transaction. */

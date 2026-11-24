@@ -131,6 +131,9 @@ public sealed class StoreHealthReader
             note);
     }
 
+    /// <summary>The build history (#9425), newest first. It reads <c>build-history.json</c> beside the store and nothing else: no store lock, no archive.</summary>
+    public IReadOnlyList<BuildStartEntry> ReadBuildHistory() => new BuildHistory(BuildHistory.PathFor(_duckDb.DatabasePath)).Read();
+
     private static double FileMegabytes(string path)
     {
         try

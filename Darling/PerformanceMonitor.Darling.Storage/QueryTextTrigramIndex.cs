@@ -477,7 +477,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         NpgsqlDataSource postgres, bool enabled, QueryTextTrigramIndexTracker tracker, DateTime utcNow, ILogger logger,
         int buildTimeoutSeconds, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
         var state = await ReadStateAsync(connection, cancellationToken).ConfigureAwait(false);
         if (!state.TableExists)
         {
@@ -692,7 +692,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
             await using var drop = new NpgsqlCommand(DropSampleIndexSql(hypertable), connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
             await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -724,7 +724,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
             await using var drop = new NpgsqlCommand(DropSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
             await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -809,7 +809,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             }
 
             var total = System.Diagnostics.Stopwatch.StartNew();
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
             var openSeconds = total.Elapsed.TotalSeconds;
             bool limitSet;
             await using (var read = new NpgsqlCommand(PendingListStateSql(indexName), connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })

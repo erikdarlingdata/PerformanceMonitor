@@ -268,7 +268,7 @@ SET source_built_at = EXCLUDED.source_built_at,
         ArgumentNullException.ThrowIfNull(logger);
 
         var clock = Stopwatch.StartNew();
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.ObjectReferencesDaily, cancellationToken);
 
         int retentionDays;
         await using (var applied = new NpgsqlCommand(AppliedRetentionSql, connection) { CommandTimeout = CommandTimeoutSeconds })

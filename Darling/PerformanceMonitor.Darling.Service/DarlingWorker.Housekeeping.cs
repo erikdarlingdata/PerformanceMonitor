@@ -144,7 +144,7 @@ public sealed partial class DarlingWorker
         var readClock = Stopwatch.StartNew();
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreSettings, cancellationToken);
             readClock.Restart();
             var stored = await DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync(connection, cancellationToken);
             return stored
@@ -283,7 +283,7 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreSize, cancellationToken);
             using var command = new NpgsqlCommand(StoreSelfMetrics.LatestStoreSizeWithTimeSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0))
@@ -348,7 +348,7 @@ public sealed partial class DarlingWorker
         var readClock = Stopwatch.StartNew();
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.CompressionHealth, cancellationToken);
             readClock.Restart();
 
             /* #1778: report what compression is DOING before deciding whether anything is stuck. The field
@@ -609,7 +609,7 @@ public sealed partial class DarlingWorker
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.TimescaleReprobe, budget.Token);
             var available = await TimescaleSupport.TryEnableAsync(connection, null, budget.Token);
             if (!available)
             {
@@ -752,7 +752,7 @@ public sealed partial class DarlingWorker
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.RetentionReevaluate, budget.Token);
 
             /* #4300: the seam-only repair runs BEFORE the coverage sweep below, on the SAME connection, so a
                seam it closes this tick is already gone by the time EnsureRetentionPoliciesAsync re-judges
@@ -1201,7 +1201,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreConverge, budget.Token);
             foreach (var step in s_storeObjectConvergence)
             {
                 /* #3913: the ONE filter the hourly pass has. On a store without TimescaleDB, a step that needs
@@ -1264,7 +1264,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// <summary>Starts the re-group loop unless one is running. Never throws and does no database work on this thread.</summary>
     private void StartPerfmonRegroupDrain(CancellationToken stoppingToken)
     {
-        _perfmonRegroupDrain ??= new PerfmonRegroupDrain(token => _postgres!.OpenConnectionAsync(token), _logger);
+        _perfmonRegroupDrain ??= new PerfmonRegroupDrain(token => _postgres!.OpenConnectionAsync(StoreSessionNames.PerfmonRegroup, token), _logger);
         _perfmonRegroupDrain.StartIfIdle(stoppingToken);
     }
 
@@ -1424,7 +1424,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.CheckpointSample, budget.Token);
             var syncMs = await StoreSelfMetrics.ReadCheckpointerSyncTimeMsAsync(connection, budget.Token);
             if (syncMs is long sampled)
             {
@@ -1501,7 +1501,7 @@ AND   j.hypertable_name = '{relation}'", connection))
         using var budget = new CancellationTokenSource(budgetLimit);
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(budget.Token);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SampleFlush, budget.Token);
 
             try
             {
@@ -1569,7 +1569,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreMetrics, budget.Token);
 
             /* #3923: its OWN narrow catch, ahead of the store-log capture below and on the same reasoning
                that catch already carries - a PostgresException the store permanently rejects here (catalog
