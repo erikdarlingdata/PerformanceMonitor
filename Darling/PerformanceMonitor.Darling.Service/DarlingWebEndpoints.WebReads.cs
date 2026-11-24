@@ -410,7 +410,7 @@ public static partial class DarlingWebEndpoints
                static reference, not a new BuildReadDispatch parameter (round-1 review, Medium 2) — unlike
                postgresConfig, the cache instance never varies by caller, so no threading is needed. #4203:
                c.RequestAborted now reaches the gather via GetOrGatherAsync's linked token. */
-            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, StoreProcessOwnership.Shared, c.RequestAborted),
+            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, StoreProcessOwnership.Shared, QueryDouble(c, "free_floor_percent", DarlingMcpStoreHostTools.DefaultFreeFloorPercent), c.RequestAborted),
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), null, c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
@@ -794,7 +794,7 @@ public static partial class DarlingWebEndpoints
     }
 
     /// <summary>The hours-back window from <c>?hours=</c> (or the tool's own <c>?hours_back=</c>), else the tool's default.</summary>
-    private static int Hours(HttpContext context, int def) => QueryInt(context, "hours", "hours_back", def);
+    internal static int Hours(HttpContext context, int def) => QueryInt(context, "hours", "hours_back", def);
 
     /// <summary>
     /// The window ANCHOR from <c>?as_of=</c>; null when absent, which is what makes the window end at now.
@@ -802,7 +802,7 @@ public static partial class DarlingWebEndpoints
     /// MCP surfaces cannot disagree about what a bad anchor means, and the refusal envelope reaches the same
     /// <see cref="ToHttpResult"/> 400 mapping every other client-correctable outcome does.
     /// </summary>
-    private static string? AsOf(HttpContext context) => First(context, "as_of");
+    internal static string? AsOf(HttpContext context) => First(context, "as_of");
 
     /// <summary>An optional text parameter; null when absent or empty (so the tool sees its own default).</summary>
     internal static string? Str(HttpContext context, string key) => First(context, key);
