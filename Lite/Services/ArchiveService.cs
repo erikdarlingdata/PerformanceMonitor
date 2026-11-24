@@ -1577,8 +1577,14 @@ COPY (
                 /* A table merged per day also leaves a batch of one alone, whatever the file's name (#5393): a
                    per-cycle file over the small budget is merged by nothing else, and rewriting it alone would
                    only rename it while risking the memory the budget exists to bound. */
+                /* A day table that is also sorted by server (query_store_stats) is the exception (#9195): its lone
+                   per-cycle file is a size reset's export, which holds the hot table's rows in time order, every
+                   server interleaved, so rewriting it sorted is not a rename, it is the one pass that clusters it.
+                   Left alone, a day that holds only one export (the common case for a reset every half day) kept
+                   row groups that each span every server. A file already in its final YYYYMMDD form still stays. */
+                var sortedDaily = isDaily && ParquetCompaction.ServerOrderByFor(table) is not null;
                 var wantedBatches = batches
-                    .Where(b => !(b.Count == 1 && (isDaily || IsMergedFileName(Path.GetFileName(b[0])))))
+                    .Where(b => !(b.Count == 1 && ((isDaily && !sortedDaily) || IsMergedFileName(Path.GetFileName(b[0])))))
                     .ToList();
                 var wantedBytes = wantedBatches.Sum(BatchInputBytes);
                 largestNeedBytes = Math.Max(largestNeedBytes, wantedBytes);

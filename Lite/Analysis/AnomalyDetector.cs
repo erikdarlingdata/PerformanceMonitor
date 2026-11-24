@@ -162,6 +162,47 @@ public class AnomalyDetector
         return anomalies;
     }
 
+    /// <summary>The newest two distinct <c>index_object_stats</c> collection times before the window's end for the server.</summary>
+    private readonly record struct ObjectSnapshotPair(DateTime Latest, DateTime Prior);
+
+    /// <summary>
+    /// The newest two distinct snapshot times of the server before the window's end, however old they are (#9195): a server
+    /// that stopped reporting still compares its last two. Null when there are fewer than two. The hot table answers alone
+    /// when it holds two and the archive's newest time is no newer than the second of them, so the pair is the same one the
+    /// <c>v_</c> view would give. Otherwise (the pair straddles the stores, or sits wholly in the archive right after a reset,
+    /// or the archive generation moved since its span was read) the view is probed for the same two times. Call with the
+    /// read lock held.
+    /// </summary>
+    private async Task<ObjectSnapshotPair?> FindObjectSnapshotsAsync(
+        DuckDBConnection connection, AnalysisContext context, long archiveGeneration, ArchiveSpan? archiveSpan)
+    {
+        var times = await ReadSnapshotTimesAsync(connection, context, "index_object_stats");
+        var archiveCannotBeNewer = times.Count == 2
+            && archiveGeneration == _duckDb.ArchiveViewGeneration
+            && archiveSpan is { } span
+            && (span.Newest is not DateTime newest || newest <= times[1]);
+        if (!archiveCannotBeNewer)
+            times = await ReadSnapshotTimesAsync(connection, context, "v_index_object_stats");
+
+        return times.Count == 2 ? new ObjectSnapshotPair(times[0], times[1]) : null;
+    }
+
+    private static async Task<List<DateTime>> ReadSnapshotTimesAsync(DuckDBConnection connection, AnalysisContext context, string source)
+    {
+        using var cmd = connection.CreateCommand();
+        /* The source is one of this class's two constants, never input. */
+        cmd.CommandText = "SELECT DISTINCT collection_time FROM " + source
+            + " WHERE server_id = $1 AND collection_time < $2 ORDER BY collection_time DESC LIMIT 2";
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+
+        var times = new List<DateTime>(2);
+        using var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-object-snapshots", context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+            times.Add(reader.GetDateTime(0));
+        return times;
+    }
+
     /// <summary>
     /// Day-over-day object/index detection (delta-based, not stddev-baseline) since the
     /// index_object_stats collector runs daily and its counters are cumulative. The two snapshots compared are
@@ -174,27 +215,35 @@ public class AnomalyDetector
     {
         try
         {
+            /* #9195: the archive's newest snapshot time, read (and cached per archive generation) before the lock, so the
+               snapshot probe below knows whether the archive can hold a newer pair than the hot table. */
+            var archiveGeneration = _duckDb.ArchiveViewGeneration;
+            var archiveSpan = await _duckDb.GetArchiveSpanAsync("index_object_stats", "collection_time", context.CancellationToken);
+
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(context.CancellationToken);
+
+            /* #9195: both reads compare the newest two snapshots before the window's end, so the pair is found once and bound
+               into the statements as plain equalities a Parquet scan can push down (an equality against a subquery's result
+               it cannot, so each statement read every row group of the server's archive). Fewer than two snapshots leave
+               nothing to compare: no growth and no contention, as before. */
+            if (await FindObjectSnapshotsAsync(connection, context, archiveGeneration, archiveSpan) is not { } snapshots)
+                return;
 
             // Growth: biggest day-over-day table grower (indexes rolled up) over threshold.
             using (var cmd = connection.CreateCommand())
             {
                 cmd.CommandText = @"
-WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 AND collection_time < $4 ORDER BY collection_time DESC LIMIT 2),
-latest AS (SELECT MAX(collection_time) t FROM snaps),
-prior AS (SELECT MIN(collection_time) t FROM snaps),
-cur AS (SELECT database_name, object_id, MAX(schema_name) schema_name, MAX(table_name) table_name, SUM(reserved_mb) mb
-        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = (SELECT t FROM latest) GROUP BY database_name, object_id),
+WITH cur AS (SELECT database_name, object_id, MAX(schema_name) schema_name, MAX(table_name) table_name, SUM(reserved_mb) mb
+        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = $4 GROUP BY database_name, object_id),
 prv AS (SELECT database_name, object_id, SUM(reserved_mb) mb
-        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = (SELECT t FROM prior) GROUP BY database_name, object_id)
+        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = $5 GROUP BY database_name, object_id)
 SELECT cur.database_name, cur.schema_name, cur.table_name, prv.mb AS prior_mb, cur.mb AS current_mb,
        cur.mb - prv.mb AS growth_mb,
        (cur.mb - prv.mb) * 100.0 / NULLIF(prv.mb, 0) AS growth_pct
 FROM cur JOIN prv ON cur.database_name = prv.database_name AND cur.object_id = prv.object_id
-WHERE (SELECT t FROM latest) <> (SELECT t FROM prior)
-AND   cur.mb - prv.mb >= $2
+WHERE cur.mb - prv.mb >= $2
 AND   (prv.mb <= 0 OR (cur.mb - prv.mb) * 100.0 / NULLIF(prv.mb, 0) >= $3)
 /*SEC*/
 ORDER BY growth_mb DESC LIMIT 1";
@@ -203,10 +252,11 @@ ORDER BY growth_mb DESC LIMIT 1";
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthMbThreshold });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectGrowthPctThreshold });
-                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+                cmd.Parameters.Add(new DuckDBParameter { Value = snapshots.Latest });
+                cmd.Parameters.Add(new DuckDBParameter { Value = snapshots.Prior });
                 /* #5558: object sizes (reserved_mb) mirror the primary, so a secondary copy's growth is the primary's
                    to report. Only this growth query is filtered; the contention anomaly stays node-local. */
-                cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "ANOMALY_OBJECT_GROWTH", "cur.database_name", 5);
+                cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "ANOMALY_OBJECT_GROWTH", "cur.database_name", 6);
 
                 using var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-object-growth", context.CancellationToken);
                 if (await reader.ReadAsync(context.CancellationToken))
@@ -250,24 +300,21 @@ ORDER BY growth_mb DESC LIMIT 1";
             using (var cmd = connection.CreateCommand())
             {
                 cmd.CommandText = @"
-WITH snaps AS (SELECT DISTINCT collection_time FROM v_index_object_stats WHERE server_id = $1 AND collection_time < $3 ORDER BY collection_time DESC LIMIT 2),
-latest AS (SELECT MAX(collection_time) t FROM snaps),
-prior AS (SELECT MIN(collection_time) t FROM snaps),
-cur AS (SELECT database_name, object_id, index_id, schema_name, table_name, index_name,
+WITH cur AS (SELECT database_name, object_id, index_id, schema_name, table_name, index_name,
                COALESCE(row_lock_wait_in_ms,0) ms, COALESCE(index_lock_promotion_count,0) esc
-        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = (SELECT t FROM latest)),
+        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = $3),
 prv AS (SELECT database_name, object_id, index_id, COALESCE(row_lock_wait_in_ms,0) ms, COALESCE(index_lock_promotion_count,0) esc
-        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = (SELECT t FROM prior))
+        FROM v_index_object_stats WHERE server_id = $1 AND collection_time = $4)
 SELECT cur.database_name, cur.schema_name, cur.table_name, cur.index_name,
        cur.ms - prv.ms AS ms_delta, cur.esc - prv.esc AS esc_delta
 FROM cur JOIN prv ON cur.database_name = prv.database_name AND cur.object_id = prv.object_id AND cur.index_id = prv.index_id
-WHERE (SELECT t FROM latest) <> (SELECT t FROM prior)
-AND   cur.ms >= prv.ms
+WHERE cur.ms >= prv.ms
 AND   cur.ms - prv.ms >= $2
 ORDER BY ms_delta DESC LIMIT 1";
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
                 cmd.Parameters.Add(new DuckDBParameter { Value = ObjectLockWaitMsDeltaThreshold });
-                cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+                cmd.Parameters.Add(new DuckDBParameter { Value = snapshots.Latest });
+                cmd.Parameters.Add(new DuckDBParameter { Value = snapshots.Prior });
 
                 using var reader = await cmd.ExecuteProfiledReaderAsync("anomaly-object-contention", context.CancellationToken);
                 if (await reader.ReadAsync(context.CancellationToken))
