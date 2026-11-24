@@ -37,10 +37,12 @@ public sealed class DarlingMcpStoreCompressionHealthTools
         + "(closed chunks older than compress_after and not compressed), oldest_eligible_range_end (the range end of the oldest of them, "
         + "null when none), compress_after_days (the policy's own delay, null when its config has none), newest_compressed_range_end "
         + "(the range end of the newest compressed chunk: the horizon a reader that must not touch compressed chunks, such as an exporter, "
-        + "stays after; null when nothing is compressed yet) and job: job_id, status (Running or Scheduled), last_run_status (Success or "
+        + "stays after; null when nothing is compressed yet) and job: job_id, status (Running, Scheduled or Paused), last_run_status (Success or "
         + "Failed, from job stats, which every role can read), last_run_started, last_run_seconds (the last completed run), "
-        + "last_successful_finish, next_start (null while the job is in crash backoff) and last_error (sqlstate, message cut to 500 "
-        + "characters, started_at) only when the last run failed and the role can read it. last_error_readable is false when the role "
+        + "last_successful_finish, next_start (null when the job has no start time: see next_start_state), next_start_state (scheduled, "
+        + "paused for a parked job, or crash_backoff when the scheduler is holding the job back after a crash; a crash_backoff state "
+        + "comes with next_start_note, which says whether this store's TimescaleDB clears it on its own, as 2.26.4 and later do, or keeps "
+        + "the job held until it is re-armed) and last_error (sqlstate, message cut to 500 characters, started_at) only when the last run failed and the role can read it. last_error_readable is false when the role "
         + "cannot read job errors: TimescaleDB shows them only to a member of the database owner's role or of the job's owner, so a "
         + "Failed run with last_error null and last_error_readable false means the error exists and this role cannot see it, not that "
         + "there is none. When the error read itself failed, errors_read_failure says so. Times are UTC. When the policy last changed "
@@ -93,6 +95,10 @@ public sealed class DarlingMcpStoreCompressionHealthTools
                         last_run_seconds = h.LastRunDuration?.TotalSeconds,
                         last_successful_finish = Iso(h.LastSuccessfulFinishUtc),
                         next_start = Iso(h.NextStartUtc),
+                        next_start_state = DarlingStoreCompressionHealthReader.NextStartStateFor(h.JobStatus, h.NextStartSentinel),
+                        next_start_note = DarlingStoreCompressionHealthReader.NextStartStateFor(h.JobStatus, h.NextStartSentinel) == DarlingStoreCompressionHealthReader.NextStartCrashBackoff
+                            ? DarlingStoreCompressionHealthReader.CrashBackoffNote(read.TimescaleVersion)
+                            : null,
                         last_error_readable = h.ErrorsVisible,
                         last_error = h.JobId is { } id && read.Errors.TryGetValue(id, out var error)
                             ? new { sqlstate = error.SqlState, message = error.Message, started_at = Iso(error.StartedAtUtc) }

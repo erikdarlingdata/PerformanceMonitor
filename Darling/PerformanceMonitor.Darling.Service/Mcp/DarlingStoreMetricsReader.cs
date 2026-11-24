@@ -190,6 +190,49 @@ WHERE metric_time >= $1
 ORDER BY object_kind, object_name, date_trunc('day', metric_time), (size_estimated IS TRUE), metric_time DESC";
 
     /// <summary>
+    /// <see cref="StoreMetricsDailySql"/> for ONE object kind, <c>$2</c> (#9429). The growth forecast needs only the store's own
+    /// total, and reading every table and index row of the window made each <c>get_store_host</c> call pay for rows it then threw away.
+    /// Same selection and order per object, so the rows it returns for that kind are the rows the full read returns.
+    /// </summary>
+    public const string StoreMetricsDailyForKindSql = @"
+SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
+    object_kind,
+    object_name,
+    date_trunc('day', metric_time) AS day,
+    total_bytes,
+    compressed_before_bytes,
+    compressed_after_bytes,
+    chunk_count,
+    row_count,
+    enabled_server_count,
+    last_run_duration_ms,
+    schedule_interval_ms,
+    total_runs,
+    total_failures,
+    toast_bytes,
+    toast_live_bytes,
+    metric_time,
+    size_estimated
+FROM collect.store_metrics
+WHERE metric_time >= $1
+AND   object_kind = $2
+ORDER BY object_kind, object_name, date_trunc('day', metric_time), (size_estimated IS TRUE), metric_time DESC";
+
+    /// <summary><see cref="StoreMetricsDailyEstimatesSql"/> for ONE object kind, <c>$2</c>, beside <see cref="StoreMetricsDailyForKindSql"/> (#9429).</summary>
+    public const string StoreMetricsDailyEstimatesForKindSql = @"
+SELECT DISTINCT ON (object_kind, object_name, date_trunc('day', metric_time))
+    object_kind,
+    object_name,
+    date_trunc('day', metric_time) AS day,
+    total_bytes,
+    metric_time
+FROM collect.store_metrics
+WHERE metric_time >= $1
+AND   object_kind = $2
+AND   size_estimated IS TRUE
+ORDER BY object_kind, object_name, date_trunc('day', metric_time), metric_time DESC";
+
+    /// <summary>
     /// The newest ESTIMATE row of each object per day (#5857), beside <see cref="StoreMetricsDailySql"/>, which keeps
     /// the day's exact row when it has one. A growth must subtract like from like (an estimate reads a little low), and
     /// the window's end is the NEWEST row, so a day whose kept point is exact can still need its estimate row to be
@@ -2215,13 +2258,26 @@ ORDER BY object_kind, object_name, metric_time DESC";
             .ToList();
     }
 
-    public static async Task<List<StoreMetricDailyPoint>> GetDailyAsync(
-        NpgsqlDataSource postgres, DateTime sinceUtc, CancellationToken cancellationToken = default)
+    public static Task<List<StoreMetricDailyPoint>> GetDailyAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, CancellationToken cancellationToken = default) =>
+        ReadDailyAsync(postgres, sinceUtc, null, cancellationToken);
+
+    /// <summary><see cref="GetDailyAsync"/> for only the rows of <paramref name="objectKind"/> (#9429), through <see cref="StoreMetricsDailyForKindSql"/>.</summary>
+    public static Task<List<StoreMetricDailyPoint>> GetDailyForKindAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, string objectKind, CancellationToken cancellationToken = default) =>
+        ReadDailyAsync(postgres, sinceUtc, objectKind ?? throw new ArgumentNullException(nameof(objectKind)), cancellationToken);
+
+    private static async Task<List<StoreMetricDailyPoint>> ReadDailyAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, string? objectKind, CancellationToken cancellationToken)
     {
         var rows = new List<StoreMetricDailyPoint>();
-        await using var command = postgres.CreateCommand(StoreMetricsDailySql);
+        await using var command = postgres.CreateCommand(objectKind is null ? StoreMetricsDailySql : StoreMetricsDailyForKindSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
+        if (objectKind is not null)
+        {
+            command.Parameters.AddWithValue(objectKind);
+        }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -2249,10 +2305,15 @@ ORDER BY object_kind, object_name, metric_time DESC";
         /* #5857: the day's newest estimate row, attached to the points that kept an EXACT row. A point that is itself an
            estimate (a day with no exact row) is its own newest estimate. */
         var estimates = new Dictionary<(string Kind, string Name, DateTime Day), (long? Bytes, DateTime Time)>();
-        await using (var estimateCommand = postgres.CreateCommand(StoreMetricsDailyEstimatesSql))
+        await using (var estimateCommand = postgres.CreateCommand(objectKind is null ? StoreMetricsDailyEstimatesSql : StoreMetricsDailyEstimatesForKindSql))
         {
             estimateCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             estimateCommand.Parameters.AddWithValue(DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified));
+            if (objectKind is not null)
+            {
+                estimateCommand.Parameters.AddWithValue(objectKind);
+            }
+
             await using var estimateReader = await estimateCommand.ExecuteReaderAsync(cancellationToken);
             while (await estimateReader.ReadAsync(cancellationToken))
             {

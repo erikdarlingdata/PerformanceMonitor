@@ -99,11 +99,24 @@ public sealed class DarlingMcpStoreHostTools
         + "store's). It is a straight-line estimate from the net size change, so a compression pass or a retention drop inside the "
         + "window lowers it. This "
         + "tool never writes a setting or a conf file.")]
-    public static async Task<string> GetStoreHost(
+    public static Task<string> GetStoreHost(
         NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache,
         StoreProcessOwnership? ownership = null,
         double free_floor_percent = DefaultFreeFloorPercent,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        GetStoreHostAt(postgres, postgresConfig, cache, ownership, free_floor_percent, forecastAtUtc: null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="GetStoreHost"/> with the growth forecast's "now" given by the caller (#9429), so a test that seeds the history on one
+    /// UTC day anchors the reader's window on that same day instead of on a second read of the clock. The tool passes null and gets
+    /// the current UTC time.
+    /// </summary>
+    internal static async Task<string> GetStoreHostAt(
+        NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache,
+        StoreProcessOwnership? ownership,
+        double free_floor_percent,
+        DateTime? forecastAtUtc,
+        CancellationToken cancellationToken)
     {
         if (!(free_floor_percent > 0d && free_floor_percent < 100d))
         {
@@ -172,7 +185,7 @@ public sealed class DarlingMcpStoreHostTools
             /* #9429: the days until the data volume falls to the free-space floor, from the daily history get_store_metrics
                already returns. Read here, outside the profile cache, so the rate is as current as the sweep and a failure of
                this read nulls the forecast without failing the profile. */
-            var forecastAt = DateTime.UtcNow;
+            var forecastAt = forecastAtUtc ?? DateTime.UtcNow;
             var (growthPoints, growthFailure) = await ReadStoreGrowthAsync(postgres, forecastAt, cancellationToken);
             var forecast = growthPoints is null
                 ? StoreGrowthForecast.Unavailable(free_floor_percent, growthFailure!)
@@ -315,11 +328,11 @@ public sealed class DarlingMcpStoreHostTools
     {
         try
         {
-            var daily = await DarlingStoreMetricsReader.GetDailyAsync(postgres, nowUtc.AddDays(-(ForecastWindowDays + 2)), cancellationToken);
-            var storeDaily = daily
-                .Where(p => p.ObjectKind == PerformanceMonitor.Darling.Storage.StoreSelfMetrics.StoreObjectKind)
-                .OrderBy(p => p.Day)
-                .ToList();
+            /* Only the store's own total feeds the rate, so only that kind is read: the all-kinds read of the same window costs far more on a store with
+               a few hundred tables and indexes. */
+            var daily = await DarlingStoreMetricsReader.GetDailyForKindAsync(
+                postgres, nowUtc.AddDays(-(ForecastWindowDays + 2)), PerformanceMonitor.Darling.Storage.StoreSelfMetrics.StoreObjectKind, cancellationToken);
+            var storeDaily = daily.OrderBy(p => p.Day).ToList();
             return (DarlingStoreMetricsReader.ComputeDailyGrowth(storeDaily, nowUtc), null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

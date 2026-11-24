@@ -101,6 +101,10 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
             /* The parked job's next start is infinity and its last success is -infinity: both read as null, not as a date in year 1. */
             Assert.Equal(JsonValueKind.Null, row.GetProperty("job").GetProperty("next_start").ValueKind);
             Assert.Equal(JsonValueKind.Null, row.GetProperty("job").GetProperty("last_successful_finish").ValueKind);
+
+            /* A parked job is paused, which is not a crash backoff, so it carries no backoff sentence. */
+            Assert.Equal("paused", row.GetProperty("job").GetProperty("next_start_state").GetString());
+            Assert.Equal(JsonValueKind.Null, row.GetProperty("job").GetProperty("next_start_note").ValueKind);
             Assert.True(before.RootElement.GetProperty("summary").GetProperty("hypertables_with_backlog").GetInt32() >= 1);
             Assert.True(before.RootElement.GetProperty("summary").GetProperty("backlog_chunks").GetInt64() >= 1);
         }
@@ -168,6 +172,10 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
            rate's own answer and never the "already at the floor" zero. */
         const double Floor = 0.001d;
 
+        /* One clock for the seed and the reader: the days are seeded from this UTC day and the reader is told it is this instant, so a
+           UTC midnight between the two reads cannot move the window off the seeded days. */
+        var anchor = LiveClock.Now();
+
         await using (var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct))
         {
             await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -177,11 +185,11 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
             /* Eight daily points, today minus 8 through today minus 1, each a day apart and 1 GB larger: seven full days of growth. */
             for (var daysAgo = 8; daysAgo >= 1; daysAgo--)
             {
-                await SeedStoreSizeAsync(connection, daysAgo, 50_000_000_000L + (8 - daysAgo) * DailyGrowth, ct);
+                await SeedStoreSizeAsync(connection, anchor, daysAgo, 50_000_000_000L + (8 - daysAgo) * DailyGrowth, ct);
             }
 
-            using var full = JsonDocument.Parse(await DarlingMcpStoreHostTools.GetStoreHost(
-                dataSource, config, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), null, Floor, ct));
+            using var full = JsonDocument.Parse(await DarlingMcpStoreHostTools.GetStoreHostAt(
+                dataSource, config, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), null, Floor, anchor, ct));
             var forecast = full.RootElement.GetProperty("growth_forecast");
             Assert.Equal(7, forecast.GetProperty("growth_days_in_window").GetInt32());
             Assert.Equal((double)DailyGrowth, forecast.GetProperty("growth_bytes_per_day_7d").GetDouble());
@@ -200,11 +208,11 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
             /* Four days of history: three full days of growth, short of the seven the rate needs. */
             for (var daysAgo = 4; daysAgo >= 1; daysAgo--)
             {
-                await SeedStoreSizeAsync(connection, daysAgo, 50_000_000_000L + (4 - daysAgo) * DailyGrowth, ct);
+                await SeedStoreSizeAsync(connection, anchor, daysAgo, 50_000_000_000L + (4 - daysAgo) * DailyGrowth, ct);
             }
 
-            using var shortHistory = JsonDocument.Parse(await DarlingMcpStoreHostTools.GetStoreHost(
-                dataSource, config, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), null, Floor, ct));
+            using var shortHistory = JsonDocument.Parse(await DarlingMcpStoreHostTools.GetStoreHostAt(
+                dataSource, config, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), null, Floor, anchor, ct));
             var forecast = shortHistory.RootElement.GetProperty("growth_forecast");
             Assert.Equal(3, forecast.GetProperty("growth_days_in_window").GetInt32());
             Assert.Equal(JsonValueKind.Null, forecast.GetProperty("growth_bytes_per_day_7d").ValueKind);
@@ -213,6 +221,40 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
         }
 
         dataDirectory.Delete(true);
+    }
+
+    [Fact]
+    public async Task DailyPoints_ForOneKind_AreTheRowsTheAllKindsReadReturnsForThatKind()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9429 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var anchor = LiveClock.Now();
+        for (var daysAgo = 3; daysAgo >= 1; daysAgo--)
+        {
+            await SeedStoreSizeAsync(connection, anchor, daysAgo, 50_000_000_000L + (3 - daysAgo) * 1_000_000_000L, ct);
+            await ExecAsync(connection,
+                $"INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes, size_estimated) VALUES "
+                + $"(date_trunc('day', now()::timestamp) - INTERVAL '{daysAgo} days' + INTERVAL '13 hours', 'store_9429', 'store', 1, true), "
+                + $"(date_trunc('day', now()::timestamp) - INTERVAL '{daysAgo} days' + INTERVAL '12 hours', 'tbl_9429', 'table', 7, false)", ct);
+        }
+
+        var since = anchor.AddDays(-5);
+        var all = await DarlingStoreMetricsReader.GetDailyAsync(dataSource, since, ct);
+        var onlyStore = await DarlingStoreMetricsReader.GetDailyForKindAsync(dataSource, since, "store", ct);
+
+        Assert.Contains(all, p => p.ObjectKind == "table");
+        Assert.NotEmpty(onlyStore);
+        Assert.All(onlyStore, p => Assert.Equal("store", p.ObjectKind));
+        Assert.Equal(
+            all.Where(p => p.ObjectKind == "store").OrderBy(p => p.Day).ToList(),
+            onlyStore.OrderBy(p => p.Day).ToList());
     }
 
     [Fact]
@@ -289,6 +331,7 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the #9428 live tests.");
         var ct = TestContext.Current.CancellationToken;
         var roleName = "ch9428_reader_" + Guid.NewGuid().ToString("N")[..8];
+        var memberRoleName = "ch9428_member_" + Guid.NewGuid().ToString("N")[..8];
         const string RolePassword = "ch9428-test-pw";
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
@@ -360,24 +403,113 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
             Assert.False(job.GetProperty("last_error_readable").GetBoolean());
             Assert.Equal(JsonValueKind.Null, job.GetProperty("last_error").ValueKind);
             Assert.Equal(JsonValueKind.Null, viewed.RootElement.GetProperty("errors_read_failure").ValueKind);
+
+            /* A role that is a member of the job's owner, so the read asks for the job's error, but that holds no right to read the error
+               view: NOINHERIT keeps the owner's own rights from reaching it, and the view's grant to everyone is withdrawn. The error
+               statement is refused, and the tool says so instead of returning a Failed job with no error and no word why. */
+            await ExecAsync(connection, $"CREATE ROLE {memberRoleName} LOGIN NOSUPERUSER NOINHERIT PASSWORD '{RolePassword}'", ct);
+            string ownerRole;
+            await using (var who = new NpgsqlCommand("SELECT current_user::text", connection))
+            {
+                ownerRole = (string)(await who.ExecuteScalarAsync(ct))!;
+            }
+
+            await ExecAsync(connection, $"GRANT \"{ownerRole}\" TO {memberRoleName}", ct);
+            foreach (var statement in ViewerGrantReplay.StatementsFor(memberRoleName, scratch.DatabaseName, "mcp"))
+            {
+                await ExecAsync(connection, statement, ct);
+            }
+
+            await ExecAsync(connection, $"REVOKE ALL ON timescaledb_information.job_errors FROM PUBLIC, {memberRoleName}", ct);
+
+            await using var asMember = NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+            {
+                Username = memberRoleName,
+                Password = RolePassword,
+                Pooling = false,
+            }.ConnectionString);
+
+            using var refused = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(asMember, ct));
+            var refusedJob = Job(refused);
+            Assert.Equal("Failed", refusedJob.GetProperty("last_run_status").GetString());
+            Assert.True(refusedJob.GetProperty("last_error_readable").GetBoolean(), "a member of the job's owner is asked for the error");
+            Assert.Equal(JsonValueKind.Null, refusedJob.GetProperty("last_error").ValueKind);
+            Assert.Equal(JsonValueKind.String, refused.RootElement.GetProperty("errors_read_failure").ValueKind);
             bodySucceeded = true;
         }
         finally
         {
-            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", CancellationToken.None));
+            await LiveStoreCleanup.RunOwnedAsync(bodySucceeded, () => ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName}; DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{memberRoleName}') THEN DROP OWNED BY {memberRoleName}; DROP ROLE {memberRoleName}; END IF; END $$;", CancellationToken.None));
         }
+    }
+
+    [Fact]
+    public async Task CompressionHealth_OnATimescaleStoreWithNoCompressionPolicy_AnswersEmpty_NotNotCollected()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the #9428 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        /* Unmigrated: the extension is on, and no policy job has been created. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "the dev fixture is expected to have TimescaleDB installed");
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        using var doc = JsonDocument.Parse(await DarlingMcpStoreCompressionHealthTools.GetStoreCompressionHealth(dataSource, ct));
+        Assert.Equal("empty", doc.RootElement.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task HourlyTick_WhenTheCompressionStatementFails_LogsAWarning_AndReadsNoPolicies()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9428 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+
+        /* Without the extension the TimescaleDB views the statement reads do not exist, so it fails for real. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct, plainPostgres: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var logger = new CapturingTestLogger();
+        var activity = await TimescaleSupport.ReadCompressionActivityAsync(connection, logger, ct);
+
+        Assert.Empty(activity);
+        Assert.True(logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning) == 1, "the failed read is logged once at warning level: " + logger.Joined);
+    }
+
+    /// <summary>What a null <c>next_start</c> means, by the job's status and the value the scheduler holds.</summary>
+    [Theory]
+    [InlineData("Scheduled", "infinity", "paused")]
+    [InlineData("Paused", "infinity", "paused")]
+    [InlineData("Paused", null, "paused")]
+    [InlineData("Scheduled", "-infinity", "crash_backoff")]
+    [InlineData("Running", "-infinity", "scheduled")]
+    [InlineData("Scheduled", null, "scheduled")]
+    [InlineData("Running", null, "scheduled")]
+    public void NextStartState_SeparatesAParkedJobFromACrashBackoff(string? jobStatus, string? sentinel, string expected) =>
+        Assert.Equal(expected, DarlingStoreCompressionHealthReader.NextStartStateFor(jobStatus, sentinel));
+
+    [Fact]
+    public void CrashBackoffNote_SaysTheSchedulerClearsItOnlyFromTheFixedVersion()
+    {
+        var fixedStore = DarlingStoreCompressionHealthReader.CrashBackoffNote(new Version(2, 26, 4));
+        var oldStore = DarlingStoreCompressionHealthReader.CrashBackoffNote(new Version(2, 26, 3));
+        Assert.NotEqual(fixedStore, oldStore);
+        Assert.Equal(oldStore, DarlingStoreCompressionHealthReader.CrashBackoffNote(null));
     }
 
     private static string PolicyJobSql(string select) =>
         $"{select} FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = '{Table}' AND (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')";
 
-    private static async Task SeedStoreSizeAsync(NpgsqlConnection connection, int daysAgo, long totalBytes, CancellationToken ct)
+    private static async Task SeedStoreSizeAsync(NpgsqlConnection connection, DateTime anchorUtc, int daysAgo, long totalBytes, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
-            "INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes) "
-            + "VALUES (date_trunc('day', now() AT TIME ZONE 'UTC') - make_interval(days => $1) + interval '12 hours', 'store_9429', 'store', $2)",
+            "INSERT INTO collect.store_metrics (metric_time, object_name, object_kind, total_bytes) VALUES ($1, 'store_9429', 'store', $2)",
             connection);
-        command.Parameters.AddWithValue(daysAgo);
+        command.Parameters.Add(new NpgsqlParameter { Value = DateTime.SpecifyKind(anchorUtc.Date.AddDays(-daysAgo).AddHours(12), DateTimeKind.Unspecified), NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
         command.Parameters.AddWithValue(totalBytes);
         await command.ExecuteNonQueryAsync(ct);
     }

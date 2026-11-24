@@ -62,12 +62,14 @@ ORDER BY e.job_id, e.start_time DESC";
     /// <param name="TimescaleInstalled">False when the database has no TimescaleDB extension, which has no compression policies to read.</param>
     /// <param name="Hypertables">One row per compression policy, the most waiting chunks first. Empty when there is no policy.</param>
     /// <param name="Errors">The newest error of each job that has one the role can read, by job id.</param>
+    /// <param name="TimescaleVersion">The extension's version, or null when it could not be read, which reads as a version below 2.26.4.</param>
     /// <param name="ErrorsReadFailure">One sentence when the error read itself failed, so the missing errors are not read as none. Null otherwise.</param>
     public sealed record CompressionHealth(
         bool TimescaleInstalled,
         IReadOnlyList<CompressionActivity> Hypertables,
         IReadOnlyDictionary<int, JobError> Errors,
-        string? ErrorsReadFailure)
+        string? ErrorsReadFailure,
+        Version? TimescaleVersion = null)
     {
         /// <summary>The hypertables with at least one chunk past the delay and still uncompressed.</summary>
         public int HypertablesWithBacklog => Hypertables.Count(h => h.EligibleUncompressedChunks > 0);
@@ -75,6 +77,46 @@ ORDER BY e.job_id, e.start_time DESC";
         /// <summary>The chunks past the delay and still uncompressed, over every hypertable.</summary>
         public long TotalBacklogChunks => Hypertables.Sum(h => h.EligibleUncompressedChunks);
     }
+
+    /// <summary>The job is waiting for its next start.</summary>
+    public const string NextStartScheduled = "scheduled";
+
+    /// <summary>The job is parked: paused, or its next start is <c>infinity</c> (<c>scheduled =&gt; false</c>).</summary>
+    public const string NextStartPaused = "paused";
+
+    /// <summary>The scheduler holds the job at <c>-infinity</c> after a run that crashed.</summary>
+    public const string NextStartCrashBackoff = "crash_backoff";
+
+    /// <summary>
+    /// What a job's null <c>next_start</c> means (#9428). <c>infinity</c> is a parked job, <c>-infinity</c> a crash backoff, and a job
+    /// that is running right now also holds <c>-infinity</c> while it runs, so that is not a backoff. A finite start is
+    /// <c>scheduled</c>, unless the job's status says <c>Paused</c>.
+    /// </summary>
+    public static string NextStartStateFor(string? jobStatus, string? nextStartSentinel)
+    {
+        if (string.Equals(nextStartSentinel, "infinity", StringComparison.Ordinal))
+        {
+            return NextStartPaused;
+        }
+
+        if (string.Equals(nextStartSentinel, "-infinity", StringComparison.Ordinal)
+            && !string.Equals(jobStatus, "Running", StringComparison.OrdinalIgnoreCase))
+        {
+            return NextStartCrashBackoff;
+        }
+
+        return string.Equals(jobStatus, "Paused", StringComparison.OrdinalIgnoreCase) ? NextStartPaused : NextStartScheduled;
+    }
+
+    /// <summary>
+    /// The sentence that goes with a <c>crash_backoff</c> state, by the store's TimescaleDB version: from 2.26.4 the scheduler
+    /// clears the backoff itself, below it (and for an unreadable version) the job stays held until someone re-arms it.
+    /// </summary>
+    public static string CrashBackoffNote(Version? timescaleVersion) =>
+        TimescaleSupport.SchedulerRecoversNegativeInfinity(timescaleVersion)
+            ? "The job crashed and the scheduler holds it back. This TimescaleDB clears that on its own and runs the job again."
+            : "The job crashed and the scheduler holds it back. This TimescaleDB is below 2.26.4 (or its version could not be read), "
+              + "which does not clear that on its own: the job stays held until it is re-armed with alter_job.";
 
     /// <summary>Most waiting chunks first, then by name, so the worst table leads and the order is stable.</summary>
     public static IReadOnlyList<CompressionActivity> Order(IEnumerable<CompressionActivity> activity) =>
@@ -104,7 +146,7 @@ ORDER BY e.job_id, e.start_time DESC";
 
         if (!installed)
         {
-            return new CompressionHealth(false, Array.Empty<CompressionActivity>(), new Dictionary<int, JobError>(), null);
+            return new CompressionHealth(false, Array.Empty<CompressionActivity>(), new Dictionary<int, JobError>(), null, null);
         }
 
         var activity = Order(await TimescaleSupport.QueryCompressionActivityAsync(connection, cancellationToken));
@@ -147,6 +189,7 @@ ORDER BY e.job_id, e.start_time DESC";
             }
         }
 
-        return new CompressionHealth(true, activity, errors, failure);
+        var version = await TimescaleSupport.ReadTimescaleVersionAsync(connection, null, cancellationToken);
+        return new CompressionHealth(true, activity, errors, failure, version);
     }
 }
