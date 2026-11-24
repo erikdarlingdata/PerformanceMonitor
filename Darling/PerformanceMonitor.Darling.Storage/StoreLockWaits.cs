@@ -682,6 +682,30 @@ AND   a.backend_start IS NOT NULL";
 
         var written = 0;
         var shortIds = new List<long>();
+        /* The slab's ends come first: each closes a wait an earlier slab opened, so it is earlier in the log than anything the loop below
+           handles. Handled the other way round, a later wait of the same process on the same lock would take over the older open row. */
+        if (parsed.Closes.Count > 0)
+        {
+            var closeUtc = new List<DateTime>(parsed.Closes.Count);
+            for (var i = 0; i < parsed.Closes.Count; i++)
+            {
+                closeUtc.Add(utc[(parsed.Waits.Count * 2) + i]);
+            }
+
+            var openPids = await ReadOpenPidsAsync(connection, transaction, closeUtc.Min(), cancellationToken);
+            for (var i = 0; i < parsed.Closes.Count; i++)
+            {
+                var c = parsed.Closes[i];
+                if (!openPids.Contains(c.Pid))
+                {
+                    unmatched?.Add(new UnmatchedClose(c, closeUtc[i]));
+                    continue;
+                }
+
+                written += (await CloseAsync(connection, transaction, c.Pid, c.Outcome, c.AfterMs is { } ms ? (long)Math.Round(ms) : null, closeUtc[i], null, shortIds, cancellationToken)).Kept;
+            }
+        }
+
         var index = 0;
         foreach (var w in parsed.Waits)
         {
@@ -747,28 +771,6 @@ AND   a.backend_start IS NOT NULL";
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (long)Math.Round(durationMs) });
             insert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = w.Outcome });
             written += await insert.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        if (parsed.Closes.Count > 0)
-        {
-            var closeUtc = new List<DateTime>(parsed.Closes.Count);
-            for (var i = 0; i < parsed.Closes.Count; i++)
-            {
-                closeUtc.Add(utc[index++]);
-            }
-
-            var openPids = await ReadOpenPidsAsync(connection, transaction, closeUtc.Min(), cancellationToken);
-            for (var i = 0; i < parsed.Closes.Count; i++)
-            {
-                var c = parsed.Closes[i];
-                if (!openPids.Contains(c.Pid))
-                {
-                    unmatched?.Add(new UnmatchedClose(c, closeUtc[i]));
-                    continue;
-                }
-
-                written += (await CloseAsync(connection, transaction, c.Pid, c.Outcome, c.AfterMs is { } ms ? (long)Math.Round(ms) : null, closeUtc[i], null, shortIds, cancellationToken)).Kept;
-            }
         }
 
         if (shortIds.Count > 0)

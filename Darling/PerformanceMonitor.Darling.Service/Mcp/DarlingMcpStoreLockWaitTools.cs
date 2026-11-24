@@ -103,8 +103,9 @@ WHERE s.name = 'log_lock_waits'";
         + "Both filters are applied before limit, so a page holds matching rows only. limit is 1-200; a larger value is refused, not cut, and "
         + "truncated says the window held more rows than the page. Roles and applications of a holder come from a one-minute read of the "
         + "store's processes (background processes included, by backend type), so a holder that began and ended between two reads shows "
-        + "unresolved. status empty means the window holds no wait, which is a true negative only while log_lock_waits is on and the log is "
-        + "in English: precondition says when it is not, because the lock wait lines are read by their English text.")]
+        + "unresolved. status empty means the window holds no wait and the store log was captured in it, which is a true negative only while log_lock_waits is on and the log is "
+        + "in English: precondition says when it is not, because the lock wait lines are read by their English text. unavailable means the store log "
+        + "was not captured in the window (no log files, a role that cannot read them, or a failing capture), so the window was never read: get_store_log says why.")]
     public static Task<string> GetStoreLockWaits(
         NpgsqlDataSource postgres,
         [Description("Hours of history. Default 24; max 168.")] int hours_back = 24,
@@ -174,6 +175,17 @@ WHERE s.name = 'log_lock_waits'";
                               + "Set lc_messages to C or an English locale (ALTER SYSTEM SET lc_messages = 'C', then SELECT pg_reload_conf()) to record waits from then on."
                             : $"lc_messages is '{lcMessages}' on the store. Lock waits are read only from English log text, so waits logged in that language are not recorded and an empty window proves nothing. "
                               + "Set lc_messages to C or an English locale (ALTER SYSTEM SET lc_messages = 'C', then SELECT pg_reload_conf()) to record waits from then on.");
+                }
+
+                /* An all-clear needs an observation: the sweep that reads the lock waits is the store-log capture, so a window with no capture
+                   (no log files to list, a role that cannot read them, a failing sweep) was never looked at. get_store_log says why. */
+                var captures = await DarlingStoreLogReader.GetCaptureSummaryAsync(postgres, windowStart, windowEnd, hours_back, cancellationToken);
+                if (captures.Captures == 0)
+                {
+                    return McpHelpers.Status(
+                        "unavailable",
+                        $"No store-log capture {McpHelpers.InTheLast(CountText.Plural(hours_back, "hour"))}, so this window makes no claim about the store's lock waits: they are read from the store's log by the same hourly capture. "
+                        + "get_store_log says why the log is not being read.");
                 }
 
                 var filtered = role != null || relation != null;
