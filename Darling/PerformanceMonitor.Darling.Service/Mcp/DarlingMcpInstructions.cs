@@ -328,7 +328,7 @@ internal static class DarlingMcpInstructions
 
         - Accepted: full ISO-8601 with an offset, or a bare `2026-08-19` (midnight UTC). An unparseable or future `as_of` is refused, not read as "now"; an older one returns the normal `empty` / `unavailable`.
         - A stamp with no offset is UTC unless the tool's note puts it on the server's clock.
-        - Latest-snapshot reads take no `as_of`, read `captured_at` / `age_seconds`. `get_pvs_stats`, `get_fleet_overview`, `get_store_metrics` never take it.
+        - Latest-snapshot reads take no `as_of`, read `captured_at` / `age_seconds`. `get_pvs_stats` and `get_fleet_overview` never take it; `get_store_metrics` takes it only with `table_activity`.
         - The analysis family takes it: `get_analysis_facts`/`analyze_server` re-run fact collection, anomaly detection and scoring over the anchored window (`analyze_server` with `as_of` is exploratory, does not persist).
 
         Each finding's `confidence` is an evidence score (0.20 for a lone uncorroborated symptom, never 1.0, rising as the root fact's amplifier checks match and the chain deepens) and `confidence_basis` says in words what it rests on (an ANOMALY_* fact's `baseline_confidence` is the baseline's trustworthiness, not a finding's `confidence`).

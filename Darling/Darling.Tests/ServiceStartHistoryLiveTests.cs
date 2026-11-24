@@ -198,7 +198,7 @@ public sealed class ServiceStartHistoryLiveTests
 
             var ladder = new[]
             {
-                new PgMigrations.Migration(1, "make-history-tables", "CREATE SCHEMA IF NOT EXISTS collect; " + ServiceStartHistory.CreateSql),
+                new PgMigrations.Migration(1, "make-history-tables", "CREATE SCHEMA IF NOT EXISTS collect; " + ServiceStartHistory.CreateSql + ServiceStartRungObjects.CreateSql),
                 new PgMigrations.Migration(2, "broken-rung",
                     "DO $$ BEGIN RAISE EXCEPTION 'cannot reach the source with Host=db1;Password=hunter2;Port=5432'; END $$;"),
             };

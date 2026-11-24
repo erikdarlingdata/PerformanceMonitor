@@ -403,7 +403,7 @@ FROM config.store_log_read_marker AS m";
                 OffsetReset: resume.OffsetReset,
                 Census: census);
 
-            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, firstSlab: true, cancellationToken);
+            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, firstSlab: true, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
             captured.Add(capture);
             slabsRead++;
 
@@ -446,7 +446,7 @@ FROM config.store_log_read_marker AS m";
                     BytesPending: Math.Max(0, file.Candidate.SizeBytes - nextOffset),
                     OffsetReset: false,
                     Census: census);
-                await WriteAsync(connection, captureTime, slabCapture, nextOffset, file.Candidate.SizeBytes, firstSlab: false, cancellationToken);
+                await WriteAsync(connection, captureTime, slabCapture, nextOffset, file.Candidate.SizeBytes, firstSlab: false, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
 
                 file.Groups.AddRange(census.Groups);
                 captured[file.Index] = new FileCapture(
@@ -769,6 +769,8 @@ FROM config.store_log_read_marker AS m";
         long newOffset,
         long sizeBytes,
         bool firstSlab,
+        StoreCheckpoints.Parsed checkpoints,
+        ILogger? logger,
         CancellationToken cancellationToken)
     {
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -800,6 +802,9 @@ FROM config.store_log_read_marker AS m";
             events.Parameters.AddWithValue(samples);
             await events.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        /* #9414: the slab's checkpoint lines, in the same transaction as its census and its marker, behind a savepoint of their own. */
+        await StoreCheckpoints.WriteAsync(connection, transaction, checkpoints, captureTime, logger, SweepTimeoutSeconds, cancellationToken);
 
         if (firstSlab)
         {
@@ -870,8 +875,15 @@ FROM config.store_log_read_marker AS m";
             await events.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using var captures = new NpgsqlCommand(CaptureRetentionDeleteSql, connection) { CommandTimeout = SweepTimeoutSeconds };
-        captures.Parameters.AddWithValue(cutoff);
-        await captures.ExecuteNonQueryAsync(cancellationToken);
+        await using (var captures = new NpgsqlCommand(CaptureRetentionDeleteSql, connection) { CommandTimeout = SweepTimeoutSeconds })
+        {
+            captures.Parameters.AddWithValue(cutoff);
+            await captures.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        /* #9414: the checkpoint rows go on the same cutoff. */
+        await using var checkpoints = new NpgsqlCommand(StoreCheckpoints.RetentionDeleteSql, connection) { CommandTimeout = SweepTimeoutSeconds };
+        checkpoints.Parameters.AddWithValue(cutoff);
+        await checkpoints.ExecuteNonQueryAsync(cancellationToken);
     }
 }

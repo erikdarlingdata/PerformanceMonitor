@@ -999,9 +999,20 @@ DROP TABLE IF EXISTS collect.service_starts;"),
         // Safe on a store that never had them.
         new(308, "hasStoreTableActivity", @"DROP TABLE IF EXISTS collect.store_table_activity;
 DROP TABLE IF EXISTS collect.store_table_activity_baseline;"),
-        // V309 (#9427): the store setting state and changes tables. The probe's newest sentinel is both. The rewind drops both, so a re-run of V309 creates them empty. Safe on a store
+        // V309 (#9414): the store checkpoint rows. It is the probe's newest sentinel. The rewind drops it, so a re-run of V309 creates it empty. Safe on a store
+        // that never had it.
+        new(309, "hasStoreCheckpoints", @"DROP TABLE IF EXISTS collect.store_checkpoints;"),
+        // V310 (#9452): the partial index of the oversized-plan backlog's pending rows. It is the probe's newest sentinel. The rewind drops it, so a re-run of V310 builds it again.
+        // Safe on a store that never had it.
+        new(310, "hasOversizedPlanBacklogPendingIndex", @"DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_pending;"),
+        // V311 (#9438): the migration rung object table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V311 creates it empty. Safe on a store that never
+        // had it.
+        new(311, "hasServiceStartRungObjects", @"DROP TABLE IF EXISTS collect.service_start_rung_objects;"),
+        // V312 (#9432): the upgrade run table. The rewind drops it, so a re-run of V312 creates it again. Safe on a store that never had it.
+        new(312, "hasUpgradeRuns", @"DROP TABLE IF EXISTS collect.upgrade_runs;"),
+        // V313 (#9427): the store setting state and changes tables. The probe's newest sentinel is both. The rewind drops both, so a re-run of V313 creates them empty. Safe on a store
         // that never had them.
-        new(309, "hasStoreSettingChanges", @"DROP TABLE IF EXISTS collect.store_setting_changes;
+        new(313, "hasStoreSettingChanges", @"DROP TABLE IF EXISTS collect.store_setting_changes;
 DROP TABLE IF EXISTS collect.store_setting_state;"),
     ];
 

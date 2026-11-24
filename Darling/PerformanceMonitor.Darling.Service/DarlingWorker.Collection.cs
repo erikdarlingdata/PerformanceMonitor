@@ -154,6 +154,9 @@ public sealed partial class DarlingWorker
                    collector has written yet — so the gap the service was down for can be raised once the alert
                    engine exists. Best effort: a failed read loses one alert and must not fail or retry the start. */
                 collectionGapReport = await ReadCollectionGapAsync(migrateConnection, stoppingToken);
+                /* #9432: the upgrade run file beside the install, recorded now that the schema is current. A run written while the store was down
+                   lands here at the next start. Failure-isolated inside: it never fails or retries the start. */
+                await TryRecordUpgradeRunAsync(migrateConnection, AppContext.BaseDirectory, stoppingToken);
                 break;
             }
             catch (Exception ex) when (ex is not OperationCanceledException
