@@ -37,10 +37,15 @@ public static class InvestigationChangeWindows
     /// <summary>
     /// How long after a window's end a request still opens held (#9485): a re-capture or a settle period runs past the end of the work.
     /// Fixed at 30 minutes on purpose. A change can cause a real problem well after the work ends (a write-latency step a day and a half
-    /// after a planned resize was real), and a longer tail would hide that. The same number is in <see cref="HeldWindowIdSql"/> as
-    /// an interval literal, so a change is made in both places.
+    /// after a planned resize was real), and a longer tail would hide that. <see cref="HeldWindowIdSql"/> reads this constant.
     /// </summary>
     public const int TailMinutes = 30;
+
+    /// <summary>The <c>held</c> filter word that lists only the requests a window is holding (<c>list_investigation_requests</c>).</summary>
+    public const string HeldOnly = "only";
+
+    /// <summary>The <c>held</c> filter word that lists everything a window is not holding, a request whose hold a late join released included.</summary>
+    public const string HeldExclude = "exclude";
 
     /// <summary>
     /// The window that holds a request opening at <c>{openedAt}</c> on server <c>{serverId}</c>: the newest-ending one not cleared
@@ -50,7 +55,7 @@ public static class InvestigationChangeWindows
     /// </summary>
     public static string HeldWindowIdSql(string openedAt, string serverId) => $@"(SELECT w.window_id
         FROM config.investigation_change_windows AS w
-        WHERE w.ends_at >= {openedAt} - interval '30 minutes'
+        WHERE w.ends_at >= {openedAt} - interval '{TailMinutes} minutes'
           AND w.starts_at < {openedAt}
           AND (w.cleared_at IS NULL OR w.cleared_at >= {openedAt})
           AND (w.server_ids IS NULL OR {serverId} = ANY (w.server_ids))
