@@ -147,7 +147,8 @@ public class StoreStatementStatsTests
         var sql = StoreStatementStats.BuildGrantSql("config", ["admin", "view'er", "mcp"]);
 
         Assert.Contains("ARRAY['admin', 'view''er', 'mcp']::text[]", sql, StringComparison.Ordinal);
-        Assert.Contains("IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = grantee) THEN", sql, StringComparison.Ordinal);
+        Assert.Contains("IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = grantee)", sql, StringComparison.Ordinal);
+        Assert.Contains("pg_catalog.has_schema_privilege(grantee, 'config', 'USAGE') THEN", sql, StringComparison.Ordinal);
         Assert.Contains($"GRANT EXECUTE ON FUNCTION %I.{StoreStatementStats.FunctionName}() TO %I", sql, StringComparison.Ordinal);
         Assert.Contains($"GRANT EXECUTE ON FUNCTION %I.{StoreStatementStats.InfoFunctionName}() TO %I", sql, StringComparison.Ordinal);
         Assert.Throws<ArgumentNullException>(() => StoreStatementStats.BuildGrantSql("config", null!));
