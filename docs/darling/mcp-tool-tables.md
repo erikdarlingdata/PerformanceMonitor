@@ -217,6 +217,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_server_settings` | `config.config_monitored_servers` |
 | `get_service_starts` | `collect.service_starts`<br>`collect.service_start_rungs`<br>`collect.service_start_rung_objects` |
 | `get_slow_reads` | `collect.slow_reads` |
+| `get_store_compression_health` | TimescaleDB's `timescaledb_information.chunks`, `timescaledb_information.jobs`, `timescaledb_information.job_stats` and `timescaledb_information.job_errors` |
 | `get_store_connections` | `collect.store_connection_samples`<br>`collect.store_connection_slots` |
 | `get_store_host` | `collect.store_metrics` |
 | `get_store_job_runs` | `collect.store_job_runs` (a function, where the store has it)<br>TimescaleDB's `timescaledb_information.job_history` and `timescaledb_information.jobs` (where it does not) |

@@ -83,9 +83,12 @@ CREATE INDEX IF NOT EXISTS idx_upgrade_runs_started
     ON collect.upgrade_runs(started_at);";
 
     /// <summary>One row per run id: a second pickup of the same run updates the row, it never adds one. <c>recorded_at</c> keeps the
-    /// first time the service saw the run.</summary>
+    /// first time the service saw the run. A row never steps back: the update runs only when the file's state is at least as far along
+    /// as the stored one (in_progress, then succeeded or failed, then verified), so an older copy of the run's file, put back from a
+    /// rollback backup, cannot move a failed or verified row to in_progress. When the update is skipped the statement returns no row,
+    /// and the pickup treats the file as stale.</summary>
     public const string UpsertSql = @"
-INSERT INTO collect.upgrade_runs
+INSERT INTO collect.upgrade_runs AS r
     (run_id, state, tool_version, target_build, started_at, ended_at, exit_code, stop_check, rollback_folder, first_error, verified_at, recorded_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
 ON CONFLICT (run_id) DO UPDATE SET
@@ -99,7 +102,10 @@ ON CONFLICT (run_id) DO UPDATE SET
     rollback_folder = EXCLUDED.rollback_folder,
     first_error = EXCLUDED.first_error,
     verified_at = EXCLUDED.verified_at,
-    updated_at = EXCLUDED.updated_at";
+    updated_at = EXCLUDED.updated_at
+WHERE (CASE EXCLUDED.state WHEN 'verified' THEN 2 WHEN 'in_progress' THEN 0 ELSE 1 END)
+    >= (CASE r.state WHEN 'verified' THEN 2 WHEN 'in_progress' THEN 0 ELSE 1 END)
+RETURNING r.state";
 
     /// <summary>The bounded retention delete, run after each record.</summary>
     public const string RetentionDeleteSql = @"
@@ -129,7 +135,7 @@ public enum UpgradeRunPickupOutcome
     /// <summary>The file was recorded and left in place: the run is not finished or not yet verified.</summary>
     Recorded,
 
-    /// <summary>The file was recorded and then removed: the run is verified, failed or older than a week.</summary>
+    /// <summary>The file was recorded and then removed: the run is verified, failed or older than a week, or the stored row is already further along than the file.</summary>
     RecordedAndRemoved,
 
     /// <summary>The file was recorded but could not be removed. The next pass records it again and the row stays one row.</summary>
@@ -212,10 +218,11 @@ public sealed class UpgradeRunPickup
             return new UpgradeRunPickupResult(UpgradeRunPickupOutcome.Malformed, null, null);
         }
 
-        await RecordAsync(connection, run!, nowUtc, cancellationToken);
+        var recorded = await RecordAsync(connection, run!, nowUtc, cancellationToken);
 
-        var finished = run!.State is UpgradeRuns.Verified or UpgradeRuns.Failed;
-        var stale = nowUtc - run.StartedUtc > MaxFileAge;
+        /* A file behind the stored row (an older copy put back from a rollback backup) changed nothing and is stale: it is removed. */
+        var finished = !recorded || run!.State is UpgradeRuns.Verified or UpgradeRuns.Failed;
+        var stale = nowUtc - run!.StartedUtc > MaxFileAge;
         if (!finished && !stale)
         {
             return new UpgradeRunPickupResult(UpgradeRunPickupOutcome.Recorded, run.RunId, run.State);
@@ -314,11 +321,13 @@ public sealed class UpgradeRunPickup
         }
     }
 
-    private static async Task RecordAsync(NpgsqlConnection connection, UpgradeRunFile run, DateTime nowUtc, CancellationToken cancellationToken)
+    /// <summary>False when the stored row is further along than the file, so nothing was written.</summary>
+    private static async Task<bool> RecordAsync(NpgsqlConnection connection, UpgradeRunFile run, DateTime nowUtc, CancellationToken cancellationToken)
     {
         /* The columns are timestamp without time zone, and Npgsql refuses a Kind=Utc value for one. The file's times are already Unspecified,
            so the caller's UtcNow gets the same Kind here. Without this the first pickup throws and the file never reaches the store (#9432). */
         var now = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified);
+        bool written;
         await using (var upsert = new NpgsqlCommand(UpgradeRuns.UpsertSql, connection) { CommandTimeout = 30 })
         {
             upsert.Parameters.Add(new NpgsqlParameter { Value = run.RunId, NpgsqlDbType = NpgsqlDbType.Uuid });
@@ -333,12 +342,13 @@ public sealed class UpgradeRunPickup
             upsert.Parameters.Add(new NpgsqlParameter { Value = (object?)run.FirstError ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
             upsert.Parameters.Add(new NpgsqlParameter { Value = (object?)run.VerifiedUtc ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
             upsert.Parameters.Add(new NpgsqlParameter { Value = now, NpgsqlDbType = NpgsqlDbType.Timestamp });
-            await upsert.ExecuteNonQueryAsync(cancellationToken);
+            written = await upsert.ExecuteScalarAsync(cancellationToken) is not null;
         }
 
         await using var retention = new NpgsqlCommand(UpgradeRuns.RetentionDeleteSql, connection) { CommandTimeout = 30 };
         retention.Parameters.Add(new NpgsqlParameter { Value = now.AddDays(-UpgradeRuns.RetentionDays), NpgsqlDbType = NpgsqlDbType.Timestamp });
         await retention.ExecuteNonQueryAsync(cancellationToken);
+        return written;
     }
 
     private void WarnOnce(string key, string message, params object?[] args)

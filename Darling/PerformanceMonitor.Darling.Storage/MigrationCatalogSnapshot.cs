@@ -78,20 +78,25 @@ public sealed class MigrationCatalogSnapshot
     internal const string TimescaleProbeSql =
         "SELECT to_regclass('timescaledb_information.hypertables') IS NOT NULL AND to_regclass('timescaledb_information.jobs') IS NOT NULL";
 
-    /// <summary>The relations, columns, indexes and functions. One row per object: kind, schema, object, parent table (columns and indexes), column, signature.</summary>
+    /// <summary>The relations, columns, indexes and functions. One row per object: kind, schema, object, parent table (columns and indexes), column, signature.
+    /// <para><b>No relation lock (#9486).</b> The snapshot runs inside the rung's transaction before the rung sets its <c>lock_timeout</c>, and every lock it took would be held to the end of the rung.
+    /// <c>pg_get_viewdef</c> and <c>pg_get_expr(adbin, adrelid)</c> open the view or the table with <c>AccessShareLock</c>, so a view body is compared by the hash of its stored rule tree (<c>pg_rewrite.ev_action</c>)
+    /// and a column default by the hash of its stored expression tree (<c>pg_attrdef.adbin</c>): both are plain catalog columns. <c>pg_get_indexdef</c>, <c>pg_get_constraintdef</c>, <c>pg_get_function_identity_arguments</c>
+    /// and <c>format_type</c> read the catalog caches only and open no relation.</para></summary>
     internal const string CoreSql = @"
 SELECT 'table' AS kind, n.nspname AS schema_name, c.relname AS object_name, NULL::text AS parent_name, NULL::text AS column_name, c.relkind::text AS signature
 FROM pg_class AS c
 JOIN pg_namespace AS n ON n.oid = c.relnamespace
 WHERE n.nspname IN (" + SchemaList + @") AND c.relkind IN ('r', 'p') AND NOT c.relispartition
 UNION ALL
-SELECT 'view', n.nspname, c.relname, NULL, NULL, c.relkind::text || ':' || md5(pg_get_viewdef(c.oid))
+SELECT 'view', n.nspname, c.relname, NULL, NULL, c.relkind::text || ':' || coalesce(md5(r.ev_action::text), '')
 FROM pg_class AS c
 JOIN pg_namespace AS n ON n.oid = c.relnamespace
+LEFT JOIN pg_rewrite AS r ON r.ev_class = c.oid AND r.rulename = '_RETURN'
 WHERE n.nspname IN (" + SchemaList + @") AND c.relkind IN ('v', 'm')
 UNION ALL
 SELECT 'column', n.nspname, c.relname, c.relname, a.attname::text,
-       format_type(a.atttypid, a.atttypmod) || '|' || a.attnotnull::text || '|' || coalesce(md5(pg_get_expr(d.adbin, d.adrelid)), '')
+       format_type(a.atttypid, a.atttypmod) || '|' || a.attnotnull::text || '|' || coalesce(md5(d.adbin::text), '')
 FROM pg_attribute AS a
 JOIN pg_class AS c ON c.oid = a.attrelid
 LEFT JOIN pg_attrdef AS d ON d.adrelid = a.attrelid AND d.adnum = a.attnum

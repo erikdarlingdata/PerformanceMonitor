@@ -149,7 +149,8 @@ public sealed class QueryFleetSummaryCoveringIndexLiveTests
             await DarlingMcpTestData.RegisterServerAsync(c, -914900 - i, "c9149-" + i, ct);
         }
 
-        var from = t.Start;
+        /* #9491: the read window is hours_back back from now, so a read after the hour turns starts an hour later. Seeding from two hours inside keeps every row in both reads. */
+        var from = t.Start.AddHours(2);
         var to = t.End.AddHours(-1);
         await Exec(c, $@"INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
               delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, total_logical_reads, sample_interval_seconds)
