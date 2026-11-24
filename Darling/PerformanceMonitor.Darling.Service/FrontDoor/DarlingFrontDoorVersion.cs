@@ -18,15 +18,15 @@ namespace PerformanceMonitor.Darling.Service.FrontDoor;
 
 /// <summary>
 /// #9431: the front door's answer to "which build is serving, and are its stores up". It carries the build line (the same words the web
-/// footer shows), the commit, when the process started, and for each store whether the front door can use it right now. Nothing else:
-/// no address, no token and no error text, because it is read with no sign-in.
+/// footer shows), the commit, when the process started, and how many stores the front door can use right now out of how many it has.
+/// Nothing else: no store name, no address, no token and no error text, because it is read with no sign-in.
 ///
 /// <para>Two places serve it. <c>GET /version</c> on the web listener is answered ahead of the sign-in gate (after the Host guard and the
 /// network test), so it works on defaults with no <c>health</c> block. The health port's <c>/readyz</c> adds the same object after its
 /// word when the health port is on. A probe must read the body: before this build the web listener answered 200 with the sign-in page
 /// for any path, so a 200 alone does not show that the endpoint exists. The body is JSON with a <c>build</c> key.</para>
 ///
-/// <para>A store is <c>up</c> when its last refresh succeeded. A store that is stale, never answered or refused the token is <c>down</c>.
+/// <para>A store counts as up when its last refresh succeeded. A store that is stale, never answered or refused the token does not.
 /// It is the directory's last result, so a request here sends nothing to any store.</para>
 /// </summary>
 internal static class DarlingFrontDoorVersion
@@ -43,16 +43,16 @@ internal static class DarlingFrontDoorVersion
         return new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
     }
 
-    /// <summary>The word for one store: <c>up</c> or <c>down</c>.</summary>
-    internal static string UpstreamWord(FrontDoorStoreHealth health) => health == FrontDoorStoreHealth.Ok ? "up" : "down";
-
     /// <summary>The object both places serve.</summary>
     internal static JsonObject Describe(IReadOnlyList<FrontDoorStoreState> stores, DateTimeOffset startedUtc)
     {
-        var upstreams = new JsonArray();
+        var up = 0;
         foreach (var state in stores)
         {
-            upstreams.Add(new JsonObject { ["name"] = state.Store.Name, ["state"] = UpstreamWord(state.Health) });
+            if (state.Health == FrontDoorStoreHealth.Ok)
+            {
+                up++;
+            }
         }
 
         return new JsonObject
@@ -60,7 +60,8 @@ internal static class DarlingFrontDoorVersion
             ["build"] = DarlingCliCommands.BuildText(),
             ["commit"] = DarlingCliCommands.CommitText(),
             ["started_utc"] = startedUtc.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
-            ["upstreams"] = upstreams,
+            ["upstreams_total"] = stores.Count,
+            ["upstreams_up"] = up,
         };
     }
 

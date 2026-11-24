@@ -118,7 +118,7 @@ internal sealed class DarlingFrontDoorWebProxy
     /// before its sign-in gate and calls <see cref="WriteVersionAsync"/> when it is.</summary>
     internal static bool IsVersionRequest(HttpRequest request) => DarlingFrontDoorVersion.IsVersionRequest(request);
 
-    /// <summary>#9431: answers <c>GET /version</c> with the build, the commit, the start time and each store's reachability.</summary>
+    /// <summary>#9431: answers <c>GET /version</c> with the build, the commit, the start time and how many stores are up.</summary>
     internal Task WriteVersionAsync(HttpContext context)
         => DarlingFrontDoorVersion.WriteAsync(context, _directory.Stores, _processStart);
 

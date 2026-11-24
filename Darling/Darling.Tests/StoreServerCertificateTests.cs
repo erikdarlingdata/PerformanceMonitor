@@ -60,6 +60,9 @@ public sealed class StoreServerCertificateTests
             Assert.Equal(root.Subject, report.Server.Issuer);
             Assert.Equal(Hex(root), report.Root!.Sha256);
             Assert.Equal(root.Subject, report.Root.Subject);
+            Assert.Equal(DateTimeKind.Utc, report.Server.NotBeforeUtc.Kind);
+            Assert.Equal(DateTimeKind.Utc, report.Server.NotAfterUtc.Kind);
+            Assert.Equal(leaf.NotBefore.ToUniversalTime(), report.Server.NotBeforeUtc);
             Assert.InRange(StoreServerCertificate.DaysToExpiry(report.Server.NotAfterUtc, DateTime.UtcNow), 3640, 3660);
             Assert.Equal(-1, StoreServerCertificate.DaysToExpiry(report.Server.NotAfterUtc, report.Server.NotAfterUtc.AddHours(30)));
         }
@@ -140,6 +143,7 @@ public sealed class StoreServerCertificateTests
         listener.Start();
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var sawStartup = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var server = Task.Run(async () =>
         {
             while (!stop.IsCancellationRequested)
@@ -150,7 +154,17 @@ public sealed class StoreServerCertificateTests
                 await stream.ReadExactlyAsync(request, stop.Token);
                 await stream.WriteAsync(new byte[] { (byte)'S' }, stop.Token);
                 await using var tls = new SslStream(stream);
-                await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificateContext = context }, stop.Token);
+                try
+                {
+                    await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificateContext = context }, stop.Token);
+
+                    /* Anything the client sends after the handshake is its startup message (user name, database) or a password. */
+                    sawStartup.TrySetResult(await tls.ReadAsync(new byte[1], stop.Token) > 0);
+                }
+                catch (Exception) when (!stop.IsCancellationRequested)
+                {
+                    sawStartup.TrySetResult(false);
+                }
             }
         }, stop.Token);
 
@@ -164,6 +178,7 @@ public sealed class StoreServerCertificateTests
             Assert.Equal(Hex(leaf), report.Server!.Sha256);
             Assert.Equal(leaf.NotAfter.ToUniversalTime(), report.Server.NotAfterUtc);
             Assert.Equal(Hex(root), report.Root!.Sha256);
+            Assert.False(await sawStartup.Task.WaitAsync(TimeSpan.FromSeconds(10), ct), "the client sent bytes after the handshake");
         }
         finally
         {

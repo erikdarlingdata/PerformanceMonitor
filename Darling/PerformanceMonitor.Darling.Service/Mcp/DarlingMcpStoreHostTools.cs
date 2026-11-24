@@ -90,7 +90,7 @@ public sealed class DarlingMcpStoreHostTools
         + "store_certificate is the server certificate the store presents to TLS clients (#9430): tls is on, off "
         + "or unavailable. On, source says where it was read: managed_file (the server.crt the service wrote for a "
         + "managed store, beside the data directory) or tls_handshake (the certificate the store presents when this "
-        + "service connects, for a store it does not manage; no password is sent), and server carries subject, issuer, "
+        + "service connects, for a store it does not manage; the handshake ends before any user name or password is sent), and server carries subject, issuer, "
         + "sha256 (64 upper-case hex characters, the fingerprint of the certificate's DER bytes), not_before and not_after "
         + "(UTC) and days_to_expiry (whole days, negative once expired, as of this response). root is the issuing "
         + "root's subject and sha256 when the chain carries one, else null. Off means the store's ssl setting is off and "

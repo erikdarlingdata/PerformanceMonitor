@@ -124,8 +124,9 @@ internal static class StoreServerCertificate
 
     /// <summary>
     /// A store's certificate as it presents it. Connects with <see cref="SslMode.Require"/> and takes the certificate from Npgsql's validation
-    /// callback, which runs before sign-in, so no password is sent and the answer does not depend on one. The callback accepts any certificate:
-    /// it is reading what the store presents, not deciding whether to trust it. The connection that follows is dropped.
+    /// callback, which runs during the TLS handshake, before Npgsql sends its startup message. The callback keeps the certificate and then
+    /// returns false, so the handshake ends there: no startup message (user name, database) and no password is ever sent, and the store sees
+    /// a failed TLS handshake, not a failed sign-in. It is reading what the store presents, not deciding whether to trust it.
     /// </summary>
     internal static async Task<Report> FromHandshakeAsync(string connectionString, CancellationToken cancellationToken)
     {
@@ -157,7 +158,7 @@ internal static class StoreServerCertificate
                     }
                 }
 
-                return true;
+                return false;
             });
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -169,7 +170,7 @@ internal static class StoreServerCertificate
             }
             catch (Exception) when (server is not null)
             {
-                /* The certificate came before the sign-in step that failed. That failure is not what this read is for. */
+                /* The callback ended the handshake on purpose once it had the certificate. That failure is not what this read is for. */
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

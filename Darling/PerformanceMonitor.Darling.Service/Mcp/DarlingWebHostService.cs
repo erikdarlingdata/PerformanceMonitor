@@ -1801,8 +1801,8 @@ public sealed class DarlingWebHostService : BackgroundService
 
         /* #9431: a front door answers GET /version with no sign-in, so a person can check which build is serving with one request. It sits after
            the Host guard and the network test (an address outside web.network.allowFrom still gets the gate's refusal) and before the
-           sign-in gate, so it works on defaults with no health block. It carries only the build, the commit, the start time and each
-           store's up or down (DarlingFrontDoorVersion). */
+           sign-in gate, so it works on defaults with no health block. It carries only the build, the commit, the start time and the
+           count of stores that are up (DarlingFrontDoorVersion). */
         if (frontDoorProxy is not null)
         {
             var versionCidr = allowedCidr;

@@ -33,11 +33,10 @@ public sealed class FrontDoorVersionTests
 {
     private static JsonNode Json(string body) => JsonNode.Parse(body)!;
 
-    private static string[] Upstreams(JsonNode json)
-        => json["upstreams"]!.AsArray().Select(u => $"{u!["name"]}:{u["state"]}").ToArray();
+    private static string Upstreams(JsonNode json) => $"{json["upstreams_up"]}/{json["upstreams_total"]}";
 
     [Fact(Timeout = 60_000)]
-    public async Task Version_SignedOut_ReportsTheBuildTheStartTimeAndEachStoresReachability_AndNothingElse()
+    public async Task Version_SignedOut_ReportsTheBuildTheStartTimeAndHowManyStoresAreUp_AndNothingElse()
     {
         var ct = TestContext.Current.CancellationToken;
         var a = await FakeWebPeer.StartAsync("use1");
@@ -49,7 +48,7 @@ public sealed class FrontDoorVersionTests
         var (upBoth, bothBody) = await door.SendAsync(door.Request(HttpMethod.Get, "/version", FrontDoorSeat.SignedOut), ct);
         Assert.Equal(HttpStatusCode.OK, upBoth.StatusCode);
         Assert.StartsWith("application/json", upBoth.Content.Headers.ContentType?.ToString());
-        Assert.Equal(new[] { "use1:up", "usw2:up" }, Upstreams(Json(bothBody)));
+        Assert.Equal("2/2", Upstreams(Json(bothBody)));
 
         door.Directory.SetHealth("usw2", FrontDoorStoreHealth.Unreachable, "connect to 10.20.30.40:5152 refused");
         var (_, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/version", FrontDoorSeat.SignedOut), ct);
@@ -59,10 +58,12 @@ public sealed class FrontDoorVersionTests
         Assert.Equal(DarlingCliCommands.CommitText(), (string?)json["commit"]);
         var started = DateTimeOffset.Parse((string)json["started_utc"]!, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal);
         Assert.InRange(started, DateTimeOffset.UtcNow.AddDays(-365), DateTimeOffset.UtcNow.AddMinutes(1));
-        Assert.Equal(new[] { "use1:up", "usw2:down" }, Upstreams(json));
+        Assert.Equal("1/2", Upstreams(json));
 
-        /* Only those four keys, and a down store carries no address and no error text. */
-        Assert.Equal(new[] { "build", "commit", "started_utc", "upstreams" }, json.AsObject().Select(p => p.Key).ToArray());
+        /* Only those five keys: no store name, and a down store carries no address and no error text. */
+        Assert.Equal(new[] { "build", "commit", "started_utc", "upstreams_total", "upstreams_up" }, json.AsObject().Select(p => p.Key).ToArray());
+        Assert.DoesNotContain("use1", body);
+        Assert.DoesNotContain("usw2", body);
         Assert.DoesNotContain("10.20.30.40", body);
         Assert.DoesNotContain("refused", body);
 
@@ -84,7 +85,7 @@ public sealed class FrontDoorVersionTests
 
         var (_, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/version", FrontDoorSeat.SignedOut), ct);
 
-        Assert.Equal(new[] { "use1:down" }, Upstreams(Json(body)));
+        Assert.Equal("0/1", Upstreams(Json(body)));
     }
 
     [Fact(Timeout = 60_000)]
@@ -99,9 +100,49 @@ public sealed class FrontDoorVersionTests
         var (_, otherBody) = await door.SendAsync(door.Request(HttpMethod.Get, "/versions", FrontDoorSeat.SignedOut), ct);
         var (api, _) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/front-door", FrontDoorSeat.SignedOut), ct);
 
-        Assert.DoesNotContain("upstreams", postBody);
-        Assert.DoesNotContain("upstreams", otherBody);
+        Assert.DoesNotContain("upstreams_up", postBody);
+        Assert.DoesNotContain("upstreams_up", otherBody);
         Assert.Equal(HttpStatusCode.Unauthorized, api.StatusCode);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task Version_IsRefusedWhenTheHostHeaderIsNotOneTheListenerBinds()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var a = await FakeWebPeer.StartAsync("use1");
+        await using var _a = a;
+        await using var door = await FrontDoorWebHarness.StartAsync(new[] { (a, new[] { "sql-east-1" }) }, ct: ct);
+
+        var request = door.Request(HttpMethod.Get, "/version", FrontDoorSeat.SignedOut);
+        request.Headers.Host = "rebound.example.test";
+        var (refused, refusedBody) = await door.SendAsync(request, ct);
+        var (answered, answeredBody) = await door.SendAsync(door.Request(HttpMethod.Get, "/version", FrontDoorSeat.SignedOut), ct);
+
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        Assert.DoesNotContain("upstreams_up", refusedBody);
+        Assert.Equal(HttpStatusCode.OK, answered.StatusCode);
+        Assert.Contains("upstreams_up", answeredBody);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task Version_IsRefusedForAnAddressOutsideAllowFrom_AndAnsweredWithNoSignInForOneInside()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var a = await FakeWebPeer.StartAsync("use1");
+        await using var _a = a;
+        var caller = IPAddress.Parse("203.0.113.9");
+        await using var outside = await FrontDoorWebHarness.StartAsync(
+            new[] { (a, new[] { "sql-east-1" }) }, ct: ct, remoteIp: caller, allowFrom: "10.0.0.0/8");
+        await using var inside = await FrontDoorWebHarness.StartAsync(
+            new[] { (a, new[] { "sql-east-1" }) }, ct: ct, remoteIp: caller, allowFrom: "203.0.113.0/24");
+
+        var (refused, refusedBody) = await outside.SendAsync(outside.Request(HttpMethod.Get, "/version", FrontDoorSeat.SignedOut), ct);
+        var (answered, answeredBody) = await inside.SendAsync(inside.Request(HttpMethod.Get, "/version", FrontDoorSeat.SignedOut), ct);
+
+        Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+        Assert.DoesNotContain("upstreams_up", refusedBody);
+        Assert.Equal(HttpStatusCode.OK, answered.StatusCode);
+        Assert.Equal("1/1", Upstreams(Json(answeredBody)));
     }
 
     [Fact(Timeout = 60_000)]
@@ -139,7 +180,7 @@ public sealed class FrontDoorVersionTests
         Assert.Equal("ok", lines[0]);
         var json = Json(lines[1]);
         Assert.Equal(DarlingCliCommands.BuildText(), (string?)json["build"]);
-        Assert.Equal(new[] { "use1:up", "usw2:down" }, Upstreams(json));
+        Assert.Equal("1/2", Upstreams(json));
         Assert.Equal("ok", await live.Content.ReadAsStringAsync(ct));
     }
 
