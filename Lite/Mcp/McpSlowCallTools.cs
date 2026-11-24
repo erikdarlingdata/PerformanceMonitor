@@ -33,11 +33,11 @@ public sealed class McpSlowCallTools
         "total_ms (whole call); lock_wait_ms (time waiting for the local store's read lock, added up over every connection the call opened); " +
         "hot_ms and archive_ms (the part of total_ms spent outside and inside the archive span reads) and archive_files (archive files those reads opened), " +
         "which are null for a tool that keeps no phase split (only get_query_store_top does), so null means not measured, not zero; " +
-        "response_bytes (size of the text the client received); hours_back (the window the call asked for, null when it had none); " +
+        "response_bytes (size of the reply text the tool returned, before MCP's JSON-RPC encoding, so the body on the wire is larger); hours_back (the window the call asked for, null when it had none); " +
         "peak_working_set_bytes (highest process working set polled every 75 ms during the call) and duckdb_memory_bytes (DuckDB's memory total when the call ended, " +
         "null when the store lock was busy then); memory_source says where the two memory figures came from. No argument value is stored. " +
         "per_tool: for each tool called since Lite started, count, total_ms, mean_ms, max_ms, p50_ms, p95_ms and p99_ms (bucket upper bounds, never interpolated, capped at max_ms), " +
-        "slow_calls and errors. Rows are kept 7 days, at most 1000. Optional tool filter on slow_calls. Empty slow_calls means no call was slow, not a failure. " +
+        "slow_calls and errors. Rows are kept 7 days, at most 1000. Optional tool filter: slow_calls and per_tool then hold only that tool. Empty slow_calls means no call was slow, not a failure. " +
         "truncated is true when the window held more slow calls than limit, so slow_calls is the newest limit of them. per_tool is never cut by limit.";
 
     [McpServerTool(Name = "get_slow_mcp_calls"), Description(Description)]
@@ -45,7 +45,7 @@ public sealed class McpSlowCallTools
         LocalDataService dataService,
         McpCallTimingRecorder recorder,
         [Description("Hours of history for slow_calls. Default 24; max 168.")] int hours_back = DefaultHours,
-        [Description("Optional: only slow_calls for this tool name.")] string? tool = null,
+        [Description("Optional: only this tool's slow_calls rows and per_tool entry.")] string? tool = null,
         [Description("Maximum slow_calls rows to return, newest first. Default 20. This is what bounds the page: read truncated to know whether the window held more.")] int limit = DefaultLimit)
     {
         var windowError = McpHelpers.ValidateWindow(hours_back, null, out _) ?? McpHelpers.ValidateTop(limit);
