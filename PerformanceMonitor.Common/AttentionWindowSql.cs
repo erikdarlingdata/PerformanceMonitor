@@ -39,6 +39,17 @@ public static class AttentionWindowSql
     /// <summary>The <c>event_kind</c> of a kept ring-buffer event.</summary>
     public const string KindSample = "sample";
 
+    /// <summary>How far BEFORE an attention sample's event_time a captured call's event_time may fall and still match it (#9507), in
+    /// microseconds. Measured on SQL Server 2022 and 2025 (20 real command timeouts each, batch and RPC): the session writes the captured
+    /// call first and the attention second, with the same timestamp to the millisecond, so the real gap is under 1 ms. One second is the
+    /// tolerance for a slower dispatch.</summary>
+    public const long CapturedCallMatchBeforeUs = 1_000_000;
+
+    /// <summary>How far AFTER an attention sample's event_time a captured call's event_time may fall and still match it (#9507), in
+    /// microseconds. The captured call is written at or before the attention (see <see cref="CapturedCallMatchBeforeUs"/>), so this is
+    /// slack only: the window the judge matches on is the attention time minus <see cref="CapturedCallMatchBeforeUs"/> to plus this.</summary>
+    public const long CapturedCallMatchAfterUs = 2_000_000;
+
     /// <summary>How many entries each top list holds.</summary>
     public const int TopCount = 5;
 

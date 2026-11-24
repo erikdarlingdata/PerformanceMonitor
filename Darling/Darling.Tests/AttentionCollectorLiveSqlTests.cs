@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Targets;
 using Xunit;
 
@@ -196,6 +197,168 @@ public sealed class AttentionCollectorLiveSqlTests
             {
                 /* Drops the test session by its own name, and only that one. */
                 await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + sessionName + "] ON SERVER;", CancellationToken.None);
+            }
+        }
+    }
+
+    private static async Task<List<AttentionCollector.Row>> CollectUntilAsync(
+        string connectionString, string sessionName, Func<List<AttentionCollector.Row>, bool> done, CancellationToken ct)
+    {
+        var prior = new Dictionary<string, string> { [AttentionCollector.CountKeyFor(null)] = "0" };
+        var rows = new List<AttentionCollector.Row>();
+        var deadline = DateTime.UtcNow.AddSeconds(40);
+        while (true)
+        {
+            (rows, _) = await RunCollectorAsync(connectionString, sessionName, prior, ct);
+            if (done(rows) || DateTime.UtcNow > deadline)
+            {
+                return rows;
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(1), ct);
+        }
+    }
+
+    private static async Task RunCallAsync(string connectionString, string sql, int timeoutSeconds, CancellationToken ct)
+    {
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await using var command = new SqlCommand(sql, connection) { CommandTimeout = timeoutSeconds };
+        try
+        {
+            await command.ExecuteNonQueryAsync(ct);
+        }
+        catch (SqlException)
+        {
+            /* The call is meant to fail: a timeout or a divide by zero. */
+        }
+    }
+
+    /// <summary>
+    /// #9507: the session keeps a call the client cancelled while it ran, and only that. A 2 s command timeout against a 5 s WAITFOR
+    /// leaves one captured call of about 2 s (result Abort on SQL Server 2016 to 2022, Error on 2025), which sits at the attention's time
+    /// on the same session. A fast failed batch and a reader disposed early after a call that finished leave none.
+    /// </summary>
+    [Fact]
+    public async Task OwnSession_ACommandTimeoutLeavesOneCapturedCall_AFastFailedBatchAndAnEarlyDisposedReaderLeaveNone()
+    {
+        const string timeoutApp = "pm-9507-timeout";
+        const string fastFailApp = "pm-9507-fastfail";
+        const string earlyApp = "pm-9507-early";
+        var connectionString = ConnectionString(timeoutApp);
+        Assert.SkipWhen(connectionString is null, "Set DARLING_TEST_SQL (and, for SQL auth, DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the live attention collector test.");
+        Assert.SkipWhen(ReadOnlyMode, "DARLING_TEST_SQL_READONLY=1: this server holds real monitoring data.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var sessionName = AlwaysOnXeSessions.OwnNameFor(
+            LongQueryCompletionsCollector.DarlingProduct, Guid.NewGuid().ToString("N")[..8], AlwaysOnXeSessionKind.Attention);
+        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+            .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + sessionName + "]", StringComparison.Ordinal)
+            .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
+        Assert.DoesNotContain("[" + AttentionCollector.XeSessionName + "]", create, StringComparison.Ordinal);
+
+        var created = false;
+        try
+        {
+            await ExecuteAsync(connectionString!, create, ct);
+            created = true;
+
+            string Conn(string app) => new SqlConnectionStringBuilder(connectionString!) { ApplicationName = app }.ConnectionString;
+            await RunCallAsync(Conn(fastFailApp), "SELECT 1/0;", 2, ct);
+            await using (var connection = new SqlConnection(Conn(earlyApp)))
+            {
+                await connection.OpenAsync(ct);
+                await using var command = new SqlCommand(
+                    "SELECT TOP (200000) a.object_id, a.name FROM sys.all_columns AS a CROSS JOIN sys.all_columns AS b;", connection) { CommandTimeout = 30 };
+                await using var early = await command.ExecuteReaderAsync(ct);
+                Assert.True(await early.ReadAsync(ct));
+            }
+
+            await RunCallAsync(Conn(timeoutApp), "WAITFOR DELAY '00:00:05';", 2, ct);
+
+            var rows = await CollectUntilAsync(
+                connectionString!, sessionName,
+                r => r.Exists(x => x.EventKind == AttentionCollector.KindAborted && x.ClientAppName == timeoutApp)
+                    && r.Exists(x => x.EventKind == AttentionCollector.KindSample && x.ClientAppName == timeoutApp), ct);
+
+            var captured = Assert.Single(rows, r => r.EventKind == AttentionCollector.KindAborted && r.ClientAppName == timeoutApp);
+            Assert.InRange(captured.InterruptDurationUs ?? 0, 1_500_000, 4_000_000);
+            Assert.Contains("WAITFOR DELAY", captured.StatementText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal("master", captured.DatabaseName);
+
+            /* The match the judge makes: same session, and the call's time inside the attention's window. */
+            var attention = Assert.Single(rows, r => r.EventKind == AttentionCollector.KindSample && r.ClientAppName == timeoutApp);
+            Assert.Equal(attention.SessionId, captured.SessionId);
+            var gapUs = (captured.EventTime!.Value - attention.EventTime!.Value).Ticks / 10;
+            Assert.InRange(gapUs, -AttentionWindowSql.CapturedCallMatchBeforeUs, AttentionWindowSql.CapturedCallMatchAfterUs);
+
+            Assert.DoesNotContain(rows, r => r.EventKind == AttentionCollector.KindAborted && (r.ClientAppName == fastFailApp || r.ClientAppName == earlyApp));
+        }
+        finally
+        {
+            if (created)
+            {
+                await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + sessionName + "] ON SERVER;", CancellationToken.None);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #9507: the drop-and-recreate that upgrades a box replaces an older attention-only session once and leaves the new definition alone.
+    /// The probe is the shipped one, pointed at two scratch sessions of this test's own.
+    /// </summary>
+    [Fact]
+    public async Task ServerProbe_ReadsAnAttentionOnlySessionAsAMismatch_AndTheCurrentDefinitionAsOurs()
+    {
+        var connectionString = ConnectionString("pm-9507-probe-live");
+        Assert.SkipWhen(connectionString is null, "Set DARLING_TEST_SQL to run the live attention definition test.");
+        Assert.SkipWhen(ReadOnlyMode, "DARLING_TEST_SQL_READONLY=1: this server holds real monitoring data.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var oldName = "PerformanceMonitor_Darling_" + Guid.NewGuid().ToString("N")[..8] + "_Attention";
+        var newName = "PerformanceMonitor_Darling_" + Guid.NewGuid().ToString("N")[..8] + "_Attention";
+
+        var oldCreate = "CREATE EVENT SESSION [" + oldName + "] ON SERVER "
+            + "ADD EVENT sqlserver.attention (ACTION (sqlserver.client_app_name, sqlserver.client_hostname, sqlserver.database_name, sqlserver.session_id, sqlserver.sql_text)) "
+            + "ADD TARGET package0.event_counter, ADD TARGET package0.ring_buffer (SET max_memory = 1024) WITH (MEMORY_PARTITION_MODE = NONE, STARTUP_STATE = OFF);";
+        var newCreate = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+            .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + newName + "]", StringComparison.Ordinal)
+            .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
+        /* Not started: the probe answers 0 (stopped) for a matching definition and 2 for a mismatch. */
+        newCreate = newCreate.Substring(0, newCreate.IndexOf("ALTER EVENT SESSION", StringComparison.Ordinal));
+
+        async Task<int?> ProbeAsync(string name)
+        {
+            await using var connection = new SqlConnection(connectionString!);
+            await connection.OpenAsync(ct);
+            await using var command = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("pm-9507-test"), connection);
+            command.Parameters.AddWithValue("@session_name", name);
+            var value = await command.ExecuteScalarAsync(ct);
+            return value is null or DBNull ? null : Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+
+        var madeOld = false;
+        var madeNew = false;
+        try
+        {
+            await ExecuteAsync(connectionString!, oldCreate, ct);
+            madeOld = true;
+            await ExecuteAsync(connectionString!, newCreate, ct);
+            madeNew = true;
+
+            Assert.Equal(AlwaysOnXeSessions.AttentionDefinitionMismatch, await ProbeAsync(oldName));
+            Assert.Equal(0, await ProbeAsync(newName));
+        }
+        finally
+        {
+            if (madeOld)
+            {
+                await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + oldName + "] ON SERVER;", CancellationToken.None);
+            }
+
+            if (madeNew)
+            {
+                await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + newName + "] ON SERVER;", CancellationToken.None);
             }
         }
     }
