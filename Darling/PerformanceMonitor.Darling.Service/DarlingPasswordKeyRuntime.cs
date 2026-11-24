@@ -240,7 +240,7 @@ internal sealed class DarlingPasswordKeyRuntime
 
         try
         {
-            await using var c = await _postgres.OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using var c = await _postgres.OpenConnectionAsync(StoreSessionNames.PasswordKey, ct).ConfigureAwait(false);
             var triggerProblem = await DarlingPasswordKeyStore.CheckTriggersAsync(c, ct).ConfigureAwait(false);
             PublishedKey? current = null;
             if (triggerProblem is null)
@@ -311,7 +311,7 @@ internal sealed class DarlingPasswordKeyRuntime
         string directory, NpgsqlDataSource postgres, ILogger logger, Func<PasswordPrivateKey, PublishedKey, bool> selfTest,
         string host, string? keySetting, CancellationToken ct)
     {
-        await using var c = await postgres.OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var c = await postgres.OpenConnectionAsync(StoreSessionNames.PasswordKey, ct).ConfigureAwait(false);
 
         var triggerProblem = await DarlingPasswordKeyStore.CheckTriggersAsync(c, ct).ConfigureAwait(false);
         if (triggerProblem is not null)
@@ -536,7 +536,7 @@ internal sealed class DarlingPasswordKeyRuntime
     {
         try
         {
-            await using var c = await postgres.OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using var c = await postgres.OpenConnectionAsync(StoreSessionNames.PasswordKey, ct).ConfigureAwait(false);
             await DarlingPasswordKeyStore.WriteServiceStateAsync(
                 c, host, keyId, state, note, ServiceCommandDeadlines.BootstrapSeconds, ct).ConfigureAwait(false);
         }

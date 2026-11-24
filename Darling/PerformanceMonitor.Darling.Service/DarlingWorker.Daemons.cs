@@ -2168,7 +2168,7 @@ public sealed partial class DarlingWorker
         var watermarks = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             using var command = new NpgsqlCommand(ReadCollectorWatermarksSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
@@ -2254,7 +2254,7 @@ public sealed partial class DarlingWorker
                 return new ServerClockStamp(await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken));
             }
 
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
 
             /* The newest day first, then every retained snapshot only when that day held none: the bounds the analysis side
                reads the same row with. The day's newest qualifying row is the newest one the unbounded read would find, so

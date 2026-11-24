@@ -107,7 +107,7 @@ public static class CollectionCaveatStore
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.CollectionCaveats, cancellationToken).ConfigureAwait(false);
 
             if (unread.Count > 0)
             {
@@ -167,7 +167,7 @@ public static class CollectionCaveatStore
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.CollectionCaveats, cancellationToken).ConfigureAwait(false);
             await using var command = new NpgsqlCommand(PruneStaleSql, connection)
             {
                 CommandTimeout = CommandTimeoutSeconds,

@@ -29,6 +29,18 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpStoreLockWaitTools
 {
+    /// <summary>This tool's entries on the web read surface and in Custom Views validation, kept here and not in the shared lists (#9477).</summary>
+    internal sealed class Registration : IReadToolRegistration
+    {
+        public ReadToolRegistration Read { get; } = new(
+            "get_store_lock_waits",
+            (c, pg, an) => GetStoreLockWaits(pg, DarlingWebEndpoints.Hours(c, 24), DarlingWebEndpoints.Rows(c, "limit", DefaultLimit), DarlingWebEndpoints.Str(c, "role"), DarlingWebEndpoints.Str(c, "relation"), DarlingWebEndpoints.AsOf(c), c.RequestAborted),
+            DarlingWebEndpoints.R(
+                DarlingWebEndpoints.CatOverview,
+                "The lock waits the monitoring store's OWN sessions suffered (from the store's PostgreSQL log): who waited, who held the lock, on what relation, for how long and how it ended. Only waits of 5 seconds or more.",
+                DarlingWebEndpoints.PHours(24), DarlingWebEndpoints.PLimit(DefaultLimit), DarlingWebEndpoints.PText("role"), DarlingWebEndpoints.PText("relation"), DarlingWebEndpoints.PAsOf()));
+    }
+
     /// <summary>Default rows returned.</summary>
     public const int DefaultLimit = 50;
 

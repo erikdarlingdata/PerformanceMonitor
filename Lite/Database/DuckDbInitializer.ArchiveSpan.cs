@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -84,6 +85,8 @@ public partial class DuckDbInitializer
                     return new ArchiveSpan(null, null);
                 }
 
+                /* #9423: the files this read opens, for the slow-call row. A cache hit opens none, so only a miss counts them. */
+                ReadLockWaitTally.Current?.RecordArchiveFiles(ArchiveParquetFileCount(table));
                 var timer = Helpers.QueryExecutionContext.CurrentPhases;
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 using var slot = await (limiter ?? ArchiveReadLimiter.Shared).EnterAsync(cancellationToken);
@@ -115,6 +118,19 @@ public partial class DuckDbInitializer
             AppLogger.Warn("ArchiveSpan", $"Could not read the span of the {table} archive ({ex.GetType().Name}: {ex.Message}); reading the archive view instead");
             return null;
         }
+    }
+
+    /// <summary>How many archive files <paramref name="table"/> has right now, over the two name shapes <see cref="ArchiveParquetGlobs"/> reads.</summary>
+    internal int ArchiveParquetFileCount(string table)
+    {
+        if (!Directory.Exists(_archivePath))
+        {
+            return 0;
+        }
+
+        var exact = new EnumerationOptions { MatchType = MatchType.Simple, MatchCasing = MatchCasing.CaseInsensitive, AttributesToSkip = 0 };
+        return new[] { $"*_{table}.parquet", $"*_{table}_pt???.parquet" }
+            .Sum(pattern => Directory.EnumerateFiles(_archivePath, pattern, exact).Count());
     }
 
     private async Task<LockedConnection> OpenSpanConnectionAsync(CancellationToken cancellationToken)

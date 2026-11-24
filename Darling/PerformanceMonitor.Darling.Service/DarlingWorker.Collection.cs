@@ -118,6 +118,13 @@ public sealed partial class DarlingWorker
            job and no reloptions. No rung uses CREATE INDEX CONCURRENTLY or any other statement that
            cannot be transacted. */
         var storeRetryBudget = System.Diagnostics.Stopwatch.StartNew();
+        /* #9415: this start's row in the store's start history, and a row per migration rung it tries. The recorder hears the runner as it goes and
+           holds what it hears until the history's tables exist (a rung makes them). It flushes when the store is ready, after a failed attempt (so a
+           start that dies in a rung shows it), once a minute for the ERROR and WARN counts, and once more at shutdown. Never fails or delays the start. */
+        using var startRecorder = ServiceStartRecorder.ForThisProcess(ServiceLogTally.Shared, ProcessStartUtc());
+        /* Declared after the recorder and the data source it reads through, so EVERY exit of this method (a return, an exception, the store-retry
+           wait's cancellation) stops the loop, runs its last flush and awaits it before either is disposed. */
+        await using var startHistory = startRecorder.StartFlushLoop(postgres, _logger, stoppingToken);
         /* #4508: set once, the first time the fast budget above runs out on a failure that is still
            retryable — see the arm below. Gates CRITICAL-once/WARNING-per-retry the same way the config
            and bootstrap sites' single terminal LogCritical already is "once": this is the sustained arm's
@@ -128,14 +135,16 @@ public sealed partial class DarlingWorker
         {
             try
             {
-                await using var migrateConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                await using var migrateConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
                 /* MigrateAsync (logger overload) also best-effort sets the database-default search_path to
                    collect/config for every future connection (V8 security split); a least-privilege BYO
                    login that cannot ALTER DATABASE is warned, not failed — the managed connection strings
                    carry Search Path regardless. */
-                var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken);
+                var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, startRecorder, stoppingToken);
                 _logger.LogInformation("Postgres store ready (schema v{Version}, {Applied} migration(s) applied)",
                     StorageVersion.SchemaVersion, applied);
+                startRecorder.StoreReady();
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
                 /* #4961: this install's id, made (or read back) now that the schema is current and before any worker
                    starts. Inside this try, on the same connection, so a failure to make it is retried and triaged exactly
                    like a failed migration. The CLI and the Viewer only read the row. */
@@ -167,6 +176,7 @@ public sealed partial class DarlingWorker
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException
@@ -206,6 +216,7 @@ public sealed partial class DarlingWorker
 
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts, sustained: true);
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
                 await Task.Delay(next.Delay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -215,6 +226,9 @@ public sealed partial class DarlingWorker
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
                 _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store);
+                /* #9415: the flush loop's last flush writes the failed rung, if the history's tables exist, before the service stands down and the
+                   data source goes. */
+                await startHistory.StopAsync();
                 return;
             }
         }
@@ -423,7 +437,7 @@ public sealed partial class DarlingWorker
 
         try
         {
-            await using var timescaleConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var timescaleConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
             _timescaleAvailable = await TimescaleSupport.TryEnableAsync(timescaleConnection, _logger, stoppingToken);
             if (_timescaleAvailable)
             {
@@ -549,7 +563,7 @@ public sealed partial class DarlingWorker
            them. */
         try
         {
-            await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var fallbackConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
             /* #3817: segment three of the one convergence list — the two baseline steps, in the same order,
                off the same list, so the hourly pass runs them too. The UNGATED property is a property of this
                CALL SITE (after the TimescaleDB block's catch, on every path), not of the list: the steps are
@@ -573,7 +587,7 @@ public sealed partial class DarlingWorker
            fatal (the same optional-feature discipline as the TimescaleDB block above). */
         try
         {
-            await using var tuningConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var tuningConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
             /* #3817: segment four — the tuning pass, off the same list. The whole-block wrap the issue names
                (one failure costing every index in the pass) is unchanged HERE and unchanged on the hourly
                pass, because it is inside PgTableTuning.ApplyAsync's own per-statement isolation rather than
@@ -825,7 +839,7 @@ public sealed partial class DarlingWorker
             InvestigationDispatcher.WithLockTimeout(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(
-                        DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
+                        DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), StoreSessionNames.Investigation))));
         var investigationStore = new InvestigationRequestStore(
             investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         /* #5821: the generic webhook's {{investigation_json}} masks the stored brief at the level the MCP tools serve; an
@@ -2064,6 +2078,10 @@ public sealed partial class DarlingWorker
         /* And the relation sizes writer (#9374): it ends at shutdown and never throws. */
         await relationSizesWriter;
 
+        /* And the start history's flush loop (#9415): it ends at shutdown with one last flush, bounded at five seconds, and never throws. Any other
+           exit of this method stops it when the scope ends. */
+        await startHistory.StopAsync();
+
         /* And the slow-read writer (#5097): a record still queued at shutdown is dropped. */
         try
         {
@@ -2916,7 +2934,7 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.BaselineBackfill, stoppingToken);
             var backfilled = await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, _logger, stoppingToken);
             /* #8549: the daily wait totals, on the same connection and the same off-the-start-path run. */
             await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
@@ -2947,7 +2965,7 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RollupWarm, stoppingToken);
             await TimescaleSupport.WarmCollectionHealthHourlyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3002,7 +3020,7 @@ public sealed partial class DarlingWorker
         _materializationHoleRepairRunning = true;
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.HoleRepair, stoppingToken);
 
             /* #4299: read BEFORE the repair runs, so the value stamped on a clean finish is the postmaster
                start this repair actually ran under, not whatever it is by the time the repair returns. A

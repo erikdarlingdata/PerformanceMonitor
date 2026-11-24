@@ -1453,7 +1453,7 @@ WHERE b.server_id = f.server_id
 
         int built = 0, failed = 0, started = 0;
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.QueryStoreClosedDay, cancellationToken);
         await HeartbeatAsync(connection, nowUtc, logger, cancellationToken);
 
         /* #9173: the hourly clutter step first: an hour costs little and is what a 24-hour read waits on, and it stops at its own share of the

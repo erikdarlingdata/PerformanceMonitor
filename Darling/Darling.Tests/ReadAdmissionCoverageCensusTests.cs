@@ -108,7 +108,7 @@ public sealed class ReadAdmissionCoverageCensusTests
     public void TheSkipRoster_IsTheHealthReads_EachWithAReason_AndEachAToolThatExists()
     {
         Assert.Equal(
-            new[] { "get_collection_health", "get_collection_log", "get_read_latency", "get_slow_reads", "get_store_log", "get_store_metrics", "list_servers" },
+            new[] { "get_collection_health", "get_collection_log", "get_collector_readiness", "get_read_latency", "get_slow_reads", "get_store_log", "get_store_metrics", "get_store_pass_steps", "list_servers" },
             ReadAdmission.SkippedRoutes.Keys.OrderBy(k => k, StringComparer.Ordinal));
 
         var toolSource = string.Join("\n", Directory.EnumerateFiles(Path.Combine(ServiceDir, "Mcp"), "*.cs").Select(File.ReadAllText));

@@ -104,7 +104,9 @@ public static class QueryStoreTextTrigramIndex
     /// statement's trigrams, about 456 trigrams or about 1.9 pending-list pages on a text of 1.4 KB, so its list fills faster per row than the
     /// plan-cache index's: at a store ten times the field's write rate a list cleaned every 5 minutes reaches the
     /// <see cref="PendingListLimitKb"/> limit, and 2 minutes keeps it under half of it. #9303: the plan-cache index's
-    /// <see cref="QueryTextTrigramIndex.CleanInterval"/> is the same 2 minutes, so a collection insert on either one rarely meets a long list.</summary>
+    /// <see cref="QueryTextTrigramIndex.CleanInterval"/> is the same 2 minutes, so a collection insert on either one rarely meets a long list.
+    /// #9460 measured 2, 5 and 10 minutes at 60,000 new texts an hour: 2 minutes peaked just under half of the limit, and 5 and 10 minutes
+    /// reached it and made the inserts merge the list inline. 2 minutes is the longest safe interval.</summary>
     public static readonly TimeSpan CleanInterval = TimeSpan.FromMinutes(2);
 
     /// <summary>One catalog read: the table, the index, the index it replaces, both extensions and any build in progress on the table. No
@@ -169,7 +171,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         NpgsqlDataSource postgres, bool enabled, QueryTextTrigramIndexTracker tracker, DateTime utcNow, ILogger logger,
         int buildTimeoutSeconds, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
         var state = await ReadStateAsync(connection, cancellationToken).ConfigureAwait(false);
         if (!state.TableExists)
         {
@@ -358,7 +360,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
             await using var drop = new NpgsqlCommand(DropSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
             await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }

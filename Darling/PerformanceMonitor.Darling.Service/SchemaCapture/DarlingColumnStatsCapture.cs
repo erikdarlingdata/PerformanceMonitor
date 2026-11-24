@@ -96,7 +96,7 @@ public static class DarlingColumnStatsCapture
         }
 
         var run = new Run(runner, server, DarlingSnapshotScope.IsActive, ct);
-        await using var store = await runner.Store.OpenConnectionAsync(ct);
+        await using var store = await runner.Store.OpenConnectionAsync(StoreSessionNames.SchemaCapture, ct);
         run.Store = store;
         await run.LoadTraceFlagAsync();
         if (server.Target.IsAzureSqlDb)

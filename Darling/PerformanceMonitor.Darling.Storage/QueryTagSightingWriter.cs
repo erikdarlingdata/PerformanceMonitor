@@ -236,7 +236,7 @@ WHERE (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
             int length = Math.Min(RowsPerStatement, rows.Count - start);
             try
             {
-                await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
                 await using var command = new NpgsqlCommand(UpsertSql, connection) { CommandTimeout = CommandTimeoutSeconds };
                 var serverIds = new int[length];
                 var counts = new long[length];

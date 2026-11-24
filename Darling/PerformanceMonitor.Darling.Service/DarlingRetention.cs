@@ -731,7 +731,7 @@ public static class DarlingRetention
             {
                 try
                 {
-                    await using var floorConnection = await postgres.OpenConnectionAsync(cancellationToken);
+                    await using var floorConnection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
 
                     DateTime? floor = null;
                     if (timescaleAvailable)
@@ -1989,7 +1989,7 @@ AND   r.database_name = d.database_name";
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             /* AT TIME ZONE 'UTC' collapses the catalog's timestamptz to the naive-UTC every stored timestamp follows. */
             using var command = new NpgsqlCommand(@"
 SELECT
@@ -2380,7 +2380,7 @@ WHERE NOT EXISTS
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             await QueryStoreIntervalPartitions.DropExpiredAsync(
                 connection, table, utcNow, logger ?? NullLogger.Instance, cancellationToken);
         }
@@ -2460,7 +2460,7 @@ WHERE NOT EXISTS
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             var state = await QueryStoreIntervalPartitions.ReadStateAsync(connection, table, cancellationToken);
             return state.Promoted && state.LegacyExists && state.LegacyUpper.HasValue;
         }
@@ -2477,7 +2477,7 @@ WHERE NOT EXISTS
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             await using var command = new NpgsqlCommand("SELECT to_regclass($1) IS NOT NULL", connection) { CommandTimeout = 30 };
             command.Parameters.AddWithValue(qualifiedName);
             return (bool)(await command.ExecuteScalarAsync(cancellationToken))!;
@@ -2847,7 +2847,7 @@ SELECT pg_catalog.current_setting('{DropChunksAnswerSetting}')::integer";
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             using var command = new NpgsqlCommand(DropJobHistoryOldestDailySql(retentionDays), connection) { CommandTimeout = DeleteTimeoutSeconds };
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -2897,7 +2897,7 @@ $do$";
         {
             var dropped = await ExecuteDropChunksWithDeadlockRetryAsync(async () =>
             {
-                await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
                 using var command = new NpgsqlCommand(givingWaySql, connection) { CommandTimeout = DeleteTimeoutSeconds };
                 var answer = await command.ExecuteScalarAsync(cancellationToken);
                 if (answer is null or DBNull)
@@ -2983,7 +2983,7 @@ $do$";
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             return await TimescaleSupport.ReadRawHypertablesAsync(connection, DeleteTimeoutSeconds, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3028,7 +3028,7 @@ $do$";
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             return await TimescaleSupport.IsRawTierDropSafeAsync(connection, tableName, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -3080,7 +3080,7 @@ $do$";
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
             using var command = new NpgsqlCommand(adoptSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
             command.Parameters.AddWithValue(cutoff);
 
@@ -3164,7 +3164,7 @@ $do$";
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
 
             /* Deleting a whole expired slice from a COMPRESSED chunk (the drop_chunks-failed fallback)
                decompresses every affected segment, and TimescaleDB caps that at 100k tuples per DML
