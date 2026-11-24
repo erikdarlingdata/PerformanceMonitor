@@ -384,7 +384,7 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     /// <summary>
     /// #7419: what the candidate query returns for <c>query_text</c> when the host reads the text in a second query
     /// (<see cref="CollectorContext.DeferTextFetch"/>). The <c>dm_exec_sql_text</c> apply STAYS in the candidate query, because
-    /// the collector's own-statement self-filter (<c>st.text NOT LIKE N'%PerformanceMonitorLite%'</c>) and the host object name
+    /// the collector's own-statement self-filter (<c>st.text COLLATE Latin1_General_100_BIN2 NOT LIKE N'%PerformanceMonitorLite%'</c>) and the host object name
     /// read it, so what a deferred run saves is the <c>SUBSTRING</c> and the transfer of the text, not the apply.
     /// </summary>
     private const string DeferredQueryTextExpression = @"
@@ -555,12 +555,16 @@ ORDER BY
     qs.total_elapsed_time DESC
 OPTION(RECOMPILE);";
 
-    /* The text apply and the collector's own-statement self-filter, as the no-plan form (Lite, and Darling with the
-       plan fetch deferred) has always spelled them. Spliced at the TEXT_APPLY marker so that form's SQL is byte-identical;
-       QueryStatsSqlGoldenTests pins its hash. */
+    /* The text apply and the collector's own-statement self-filter for the no-plan form (Lite, and Darling with the
+       plan fetch deferred), spliced at the TEXT_APPLY marker. QueryStatsSqlGoldenTests pins its hash.
+       #9531: the filter compares under a binary collation. st.text is the whole batch or procedure text, nvarchar(max),
+       and a leading-wildcard LIKE under the database's linguistic collation over up to MaxCandidateRows of it was most of
+       a run's drain (lab: 2,000 candidates drained in 700 ms linguistic, 81 ms binary, 18 ms with no filter, identical
+       rows). Every statement the tool sends carries the marker in exactly this case, so the binary match excludes the
+       same rows. The inline form below uses the same comparison. */
     private const string PlainTextApplyFragment = @"
 OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
-WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'";
+WHERE st.text COLLATE Latin1_General_100_BIN2 NOT LIKE N'%PerformanceMonitorLite%'";
 
     /* #7156: the inline plan form wraps the cheap TOP derived table in a ranked layer. Spliced at the RANK_OPEN marker; the
        matching close is InlineTextApplyFragment, which carries the text apply, the self-filter and the plan apply.
@@ -623,7 +627,7 @@ WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'";
        outer SELECT under the st alias it already reads, and the plan apply runs against the ranked rows. */
     private static readonly string InlineTextApplyFragment = @"
 OUTER APPLY sys.dm_exec_sql_text(qs.sql_handle) AS st
-    WHERE st.text NOT LIKE N'%PerformanceMonitorLite%'
+    WHERE st.text COLLATE Latin1_General_100_BIN2 NOT LIKE N'%PerformanceMonitorLite%'
 ) AS qs
 OUTER APPLY
 (
