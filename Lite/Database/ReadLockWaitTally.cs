@@ -41,6 +41,8 @@ internal sealed class ReadLockWaitTally : IDisposable
     private readonly ReadLockWaitTally? _outer;
     private long _waitTicks;
     private long _archiveSpanTicks;
+    private long _archiveFiles;
+    private int _hasSplit;
     private int _connections;
     private bool _disposed;
 
@@ -67,6 +69,21 @@ internal sealed class ReadLockWaitTally : IDisposable
     /// <summary>Adds time spent reading an archive span. It is inside whatever phase asked for the span.</summary>
     internal void RecordArchiveSpan(long ticks) => Interlocked.Add(ref _archiveSpanTicks, ticks);
 
+    /// <summary>Adds the archive files an archive span read opened (#9423).</summary>
+    internal void RecordArchiveFiles(int files) => Interlocked.Add(ref _archiveFiles, files);
+
+    /// <summary>Archive files the call's archive span reads opened (#9423).</summary>
+    internal long ArchiveFiles => Interlocked.Read(ref _archiveFiles);
+
+    /// <summary>
+    /// Says the read keeps a phase split (#9423): a tool that times its own phases, as get_query_store_top does, calls this so the
+    /// slow-call row stores the hot against archive figures. A read that never calls it stores NULL for them, since "no split
+    /// kept" and "no archive time" are different answers. The flag passes to the outer tally when this one ends.
+    /// </summary>
+    internal void MarkSplitKept() => Interlocked.Exchange(ref _hasSplit, 1);
+
+    internal bool SplitKept => Volatile.Read(ref _hasSplit) == 1;
+
     internal TimeSpan LockWait => Elapsed(Interlocked.Read(ref _waitTicks));
     internal TimeSpan ArchiveSpan => Elapsed(Interlocked.Read(ref _archiveSpanTicks));
     internal int Connections => Volatile.Read(ref _connections);
@@ -83,6 +100,8 @@ internal sealed class ReadLockWaitTally : IDisposable
         {
             Interlocked.Add(ref _outer._waitTicks, Interlocked.Read(ref _waitTicks));
             Interlocked.Add(ref _outer._archiveSpanTicks, Interlocked.Read(ref _archiveSpanTicks));
+            Interlocked.Add(ref _outer._archiveFiles, Interlocked.Read(ref _archiveFiles));
+            if (SplitKept) _outer.MarkSplitKept();
             Interlocked.Add(ref _outer._connections, Volatile.Read(ref _connections));
         }
     }
