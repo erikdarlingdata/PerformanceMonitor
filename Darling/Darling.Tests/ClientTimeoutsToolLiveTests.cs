@@ -46,8 +46,12 @@ public sealed class ClientTimeoutsToolLiveTests
     private const int TieId = -5640109;
     private const int MissingSessionId = -5640110;
     private const int DurationFloorId = -5640111;
+    private const int MatchedCallsId = -5640112;
+    private const int NearMissId = -5640113;
+    private const int MetadataCallsId = -5640114;
+    private const int NoCallsId = -5640115;
 
-    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId };
+    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, NearMissId, MetadataCallsId, NoCallsId };
 
     private static string Name(int id) => "ct-live" + (-id).ToString(CultureInfo.InvariantCulture);
 
@@ -171,6 +175,183 @@ public sealed class ClientTimeoutsToolLiveTests
                 .Select(e => e.GetProperty("statement_fingerprint").GetString()!).ToArray());
             Assert.Equal(new[] { "fp-1s", "fp-30s", "fp-null" }, listed.Where(e => !e.GetProperty("below_duration_floor").GetBoolean())
                 .Select(e => e.GetProperty("statement_fingerprint").GetString()!).OrderBy(f => f, StringComparer.Ordinal).ToArray());
+        });
+    }
+
+    /// <summary>Seeds a server whose collector ran 12 times a minute apart, with 5 attentions counted by every run (55 in the span), and returns the
+    /// collection time the sampled rows are written at plus the event time the attention samples carry (a second before it).</summary>
+    private static async Task<(DateTime At, DateTime EventTime)> SeedJudgedSpanAsync(NpgsqlConnection connection, int serverId, CancellationToken ct)
+    {
+        var now = Now();
+        await RegisterAsync(connection, serverId, "sqlserver", ct);
+        var runs = await SeedRunsAsync(connection, serverId, now.AddSeconds(-30), 12, TimeSpan.FromMinutes(1), ct);
+        foreach (var run in runs)
+        {
+            await RowAsync(connection, serverId, run.AddSeconds(2), "count", 5, null, null, null, null, ct);
+        }
+
+        var at = runs[1].AddSeconds(2);
+        return (at, at.AddSeconds(-1));
+    }
+
+    [Fact]
+    public async Task AnUnderFloorAttention_ThatMatchesACapturedAbortedCall_IsJudged_AndEachCallIsListedWithHowLongItRan()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var (at, eventTime) = await SeedJudgedSpanAsync(connection, MatchedCallsId, ct);
+
+            /* Eight 4 ms attentions, each from its own session, each with the 30 s call it cancelled captured 120 ms later. */
+            for (var i = 0; i < 8; i++)
+            {
+                await RowAsync(connection, MatchedCallsId, at, "sample", 0, "db1", "etl", null, null, ct,
+                    durationUs: 4_000, eventTime: eventTime, sessionId: 100 + i);
+                await RowAsync(connection, MatchedCallsId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.GetOrders: EXEC dbo.GetOrders @id = 1", ct,
+                    durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(120), sessionId: 100 + i, host: "web01");
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(MatchedCallsId), 1, cancellationToken: ct));
+            var body = doc.RootElement.GetProperty("client_timeouts");
+
+            Assert.Equal(55, body.GetProperty("count").GetInt64());
+            Assert.Equal(8, body.GetProperty("sampled_events_in_range").GetInt64());
+            var excluded = body.GetProperty("excluded_from_alert");
+            Assert.Equal(0, excluded.GetProperty("below_duration_floor_events").GetInt64());
+            Assert.Equal(8, excluded.GetProperty("matched_calls").GetInt64());
+            Assert.Equal(55.0, excluded.GetProperty("count_judged").GetDouble());
+
+            var calls = body.GetProperty("matched_calls").EnumerateArray().ToList();
+            Assert.Equal(8, calls.Count);
+            Assert.All(calls, c =>
+            {
+                Assert.Equal(30.0, c.GetProperty("elapsed_seconds").GetDouble());
+                Assert.Equal("db1", c.GetProperty("database_name").GetString());
+                Assert.Equal("etl", c.GetProperty("client_app_name").GetString());
+                Assert.Equal("web01", c.GetProperty("client_hostname").GetString());
+                Assert.Contains("dbo.GetOrders", c.GetProperty("statement").GetString(), StringComparison.Ordinal);
+            });
+            Assert.Equal(Enumerable.Range(100, 8), calls.Select(c => c.GetProperty("session_id").GetInt32()).OrderBy(s => s));
+            Assert.False(body.GetProperty("matched_calls_truncated").GetBoolean());
+
+            var listed = body.GetProperty("sampled_events").EnumerateArray().ToList();
+            Assert.Equal(8, listed.Count);
+            Assert.All(listed, e =>
+            {
+                Assert.True(e.GetProperty("matched_call").GetBoolean());
+                Assert.False(e.GetProperty("below_duration_floor").GetBoolean());
+            });
+
+            /* The same rows through the shared judgement: the alert judges the matched events. */
+            var (window, _) = await DarlingMcpClientTimeoutTools.ReadRangeAsync(postgres, MatchedCallsId, Now().AddHours(-1), Now(), 20, ct);
+            var (_, reading) = ClientTimeoutsRead.Classify(window, Now());
+            Assert.Equal(8, reading!.MatchedSamples);
+            Assert.Equal(0, reading.ShortSamples);
+        });
+    }
+
+    [Fact]
+    public async Task AnUnderFloorAttention_WithNoAbortedCallRows_KeepsEveryNumberItHadBefore()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var (at, eventTime) = await SeedJudgedSpanAsync(connection, NoCallsId, ct);
+
+            /* The #9030 shape: two 4 ms attentions, and a 30 s one, one at exactly 1 s and one with no duration. Session and event time are recorded, no call is. */
+            await RowAsync(connection, NoCallsId, at, "sample", 0, "db1", "etl", "fp-ms", "SELECT 1", ct, durationUs: 4_000, eventTime: eventTime, sessionId: 51);
+            await RowAsync(connection, NoCallsId, at, "sample", 0, "db1", "web", "fp-ms", "SELECT 1", ct, durationUs: 4_000, eventTime: eventTime, sessionId: 52);
+            await RowAsync(connection, NoCallsId, at, "sample", 0, "db1", "etl", "fp-30s", "SELECT 2", ct, durationUs: 30_000_000, eventTime: eventTime, sessionId: 53);
+            await RowAsync(connection, NoCallsId, at, "sample", 0, "db1", "etl", "fp-1s", "SELECT 3", ct, durationUs: 1_000_000, eventTime: eventTime, sessionId: 54);
+            await RowAsync(connection, NoCallsId, at, "sample", 0, "db1", "etl", "fp-null", "SELECT 4", ct, durationUs: null, eventTime: eventTime, sessionId: 55);
+
+            using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(NoCallsId), 1, cancellationToken: ct));
+            var body = doc.RootElement.GetProperty("client_timeouts");
+
+            Assert.Equal(55, body.GetProperty("count").GetInt64());
+            Assert.Equal(5, body.GetProperty("sampled_events_in_range").GetInt64());
+            var excluded = body.GetProperty("excluded_from_alert");
+            Assert.Equal(2, excluded.GetProperty("below_duration_floor_events").GetInt64());
+            Assert.Equal(0, excluded.GetProperty("matched_calls").GetInt64());
+            Assert.Equal(0, excluded.GetProperty("azdata_metadata_events").GetInt64());
+            Assert.Equal(0, excluded.GetProperty("dbatools_metadata_events").GetInt64());
+            Assert.Equal(55 * 3 / 5.0, excluded.GetProperty("count_judged").GetDouble());
+            Assert.Equal(0, body.GetProperty("matched_calls").GetArrayLength());
+
+            var listed = body.GetProperty("sampled_events").EnumerateArray().ToList();
+            Assert.Equal(2, listed.Count(e => e.GetProperty("below_duration_floor").GetBoolean()));
+            Assert.DoesNotContain(listed, e => e.GetProperty("matched_call").GetBoolean());
+        });
+    }
+
+    [Fact]
+    public async Task ACallOnAnotherSession_AnotherDatabase_OrOutsideTheMatchWindow_IsNotAMatch_ButTheWindowEdgesAre()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var (at, eventTime) = await SeedJudgedSpanAsync(connection, NearMissId, ct);
+
+            /* Six 4 ms attentions, one session each. Only the last two have a call inside the window, at its two edges. */
+            var cases = new (int Session, string Db, TimeSpan Offset, int CallSession)[]
+            {
+                (201, "db1", TimeSpan.FromMilliseconds(100), 299),
+                (202, "db1", AttentionWindowSql.MatchCallWindowAfter + TimeSpan.FromMilliseconds(1), 202),
+                (203, "db2", TimeSpan.FromMilliseconds(100), 203),
+                (204, "db1", -(AttentionWindowSql.MatchCallToleranceBefore + TimeSpan.FromMilliseconds(1)), 204),
+                (205, "db1", AttentionWindowSql.MatchCallWindowAfter, 205),
+                (206, "db1", -AttentionWindowSql.MatchCallToleranceBefore, 206),
+            };
+            foreach (var (session, db, offset, callSession) in cases)
+            {
+                await RowAsync(connection, NearMissId, at, "sample", 0, db, "etl", null, null, ct, durationUs: 4_000, eventTime: eventTime, sessionId: session);
+                await RowAsync(connection, NearMissId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.Slow: EXEC dbo.Slow", ct,
+                    durationUs: 30_000_000, eventTime: eventTime + offset, sessionId: callSession);
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(NearMissId), 1, cancellationToken: ct));
+            var body = doc.RootElement.GetProperty("client_timeouts");
+
+            Assert.Equal(6, body.GetProperty("sampled_events_in_range").GetInt64());
+            var excluded = body.GetProperty("excluded_from_alert");
+            Assert.Equal(2, excluded.GetProperty("matched_calls").GetInt64());
+            Assert.Equal(4, excluded.GetProperty("below_duration_floor_events").GetInt64());
+            Assert.Equal(55 * 2 / 6.0, excluded.GetProperty("count_judged").GetDouble(), 1);
+            Assert.Equal(new[] { 205, 206 }, body.GetProperty("matched_calls").EnumerateArray().Select(c => c.GetProperty("session_id").GetInt32()).OrderBy(s => s).ToArray());
+        });
+    }
+
+    [Fact]
+    public async Task TheToolExclusions_StillApplyToAMatchedAttention_ByTheCallsOwnStatement()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var (at, eventTime) = await SeedJudgedSpanAsync(connection, MetadataCallsId, ct);
+
+            /* The attention row carries no statement, the call does. An azdata metadata call and a dbatools SMO call are left out. An azdata editor query is judged. */
+            var cases = new (int Session, string Db, string App, string Text)[]
+            {
+                (301, "master", AttentionWindowSql.AzdataClientApp, "create table #SVer(ID int, Name sysname)"),
+                (302, "db1", AttentionWindowSql.DbatoolsClientApp, "dbo.Smo: SELECT name FROM sys.schemas WHERE schema_id = @_msparam_0"),
+                (303, "db1", AttentionWindowSql.AzdataClientApp, "SELECT * FROM dbo.Orders"),
+            };
+            foreach (var (session, db, app, text) in cases)
+            {
+                await RowAsync(connection, MetadataCallsId, at, "sample", 0, db, app, null, null, ct, durationUs: 4_000, eventTime: eventTime, sessionId: session);
+                await RowAsync(connection, MetadataCallsId, at, "aborted", 0, db, app, "fp-call", text, ct,
+                    durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(80), sessionId: session);
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(MetadataCallsId), 1, cancellationToken: ct));
+            var body = doc.RootElement.GetProperty("client_timeouts");
+
+            var excluded = body.GetProperty("excluded_from_alert");
+            Assert.Equal(1, excluded.GetProperty("azdata_metadata_events").GetInt64());
+            Assert.Equal(1, excluded.GetProperty("dbatools_metadata_events").GetInt64());
+            Assert.Equal(1, excluded.GetProperty("matched_calls").GetInt64());
+            Assert.Equal(0, excluded.GetProperty("below_duration_floor_events").GetInt64());
+            Assert.Equal(55 / 3.0, excluded.GetProperty("count_judged").GetDouble(), 1);
+
+            var calls = body.GetProperty("matched_calls").EnumerateArray().ToList();
+            Assert.Single(calls);
+            Assert.Equal(303, calls[0].GetProperty("session_id").GetInt32());
         });
     }
 
@@ -517,12 +698,13 @@ public sealed class ClientTimeoutsToolLiveTests
 
     private static async Task RowAsync(
         NpgsqlConnection connection, int serverId, DateTime time, string kind, long count,
-        string? db, string? app, string? fingerprint, string? text, CancellationToken ct, long? durationUs = null)
+        string? db, string? app, string? fingerprint, string? text, CancellationToken ct, long? durationUs = null,
+        DateTime? eventTime = null, int? sessionId = null, string? host = null)
     {
         using var command = new NpgsqlCommand(
             @"INSERT INTO attention_events
-                  (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, interrupt_duration_us)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection);
+                  (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, interrupt_duration_us, event_time, session_id, client_hostname)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connection);
         command.Parameters.AddWithValue(NpgsqlDbType.Bigint, Interlocked.Increment(ref _nextEventId));
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(time, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(NpgsqlDbType.Integer, serverId);
@@ -534,6 +716,9 @@ public sealed class ClientTimeoutsToolLiveTests
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)fingerprint ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)text ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)durationUs ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = eventTime is null ? DBNull.Value : DateTime.SpecifyKind(eventTime.Value, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = (object?)sessionId ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)host ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(ct);
     }
 }

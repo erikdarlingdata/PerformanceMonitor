@@ -266,6 +266,107 @@ public sealed class AttentionWindowReadLiveTests
     }
 
     [Fact]
+    public async Task AnUnderFloorSample_ThatMatchesAnAbortedCall_IsMatchedNotShort_InTheSampleGroupsAndTheEvaluator()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            long id = 1200;
+            var server = ServerId;
+            for (var i = 0; i < 6; i++)
+            {
+                await LogAsync(connection, id++, server, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS", ct);
+            }
+
+            var at = now.AddSeconds(-28);
+            var eventTime = at.AddSeconds(-1);
+            await RowAsync(connection, id++, server, at, "count", 100, null, null, null, null, ct);
+
+            /* Four 4 ms attentions. Sessions 1 and 2 have the call they cancelled captured, sessions 3 and 4 do not (a call on session 9 is another session's). */
+            for (var session = 1; session <= 4; session++)
+            {
+                await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", null, null, ct, durationUs: 4_000, eventTime: eventTime, sessionId: session);
+            }
+
+            await RowAsync(connection, id++, server, at, "aborted", 0, "db1", "app", "fp-call", "dbo.A: EXEC dbo.A", ct, durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(100), sessionId: 1);
+            await RowAsync(connection, id++, server, at, "aborted", 0, "db1", "app", "fp-call", "dbo.B: EXEC dbo.B", ct, durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(100), sessionId: 2);
+            await RowAsync(connection, id++, server, at, "aborted", 0, "db1", "app", "fp-call", "dbo.C: EXEC dbo.C", ct, durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(100), sessionId: 9);
+
+            var window = await adapter.GetAttentionWindowAsync(server.ToString(CultureInfo.InvariantCulture), Lookback, ct);
+
+            /* The call rows are not samples: four sampled events, two matched and two short. */
+            Assert.Equal(4, window.SampleGroups.Sum(g => g.Samples));
+            Assert.Equal(2, window.SampleGroups.Sum(g => g.MatchedSamples));
+            Assert.Equal(2, window.SampleGroups.Sum(g => g.ShortSamples));
+
+            var reading = AttentionEvaluator.Read(window, now)!;
+            Assert.Equal(2, reading.MatchedSamples);
+            Assert.Equal(2, reading.ShortSamples);
+
+            /* Only the two short samples no call explains are left out: 100 x 2/4. */
+            var finding = AttentionEvaluator.Evaluate(reading, 1, 10_000);
+            Assert.NotNull(finding);
+            Assert.Equal(50d, finding!.JudgedCount, 6);
+            Assert.Equal(2, finding.MatchedCalls);
+        });
+    }
+
+    [Fact]
+    public async Task TheBaseline_UsesTheSameMatchRule_AMatchedUnderFloorSampleIsKept_ExceptForAToolsMetadataCall()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var server = ServerId;
+            var t0 = DateTime.UtcNow.Date.AddDays(-2).AddHours(12);
+            long id = 1300;
+            for (var m = 0; m < 3; m++)
+            {
+                await LogAsync(connection, id++, server, t0.AddMinutes(m), "SUCCESS", ct);
+            }
+
+            /* Minute 0: four 4 ms samples, two with a call. The unmatched two are left out: 100 x 2/4 = 50. */
+            var at0 = t0.AddSeconds(2);
+            await RowAsync(connection, id++, server, at0, "count", 100, null, null, null, null, ct);
+            for (var session = 1; session <= 4; session++)
+            {
+                await RowAsync(connection, id++, server, at0, "sample", 0, "db1", "app", null, null, ct, durationUs: 4_000, eventTime: at0.AddSeconds(-1), sessionId: session);
+            }
+
+            await RowAsync(connection, id++, server, at0, "aborted", 0, "db1", "app", "fp", "dbo.A: EXEC dbo.A", ct, durationUs: 30_000_000, eventTime: at0.AddSeconds(-1).AddMilliseconds(50), sessionId: 1);
+            await RowAsync(connection, id++, server, at0, "aborted", 0, "db1", "app", "fp", "dbo.B: EXEC dbo.B", ct, durationUs: 30_000_000, eventTime: at0.AddSeconds(-1).AddMilliseconds(50), sessionId: 2);
+
+            /* Minute 1: an azdata attention whose matched call is metadata work is left out, an app attention with a call is kept: 60 x 1/2 = 30. */
+            var at1 = t0.AddMinutes(1).AddSeconds(2);
+            await RowAsync(connection, id++, server, at1, "count", 60, null, null, null, null, ct);
+            await RowAsync(connection, id++, server, at1, "sample", 0, "master", "azdata", null, null, ct, durationUs: 4_000, eventTime: at1.AddSeconds(-1), sessionId: 11);
+            await RowAsync(connection, id++, server, at1, "sample", 0, "db1", "app", null, null, ct, durationUs: 4_000, eventTime: at1.AddSeconds(-1), sessionId: 12);
+            await RowAsync(connection, id++, server, at1, "aborted", 0, "master", "azdata", "fp", "create table #SVer(ID int)", ct, durationUs: 30_000_000, eventTime: at1.AddSeconds(-1).AddMilliseconds(50), sessionId: 11);
+            await RowAsync(connection, id++, server, at1, "aborted", 0, "db1", "app", "fp", "dbo.C: EXEC dbo.C", ct, durationUs: 30_000_000, eventTime: at1.AddSeconds(-1).AddMilliseconds(50), sessionId: 12);
+
+            /* Minute 2: no call rows at all, so every under-floor sample is left out as before: 40 x 0/2 = 0. */
+            var at2 = t0.AddMinutes(2).AddSeconds(2);
+            await RowAsync(connection, id++, server, at2, "count", 40, null, null, null, null, ct);
+            await RowAsync(connection, id++, server, at2, "sample", 0, "db1", "app", null, null, ct, durationUs: 4_000, eventTime: at2.AddSeconds(-1), sessionId: 21);
+            await RowAsync(connection, id++, server, at2, "sample", 0, "db1", "app", null, null, ct, durationUs: 4_000, eventTime: at2.AddSeconds(-1), sessionId: 22);
+
+            using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), connection);
+            command.Parameters.AddWithValue(NpgsqlDbType.Integer, server);
+            command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(t0, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(t0.AddMinutes(3), DateTimeKind.Unspecified));
+            var got = new System.Collections.Generic.List<long>();
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                while (await reader.ReadAsync(ct))
+                {
+                    got.Add(reader.GetInt64(1));
+                }
+            }
+
+            Assert.Equal(new long[] { 50, 30, 0 }, got.ToArray());
+        });
+    }
+
+    [Fact]
     public async Task TheBaseline_IsMadeOfTheSameEvents_TheSampledShareThatPassesScalesEachMinute()
     {
         await RunAsync(async (adapter, connection, ct) =>
@@ -511,12 +612,13 @@ public sealed class AttentionWindowReadLiveTests
 
     private static async Task RowAsync(
         NpgsqlConnection connection, long id, int serverId, DateTime time, string kind, long count,
-        string? db, string? app, string? fingerprint, string? text, CancellationToken ct, long? durationUs = null)
+        string? db, string? app, string? fingerprint, string? text, CancellationToken ct, long? durationUs = null,
+        DateTime? eventTime = null, int? sessionId = null)
     {
         using var command = new NpgsqlCommand(
             @"INSERT INTO attention_events
-                  (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, interrupt_duration_us)
-              VALUES ($1, $2, $3, 'attention-live', $4, $5, $6, $7, $8, $9, $10)", connection);
+                  (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, interrupt_duration_us, event_time, session_id)
+              VALUES ($1, $2, $3, 'attention-live', $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection);
         command.Parameters.AddWithValue(NpgsqlDbType.Bigint, id);
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(time, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(NpgsqlDbType.Integer, serverId);
@@ -527,6 +629,8 @@ public sealed class AttentionWindowReadLiveTests
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)fingerprint ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)text ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)durationUs ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = eventTime is null ? DBNull.Value : DateTime.SpecifyKind(eventTime.Value, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = (object?)sessionId ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(ct);
     }
 }
