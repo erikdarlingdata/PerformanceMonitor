@@ -733,12 +733,9 @@ public static class ParquetCompaction
 
             /* The sampler may be inside ExecuteScalar on the native handle, so a probe disposed under it is a use after free.
                On a timeout the thread disposes the probe on its way out instead. */
-            if (_thread.Join(_joinTimeout))
-            {
-                return;
-            }
+            _thread.Join(_joinTimeout);
 
-            AppLogger.Debug("Compaction", $"The DuckDB memory sampler did not stop within {_joinTimeout.TotalSeconds:0.#} s. It disposes its own connection when it ends.");
+            /* No log line on a timeout: this file is also compiled on its own by tools/CompactionRepro, which has no AppLogger. */
         }
 
         private void DisposeResources()
