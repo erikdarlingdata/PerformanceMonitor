@@ -773,7 +773,8 @@ public static class DarlingQueryStoreClutterReader
     /// <summary>
     /// #9478: the narrow plan-churn statements, for the fleet median alone. The median reads <c>plans_per_query_p95</c> per (server, database)
     /// and nothing else of the churn arm, so these carry the four key columns of each source and no first or last sighting, no per-database
-    /// detail and no collections statement. With only the key columns every arm is an index-only scan on the unique index of its table.
+    /// detail and no collections statement. With only the key columns every arm can be an index-only scan: the two rollups on their unique
+    /// indexes, and raw query_store_stats on the non-unique tuning index idx_query_store_stats_server_db_query_plan_time.
     /// $1 to $4 and the served range in $5 to $8 mean what they mean in <see cref="PlanChurnSql"/>, <see cref="PlanChurnClosedDaysSql"/>
     /// and <see cref="PlanChurnClosedHoursSql"/>, and the count of distinct plans per (server, database, query) is the same, because a plan
     /// is one (server, database, query, plan) whichever source and however many sightings it has.
