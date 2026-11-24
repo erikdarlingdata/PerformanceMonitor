@@ -6,7 +6,6 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using System;
 using System.Linq;
 
 namespace PerformanceMonitor.Common;
@@ -41,21 +40,29 @@ public static class AttentionWindowSql
     public const string KindSample = "sample";
 
     /// <summary>The <c>event_kind</c> of one captured call that ended aborted: a command the client cancelled while it still ran (#9507).
-    /// Its <c>interrupt_duration_us</c> is the call's elapsed time, which is the length of the command timeout.</summary>
+    /// Its <c>interrupt_duration_us</c> is the call's elapsed time, which is the length of the command timeout. The same value as
+    /// <c>AttentionCollector.KindAborted</c>.</summary>
     public const string KindAborted = "aborted";
 
-    /// <summary>How long BEFORE an attention event a captured call may end and still be matched to it (#9507). The two events are
-    /// stamped by different threads of the same session, so the call can read a few milliseconds early.</summary>
-    public static readonly TimeSpan MatchCallToleranceBefore = TimeSpan.FromMilliseconds(50);
+    /// <summary>How far BEFORE an attention sample's event_time a captured call's event_time may fall and still match it (#9507), in
+    /// microseconds. On SQL Server 2022 and 2025 the captured call and the attention carry the same millisecond timestamp, the call first,
+    /// in 20 of 20 real timeouts. A field pairing measured every real cancel within 20 ms of its attention, from the client side. 100 ms
+    /// leaves margin under load. A wider window would let an error that ends a call (a deadlock victim), followed by a reader cleanup
+    /// cancel on the same session, count as a timeout.</summary>
+    public const long CapturedCallMatchBeforeUs = 100_000;
 
-    /// <summary>How long AFTER an attention event a captured call may end and still be matched to it (#9507). A command that is still
-    /// running when the client cancels ends within moments of the cancel. A cancel that arrives after the command finished raises no
-    /// captured call at all, so nothing matches it.</summary>
-    public static readonly TimeSpan MatchCallWindowAfter = TimeSpan.FromSeconds(2);
+    /// <summary>How far AFTER an attention sample's event_time a captured call's event_time may fall and still match it (#9507), in
+    /// microseconds. The captured call is written at or before the attention (see <see cref="CapturedCallMatchBeforeUs"/>), so this is
+    /// margin only, and it is 100 ms for the same reason: a wider window would pair a call that ended in an error with a later cleanup
+    /// cancel on the same session.</summary>
+    public const long CapturedCallMatchAfterUs = 100_000;
 
-    private static readonly string MatchCallToleranceBeforeSql = $"INTERVAL '{(long)MatchCallToleranceBefore.TotalMilliseconds} milliseconds'";
+    private static readonly string MatchCallToleranceBeforeSql = $"INTERVAL '{CapturedCallMatchBeforeUs} microseconds'";
 
-    private static readonly string MatchCallWindowAfterSql = $"INTERVAL '{(long)MatchCallWindowAfter.TotalMilliseconds} milliseconds'";
+    private static readonly string MatchCallWindowAfterSql = $"INTERVAL '{CapturedCallMatchAfterUs} microseconds'";
+
+    /// <summary>The baseline read's collection_time cut: <c>$2</c> inclusive, <c>$3</c> exclusive.</summary>
+    private const string BaselineRange = "collection_time >= $2 AND collection_time < $3";
 
     /// <summary>How many entries each top list holds.</summary>
     public const int TopCount = 5;
@@ -275,10 +282,8 @@ ORDER BY collection_time DESC
     /// of this one server.
     /// </summary>
     public static string BaselineMinutes(string logRelation, string eventsRelation) => $"""
-WITH {CallsCte(eventsRelation, "collection_time >= $2
-    AND   collection_time < $3")},
-{MatchedCte(eventsRelation, "collection_time >= $2
-    AND   collection_time < $3")},
+WITH {CallsCte(eventsRelation, BaselineRange)},
+{MatchedCte(eventsRelation, BaselineRange)},
 runs AS (
     SELECT date_trunc('minute', collection_time) AS minute
     FROM {logRelation}

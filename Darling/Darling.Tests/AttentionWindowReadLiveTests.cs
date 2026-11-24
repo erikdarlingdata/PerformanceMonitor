@@ -288,9 +288,9 @@ public sealed class AttentionWindowReadLiveTests
                 await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", null, null, ct, durationUs: 4_000, eventTime: eventTime, sessionId: session);
             }
 
-            await RowAsync(connection, id++, server, at, "aborted", 0, "db1", "app", "fp-call", "dbo.A: EXEC dbo.A", ct, durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(100), sessionId: 1);
-            await RowAsync(connection, id++, server, at, "aborted", 0, "db1", "app", "fp-call", "dbo.B: EXEC dbo.B", ct, durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(100), sessionId: 2);
-            await RowAsync(connection, id++, server, at, "aborted", 0, "db1", "app", "fp-call", "dbo.C: EXEC dbo.C", ct, durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(100), sessionId: 9);
+            await RowAsync(connection, id++, server, at, "aborted", 0, "db1", "app", "fp-call", "dbo.A: EXEC dbo.A", ct, durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 1);
+            await RowAsync(connection, id++, server, at, "aborted", 0, "db1", "app", "fp-call", "dbo.B: EXEC dbo.B", ct, durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 2);
+            await RowAsync(connection, id++, server, at, "aborted", 0, "db1", "app", "fp-call", "dbo.C: EXEC dbo.C", ct, durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 9);
 
             var window = await adapter.GetAttentionWindowAsync(server.ToString(CultureInfo.InvariantCulture), Lookback, ct);
 

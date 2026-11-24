@@ -429,14 +429,51 @@ public static class AlwaysOnXeSessions
             }
         }
 
-        return "ADD EVENT sqlserver.attention\n"
-            + "(\n"
-            + "    ACTION\n"
+        var actionBlock = "    ACTION\n"
             + "    (\n"
             + string.Join(",\n", actions) + "\n"
-            + "    )\n"
+            + "    )\n";
+        var abortPredicate = "    WHERE ([result] = " + AbortResultMapKey.ToString(CultureInfo.InvariantCulture)
+            + " OR ([result] = " + ErrorResultMapKey.ToString(CultureInfo.InvariantCulture)
+            + " AND [duration] >= " + CapturedCallMinDurationUs.ToString(CultureInfo.InvariantCulture) + "))\n";
+
+        /* #9507: a real application command timeout raises an attention event that times the cancel (milliseconds), so the
+           attention duration says nothing about how long the command ran. The call that was still running when the client
+           cancelled ends with an rpc_completed or sql_batch_completed carrying its elapsed duration, its object or statement
+           and the same actions. SQL Server 2016 to 2022 end it with result Abort, 2025 with result Error, so the predicate keeps
+           an Abort, and an Error that ran at least 0.9 s (a command timeout is whole seconds in every driver). A cancel that
+           arrives after the command finished raises no such event. */
+        return "ADD EVENT sqlserver.attention\n"
+            + "(\n"
+            + actionBlock
+            + "),\n"
+            + "ADD EVENT sqlserver.rpc_completed\n"
+            + "(\n"
+            + actionBlock
+            + abortPredicate
+            + "),\n"
+            + "ADD EVENT sqlserver.sql_batch_completed\n"
+            + "(\n"
+            + actionBlock
+            + abortPredicate
             + ")\n";
     }
+
+    /// <summary>
+    /// The key of <c>Abort</c> in the <c>sys.dm_xe_map_values</c> map that the <c>result</c> field of <c>rpc_completed</c> and of
+    /// <c>sql_batch_completed</c> uses (map <c>rpc_return_result</c>: 0 OK, 1 Error, 2 Abort, 3 Skipped). The same on SQL Server
+    /// 2016, 2017, 2019, 2022 and 2025 (#9507).
+    /// </summary>
+    internal const int AbortResultMapKey = 2;
+
+    /// <summary>The key of <c>Error</c> in the same map. SQL Server 2025 ends a client-cancelled call with it (#9507).</summary>
+    internal const int ErrorResultMapKey = 1;
+
+    /// <summary>
+    /// The shortest elapsed time, in microseconds, of an Error call the session keeps (#9507). A command timeout is whole seconds in
+    /// every driver, so a real one runs at least about 1 s, and the floor keeps ordinary fast failed batches out of the ring buffer.
+    /// </summary>
+    internal const long CapturedCallMinDurationUs = 900_000;
 
     /* event_counter is the exact count (it never drops an event); the ring buffer is a sample for the detail. 1024 KB is
        Microsoft's tip for a ring buffer and stays under the 4 MB cut-off of the XML a read shreds. */
@@ -502,8 +539,8 @@ LEFT JOIN sys.dm_xe_sessions AS dxs
 WHERE ses.name = @session_name;";
 
     /// <summary>
-    /// The T-SQL condition that a session's definition is the client-timeout one (#5640): the one <c>attention</c> event, every
-    /// action the builder adds to it and none other, and the <c>event_counter</c> and <c>ring_buffer</c> targets and no other.
+    /// The T-SQL condition that a session's definition is the client-timeout one (#5640): the <c>attention</c> event and the two completed events that carry a predicate (<c>rpc_completed</c>, <c>sql_batch_completed</c>, #9507) and no other event, every
+    /// action the builder adds to them and none other, and the <c>event_counter</c> and <c>ring_buffer</c> targets and no other.
     /// On Azure SQL Database the actions Azure rejects are not required and the unverified ones are optional, because a create the
     /// engine refused is retried without them. Built from the same lists as the DDL, so the two cannot drift.
     /// </summary>
@@ -533,13 +570,20 @@ WHERE ses.name = @session_name;";
 
         return @"
             (
-                EXISTS
+                (
+                    SELECT
+                        COUNT_BIG(DISTINCT e.name)
+                    FROM " + prefix + @"_events AS e
+                    WHERE e.event_session_id = " + key + @"
+                    AND   e.name IN (N'attention', N'rpc_completed', N'sql_batch_completed')
+                ) = 3
+                AND NOT EXISTS
                 (
                     SELECT
                         1/0
                     FROM " + prefix + @"_events AS e
                     WHERE e.event_session_id = " + key + @"
-                    AND   e.name = N'attention'
+                    AND   e.name NOT IN (N'attention', N'rpc_completed', N'sql_batch_completed')
                 )
                 AND NOT EXISTS
                 (
@@ -547,7 +591,8 @@ WHERE ses.name = @session_name;";
                         1/0
                     FROM " + prefix + @"_events AS e
                     WHERE e.event_session_id = " + key + @"
-                    AND   e.name <> N'attention'
+                    AND   e.name IN (N'rpc_completed', N'sql_batch_completed')
+                    AND   e.predicate IS NULL
                 )
                 AND
                 (

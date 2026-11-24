@@ -201,13 +201,13 @@ public sealed class ClientTimeoutsToolLiveTests
         {
             var (at, eventTime) = await SeedJudgedSpanAsync(connection, MatchedCallsId, ct);
 
-            /* Eight 4 ms attentions, each from its own session, each with the 30 s call it cancelled captured 120 ms later. */
+            /* Eight 4 ms attentions, each from its own session, each with the 30 s call it cancelled captured 20 ms later. */
             for (var i = 0; i < 8; i++)
             {
                 await RowAsync(connection, MatchedCallsId, at, "sample", 0, "db1", "etl", null, null, ct,
                     durationUs: 4_000, eventTime: eventTime, sessionId: 100 + i);
                 await RowAsync(connection, MatchedCallsId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.GetOrders: EXEC dbo.GetOrders @id = 1", ct,
-                    durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(120), sessionId: 100 + i, host: "web01");
+                    durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(20), sessionId: 100 + i, host: "web01");
             }
 
             using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(MatchedCallsId), 1, cancellationToken: ct));
@@ -282,6 +282,10 @@ public sealed class ClientTimeoutsToolLiveTests
         });
     }
 
+    private static readonly TimeSpan WindowAfter = TimeSpan.FromMicroseconds(AttentionWindowSql.CapturedCallMatchAfterUs);
+
+    private static readonly TimeSpan ToleranceBefore = TimeSpan.FromMicroseconds(AttentionWindowSql.CapturedCallMatchBeforeUs);
+
     [Fact]
     public async Task ACallOnAnotherSession_AnotherDatabase_OrOutsideTheMatchWindow_IsNotAMatch_ButTheWindowEdgesAre()
     {
@@ -293,11 +297,11 @@ public sealed class ClientTimeoutsToolLiveTests
             var cases = new (int Session, string Db, TimeSpan Offset, int CallSession)[]
             {
                 (201, "db1", TimeSpan.FromMilliseconds(100), 299),
-                (202, "db1", AttentionWindowSql.MatchCallWindowAfter + TimeSpan.FromMilliseconds(1), 202),
+                (202, "db1", WindowAfter + TimeSpan.FromMilliseconds(1), 202),
                 (203, "db2", TimeSpan.FromMilliseconds(100), 203),
-                (204, "db1", -(AttentionWindowSql.MatchCallToleranceBefore + TimeSpan.FromMilliseconds(1)), 204),
-                (205, "db1", AttentionWindowSql.MatchCallWindowAfter, 205),
-                (206, "db1", -AttentionWindowSql.MatchCallToleranceBefore, 206),
+                (204, "db1", -(ToleranceBefore + TimeSpan.FromMilliseconds(1)), 204),
+                (205, "db1", WindowAfter, 205),
+                (206, "db1", -ToleranceBefore, 206),
             };
             foreach (var (session, db, offset, callSession) in cases)
             {
@@ -336,7 +340,7 @@ public sealed class ClientTimeoutsToolLiveTests
             {
                 await RowAsync(connection, MetadataCallsId, at, "sample", 0, db, app, null, null, ct, durationUs: 4_000, eventTime: eventTime, sessionId: session);
                 await RowAsync(connection, MetadataCallsId, at, "aborted", 0, db, app, "fp-call", text, ct,
-                    durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(80), sessionId: session);
+                    durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: session);
             }
 
             using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(MetadataCallsId), 1, cancellationToken: ct));

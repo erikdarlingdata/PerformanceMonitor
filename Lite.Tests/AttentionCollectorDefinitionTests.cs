@@ -43,7 +43,14 @@ public sealed class AttentionCollectorDefinitionTests
         };
 
     private static object[] Event(DateTime time, string? text = "SELECT 1", string app = "app")
-        => new object[] { time, "db", app, "host", 55, 0, 350L, (object?)text ?? DBNull.Value };
+        => new object[] { time, "db", app, "host", 55, 0, 350L, (object?)text ?? DBNull.Value, AttentionCollector.KindSample, DBNull.Value };
+
+    /* One captured call (#9507): a completed event that ended aborted, with its elapsed time and, for an RPC, its object name. */
+    private static object[] CapturedCall(DateTime time, long durationUs, string? text, string? objectName, string app = "app")
+        => new object[]
+        {
+            time, "db", app, "host", 55, 0, durationUs, (object?)text ?? DBNull.Value, AttentionCollector.KindAborted, (object?)objectName ?? DBNull.Value,
+        };
 
     private static object[][] Trailer(long? executionCount, long? eventCount, bool gated = false)
         => new[] { new object[] { (object?)executionCount ?? DBNull.Value, (object?)eventCount ?? DBNull.Value, gated } };
@@ -234,6 +241,39 @@ public sealed class AttentionCollectorDefinitionTests
 
         Assert.Equal("107", context.StagedItemState[AttentionCollector.CountStateKey]);
         Assert.Equal("77", context.StagedItemState[XeShredGate.StateKey]);
+    }
+
+    [Fact]
+    public async Task ReadAsync_WritesACapturedCallAsAnAbortedRow_WithItsElapsedTimeAndTheObjectNamedBeforeTheStatement()
+    {
+        var context = MakeContext(state: Prior(100));
+        var t1 = Now.AddSeconds(-30);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[]
+            {
+                CapturedCall(t1, 2_003_000L, "exec dbo.slow_proc @id = 1", "dbo.slow_proc"),
+                CapturedCall(t1.AddSeconds(1), 31_000_000L, "SELECT 1", null),
+                Event(t1.AddSeconds(2)),
+            },
+            Trailer(77, 101));
+
+        var rows = await AttentionCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var aborted = rows.Where(r => r.EventKind == AttentionCollector.KindAborted).ToList();
+        Assert.Equal(2, aborted.Count);
+        Assert.Equal(2_003_000L, aborted[0].InterruptDurationUs);
+        Assert.Equal("dbo.slow_proc: exec dbo.slow_proc @id = 1", aborted[0].StatementText);
+        Assert.NotNull(aborted[0].StatementFingerprint);
+        Assert.Equal("SELECT 1", aborted[1].StatementText);
+        Assert.All(aborted, r => Assert.Equal(0, r.AttentionCount));
+        Assert.All(aborted, r => Assert.NotNull(r.EventTime));
+        Assert.Equal(55, aborted[0].SessionId);
+        Assert.Equal("app", aborted[0].ClientAppName);
+
+        /* A captured call is detail only: it never moves the attention count, which stays the exact counter delta. */
+        Assert.Equal(1, Assert.Single(rows, r => r.EventKind == AttentionCollector.KindCount).AttentionCount);
+        Assert.Equal(1, rows.Sum(r => r.AttentionCount));
+        Assert.Single(rows, r => r.EventKind == AttentionCollector.KindSample);
     }
 
     [Fact]
