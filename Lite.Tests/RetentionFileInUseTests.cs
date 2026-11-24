@@ -17,7 +17,7 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #9407: retention deletes an expired archive file under the store write lock only, so a sort or a read that has the file open
-/// makes the delete fail on Windows. That is not an error: the file is deleted by the next run, once it is free.
+/// makes the delete fail on Windows. That is logged as information, not as an error, and the file is deleted by the next run, once it is free (Store Health still records the run's failure).
 /// </summary>
 public sealed class RetentionFileInUseTests : IDisposable
 {
@@ -42,7 +42,7 @@ public sealed class RetentionFileInUseTests : IDisposable
     }
 
     [Fact]
-    public void AnExpiredFileInUse_IsNotAnError_AndIsDeletedByTheNextRun()
+    public void AnExpiredFileInUse_IsNotLoggedAsAnError_AndIsDeletedByTheNextRun()
     {
         var path = Path.Combine(_archiveDir, "20200101_query_store_stats.parquet");
         File.WriteAllText(path, "x");
@@ -54,7 +54,7 @@ public sealed class RetentionFileInUseTests : IDisposable
         {
             Assert.Equal(0, retention.CleanupOldArchives());
             Assert.True(File.Exists(path));
-            Assert.Null(retention.LastCleanupError);
+            Assert.Contains("20200101_query_store_stats.parquet", retention.LastCleanupError);
             Assert.DoesNotContain(LogLevel.Error, levels);
         }
 

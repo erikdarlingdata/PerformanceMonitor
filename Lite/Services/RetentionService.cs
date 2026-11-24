@@ -103,9 +103,11 @@ public class RetentionService
             }
             catch (IOException ex) when (IsFileInUse(ex))
             {
-                /* A sort or a read has the file open (Windows refuses the delete). It is not an error: the file is expired
-                   either way and the next run deletes it once the file is free (#9407). */
+                /* A sort or a read has the file open (Windows refuses the delete). The file is expired either way and the next run
+                   deletes it once it is free, so this is logged as information, not as an error (#9407). Store Health still
+                   records that this run could not delete it (#8788). */
                 _logger?.LogInformation("Expired archive {File} is in use, so its delete waits for the next retention run", file);
+                firstError ??= $"{Path.GetFileName(file)}: {ex.Message}";
             }
             catch (Exception ex)
             {
