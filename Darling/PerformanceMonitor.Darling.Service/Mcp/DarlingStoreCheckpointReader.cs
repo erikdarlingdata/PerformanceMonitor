@@ -153,6 +153,13 @@ SELECT pg_catalog.to_regclass('collect.store_checkpoints') IS NOT NULL,
 
         [JsonPropertyName("checkpoints")] public List<Checkpoint> Checkpoints { get; init; } = [];
 
+        /// <summary>How many rows <see cref="Checkpoints"/> holds.</summary>
+        [JsonPropertyName("checkpoints_returned")] public int CheckpointsReturned => Checkpoints.Count;
+
+        /// <summary>True when checkpoints follow the last row this answer holds, whether <c>limit</c> or the response budget left them off.
+        /// The way on is <c>offset</c> at <c>checkpoints_skipped</c> + <c>checkpoints_returned</c>.</summary>
+        [JsonPropertyName("truncated")] public bool Truncated => CheckpointsSkipped + Checkpoints.Count < CheckpointsInWindow;
+
         [JsonPropertyName("budget_truncated")] public bool BudgetTruncated { get; init; }
 
         [JsonPropertyName("budget_note")] public string? BudgetNote { get; init; }
