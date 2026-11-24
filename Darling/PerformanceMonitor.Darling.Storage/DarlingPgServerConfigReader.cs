@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -79,6 +80,8 @@ public static class DarlingPgServerConfigReader
     /// (#3937) carries at least one of the two scope names and one of <c>changed</c>, <c>set</c>
     /// (<see cref="OldValue"/> NULL: nothing was there before) or <c>reset</c> (<see cref="NewValue"/> NULL:
     /// nothing is there now), and no unit, context or description, which the catalog does not hold.
+    /// <see cref="PlatformResized"/> and <see cref="PlatformResizeUndecided"/> (#9500) are set in C# by
+    /// <see cref="GetConfigChangesAsync"/>, never by the SQL.
     /// </summary>
     public readonly record struct PgConfigChangeRow(
         DateTime ChangedAtUtc,
@@ -91,7 +94,9 @@ public static class DarlingPgServerConfigReader
         string? ShortDescription,
         string? DatabaseName = null,
         string? RoleName = null,
-        string ChangeKind = PgConfigChangeKind.Changed);
+        string ChangeKind = PgConfigChangeKind.Changed,
+        bool PlatformResized = false,
+        bool PlatformResizeUndecided = false);
 
     /// <summary>The three <see cref="PgConfigChangeRow.ChangeKind"/> spellings, as <see cref="ScopedConfigChangesSql"/>
     /// projects them (#3937).</summary>
@@ -613,6 +618,134 @@ public static class DarlingPgServerConfigReader
     }
 
     /// <summary>
+    /// #9500: for each server-wide change (<c>$2</c> names, <c>$3</c> the snapshot times that first reported the new
+    /// value), the <c>postmaster_start_time</c> of the newest <c>pg_write_stats</c> row at or before the PREVIOUS snapshot of
+    /// that setting, and of the EARLIEST row at or after the snapshot that reported the move. The previous snapshot is
+    /// found the way <see cref="ConfigChangesSql"/>'s <c>LAG</c> finds it: the newest earlier row of the same
+    /// name, server-wide, with the same source exclusion. The two reads bracket the move, so two equal start times
+    /// prove the server did not restart between them, however long the gap. A row comes back only when a previous
+    /// snapshot exists. A start time is NULL when no <c>pg_write_stats</c> row exists on that side or the row was written
+    /// before V139. The fifth column is the time of the row after the move, NULL when none exists yet (the row is then
+    /// undecided, not a restart).
+    /// </summary>
+    public const string PlatformResizeProbeSql = """
+        SELECT
+            cand.name,
+            cand.changed_at,
+            ws_prev.postmaster_start_time,
+            ws_new.postmaster_start_time,
+            ws_new.collection_time
+        FROM unnest($2::text[], $3::timestamp[]) AS cand(name, changed_at)
+        CROSS JOIN LATERAL
+        (
+            SELECT c.collection_time
+            FROM pg_server_config AS c
+            WHERE c.server_id = $1
+            AND   c.name = cand.name
+            AND   c.collection_time < cand.changed_at
+            AND   coalesce(c.source, '') NOT IN ('client', 'session', 'override')
+            AND   c.database_name IS NULL
+            AND   c.role_name IS NULL
+            ORDER BY c.collection_time DESC
+            LIMIT 1
+        ) AS prev
+        LEFT JOIN LATERAL
+        (
+            SELECT w.postmaster_start_time
+            FROM pg_write_stats AS w
+            WHERE w.server_id = $1
+            AND   w.collection_time <= prev.collection_time
+            ORDER BY w.collection_time DESC
+            LIMIT 1
+        ) AS ws_prev ON true
+        LEFT JOIN LATERAL
+        (
+            SELECT w.postmaster_start_time, w.collection_time
+            FROM pg_write_stats AS w
+            WHERE w.server_id = $1
+            AND   w.collection_time >= cand.changed_at
+            ORDER BY w.collection_time ASC
+            LIMIT 1
+        ) AS ws_new ON true
+        """;
+
+    /// <summary>
+    /// A setting is RESIZED BY THE PLATFORM (#9500) when a serverless PostgreSQL target's <c>postmaster</c> setting
+    /// (<c>shared_buffers</c> follows the allocated capacity) moves with no restart. A <c>postmaster</c> setting
+    /// takes effect only at a restart, so a move the server's own start time says had none can only come from the
+    /// platform. All three must hold: the target is Aurora PostgreSQL, the row's context is <c>postmaster</c>, and
+    /// the start time read before the previous snapshot and the one read after the move are known and equal
+    /// (<see cref="PostmasterRestart.BothKnownAndEqual"/>). Anything missing leaves the row exactly as it was reported
+    /// before. The context decides, not a named list of settings. When the earlier start is known and no write-stats row
+    /// exists after the move yet, the row is UNDECIDED (<see cref="PgConfigChangeRow.PlatformResizeUndecided"/>): it is
+    /// reported unflagged, and Change Watch reads it again on its next detect, when the after row exists.
+    /// </summary>
+    private static async Task<List<PgConfigChangeRow>> MarkPlatformResizedAsync(
+        NpgsqlDataSource postgres, int serverId, List<PgConfigChangeRow> serverWide, CancellationToken cancellationToken)
+    {
+        var candidates = new List<int>();
+        for (var i = 0; i < serverWide.Count; i++)
+        {
+            if (string.Equals(serverWide[i].Context, "postmaster", StringComparison.Ordinal))
+            {
+                candidates.Add(i);
+            }
+        }
+
+        if (candidates.Count == 0 || !await DarlingPgIoReader.IsAuroraTargetAsync(postgres, serverId, cancellationToken))
+        {
+            return serverWide;
+        }
+
+        var names = new string[candidates.Count];
+        var times = new DateTime[candidates.Count];
+        for (var i = 0; i < candidates.Count; i++)
+        {
+            names[i] = serverWide[candidates[i]].Name;
+            times[i] = DateTime.SpecifyKind(serverWide[candidates[i]].ChangedAtUtc, DateTimeKind.Unspecified);
+        }
+
+        var resized = new HashSet<(string Name, DateTime At)>();
+        var undecided = new HashSet<(string Name, DateTime At)>();
+        await using (var command = postgres.CreateCommand(PlatformResizeProbeSql))
+        {
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = names });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = times });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                DateTime? previousStart = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+                DateTime? afterStart = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+                if (PostmasterRestart.BothKnownAndEqual(previousStart, afterStart))
+                {
+                    resized.Add((reader.GetString(0), reader.GetDateTime(1)));
+                }
+                else if (previousStart is not null && reader.IsDBNull(4))
+                {
+                    undecided.Add((reader.GetString(0), reader.GetDateTime(1)));
+                }
+            }
+        }
+
+        foreach (var i in candidates)
+        {
+            var key = (serverWide[i].Name, serverWide[i].ChangedAtUtc);
+            if (resized.Contains(key))
+            {
+                serverWide[i] = serverWide[i] with { PlatformResized = true };
+            }
+            else if (undecided.Contains(key))
+            {
+                serverWide[i] = serverWide[i] with { PlatformResizeUndecided = true };
+            }
+        }
+
+        return serverWide;
+    }
+
+    /// <summary>
     /// The change feed (#3937): the server-wide read and the scoped read, each capped at
     /// <paramref name="limit"/>, merged newest first. At one <c>collection_time</c> the server-wide rows come
     /// first (by name, their order unchanged) and the override rows after them (by name, then database, then
@@ -626,6 +759,7 @@ public static class DarlingPgServerConfigReader
         CancellationToken cancellationToken = default)
     {
         var serverWide = await ReadChangesAsync(postgres, ConfigChangesSql, scoped: false, serverId, startUtc, endUtc, limit, cancellationToken);
+        serverWide = await MarkPlatformResizedAsync(postgres, serverId, serverWide, cancellationToken);
         var scoped = await ReadChangesAsync(postgres, ScopedConfigChangesSql, scoped: true, serverId, startUtc, endUtc, limit, cancellationToken);
         if (scoped.Count == 0)
         {

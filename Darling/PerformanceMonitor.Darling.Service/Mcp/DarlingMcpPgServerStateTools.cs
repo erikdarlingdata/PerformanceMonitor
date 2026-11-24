@@ -970,7 +970,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_server_config_changes"), Description("Gets PostgreSQL configuration parameters whose value CHANGED in the window ending at as_of, newest first, old and new value side by side. Nothing else can reconstruct this after the fact. A setting appearing for the FIRST time (an upgrade, a new extension) is NOT reported as a change. Session-scoped rows are excluded. Per-database/per-role overrides (ALTER DATABASE/ROLE SET) interleave by changed_at with change_kind: changed, set (old_value null) or reset (new_value null); one already present when first read is not reported as set. <<GUIDE>> Gets PostgreSQL configuration parameters whose value CHANGED during the window, newest first, with the old and new value side by side. This is the read that answers 'this got slow sometime last month, what changed' - and nothing else in the stack can reconstruct it after the fact, because a configuration history that was not recorded cannot be recovered from the server. A setting appearing for the first time is deliberately NOT reported as a change: the first snapshot after an upgrade, or after an extension is loaded, would otherwise manufacture hundreds of changes nobody made. Session-scoped rows are excluded, so a monitoring reconnect does not read as a configuration change. PER-DATABASE AND PER-ROLE OVERRIDES (ALTER DATABASE/ROLE SET) are reported too, interleaved with the server-wide rows by changed_at: such a row carries database_name and/or role_name (only the ones it is scoped to) and change_kind - changed, set (old_value null: the override appeared) or reset (new_value null: it was removed) - while a server-wide row carries neither, and overrides already present when the collector first read them are not reported as set.")]
+    [McpServerTool(Name = "get_pg_server_config_changes"), Description("Gets PostgreSQL configuration parameters whose value CHANGED in the window ending at as_of, newest first, old and new value side by side. Nothing else can reconstruct this after the fact. A setting appearing for the FIRST time (an upgrade, a new extension) is NOT reported as a change. Session-scoped rows are excluded. Per-database/per-role overrides (ALTER DATABASE/ROLE SET) interleave by changed_at with change_kind: changed, set (old_value null) or reset (new_value null); one already present when first read is not reported as set. Platform-resized rows carry resized_by_platform. <<GUIDE>> Gets PostgreSQL configuration parameters whose value CHANGED during the window, newest first, with the old and new value side by side. This is the read that answers 'this got slow sometime last month, what changed' - and nothing else in the stack can reconstruct it after the fact, because a configuration history that was not recorded cannot be recovered from the server. A setting appearing for the first time is deliberately NOT reported as a change: the first snapshot after an upgrade, or after an extension is loaded, would otherwise manufacture hundreds of changes nobody made. Session-scoped rows are excluded, so a monitoring reconnect does not read as a configuration change. PER-DATABASE AND PER-ROLE OVERRIDES (ALTER DATABASE/ROLE SET) are reported too, interleaved with the server-wide rows by changed_at: such a row carries database_name and/or role_name (only the ones it is scoped to) and change_kind - changed, set (old_value null: the override appeared) or reset (new_value null: it was removed) - while a server-wide row carries neither, and overrides already present when the collector first read them are not reported as set. PLATFORM-RESIZED ROWS: on a serverless PostgreSQL target the platform resizes shared_buffers with the allocated capacity, so the value moves with no restart and no edit. A server-wide row for a postmaster-context setting that moved while the server stayed up (the newest pg_write_stats start time before the previous snapshot and before this one are both known and equal) on an Aurora PostgreSQL target is kept and carries resized_by_platform true, and one resized_by_platform_note is attached to the page. Such a row is not a configuration change anyone made. Any other row, including every row where a start time is unknown, is reported without the field.")]
     public static async Task<string> GetPgServerConfigChanges(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -1059,24 +1059,28 @@ public sealed class DarlingMcpPgServerStateTools
                      + $"change happened at some point in the {CollectorCadenceText.Span(changesMinutes)} before it - this collector runs {CollectorCadenceText.Every(changesMinutes)}. "
                      + "A setting appearing for the first time is not reported here.",
                 changes = rows.Select(r => r.DatabaseName is null && r.RoleName is null
-                    ? (object)new
-                    {
-                        changed_at = r.ChangedAtUtc,
-                        name = r.Name,
-                        old_value = r.OldValue,
-                        new_value = r.NewValue,
-                        unit = r.Unit,
-                        source = r.Source,
-                        context = r.Context,
-                        description = r.ShortDescription,
-                    }
+                    ? (r.PlatformResized
+                        ? PlatformResizedChange(r)
+                        : (object)new
+                        {
+                            changed_at = r.ChangedAtUtc,
+                            name = r.Name,
+                            old_value = r.OldValue,
+                            new_value = r.NewValue,
+                            unit = r.Unit,
+                            source = r.Source,
+                            context = r.Context,
+                            description = r.ShortDescription,
+                        })
                     : ScopedChange(r)),
             };
 
             /* The override note is ATTACHED, like get_pg_server_config's database_overrides, so a page with no
                override row - every page on a cluster with none, and every page before V138 - is byte-identical
                to what this tool returned before #3937. */
-            if (rows.All(r => r.DatabaseName is null && r.RoleName is null))
+            var anyScoped = rows.Any(r => r.DatabaseName is not null || r.RoleName is not null);
+            var anyResized = rows.Any(r => r.PlatformResized);
+            if (!anyScoped && !anyResized)
             {
                 var plain = JsonSerializer.Serialize(page, McpHelpers.JsonOptions);
                 return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(plain) : plain;
@@ -1084,6 +1088,18 @@ public sealed class DarlingMcpPgServerStateTools
 
             var node = JsonSerializer.SerializeToNode(page, McpHelpers.JsonOptions)?.AsObject()
                 ?? throw new InvalidOperationException("the config-changes page did not serialize to a JSON object");
+            /* #9500: attached like scoped_changes_note, only on a page that holds a flagged row. */
+            if (anyResized)
+            {
+                node["resized_by_platform_note"] = PlatformResizedNote;
+            }
+
+            if (!anyScoped)
+            {
+                var resizedOnly = node.ToJsonString(McpHelpers.JsonOptions);
+                return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(resizedOnly) : resizedOnly;
+            }
+
             node["scoped_changes_note"] = "Rows carrying database_name and/or role_name are per-database or per-role "
                 + "overrides (ALTER DATABASE/ROLE SET), interleaved with the server-wide rows by changed_at. "
                 + "change_kind says what happened between two consecutive snapshots of the server: changed (the "
@@ -1100,6 +1116,29 @@ public sealed class DarlingMcpPgServerStateTools
             return McpHelpers.FormatError("get_pg_server_config_changes", ex);
         }
     }
+
+    /// <summary>The note attached to a config-changes page that holds a platform-resized row (#9500).</summary>
+    internal const string PlatformResizedNote = "Rows with resized_by_platform true are settings the platform resized with "
+        + "capacity, with no restart. On a serverless PostgreSQL target a postmaster-context setting such as shared_buffers "
+        + "follows the allocated capacity, and the server's start time was the same before the previous snapshot and after "
+        + "this change. They are not configuration edits, and Change Watch does not report them.";
+
+    /// <summary>
+    /// A server-wide row the platform resized (#9500): the same fields in the same order as an ordinary server-wide
+    /// row, then <c>resized_by_platform</c>. An ordinary row is untouched, so every other page keeps its bytes.
+    /// </summary>
+    private static JsonObject PlatformResizedChange(DarlingPgServerConfigReader.PgConfigChangeRow r) => new()
+    {
+        ["changed_at"] = JsonSerializer.SerializeToNode(r.ChangedAtUtc, McpHelpers.JsonOptions),
+        ["name"] = r.Name,
+        ["old_value"] = r.OldValue,
+        ["new_value"] = r.NewValue,
+        ["unit"] = r.Unit,
+        ["source"] = r.Source,
+        ["context"] = r.Context,
+        ["description"] = r.ShortDescription,
+        ["resized_by_platform"] = true,
+    };
 
     /// <summary>
     /// One override change as the payload renders it (#3937): the scope names it HAS and none it does not, then
