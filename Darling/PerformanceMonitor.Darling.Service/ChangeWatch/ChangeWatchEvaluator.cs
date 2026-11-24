@@ -490,7 +490,7 @@ HAVING sum(delta_execution_count) > 0";
             return await EvaluatePostgresAsync(watch, cancellationToken);
         }
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
         var measures = new List<ChangeWatchMeasure>();
         var notMeasured = new List<ChangeWatchNotMeasured>();
         var notes = new List<string>();

@@ -166,8 +166,7 @@ public sealed class LiteTextDimensionTests : IDisposable
 
         using (var connection = await OpenAsync())
         {
-            Assert.Equal(85L, await CountAsync(connection, "SELECT MAX(version) FROM schema_version"));
-            Assert.Equal(85, DuckDbInitializer.CurrentSchemaVersion);
+            Assert.Equal((long)DuckDbInitializer.CurrentSchemaVersion, await CountAsync(connection, "SELECT MAX(version) FROM schema_version"));
             Assert.Equal(0L, await CountAsync(connection, "SELECT COUNT(*) FROM query_text_dim"));
 
             /* Zero rewrite: the rows kept their inline text, and a NULL stays NULL and an empty string stays empty. */

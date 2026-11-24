@@ -1596,7 +1596,7 @@ LIMIT 1";
         CancellationToken cancellationToken)
     {
         if (registry is null || !registry.ById.TryGetValue(serverId, out var server)) return null;
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.AnalysisInput, cancellationToken);
         using var command = new NpgsqlCommand(StoredEngineEditionSql, connection)
         { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.AddWithValue(serverId);

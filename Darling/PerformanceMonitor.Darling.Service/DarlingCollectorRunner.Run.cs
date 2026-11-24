@@ -801,7 +801,7 @@ public sealed partial class DarlingCollectorRunner
 
             /* One pooled store connection for the whole body; one binary COPY per database on it
                (completing an importer commits that database — commit-1..N-1 semantics on abort). */
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var pgConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(definition.Name), cancellationToken);
 
             /* #6875: the same pass budget and rotation as the enumerated driver, for the per-database connection loop. */
             var (azurePassBudget, azureOrder) = BeginPass(definition, server.ServerId, databases);
@@ -1695,7 +1695,7 @@ public sealed partial class DarlingCollectorRunner
                    they now borrow this one. Safe precisely because of the flushing order named above: the
                    driver reads an item and then awaits its write, so this connection is idle for the whole
                    read, which is when those fetches run. */
-                await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                await using var pgConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(definition.Name), cancellationToken);
 
                 /* #2312: open-interval stamps STAGED at decision time (perItemWatermark, below), landed
                    into PendingState only from onItemComplete — which the driver invokes solely after the
@@ -2584,7 +2584,7 @@ public sealed partial class DarlingCollectorRunner
                 NpgsqlConnection openedConnection;
                 try
                 {
-                    openedConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                    openedConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(definition.Name), cancellationToken);
                 }
                 catch
                 {
