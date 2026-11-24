@@ -293,7 +293,7 @@ public sealed class StoreServerCertificateTests
                 try
                 {
                     await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificateContext = context }, stop.Token);
-                    await tls.ReadAsync(new byte[1], stop.Token);
+                    await tls.ReadExactlyAsync(new byte[1], stop.Token);
                 }
                 catch (Exception) when (!stop.IsCancellationRequested)
                 {
