@@ -574,7 +574,7 @@
       ]
     }
   ],
-  "generated_from": "742ab81d1",
+  "generated_from": "209157b16",
   "mcp_tools": [
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
