@@ -193,17 +193,17 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
 
     /// <summary>
     /// #9507: the aborted completed events the counter holds, as a bigint: the <c>rpc_completed</c> and <c>sql_batch_completed</c>
-    /// counts added. NULL when <c>@target_data</c> is NULL or lists neither event, which is a session without them (an older
-    /// definition), so no <c>aborted_count</c> row and no capture. Read as <c>float</c> and converted, for the reason
-    /// <see cref="EventCountExpression"/> gives.
+    /// counts added, 0 when neither has fired (event_counter lists an event only after it first fires, so a quiet session lists
+    /// none). NULL when the running session does not carry the two events (<c>@aborted_carried</c> is 0, an older definition), so no
+    /// <c>aborted_count</c> row and no capture. Read as <c>float</c> and converted, for the reason <see cref="EventCountExpression"/> gives.
     /// </summary>
     public const string AbortedCountExpression =
-        "CASE WHEN @target_data.exist('/CounterTarget/Packages/Package/Event[@name=\"rpc_completed\" or @name=\"sql_batch_completed\"]') = 1 "
-        + "THEN CONVERT(bigint, @target_data.value('sum(/CounterTarget/Packages/Package/Event[@name=\"rpc_completed\" or @name=\"sql_batch_completed\"]/@count)', 'float')) END";
+        "CASE WHEN @aborted_carried = 1 THEN COALESCE(CONVERT(bigint, @target_data.value("
+        + "'sum(/CounterTarget/Packages/Package/Event[@name=\"rpc_completed\" or @name=\"sql_batch_completed\"]/@count)', 'float')), 0) END";
 
     /// <summary>
     /// The batch. <c>{0}</c> = the session name, <c>{1}</c> = the sessions DMV, <c>{2}</c> = the targets DMV, <c>{3}</c> =
-    /// <see cref="EventCountExpression"/>, <c>{6}</c> = <see cref="AbortedCountExpression"/>. Server-scoped and database-scoped sessions differ only in those two DMVs.
+    /// <see cref="EventCountExpression"/>, <c>{6}</c> = <see cref="AbortedCountExpression"/>, <c>{9}</c> = the session events DMV. Server-scoped and database-scoped sessions differ only in those two DMVs.
     /// </summary>
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -212,6 +212,7 @@ DECLARE
     @execution_count bigint,
     @event_count bigint,
     @aborted_event_count bigint,
+    @aborted_carried bit,
     @shred_needed bit,
     @target_data xml;
 
@@ -250,6 +251,23 @@ JOIN {1} AS xes
 WHERE xes.name = N'{0}'
 AND   xet.target_name = N'event_counter'
 OPTION(RECOMPILE);
+
+SELECT
+    @aborted_carried =
+        CASE
+            WHEN EXISTS
+            (
+                SELECT
+                    1/0
+                FROM {9} AS xse
+                JOIN {1} AS xes
+                  ON xes.address = xse.event_session_address
+                WHERE xes.name = N'{0}'
+                AND   xse.event_name IN (N'rpc_completed', N'sql_batch_completed')
+            )
+            THEN 1
+            ELSE 0
+        END;
 
 SELECT
     @event_count = {3},
@@ -371,7 +389,8 @@ SELECT
             .Replace("{5}", RingBufferXml.ParseSql, StringComparison.Ordinal)
             .Replace("{6}", AbortedCountExpression, StringComparison.Ordinal)
             .Replace("{7}", KindSample, StringComparison.Ordinal)
-            .Replace("{8}", KindAborted, StringComparison.Ordinal);
+            .Replace("{8}", KindAborted, StringComparison.Ordinal)
+            .Replace("{9}", isAzureSqlDb ? "sys.dm_xe_database_session_events" : "sys.dm_xe_session_events", StringComparison.Ordinal);
 
     /// <summary>The stored prior event_counter count, or null on a first run, a restarted host or an unreadable value.</summary>
     public static long? ReadLastCount(IReadOnlyDictionary<string, string> state, string? databaseName) =>
