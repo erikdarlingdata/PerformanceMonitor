@@ -174,7 +174,7 @@ public sealed class PgAlertDigest7082Tests
         var series = Enumerable.Range(0, 40).Select(_ => ((double?)100, 5.0)).ToList();
 
         Assert.Equal(1, CeilingFires(series));
-        Assert.False(series.Any(s => DarlingWorker.PgCpuSampleBreaches(s.Item1, s.Item2, 90)));
+        Assert.DoesNotContain(series, s => DarlingWorker.PgCpuSampleBreaches(s.Item1, s.Item2, 90));
     }
 
     [Fact]
