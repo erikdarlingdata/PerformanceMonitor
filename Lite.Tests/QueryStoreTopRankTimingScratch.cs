@@ -129,8 +129,7 @@ FROM (SELECT i, (i // 13) % 600 + 1 AS q, (i // 13) // 600 AS iv, i % 13 AS j,
                 {
                     var plan = Run(Sql(v), 1, true, out _);
                     report.AppendLine($"--- EXPLAIN ANALYZE {(v == 0 ? "OLD" : "NEW")}");
-                    foreach (var line in plan.SelectMany(p => p.Split('
-')))
+                    foreach (var line in plan.SelectMany(p => p.Split((char)10)))
                         if (line.Contains("HASH_") || line.Contains("SCAN") || line.Contains("JOIN") || line.Contains("Total Time") || line.Contains("rows") || line.Contains("~") || line.Contains("Table:") || line.Contains("Function"))
                             report.AppendLine(line.Trim());
                 }
