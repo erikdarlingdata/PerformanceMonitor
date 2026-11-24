@@ -46,7 +46,11 @@ public sealed class TrigramCleanIntervalLiveTests
     /// <summary>Words per generated text: about 1.4 KB of statement text, about 450 distinct trigrams, the size of a Query Store statement.</summary>
     private const int WordsPerText = 190;
 
-    private const int VocabularySize = 5000;
+    /// <summary>Distinct words the texts draw from, with a skew toward the common ones: a statement repeats its keywords and names, so a
+    /// 1.4 KB text carries about 450 distinct trigrams rather than the thousand a text of random words would.</summary>
+    private const int TextVocabulary = 100;
+
+    private const int VocabularyRows = 5000;
 
     /// <summary>One GIN pending-list page is 8 KB, and the index's limit is <see cref="QueryTextTrigramIndex.PendingListLimitKb"/> kB.</summary>
     private const int PendingPagesAtLimit = QueryTextTrigramIndex.PendingListLimitKb / 8;
@@ -87,7 +91,7 @@ SELECT g AS n,
        (SELECT string_agg(v.a[1 + floor(power(random(), 3) * {0} * (1 + x.i * 0))::int], ' ') FROM generate_series(1, {1}) AS x(i) WHERE x.i > 0 OR g > 0) || ' ' || g::text || '/' || {2}::text AS t
 FROM v, generate_series({3}, {4}) AS g";
 
-    private static string Texts(int first, int last, int salt, int vocabulary = VocabularySize, int words = WordsPerText) =>
+    private static string Texts(int first, int last, int salt, int vocabulary = TextVocabulary, int words = WordsPerText) =>
         string.Format(CultureInfo.InvariantCulture, TextsSql, vocabulary, words, salt, first, last);
 
     private static async Task PrepareVocabularyAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -98,7 +102,7 @@ FROM v, generate_series({3}, {4}) AS g";
             @"CREATE TABLE IF NOT EXISTS public.zz_vocab AS
               SELECT g AS id, (SELECT string_agg(chr(97 + get_byte(decode(md5(g::text), 'hex'), i) % 26), '' ORDER BY i)
                                FROM generate_series(0, 2 + g % 8) AS i) AS w
-              FROM generate_series(1, " + VocabularySize + ") AS g", ct);
+              FROM generate_series(1, " + VocabularyRows + ") AS g", ct);
     }
 
     private static async Task PrepareAsync(NpgsqlConnection connection, bool queryStore, int seedRows, CancellationToken ct)
@@ -270,7 +274,7 @@ FROM v, generate_series({3}, {4}) AS g";
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PrepareVocabularyAsync(connection, ct);
-        foreach (var (vocabulary, words) in new[] { (5000, 190), (1500, 190), (800, 190), (400, 190), (200, 190), (400, 120) })
+        foreach (var (vocabulary, words) in new[] { (60, 190), (100, 190), (150, 190) })
         {
             await using var command = new NpgsqlCommand(
                 $"SELECT avg(length(t)), avg(cardinality(show_trgm(t))) FROM ({Texts(1, 200, 0, vocabulary, words)}) AS s", connection);
@@ -291,19 +295,22 @@ FROM v, generate_series({3}, {4}) AS g";
         var ct = TestContext.Current.CancellationToken;
         var intervals = (Environment.GetEnvironmentVariable("DARLING_TRIGRAM_MEASURE_INTERVALS") ?? "2,5,10")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(int.Parse).ToArray();
-        var seedRows = 60 * PeakRowsPerMinute;
+        var virtualMinutes = int.Parse(Environment.GetEnvironmentVariable("DARLING_TRIGRAM_MEASURE_MINUTES") ?? "30", CultureInfo.InvariantCulture);
+        var which = Environment.GetEnvironmentVariable("DARLING_TRIGRAM_MEASURE_INDEX") ?? "both";
+        var seedRows = 20 * PeakRowsPerMinute;
+        var scale = 60.0 / virtualMinutes;
 
         foreach (var interval in intervals)
         {
-            foreach (var queryStore in new[] { false, true })
+            foreach (var queryStore in new[] { false, true }.Where(q => which == "both" || (which == "qs") == q))
             {
-                var r = await RunOnScratchAsync(queryStore, interval, 60, seedRows, ct);
+                var r = await RunOnScratchAsync(queryStore, interval, virtualMinutes, seedRows, ct);
                 var line = string.Format(CultureInfo.InvariantCulture,
-                    "classes: M|{0}|interval={1}min|peakPages={2}|peakTuples={3}|cleans={4}|walMBperHour={5:F1}|fpiPerHour={6}|cleanMsAvg={7:F0}|cleanMsMax={8:F0}|maxInsertMs={9:F0}|inlineMerges={10}|pagesBeforeEachClean={11}",
+                    "classes: M|{0}|interval={1}min|virtualMin={12}|peakPages={2}|peakTuples={3}|cleans={4}|walMBperHour={5:F1}|fpiPerHour={6}|cleanMsAvg={7:F0}|cleanMsMax={8:F0}|maxInsertMs={9:F0}|inlineMerges={10}|pagesBeforeEachClean={11}",
                     r.Index, r.IntervalMinutes, r.PeakPendingPages, r.PeakPendingTuples, r.Cleans.Count,
-                    r.Cleans.Sum(c => c.WalBytes) / 1048576.0, r.Cleans.Sum(c => c.FullPageImages),
+                    r.Cleans.Sum(c => c.WalBytes) / 1048576.0 * scale, r.Cleans.Sum(c => c.FullPageImages) * scale,
                     r.Cleans.Average(c => c.Milliseconds), r.Cleans.Max(c => c.Milliseconds), r.MaxInsertMilliseconds, r.InlineMerges,
-                    string.Join(",", r.Cleans.Select(c => c.PendingPages)));
+                    string.Join(",", r.Cleans.Select(c => c.PendingPages)), virtualMinutes);
                 await File.AppendAllTextAsync(output!, line + Environment.NewLine, ct);
             }
         }
