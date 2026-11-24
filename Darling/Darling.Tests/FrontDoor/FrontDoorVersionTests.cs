@@ -73,15 +73,15 @@ public sealed class FrontDoorVersionTests
     }
 
     [Theory(Timeout = 60_000)]
-    [InlineData(FrontDoorStoreHealth.Stale)]
-    [InlineData(FrontDoorStoreHealth.AuthFailed)]
-    public async Task Version_AStoreThatIsNotOk_ReadsDown(FrontDoorStoreHealth health)
+    [InlineData("Stale")]
+    [InlineData("AuthFailed")]
+    public async Task Version_AStoreThatIsNotOk_ReadsDown(string healthName)
     {
         var ct = TestContext.Current.CancellationToken;
         var a = await FakeWebPeer.StartAsync("use1");
         await using var _a = a;
         await using var door = await FrontDoorWebHarness.StartAsync(new[] { (a, new[] { "sql-east-1" }) }, ct: ct);
-        door.Directory.SetHealth("use1", health, null);
+        door.Directory.SetHealth("use1", Enum.Parse<FrontDoorStoreHealth>(healthName), null);
 
         var (_, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/version", FrontDoorSeat.SignedOut), ct);
 
