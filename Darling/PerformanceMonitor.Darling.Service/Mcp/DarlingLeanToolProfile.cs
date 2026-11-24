@@ -18,6 +18,7 @@ using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -172,6 +173,7 @@ internal static class DarlingLeanToolProfile
 [McpServerToolType]
 public sealed class DarlingMcpLeanTools
 {
+    [FrontDoorClass(FrontDoorToolClass.Local)]
     [McpServerTool(Name = "call_tool"), Description("Runs one read tool by name, with its arguments, as if it had been called directly. Find the tool and its arguments with find_tools. It runs read tools only: a tool that writes must be called on the full path. Where a tool takes a store argument, put it inside arguments: call_tool has no store of its own.")]
     public static string CallTool(
         [Description("The name of the tool to run.")] string name,

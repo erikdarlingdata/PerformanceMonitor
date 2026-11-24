@@ -15,6 +15,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -29,6 +30,7 @@ public sealed class DarlingMcpStoreCheckpointTools
 
     internal const int MaxLimit = 500;
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_store_checkpoints"), Description(
         "Gets the monitoring STORE's OWN PostgreSQL checkpoints, one row each, for a window; no server_name. Each row has the start and "
         + "end time, the reason (time, wal, requested, immediate, shutdown or end-of-recovery), buffers written, WAL files added, removed "

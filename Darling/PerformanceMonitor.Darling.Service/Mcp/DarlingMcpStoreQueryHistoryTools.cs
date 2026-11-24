@@ -21,6 +21,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -225,6 +226,7 @@ GROUP BY f.queryid";
     /// <summary>What a statement's text reads when the extension no longer holds it.</summary>
     public const string TextGone = "text no longer in pg_stat_statements";
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_store_query_history"), Description(
         "The STORE's own SQL statements hour by hour (pg_stat_statements deltas the service snapshots), not a " +
         "monitored server's queries. No server_name. Without query_id: top statements over hours_back by time " +

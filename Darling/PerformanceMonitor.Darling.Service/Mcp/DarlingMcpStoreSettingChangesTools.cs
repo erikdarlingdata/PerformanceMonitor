@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -55,6 +56,7 @@ public sealed class DarlingMcpStoreSettingChangesTools
     /// <summary>The default page size.</summary>
     public const int DefaultLimit = 50;
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_store_setting_changes"), Description(
         "Lists changes to the monitoring STORE's own PostgreSQL settings between service starts, newest first (not a monitored server's). "
         + "No server_name. Each row: the setting, old and new value, where the new value came from (source, source file and line), pending_restart, "

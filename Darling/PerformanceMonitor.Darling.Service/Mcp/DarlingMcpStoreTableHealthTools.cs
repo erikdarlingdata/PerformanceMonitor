@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -62,6 +63,7 @@ public sealed class DarlingMcpStoreTableHealthTools
     /// <summary>The sections the tool can return.</summary>
     internal static readonly string[] Sections = { "tables", "indexes", "all" };
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_store_table_health"), Description(
         "Gets the health of the monitoring STORE's OWN tables and indexes, not a monitored server's; no server_name. Per table: size "
         + "split, estimated empty space (an ESTIMATE, null with a reason when statistics are missing or stale, never zero), dead rows, "

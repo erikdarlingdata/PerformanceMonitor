@@ -18,6 +18,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -182,6 +183,7 @@ public sealed class DarlingMcpPlanTools
         return reason is null ? null : McpHelpers.Status("not_collected", reason);
     }
 
+    [FrontDoorClass(FrontDoorToolClass.AnyOneStore)]
     [McpServerTool(Name = "analyze_plan_xml"), Description(
         "Analyzes raw showplan XML you provide (not a stored plan). Per statement: warnings; missing_indexes " +
         "labelled impact_basis, with create_statement, the optimizer's suggested CREATE INDEX for this statement: " +

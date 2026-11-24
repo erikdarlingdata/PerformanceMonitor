@@ -20,6 +20,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitor.Common.Tags;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -108,6 +109,7 @@ public sealed class DarlingMcpQueryTagTools
         CancellationToken cancellationToken = default) =>
         UnassignQueryTagCore(new QueryTagStore(postgres, WriteCommandSeconds), kind, query_hash, database_name, schema_name, object_name, server_id, cancellationToken);
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "list_query_tags"), Description(
         "Lists the query tag tree: every tag (tag_id, name, parent_id, depth, path, colour, rule_count, and enabled_rule_count for the rules the resolver considers) with its hand assignments (kind hash or object, key, server_id or null for every server, query_id for display). Each assignment states its precedence: a hand assignment by hash for the server beats one for every server, which beats an object assignment for the server, which beats an object assignment for every server, which beats any rule (rules go by priority then id; precedence_rank is 1 to 5 in that order). map shows whether the tag map has caught up with the last tag, assignment or rule write. Read-only.")]
     public static Task<string> ListQueryTags(

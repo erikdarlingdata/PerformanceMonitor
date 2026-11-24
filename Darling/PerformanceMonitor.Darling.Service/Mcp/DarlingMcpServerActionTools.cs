@@ -19,6 +19,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -111,6 +112,7 @@ public sealed class DarlingMcpServerActionTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_server_actions"), Description(
         "Lists every monitored server's switch for each agent server action (force_plan, evict_plan, kill_session, recompile_module, create_plan_guide, drop_plan_guide): on or off (a server with no row is off), who last set it and when, and whether the server's engine can run the action at all (valid false: the switch cannot be turned on). A read. set_server_action changes a switch where mcp.allowServerAdmin is on.")]
     public static async Task<string> GetServerActions(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)

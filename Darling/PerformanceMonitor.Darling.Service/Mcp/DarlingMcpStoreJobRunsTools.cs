@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -62,6 +63,7 @@ public sealed class DarlingMcpStoreJobRunsTools
     /// be asking for rows that are gone.</summary>
     public const int MaxHours = 744;
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_store_job_runs"), Description(
         "Each run of the monitoring STORE's own TimescaleDB background jobs (compression, retention, refresh), newest first, with start, end, "
         + "outcome and error. Not a monitored server; no server_name. Filter with job_kind and hypertable. <<GUIDE>> "

@@ -23,6 +23,7 @@ using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -775,6 +776,7 @@ public sealed partial class DarlingMcpAlertTools
         }
     };
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_notification_routes"), Description(
         "Gets the alert family taxonomy, and where each family's posts go. Zero routes is the ordinary state: every alert goes to every parent channel configured in Settings. Sparse routes are layered over that parent set; an EMPTY channel on a route INHERITS the parent's rather than silencing it; resolution is scope first (server, tag, fleet-wide), then exact metric, then family, then parent; routes report scope and orphaned. Lite and Darling report the same fields. Routing decides WHERE a post lands, never WHETHER it is sent.<<GUIDE>>Gets WHERE each alert family is delivered: the closed family taxonomy, which metric names belong to " +
         "self-monitor, reports, agent-jobs and performance, and the sparse notification routes layered over the " +
@@ -1333,6 +1335,7 @@ public sealed partial class DarlingMcpAlertTools
         return null;
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them, so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed. A rule that repeats on a schedule also carries its recur_days (day names; null is every day), recur_start_time, recur_end_time and recur_time_zone, plus schedule (one line), in_window_now (true when the rule is inside a window right now, so it is muting) and next_window_start_utc (when the next window opens); a repeating rule that is active but outside its window mutes nothing at this moment. Each rule carries action: 'mute', or 'digest' for a rule that holds matching alerts back from paging and records them as digest rows for the daily digest instead of muting them.")]
     public static async Task<string> GetMuteRules(
         NpgsqlDataSource postgres,

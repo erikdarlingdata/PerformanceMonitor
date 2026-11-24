@@ -16,6 +16,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -48,6 +49,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpCustomViewTools
 {
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "list_custom_views"), Description(
         "Lists every saved custom view (dashboards and notebooks) as lightweight summaries: id, name, description, " +
         "kind ('dashboard' or 'notebook'), folder (null = the top level), personal (true = one person's own view), " +
@@ -71,6 +73,7 @@ public sealed class DarlingMcpCustomViewTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_custom_view"), Description(
         "Gets one saved custom view in full, including its definition JSON (a dashboard's panels or a notebook's " +
         "cells) plus name, description, kind, and version. Get the id from list_custom_views. Use the returned " +
@@ -93,6 +96,7 @@ public sealed class DarlingMcpCustomViewTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.AnyOneStore)]
     [McpServerTool(Name = "validate_custom_view"), Description(
         "Dry-run: validates a custom-view definition (dashboard {\"panels\":[...]} or notebook " +
         "{\"kind\":\"notebook\",\"cells\":[...]}) against the measure catalog and composer rules WITHOUT " +
@@ -343,6 +347,7 @@ public sealed class DarlingMcpCustomViewTools
         }.ToJsonString(McpHelpers.JsonOptions);
     }
 
+    [FrontDoorClass(FrontDoorToolClass.StoreRequired)]
     [McpServerTool(Name = "run_custom_view_panel"), Description(
         "Runs one composed (v2) panel and returns DATA: {sql, rows, annotations, notice?}, with no 'status' " +
         "field on success. Failures return {status, message}: \"invalid\" for a bad spec or panel, or a " +
@@ -412,6 +417,7 @@ public sealed class DarlingMcpCustomViewTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.AnyOneStore)]
     [McpServerTool(Name = "describe_custom_view_catalog"), Description(
         "Returns the COMPOSE CATALOG: the exact vocabulary (measures, dimensions, aggregates, units, timeBuckets, viz) " +
         "a composed (v2) panel may use; the compiler emits ONLY these identifiers. CALL THIS FIRST before " +

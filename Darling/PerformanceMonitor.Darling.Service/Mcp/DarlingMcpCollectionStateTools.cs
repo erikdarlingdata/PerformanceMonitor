@@ -19,6 +19,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -226,6 +227,7 @@ public sealed class DarlingMcpCollectionStateTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_collection_state"), Description(
         "Shows whether collection is paused, the store's config version, and every monitored server's enabled flag, excluded databases and monthly cost in USD (0 means none is set; disabled servers included). get_server_settings shows the rest of the fields edit_server changes. Read it before and after pause_collection, resume_collection, disable_server, enable_server, set_server_excluded_databases or reload_config. A server with enabled false is skipped by collection.")]
     public static async Task<string> GetCollectionState(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)

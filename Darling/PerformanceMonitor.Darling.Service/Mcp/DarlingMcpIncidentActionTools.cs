@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -204,6 +205,7 @@ public sealed class DarlingMcpIncidentActionTools
     /// <summary>The groups shown to the caller, and the plan as text, which a confirm value is issued and redeemed against.</summary>
     internal sealed record PurgePreview(JsonArray Groups, string Plan);
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_command_result"), Description(
         "Reads one queued command's state and result: status (pending, in_progress, succeeded or failed), result_status and the result the service wrote. Use it after test_connection, analyze_now, purge_now, pause_collection or resume_collection with the command_id they answered. Command rows older than the store's retention are gone and answer not_found. Read only; the command's arguments are never returned.")]
     public static async Task<string> GetCommandResult(
@@ -272,6 +274,7 @@ public sealed class DarlingMcpIncidentActionTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_agent_changes"), Description(
         "Lists the changes an agent made to a monitored server (a Query Store plan force or unforce, a mute, a threshold override, an evicted plan, a killed session), newest first, with the called_id undo_plan_change takes, the result (done, failed or unknown), who undid it and when, and can_undo. Use it before undo_plan_change to find the change and after it to confirm the change reads undone. Read only.")]
     public static async Task<string> GetAgentChanges(

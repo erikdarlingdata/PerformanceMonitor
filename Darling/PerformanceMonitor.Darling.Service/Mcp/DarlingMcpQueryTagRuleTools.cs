@@ -21,6 +21,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Common.QueryTags;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -107,6 +108,7 @@ public sealed class DarlingMcpQueryTagRuleTools
         CancellationToken cancellationToken = default) =>
         DeleteCore(new QueryTagRuleStore(postgres, CommandSeconds), rule_id, cancellationToken);
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "list_query_tag_rules"), Description(
         "Lists the query tag rules in the order they apply (priority, then id): id, field, pattern, priority, enabled, tag_id and tag path, server_id, who created it and when. " +
         "Disabled rules are listed with enabled false. Also returns rules_version and built_version: the tag map is stale while built_version is below rules_version, until the next collector pass. " +
@@ -117,6 +119,7 @@ public sealed class DarlingMcpQueryTagRuleTools
         CancellationToken cancellationToken = default) =>
         ListCore(new QueryTagRuleStore(postgres, CommandSeconds), server_id, cancellationToken);
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "test_query_tag_rule"), Description(
         "Dry run, writes nothing: runs a saved rule (rule_id) or a draft rule (field, pattern, tag_id, priority) over the recent query sightings of one server or every server and reports " +
         "what it would tag: how many keys the rule matches, how many of those a hand assignment or a rule that ranks ahead already holds (so the rule would not change them), " +

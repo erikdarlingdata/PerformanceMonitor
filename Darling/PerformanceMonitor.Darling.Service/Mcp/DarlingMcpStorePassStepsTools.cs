@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -37,6 +38,7 @@ public sealed class DarlingMcpStorePassStepsTools
 
     private const string ExistsSql = "SELECT to_regclass('collect.store_pass_steps') IS NOT NULL";
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_store_pass_steps"), Description(
         "What the monitoring STORE's own background passes did, step by step, newest first: when each step of the hourly "
         + "store-maintenance, 15-minute Query Store compose and hourly store self-metrics passes started, how long it took, "

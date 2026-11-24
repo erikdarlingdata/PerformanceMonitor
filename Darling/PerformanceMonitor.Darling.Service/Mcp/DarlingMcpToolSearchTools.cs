@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -24,6 +25,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpToolSearchTools
 {
+    [FrontDoorClass(FrontDoorToolClass.Local)]
     [McpServerTool(Name = "find_tools"), Description(McpToolSearchToolText.Description)]
     public static string FindTools(
         McpServer server,

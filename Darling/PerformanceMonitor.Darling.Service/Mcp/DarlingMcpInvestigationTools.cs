@@ -21,6 +21,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -140,6 +141,7 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.StoreRequired)]
     [McpServerTool(Name = "wait_for_investigation_requests"), Description(
         "Waits up to 25 seconds for an investigation request event on your agent routes (opened, joined, resolved, expired, " +
         "claims_exhausted, evidence_ready, follow_up, deadlock_digest) and answers each with its request's id, server and " +
@@ -543,6 +545,7 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_investigation_evidence"), Description(
         "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, invalid (a " +
         "sections name no section carries, the known names listed), not_found or already_claimed. <<GUIDE>> " +

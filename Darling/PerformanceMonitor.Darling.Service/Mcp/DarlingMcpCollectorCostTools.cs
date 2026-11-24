@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -50,6 +51,7 @@ public sealed class DarlingMcpCollectorCostTools
         + "measured the probe was 55.4% of plan_fetch and 80.6% of text_fetch. This series carries no phase split, so "
         + "read get_collection_log's sql_store_ms per run before concluding a target is slow.";
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_collector_cost"), Description(
         "Gets the monitoring tool's OWN per-collector cost on monitored servers: measuring itself, not server "
         + "health; no server_name. Default: ranked fleet list, total_sql_ms desc; collector_name switches to "

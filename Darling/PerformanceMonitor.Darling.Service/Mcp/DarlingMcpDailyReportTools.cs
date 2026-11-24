@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Reports;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -29,6 +30,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpDailyReportTools
 {
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [McpServerTool(Name = "get_daily_health_report"), Description(
         "Builds the Daily Health Report for one day from stored data and returns it as text plus structured sections: the fleet counts, " +
         "then each server worst first with its alerts, failed Agent jobs, overdue backups and CHECKDB, low disk and collection problems. " +
