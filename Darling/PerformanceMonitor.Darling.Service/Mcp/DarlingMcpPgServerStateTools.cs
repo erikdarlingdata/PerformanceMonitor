@@ -1108,8 +1108,8 @@ public sealed class DarlingMcpPgServerStateTools
     /// <summary>The note attached to a config-changes page that holds a platform-resized row (#9500).</summary>
     internal const string PlatformResizedNote = "Rows with resized_by_platform true are settings the platform resized with "
         + "capacity, with no restart. On a serverless PostgreSQL target a postmaster-context setting such as shared_buffers "
-        + "follows the allocated capacity, and the server's start time was the same before the previous snapshot and before "
-        + "this one. They are not configuration edits, and Change Watch does not report them.";
+        + "follows the allocated capacity, and the server's start time was the same before the previous snapshot and after "
+        + "this change. They are not configuration edits, and Change Watch does not report them.";
 
     /// <summary>
     /// A server-wide row the platform resized (#9500): the same fields in the same order as an ordinary server-wide
