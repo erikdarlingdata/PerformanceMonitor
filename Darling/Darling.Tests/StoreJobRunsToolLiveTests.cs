@@ -385,7 +385,8 @@ public sealed class StoreJobRunsToolLiveTests
                 var ownerRun = Runs(asOwner)[0];
                 Assert.True(ownerRun.GetProperty("error_readable").GetBoolean());
                 Assert.Contains("jr9440 deliberate failure", ownerRun.GetProperty("error").GetString(), StringComparison.Ordinal);
-                Assert.Equal(seen.Length, Runs(asOwner).Length);
+                /* The scheduler may land one more run of the failing job between the two reads, so the owner sees at least what the reader saw. */
+                Assert.True(Runs(asOwner).Length >= seen.Length);
             }
             finally
             {
