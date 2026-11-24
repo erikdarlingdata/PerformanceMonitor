@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
@@ -177,7 +178,9 @@ END;", ct);
             await Task.Delay(TimeSpan.FromSeconds(5), ct);
             var deltas = new CollectorDeltaCalculator();
             var first = await FirstReadAsync(master!, deltas, capturePlan, ct);
-            Assert.Contains(first, r => r.QueryText is not null && r.QueryText.Contains(completedBefore, StringComparison.Ordinal));
+            Assert.True(
+                first.Any(r => r.QueryText is not null && r.QueryText.Contains(completedBefore, StringComparison.Ordinal)),
+                $"The first read did not return the statement that completed before it. Rows: {first.Count}.");
             Assert.DoesNotContain(first, r => r.QueryText is not null && r.QueryText.Contains(spanning, StringComparison.Ordinal));
 
             await slow;
@@ -186,7 +189,9 @@ END;", ct);
 
             var (texts, taken) = await SecondReadAsync(master!, deltas, capturePlan, ct);
             Assert.NotNull(taken);
-            Assert.Contains(texts, t => t.Contains(spanning, StringComparison.Ordinal));
+            Assert.True(
+                texts.Any(t => t.Contains(spanning, StringComparison.Ordinal)),
+                $"The second read did not return the spanning statement. Rows: {texts.Count}. Watermark: {taken}.");
             Assert.DoesNotContain(texts, t => t.Contains(completedBefore, StringComparison.Ordinal));
         }
         finally
