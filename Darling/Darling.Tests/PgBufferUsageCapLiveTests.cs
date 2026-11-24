@@ -314,6 +314,7 @@ public sealed class PgBufferUsageCapLiveTests
         private readonly DarlingCollectorRunner _runner;
         private readonly ServerRuntime _runtime;
         private readonly string _monitoring;
+        private string? _lastNote;
 
         public Rig(ScratchPostgres? owned, NpgsqlDataSource store, DarlingCollectorRunner runner, ServerRuntime runtime, string monitoring)
         {
@@ -334,7 +335,7 @@ public sealed class PgBufferUsageCapLiveTests
                 await clear.ExecuteNonQueryAsync(ct);
             }
 
-            await _runner.RunAsync(PgBufferUsageCollector.Instance, _runtime, ct);
+            _lastNote = (await _runner.RunAsync(PgBufferUsageCollector.Instance, _runtime, ct)).Note;
 
             var rows = new List<Stored>();
             await using var read = _store.CreateCommand(
@@ -358,14 +359,8 @@ public sealed class PgBufferUsageCapLiveTests
         public Task<long> ScanCallsAsync() =>
             ScalarAsync<long>(_monitoring, "SELECT count(*) FROM pm9508.scan_calls", TestContext.Current.CancellationToken);
 
-        public async Task<string?> LogNoteAsync()
-        {
-            await using var command = _store.CreateCommand(
-                "SELECT error_message FROM collection_log WHERE server_id = $1 AND collector_name = 'pg_buffer_usage' ORDER BY collection_time DESC, log_id DESC LIMIT 1");
-            command.Parameters.AddWithValue(ServerId);
-            var value = await command.ExecuteScalarAsync(TestContext.Current.CancellationToken);
-            return value as string;
-        }
+        /// <summary>The note the worker writes to <c>collection_log.error_message</c> for the last run: the result's own <see cref="CollectorRunResult.Note"/>.</summary>
+        public Task<string?> LogNoteAsync() => Task.FromResult(_lastNote);
 
         public async Task<JsonElement> ToolAsync() =>
             JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgBufferUsage(_store, ServerName, limit: 25)).RootElement.Clone();

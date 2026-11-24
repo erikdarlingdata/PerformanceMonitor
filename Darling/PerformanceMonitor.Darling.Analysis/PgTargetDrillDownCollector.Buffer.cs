@@ -101,7 +101,7 @@ totals AS (
     SELECT
         max(collection_time)                                                                   AS captured_at,
         CAST(coalesce(max(pool_buffers_total), 0) AS bigint)                                   AS pool_buffers_total,
-        CAST(coalesce(max(pool_buffers_used), 0) AS bigint)                                    AS pool_buffers_used,
+        CAST(max(pool_buffers_used) AS bigint)                                                 AS pool_buffers_used,
         CAST(count(buffers) AS integer)                                                        AS relations_in_capture,
         CAST(coalesce(SUM(buffers), 0) AS bigint)                                              AS buffers_listed,
         CAST(coalesce(SUM(dirty_buffers), 0) AS bigint)                                        AS dirty_buffers_listed,
@@ -208,8 +208,10 @@ AND   e.extension_name = 'pg_buffercache'";
     {
         var top = new List<PgTargetBufferResident>(BufferTopRelationCap);
         DateTime? capturedAt = null;
-        long poolTotal = 0, poolUsed = 0, listed = 0, dirtyListed = 0, heap = 0, index = 0, toast = 0, cold = 0;
+        long poolTotal = 0, listed = 0, dirtyListed = 0, heap = 0, index = 0, toast = 0, cold = 0;
         var relationsInCapture = 0;
+        /* #9508: null when the capture has no used count (a totals-only row on a target with no pg_buffercache_summary()), never a 0 that reads as an empty pool. */
+        long? poolUsed = null;
 
         await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
         using (var cmd = new NpgsqlCommand(PgTargetBufferCompositionSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
@@ -226,7 +228,7 @@ AND   e.extension_name = 'pg_buffercache'";
             {
                 capturedAt = reader.IsDBNull(7) ? null : reader.GetDateTime(7);
                 poolTotal = reader.IsDBNull(8) ? 0 : Convert.ToInt64(reader.GetValue(8));
-                poolUsed = reader.IsDBNull(9) ? 0 : Convert.ToInt64(reader.GetValue(9));
+                poolUsed = reader.IsDBNull(9) ? null : Convert.ToInt64(reader.GetValue(9));
                 relationsInCapture = reader.IsDBNull(10) ? 0 : Convert.ToInt32(reader.GetValue(10));
                 listed = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11));
                 dirtyListed = reader.IsDBNull(12) ? 0 : Convert.ToInt64(reader.GetValue(12));
@@ -291,7 +293,7 @@ AND   e.extension_name = 'pg_buffercache'";
             PoolBuffersTotal: poolTotal,
             PoolBuffersUsed: poolUsed,
             PoolBytes: poolTotal * PgSettingValue.DefaultBlockBytes,
-            PoolFill: Share(poolUsed, poolTotal),
+            PoolFill: poolUsed is { } used ? Share(used, poolTotal) : null,
             BuffersListed: listed,
             DirtyBuffersListed: dirtyListed,
             DirtyShareOfPool: Share(dirtyListed, poolTotal),
