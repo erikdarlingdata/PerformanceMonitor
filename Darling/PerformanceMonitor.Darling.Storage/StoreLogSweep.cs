@@ -341,21 +341,40 @@ FROM config.store_log_read_marker AS m";
         DateTime utcNow,
         ILogger? logger,
         IStoreLogFiles? files,
-        CancellationToken cancellationToken = default,
-        TimeSpan? readOnBudget = null) =>
-        SweepAsync(connection, utcNow, logger, files, StoreLockWaits.Shared, cancellationToken, readOnBudget);
+        CancellationToken cancellationToken = default) =>
+        SweepAsync(connection, utcNow, logger, files, StoreLockWaits.Shared, null, cancellationToken);
+
+    /// <summary>The sweep over a given set of log files with <paramref name="readOnBudget"/> in place of
+    /// <see cref="ReadOnBudget"/>, for a test whose point is the byte and slab bounds, so a slow machine cannot end its
+    /// capture early.</summary>
+    internal static Task<List<FileCapture>> SweepAsync(
+        NpgsqlConnection connection,
+        DateTime utcNow,
+        ILogger? logger,
+        IStoreLogFiles? files,
+        TimeSpan readOnBudget,
+        CancellationToken cancellationToken) =>
+        SweepAsync(connection, utcNow, logger, files, StoreLockWaits.Shared, readOnBudget, cancellationToken);
 
     /// <summary>The sweep over a given set of log files and a given map of sessions (#9439): the service's own map in
-    /// production, a test's in a test. <paramref name="readOnBudget"/> replaces <see cref="ReadOnBudget"/> for a test whose point is
-    /// the byte and slab bounds, so a slow machine cannot end its capture early.</summary>
-    internal static async Task<List<FileCapture>> SweepAsync(
+    /// production, a test's in a test.</summary>
+    internal static Task<List<FileCapture>> SweepAsync(
         NpgsqlConnection connection,
         DateTime utcNow,
         ILogger? logger,
         IStoreLogFiles? files,
         StoreLockWaits.PidMap pids,
-        CancellationToken cancellationToken,
-        TimeSpan? readOnBudget = null)
+        CancellationToken cancellationToken) =>
+        SweepAsync(connection, utcNow, logger, files, pids, null, cancellationToken);
+
+    private static async Task<List<FileCapture>> SweepAsync(
+        NpgsqlConnection connection,
+        DateTime utcNow,
+        ILogger? logger,
+        IStoreLogFiles? files,
+        StoreLockWaits.PidMap pids,
+        TimeSpan? readOnBudget,
+        CancellationToken cancellationToken)
     {
         if (connection is null)
         {
