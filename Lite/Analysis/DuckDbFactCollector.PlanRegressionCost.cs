@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
@@ -266,7 +268,9 @@ SELECT
     c.latest_rows,
     c.best_rows,
     -- #9353: appended, the ranking key, so a read that took the databases one at a time can put their rows in this statement's order.
-    c.lost_cpu_us
+    c.lost_cpu_us,
+    -- #9353: appended, the last part of that order's unique key (below).
+    c.replica_role
 FROM candidates AS c
 LEFT JOIN texts AS t
   ON  t.collection_id = c.text_collection_id
@@ -274,7 +278,9 @@ LEFT JOIN texts AS t
 -- BEFORE the LIMIT below, so they cannot use up its rows or lead the fact.
 WHERE NOT regexp_matches(lower(COALESCE(t.query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
 -- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
-ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
+-- #9353: then the row's own key, so two rows that tie on both come out in the same order every time, and a read that took the
+-- databases one at a time (PlanRegressionRankKey) can put its rows in exactly this order. One row per (database, query, replica).
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", c.database_name, c.query_id, c.replica_role
 -- #5630: more rows than the fact keeps. The C# side drops the rows the shared input rule rules out and keeps
 -- the first MaxPlanRegressionOffenders (20) of what is left, so a dropped row does not leave the fact one
 -- offender short.
@@ -294,10 +300,10 @@ LIMIT 100";
     /// one database (#9353): every comparison in the statement stays inside one database, so its rows are that database's rows of the
     /// whole read, and a pass that reads its databases in turn lets go of the store's lock between them.
     /// </summary>
-    internal static async Task<List<(PlanRegressionCandidate Candidate, double LostCpu)>> ReadRankedPlanRegressionCandidatesAsync(
+    internal static async Task<List<RankedPlanRegression>> ReadRankedPlanRegressionCandidatesAsync(
         DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string sql, string? database)
     {
-        var candidates = new List<(PlanRegressionCandidate, double)>();
+        var candidates = new List<RankedPlanRegression>();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -332,9 +338,100 @@ LIMIT 100";
                 BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14)));
             /* NULL sorts last in the statement's ORDER BY, so a row with no lost CPU ranks below every other. */
             var lostCpu = reader.FieldCount > 15 && !reader.IsDBNull(15) ? Convert.ToDouble(reader.GetValue(15)) : double.NegativeInfinity;
-            candidates.Add((candidate, lostCpu));
+            candidates.Add(new RankedPlanRegression(candidate, lostCpu, reader.FieldCount > 16 && !reader.IsDBNull(16) ? reader.GetString(16) : null));
         }
         return candidates;
+    }
+
+    /// <summary>A cost statement row with the two things its order needs besides the candidate's own fields.</summary>
+    internal readonly record struct RankedPlanRegression(PlanRegressionCandidate Candidate, double LostCpu, string? ReplicaRole)
+    {
+        internal PlanRegressionRankKey Key => new(LostCpu, Candidate.RegressionFactor, Candidate.DatabaseName, Candidate.QueryId, ReplicaRole);
+    }
+
+    /// <summary>
+    /// What the plan regression statements order by (#9353): the CPU the regression lost, the factor, then (database, query, replica),
+    /// which is unique to a row. A pass that reads its databases in turn puts their rows through <see cref="InRankOrder"/>, and the
+    /// result is the one statement's order, ties included. NULL sorts last in the statement, as -infinity does here.
+    /// </summary>
+    internal readonly record struct PlanRegressionRankKey(double LostCpu, double Factor, string Database, long QueryId, string? ReplicaRole);
+
+    internal static IOrderedEnumerable<T> InRankOrder<T>(IEnumerable<T> rows, Func<T, PlanRegressionRankKey> key) =>
+        rows.OrderByDescending(r => key(r).LostCpu)
+            .ThenByDescending(r => key(r).Factor)
+            .ThenBy(r => key(r).Database, StringComparer.Ordinal)
+            .ThenBy(r => key(r).QueryId)
+            .ThenBy(r => key(r).ReplicaRole is null ? 1 : 0)
+            .ThenBy(r => key(r).ReplicaRole, StringComparer.Ordinal);
+
+    /// <summary>
+    /// Runs a plan regression read (<paramref name="readOne"/>: its statement, on an open connection, for one database or for all of them
+    /// when the database is null) one database at a time, each read under its own hold of the store's read lock, and returns every row.
+    /// Every comparison in these statements stays inside one database, so each database's rows are its rows of the whole read, and a
+    /// housekeeping writer waiting on its 5 s budget gets in between the reads (#9353). The databases are listed first, under a hold of
+    /// their own. One database, or none, is read as one statement. <paramref name="onlyDatabases"/> drops the databases a read cannot
+    /// return a row for. The caller puts the rows in order and cuts them (<see cref="InRankOrder"/>).
+    /// <paramref name="betweenReads"/> is a test seam, run with the lock let go before each read after the first. The plan is taken once, before
+    /// the first hold: a store reset between two holds moves the archive generation, and the plan then reads the views, which hold every row.
+    /// </summary>
+    internal static async Task<(List<T> Rows, PlanRegressionStatementTime Time)> ReadPlanRegressionByDatabaseAsync<T>(
+        DuckDbInitializer duckDb, AnalysisContext context, ArchiveReadPlan plan,
+        Func<DuckDBConnection, string?, Task<List<T>>> readOne, Action? betweenReads, ISet<string>? onlyDatabases = null)
+    {
+        var time = default(PlanRegressionStatementTime);
+        List<string> databases;
+        {
+            var waitStarted = Stopwatch.GetTimestamp();
+            using var readLock = duckDb.AcquireReadLock(context.CancellationToken);
+            var heldFrom = Stopwatch.GetTimestamp();
+            time.Wait += Stopwatch.GetElapsedTime(waitStarted, heldFrom);
+            using var connection = duckDb.CreateConnection();
+            await connection.OpenAsync(context.CancellationToken);
+
+            var statementFrom = Stopwatch.GetTimestamp();
+            databases = await ReadPlanRegressionDatabasesAsync(connection, context, plan);
+            time.Statement += Stopwatch.GetElapsedTime(statementFrom);
+            time.Held = Stopwatch.GetElapsedTime(heldFrom);
+        }
+
+        if (onlyDatabases is not null) databases = databases.Where(onlyDatabases.Contains).ToList();
+
+        var rows = new List<T>();
+        var readEach = databases.Count > 1;
+        for (var d = 0; d < (readEach ? databases.Count : 1); d++)
+        {
+            if (d > 0) betweenReads?.Invoke();
+
+            var waitStarted = Stopwatch.GetTimestamp();
+            using var readLock = duckDb.AcquireReadLock(context.CancellationToken);
+            var heldFrom = Stopwatch.GetTimestamp();
+            time.Wait += Stopwatch.GetElapsedTime(waitStarted, heldFrom);
+            using var connection = duckDb.CreateConnection();
+            await connection.OpenAsync(context.CancellationToken);
+
+            var statementFrom = Stopwatch.GetTimestamp();
+            rows.AddRange(await readOne(connection, readEach ? databases[d] : null));
+            time.Statement += Stopwatch.GetElapsedTime(statementFrom);
+            var held = Stopwatch.GetElapsedTime(heldFrom);
+            if (held > time.Held) time.Held = held;
+        }
+
+        return (rows, time);
+    }
+
+    /// <summary>
+    /// The cost statement's candidates in its own order and cut (#9353): the CPU lost, the factor second, the row's key last, the first
+    /// <see cref="PlanRegressionCandidateLimit"/>. Read one database at a time (<see cref="ReadPlanRegressionByDatabaseAsync{T}"/>), and the same
+    /// rows in the same order as one statement over every database gives, ties included.
+    /// </summary>
+    internal async Task<(List<PlanRegressionCandidate> Candidates, PlanRegressionStatementTime Time)> ReadPlanRegressionCostAsync(
+        AnalysisContext context, ArchiveReadPlan plan)
+    {
+        var (ranked, time) = await ReadPlanRegressionByDatabaseAsync(
+            _duckDb, context, plan,
+            (connection, database) => ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql, database),
+            AfterPlanRegressionDatabaseReadForTests);
+        return (InRankOrder(ranked, r => r.Key).Take(PlanRegressionCandidateLimit).Select(r => r.Candidate).ToList(), time);
     }
 
     /// <summary>The most rows the cost statement returns, and so the most a pass that reads its databases in turn keeps of all of them.</summary>
