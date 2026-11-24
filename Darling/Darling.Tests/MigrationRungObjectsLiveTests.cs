@@ -94,7 +94,8 @@ public sealed class MigrationRungObjectsLiveTests
                 @"CREATE TABLE collect.probe_added (id integer NOT NULL, note text);
                   ALTER TABLE collect.probe_existing ADD COLUMN added_col integer;
                   ALTER TABLE collect.probe_existing DROP COLUMN old_note;");
-            var second = await StartAsync(scratch, source, "host-a", T0.AddHours(1), [Setup(), rung2], ct);
+            var rung3 = new PgMigrations.Migration(3, "add-third", "CREATE TABLE collect.probe_third (id integer NOT NULL);");
+            var second = await StartAsync(scratch, source, "host-a", T0.AddHours(1), [Setup(), rung2, rung3], ct);
 
             var root = Parse(await DarlingMcpServiceStartTools.GetServiceStarts(source, rung: 2, cancellationToken: ct));
             var start = Assert.Single(root.GetProperty("starts").EnumerateArray());
@@ -106,6 +107,11 @@ public sealed class MigrationRungObjectsLiveTests
             Assert.Contains(("column", "create", "probe_existing", "added_col"), rows);
             Assert.Contains(("column", "drop", "probe_existing", "old_note"), rows);
             Assert.All(start.GetProperty("objects").EnumerateArray(), o => Assert.Equal("collect", o.GetProperty("schema").GetString()));
+
+            /* A rung after it lists only its own change: the closing catalog of one rung is the opening catalog of the next. */
+            var third = Parse(await DarlingMcpServiceStartTools.GetServiceStarts(source, rung: 3, cancellationToken: ct));
+            var thirdRows = Rows(Assert.Single(third.GetProperty("starts").EnumerateArray()));
+            Assert.Equal(new[] { ("table", "create", "probe_third", (string?)null) }, thirdRows.ToArray());
 
             /* The start's rung rows carry the count, and the rung 1 row of the first start says fresh_install. */
             var all = Parse(await DarlingMcpServiceStartTools.GetServiceStarts(source, cancellationToken: ct)).GetProperty("starts").EnumerateArray().ToList();
