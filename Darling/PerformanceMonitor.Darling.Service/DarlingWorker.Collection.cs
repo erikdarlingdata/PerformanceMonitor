@@ -122,8 +122,9 @@ public sealed partial class DarlingWorker
            holds what it hears until the history's tables exist (a rung makes them). It flushes when the store is ready, after a failed attempt (so a
            start that dies in a rung shows it), once a minute for the ERROR and WARN counts, and once more at shutdown. Never fails or delays the start. */
         using var startRecorder = ServiceStartRecorder.ForThisProcess(ServiceLogTally.Shared, ProcessStartUtc());
-        using var startHistoryStop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-        var startHistoryFlusher = startRecorder.RunAsync(postgres, _logger, startHistoryStop.Token);
+        /* Declared after the recorder and the data source it reads through, so EVERY exit of this method (a return, an exception, the store-retry
+           wait's cancellation) stops the loop, runs its last flush and awaits it before either is disposed. */
+        await using var startHistory = startRecorder.StartFlushLoop(postgres, _logger, stoppingToken);
         /* #4508: set once, the first time the fast budget above runs out on a failure that is still
            retryable — see the arm below. Gates CRITICAL-once/WARNING-per-retry the same way the config
            and bootstrap sites' single terminal LogCritical already is "once": this is the sustained arm's
@@ -227,8 +228,7 @@ public sealed partial class DarlingWorker
                 _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store);
                 /* #9415: the flush loop's last flush writes the failed rung, if the history's tables exist, before the service stands down and the
                    data source goes. */
-                startHistoryStop.Cancel();
-                await startHistoryFlusher;
+                await startHistory.StopAsync();
                 return;
             }
         }
@@ -2075,8 +2075,9 @@ public sealed partial class DarlingWorker
         /* And the relation sizes writer (#9374): it ends at shutdown and never throws. */
         await relationSizesWriter;
 
-        /* And the start history's flush loop (#9415): it ends at shutdown with one last flush, bounded at five seconds, and never throws. */
-        await startHistoryFlusher;
+        /* And the start history's flush loop (#9415): it ends at shutdown with one last flush, bounded at five seconds, and never throws. Any other
+           exit of this method stops it when the scope ends. */
+        await startHistory.StopAsync();
 
         /* And the slow-read writer (#5097): a record still queued at shutdown is dropped. */
         try
