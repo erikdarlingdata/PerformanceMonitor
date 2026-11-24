@@ -1398,6 +1398,34 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// The #9437 once-a-minute store connection sample, on the checkpointer sample's minute: the store's client backends by role,
+    /// application, state and wait type, and the slots left against <c>max_connections</c>
+    /// (<see cref="StoreConnectionSamples.CaptureAsync"/>). Awaited on the main loop under its own short budget. A failure (a store that is
+    /// down, a role that cannot read <c>pg_stat_activity</c>, the budget expiring) is a Debug line and a skipped minute. Never throws except
+    /// for the service stopping.
+    ///
+    /// <para>The host load is passed as null. The host profile the service reads for the store (<see cref="DarlingStoreHostProfile"/>) carries
+    /// total memory, the processor count and the data volume's free space, and no CPU percent, available memory or disk queue, so there is
+    /// nothing to hand over yet. The three columns stay NULL and the read says so once.</para>
+    /// </summary>
+    private async Task SampleStoreConnectionsAsync(CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_checkpointSyncSampleBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            await StoreConnectionSamples.CaptureAsync(connection, DateTime.UtcNow, hostLoad: null, budget.Token);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogDebug(ex, "store connection sample failed and was skipped");
+        }
+    }
+
+    /// <summary>
     /// The sentence the store-log capture's warning gives as the cause (#9333). A 58P01 (UndefinedFile) means the log
     /// folder is not there, which is a store that keeps no log files, not a missing privilege: the compose store ran
     /// without logging_collector and named the privilege anyway. A 42501 (InsufficientPrivilege) keeps the privilege

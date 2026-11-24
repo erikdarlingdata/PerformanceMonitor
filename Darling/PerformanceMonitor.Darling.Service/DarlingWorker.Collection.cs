@@ -1800,6 +1800,9 @@ public sealed partial class DarlingWorker
             {
                 _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
                 await SampleCheckpointSyncAsync(stoppingToken);
+
+                /* #9437: the same minute's store connection sample. A failed read is a Debug line and a skipped minute, never a stopped loop. */
+                await SampleStoreConnectionsAsync(stoppingToken);
             }
 
             /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */
