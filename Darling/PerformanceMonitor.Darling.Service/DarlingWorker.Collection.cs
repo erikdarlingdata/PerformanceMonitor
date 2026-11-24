@@ -1818,6 +1818,8 @@ public sealed partial class DarlingWorker
                 _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
                 await SampleCheckpointSyncAsync(stoppingToken);
 
+                /* #9437: the same minute's store connection sample. A failed read is a Debug line and a skipped minute, never a stopped loop. */
+                await SampleStoreConnectionsAsync(config.Postgres.Managed, stoppingToken);
                 /* #9427: the store's settings, compared with the last capture on this same minute pass, so there is no timer of its own. */
                 await CaptureStoreSettingChangesAsync(stoppingToken);
             }

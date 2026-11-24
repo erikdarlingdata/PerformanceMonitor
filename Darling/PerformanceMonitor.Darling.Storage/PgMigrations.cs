@@ -4100,6 +4100,9 @@ END $$;";
            pending_restart, when seen, and when the server last loaded its configuration). Two plain tables created empty: no data moves, and the first capture on a
            store writes only the baseline. An older build ignores both. */
         new Migration(StoreSettingChanges.Version, "store-setting-changes", StoreSettingChanges.CreateSql),
+        /* V314 (#9437): the store's own connection pressure, once a minute. Two plain tables created empty: the backends by role, application, state and wait type,
+           and the slot headroom with the host load. No data moves. An older build ignores both. */
+        new Migration(StoreConnectionSamples.Version, "store-connection-samples", StoreConnectionSamples.CreateSql),
     };
 
     /// <summary>

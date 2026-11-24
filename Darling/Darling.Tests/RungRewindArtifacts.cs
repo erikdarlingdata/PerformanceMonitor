@@ -1014,6 +1014,9 @@ DROP TABLE IF EXISTS collect.store_table_activity_baseline;"),
         // that never had them.
         new(313, "hasStoreSettingChanges", @"DROP TABLE IF EXISTS collect.store_setting_changes;
 DROP TABLE IF EXISTS collect.store_setting_state;"),
+        // V314 (#9437): the two store connection tables. collect.store_connection_slots is the probe's newest sentinel. The rewind drops both, so a re-run of V314 creates them
+        // empty. Safe on a store that never had them.
+        new(314, "hasStoreConnectionSamples", @"DROP TABLE IF EXISTS collect.store_connection_slots; DROP TABLE IF EXISTS collect.store_connection_samples;"),
     ];
 
     /// <summary>
