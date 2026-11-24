@@ -218,28 +218,51 @@ svr AS
 ),
 latest AS
 (
+    -- #9492: each plan's newest row by an aggregate, not by numbering every row of the window. ROW_NUMBER over
+    -- the window sorted each chunk's rows, held every chunk's sort until the merge ended, and so cost memory in
+    -- step with the window; max over an array whose leading elements are the row's time and id keeps one array
+    -- per plan. Arrays compare element by element, so the largest array is the newest row, and on two rows at
+    -- the newest time the larger collection_id (the pair is unique, so a NULL field after it never decides the
+    -- winner and comes back NULL). Every field is a bigint or a timestamp, which rides as epoch microseconds
+    -- and is read back exactly: the column is timestamp without time zone, which holds microseconds.
     SELECT
+        database_name,
         query_hash,
         query_plan_hash,
-        database_name,
-        execution_count,
-        creation_time,
-        min_worker_time,
-        max_worker_time,
-        min_grant_kb,
-        max_grant_kb,
-        min_spills,
-        max_spills,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_hash, query_plan_hash
-            ORDER BY collection_time DESC
-        ) AS rn
+        max(ARRAY[
+            (extract(epoch FROM collection_time) * 1000000)::bigint,
+            collection_id,
+            execution_count,
+            (extract(epoch FROM creation_time) * 1000000)::bigint,
+            min_worker_time,
+            max_worker_time,
+            min_grant_kb,
+            max_grant_kb,
+            min_spills,
+            max_spills
+        ]) AS w
     FROM v_query_stats
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   collection_time <= $3
     AND   delta_execution_count > 0
+    GROUP BY database_name, query_hash, query_plan_hash
+),
+newest_rows AS
+(
+    SELECT
+        database_name,
+        query_hash,
+        query_plan_hash,
+        w[3] AS execution_count,
+        timestamp 'epoch' + w[4] * interval '1 microsecond' AS creation_time,
+        w[5] AS min_worker_time,
+        w[6] AS max_worker_time,
+        w[7] AS min_grant_kb,
+        w[8] AS max_grant_kb,
+        w[9] AS min_spills,
+        w[10] AS max_spills
+    FROM latest
 )
 SELECT
     min_worker_time,
@@ -253,8 +276,8 @@ SELECT
     database_name,
     query_hash,
     query_plan_hash
-FROM latest, svr
-WHERE rn = 1
+FROM newest_rows, svr
+WHERE TRUE
 " + ParameterSensitivitySignature.PredicateSql("creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'") + @"
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
