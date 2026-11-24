@@ -45,10 +45,11 @@ public sealed record McpToolFigures(
 /// returned are read from the reply: a top-level number named <c>count</c>, <c>row_count</c>, <c>rows_returned</c> or <c>returned_count</c>, else the
 /// length of the one top-level array the reply holds, else NULL. Both reads parse the reply of a slow call only.</para>
 ///
-/// <para><b>Memory.</b> The process working set is polled every <see cref="SampleInterval"/> while the call runs, plus once at the start
-/// and once at the end, and the highest reading is kept, the way <c>tools/CompactionRepro</c> measures a merge's peak (it polls
-/// <c>Process.WorkingSet64</c> every 75 ms on a background thread). DuckDB's memory is the <c>duckdb_memory()</c> total read once when the
-/// call ends, or NULL when the store lock is busy then. DuckDB reports no per-statement peak, so the working-set poll is the peak source.</para>
+/// <para><b>Memory.</b> The process working set and DuckDB's <c>duckdb_memory()</c> total are read every <see cref="SampleInterval"/> once a call has
+/// run for <see cref="SamplingStartDelay"/>, plus a working-set reading at the start and one of each at the end, and the highest reading of each is
+/// kept, the way <c>tools/CompactionRepro</c> and the compaction history take a merge's peak. DuckDB reports no per-statement peak. A call that
+/// ends before the delay starts no sampler (see <see cref="McpMemorySampler"/>). Both figures are for the whole process, so calls that
+/// overlap share them.</para>
 /// </summary>
 public sealed class McpCallTimingRecorder
 {
@@ -61,9 +62,19 @@ public sealed class McpCallTimingRecorder
     /// <summary>The poll interval of the working-set peak, the interval <c>tools/CompactionRepro</c> uses.</summary>
     internal static readonly TimeSpan DefaultSampleInterval = TimeSpan.FromMilliseconds(75);
 
+    /// <summary>
+    /// A call must have run this long before the shared sampler reads anything for it, so a fast call starts no thread and opens no
+    /// DuckDB connection. A quarter second, well under <see cref="DefaultSlowThreshold"/>.
+    /// </summary>
+    internal static readonly TimeSpan DefaultSamplingStartDelay = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>The wording matches <c>CompactionPassStats.MemorySourceText</c>, with the call's sampling start and the whole-process caveat added.</summary>
     internal const string MemorySourceText =
-        "peak: process working set (the counter Process.WorkingSet64 reads) polled every 75 ms during the call; " +
-        "duckdb: the duckdb_memory() total when the call ended";
+        "process: the working set of the whole Lite process (Environment.WorkingSet) read at the start of the call, every 75 ms from 250 ms into the call, " +
+        "and at the end, highest reading; " +
+        "DuckDB: duckdb_memory() of the local store read the same way except not at the start, highest total, empty when the store lock was busy at every read. " +
+        "Both figures cover the whole process, not this call alone, so calls that overlap share them. " +
+        "The first 250 ms of a call has only the starting working-set reading, and a rise shorter than 75 ms can fall between two reads";
 
     internal const string OutcomeOk = "ok";
     internal const string OutcomeError = "error";
@@ -87,6 +98,7 @@ public sealed class McpCallTimingRecorder
     private readonly ConcurrentDictionary<Task, byte> _pendingWrites = new();
     private readonly Func<McpSlowCall, Task> _write;
     private readonly Func<long?> _readDuckDbMemory;
+    private readonly McpMemorySampler _sampler;
 
     internal McpCallTimingRecorder(LocalDataService data)
         : this(data.RecordMcpSlowCallAsync, data.TryReadDuckDbMemoryBytes)
@@ -98,13 +110,20 @@ public sealed class McpCallTimingRecorder
     {
         _write = write;
         _readDuckDbMemory = readDuckDbMemory;
+        _sampler = new McpMemorySampler(() => ReadWorkingSet(), readDuckDbMemory, () => SampleInterval);
     }
 
     /// <summary>Test seam: the length that makes a call slow.</summary>
     internal TimeSpan SlowThreshold { get; set; } = DefaultSlowThreshold;
 
-    /// <summary>Test seam: the working-set poll interval.</summary>
+    /// <summary>Test seam: the interval between two reads of the sampler.</summary>
     internal TimeSpan SampleInterval { get; set; } = DefaultSampleInterval;
+
+    /// <summary>Test seam: how long a call runs before the sampler reads for it. Zero attaches a call at once.</summary>
+    internal TimeSpan SamplingStartDelay { get; set; } = DefaultSamplingStartDelay;
+
+    /// <summary>Test seam: how many times the sampler's loop has started. A fast call adds none.</summary>
+    internal int SamplerStarts => _sampler.Starts;
 
     /// <summary>Test seam: the clock that stamps a row's start time.</summary>
     internal Func<DateTime> UtcNow { get; set; } = () => DateTime.UtcNow;
@@ -160,8 +179,8 @@ public sealed class McpCallTimingRecorder
         private readonly DateTime _startedUtc;
         private readonly long _startedAt = Stopwatch.GetTimestamp();
         private readonly ReadLockWaitTally _tally;
-        private readonly Timer? _poll;
-        private long _peakWorkingSet;
+        private readonly McpMemorySampler.Registration _memory = new();
+        private readonly Timer? _attachTimer;
         private bool _finished;
 
         internal CallScope(McpCallTimingRecorder recorder, string tool, IDictionary<string, JsonElement>? arguments)
@@ -174,23 +193,23 @@ public sealed class McpCallTimingRecorder
             /* The tally the read lock and the archive span reads add to. A tool that opens its own nests inside this one and passes
                its figures up when it ends. */
             _tally = ReadLockWaitTally.Begin();
-            Sample();
-            if (recorder.SampleInterval > TimeSpan.Zero)
+            NoteWorkingSet();
+            /* A call that ends before the delay disposes the timer and no sampler ever starts for it (#9424). */
+            if (recorder.SamplingStartDelay <= TimeSpan.Zero)
             {
-                _poll = new Timer(_ => Sample(), null, recorder.SampleInterval, recorder.SampleInterval);
+                recorder._sampler.Attach(_memory);
+            }
+            else
+            {
+                _attachTimer = new Timer(_ => recorder._sampler.Attach(_memory), null, recorder.SamplingStartDelay, Timeout.InfiniteTimeSpan);
             }
         }
 
-        private void Sample()
+        private void NoteWorkingSet()
         {
             try
             {
-                var ws = _recorder.ReadWorkingSet();
-                long seen;
-                while (ws > (seen = Interlocked.Read(ref _peakWorkingSet)))
-                {
-                    if (Interlocked.CompareExchange(ref _peakWorkingSet, ws, seen) == seen) break;
-                }
+                _memory.NoteWorkingSet(_recorder.ReadWorkingSet());
             }
             catch (Exception)
             {
@@ -211,7 +230,9 @@ public sealed class McpCallTimingRecorder
                 _recorder.Add(_tool, totalMs, slow, outcome != OutcomeOk);
                 if (!slow) return;
 
-                Sample();
+                /* Leave the sampler first: what it read since the call began is this call's own peak, and a reading after the end is not. */
+                _recorder._sampler.Detach(_memory);
+                NoteWorkingSet();
                 /* Read now: the tally ends with this scope, and its figures are the call's own. */
                 var lockWaitMs = (long)_tally.LockWait.TotalMilliseconds;
                 long? hotMs = null, archiveMs = null, archiveFiles = null;
@@ -222,11 +243,10 @@ public sealed class McpCallTimingRecorder
                     archiveFiles = _tally.ArchiveFiles;
                 }
 
-                var peak = Interlocked.Read(ref _peakWorkingSet);
                 var reply = result is null ? null : ReplyOf(result);
                 _recorder.WriteInBackground(new McpSlowCall(
                     _startedUtc, _tool, outcome, totalMs, lockWaitMs, hotMs, archiveMs, archiveFiles, result is null ? 0 : BytesOf(result), _hoursBack,
-                    peak > 0 ? peak : null, null, MemorySourceText, reply?.Server ?? _serverArgument, reply?.Rows));
+                    _memory.WorkingSetPeak, _memory.DuckDbPeak, MemorySourceText, reply?.Server ?? _serverArgument, reply?.Rows));
             }
             catch (Exception ex)
             {
@@ -236,7 +256,8 @@ public sealed class McpCallTimingRecorder
 
         public void Dispose()
         {
-            _poll?.Dispose();
+            _attachTimer?.Dispose();
+            _recorder._sampler.Detach(_memory);
             _tally.Dispose();
         }
     }
@@ -256,14 +277,19 @@ public sealed class McpCallTimingRecorder
         }
     }
 
-    /// <summary>Reads DuckDB's memory and writes the row off the call's own path. A failure is a Debug line.</summary>
+    /// <summary>
+    /// Takes the closing DuckDB reading and writes the row, off the call's own path. The reading is folded into the peak the sampler
+    /// kept, so the row holds the highest total and not the last. A failure is a Debug line.
+    /// </summary>
     private void WriteInBackground(McpSlowCall call)
     {
         var task = Task.Run(async () =>
         {
             try
             {
-                var withMemory = call with { DuckDbMemoryBytes = _readDuckDbMemory() };
+                var closing = _readDuckDbMemory();
+                var peak = call.DuckDbPeakMemoryBytes is { } sampled ? (closing is { } c ? Math.Max(sampled, c) : sampled) : closing;
+                var withMemory = call with { DuckDbPeakMemoryBytes = peak };
                 await _write(withMemory).ConfigureAwait(false);
             }
             catch (Exception ex)
