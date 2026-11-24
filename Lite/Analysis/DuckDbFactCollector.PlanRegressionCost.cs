@@ -351,12 +351,12 @@ LIMIT 100";
 
     /// <summary>
     /// What the plan regression statements order by (#9353): the CPU the regression lost, the factor, then (database, query, replica),
-    /// which is unique to a row. A pass that reads its databases in turn puts their rows through <see cref="InStatementOrder"/>, and the
+    /// which is unique to a row. A pass that reads its databases in turn puts their rows through <see cref="InRankOrder"/>, and the
     /// result is the one statement's order, ties included. NULL sorts last in the statement, as -infinity does here.
     /// </summary>
     internal readonly record struct PlanRegressionRankKey(double LostCpu, double Factor, string Database, long QueryId, string? ReplicaRole);
 
-    internal static IOrderedEnumerable<T> InStatementOrder<T>(IEnumerable<T> rows, Func<T, PlanRegressionRankKey> key) =>
+    internal static IOrderedEnumerable<T> InRankOrder<T>(IEnumerable<T> rows, Func<T, PlanRegressionRankKey> key) =>
         rows.OrderByDescending(r => key(r).LostCpu)
             .ThenByDescending(r => key(r).Factor)
             .ThenBy(r => key(r).Database, StringComparer.Ordinal)
@@ -370,7 +370,7 @@ LIMIT 100";
     /// Every comparison in these statements stays inside one database, so each database's rows are its rows of the whole read, and a
     /// housekeeping writer waiting on its 5 s budget gets in between the reads (#9353). The databases are listed first, under a hold of
     /// their own. One database, or none, is read as one statement. <paramref name="onlyDatabases"/> drops the databases a read cannot
-    /// return a row for. The caller puts the rows in order and cuts them (<see cref="InStatementOrder"/>).
+    /// return a row for. The caller puts the rows in order and cuts them (<see cref="InRankOrder"/>).
     /// <paramref name="betweenReads"/> is a test seam, run with the lock let go before each read after the first. The plan is taken once, before
     /// the first hold: a store reset between two holds moves the archive generation, and the plan then reads the views, which hold every row.
     /// </summary>
@@ -431,7 +431,7 @@ LIMIT 100";
             _duckDb, context, plan,
             (connection, database) => ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql, database),
             AfterPlanRegressionDatabaseReadForTests);
-        return (InStatementOrder(ranked, r => r.Key).Take(PlanRegressionCandidateLimit).Select(r => r.Candidate).ToList(), time);
+        return (InRankOrder(ranked, r => r.Key).Take(PlanRegressionCandidateLimit).Select(r => r.Candidate).ToList(), time);
     }
 
     /// <summary>The most rows the cost statement returns, and so the most a pass that reads its databases in turn keeps of all of them.</summary>

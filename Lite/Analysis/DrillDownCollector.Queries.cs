@@ -497,7 +497,7 @@ QUALIFY ROW_NUMBER() OVER
             AfterRegressedQueriesDatabaseReadForTests,
             offenders?.Select(o => o.DatabaseName).ToHashSet(StringComparer.Ordinal));
 
-        var items = DuckDbFactCollector.InStatementOrder(rows, r => r.Key).Take(RegressedQueriesLimit).Select(r => r.Item).ToList();
+        var items = DuckDbFactCollector.InRankOrder(rows, r => r.Key).Take(RegressedQueriesLimit).Select(r => r.Item).ToList();
 
         if (items.Count > 0)
             finding.DrillDown!["regressed_queries"] = items;
