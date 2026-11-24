@@ -85,6 +85,9 @@ public class StoreLogClassifierTests
         "2026-09-05 14:02:11.104 UTC [4120] LOG:  checkpoint starting: time",
         "2026-09-05 14:02:19.882 UTC [4120] LOG:  checkpoint complete: wrote 812 buffers (1.2%); 0 WAL file(s) added",
 
+        /* lock_wait (#9439) - a log_lock_waits line. */
+        "2026-09-05 14:02:55.100 UTC [5301] LOG:  process 5301 still waiting for ShareLock on transaction 777 after 1000.100 ms",
+
         /* user_request_cancel — the ~1,100/day floor, with its STATEMENT continuation. */
         "2026-09-05 14:03:02.551 UTC [5288] ERROR:  canceling statement due to user request",
         "2026-09-05 14:03:02.551 UTC [5288] STATEMENT:  SELECT count(*) FROM collect.query_stats",
@@ -1170,7 +1173,7 @@ public class StoreLogClassifierTests
         Assert.True(census.EntriesRead > 0, "the fixture produced no entries at all");
         Assert.True(census.Groups.Count > 0, "the fixture produced no groups at all");
 
-        Assert.Equal(18, StoreLogClassifier.ClassNames.Count);
+        Assert.Equal(19, StoreLogClassifier.ClassNames.Count);
 
         var covered = census.Groups.Select(g => g.EventClass).ToHashSet(StringComparer.Ordinal);
         Assert.Equal(
