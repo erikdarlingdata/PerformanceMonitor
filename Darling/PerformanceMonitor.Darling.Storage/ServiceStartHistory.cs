@@ -84,7 +84,7 @@ public sealed record ServiceBuildChange(string ServiceHost, DateTime StartedUtc,
 
 /// <summary>
 /// The store's record of each service start (V307, #9415): one row per start in <c>collect.service_starts</c>, one row per migration rung that
-/// start tried in <c>collect.service_start_rungs</c>. The objects each rung created, changed or dropped are the child rows in <c>collect.service_start_rung_objects</c> (V308, #9438, <see cref="ServiceStartRungObjects"/>). <c>config.service_version</c> (V174) stays as it is: it holds the version each host last
+/// start tried in <c>collect.service_start_rungs</c>. The objects each rung created, changed or dropped are the child rows in <c>collect.service_start_rung_objects</c> (V311, #9438, <see cref="ServiceStartRungObjects"/>). <c>config.service_version</c> (V174) stays as it is: it holds the version each host last
 /// reported, and this holds every start.
 ///
 /// <para><b>Why the rows are written late.</b> The rung rows cannot be written by the runner as it goes, because the migration that creates

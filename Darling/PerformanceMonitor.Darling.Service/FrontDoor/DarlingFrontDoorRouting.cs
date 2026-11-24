@@ -125,6 +125,8 @@ internal static class DarlingFrontDoorRouting
         "get_store_table_health",
         "measure_store_table",
         "get_store_maintenance_readiness",
+        "get_store_compression_health",
+        "get_store_job_runs",
         "get_store_query_history",
         "get_store_query_stats",
         /* #9427: the store's own setting changes, read from the central store like the get_store_* family. */

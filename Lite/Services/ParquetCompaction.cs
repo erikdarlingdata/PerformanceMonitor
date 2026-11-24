@@ -420,7 +420,8 @@ public static class ParquetCompaction
         int? rowGroupSize = null,
         long? rowGroupBytes = null,
         Action<string, int, string>? onSortFallback = null,
-        Action<string, int, string>? onSortedAtSmallGroups = null)
+        Action<string, int, string>? onSortedAtSmallGroups = null,
+        Action<long>? onMemorySample = null)
     {
         var orderBy = ServerOrderByFor(table);
         var sortedThreads = threads ?? ThreadsFor(table, sortedAttempt: orderBy is not null);
@@ -428,7 +429,7 @@ public static class ParquetCompaction
         try
         {
             RunMerge(table, sourcePaths, outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
-                sortedThreads, sortedGroupRows, rowGroupBytes, orderBy);
+                sortedThreads, sortedGroupRows, rowGroupBytes, orderBy, onMemorySample);
         }
         catch (DuckDBException ex) when (orderBy is not null && IsOutOfMemoryOrTempSpace(ex))
         {
@@ -453,7 +454,7 @@ public static class ParquetCompaction
                 try
                 {
                     RunMerge(table, sourcePaths, outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
-                        sortedThreads, ArchiveRowGroupSize, rowGroupBytes, orderBy);
+                        sortedThreads, ArchiveRowGroupSize, rowGroupBytes, orderBy, onMemorySample);
                     onSortedAtSmallGroups?.Invoke(table, sourcePaths.Count, ex.Message);
                     return;
                 }
@@ -469,7 +470,7 @@ public static class ParquetCompaction
 
             onSortFallback?.Invoke(table, sourcePaths.Count, error.Message);
             RunMerge(table, sourcePaths, outputPath, spillDirSql, DefaultMemoryLimit,
-                threads ?? ThreadsFor(table), rowGroupSize ?? ArchiveRowGroupSize, rowGroupBytes, orderBy: null);
+                threads ?? ThreadsFor(table), rowGroupSize ?? ArchiveRowGroupSize, rowGroupBytes, orderBy: null, onMemorySample);
         }
     }
 
@@ -483,13 +484,14 @@ public static class ParquetCompaction
        caller keeps the original rather than swap in the unsorted order the compaction merge falls back to. Any other
        failure throws. */
     internal static bool TryRecutToFile(
-        string table, string sourcePath, string outputPath, string spillDirSql, string? memoryLimit = null, int? rowGroupSize = null)
+        string table, string sourcePath, string outputPath, string spillDirSql, string? memoryLimit = null, int? rowGroupSize = null,
+        Action<long>? onMemorySample = null)
     {
         var orderBy = ServerOrderByFor(table) ?? throw new ArgumentException($"{table} is not merged in server order", nameof(table));
         try
         {
             RunMerge(table, [sourcePath], outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
-                ThreadsFor(table, sortedAttempt: true), rowGroupSize ?? SortedArchiveRowGroupSize, rowGroupBytes: null, orderBy);
+                ThreadsFor(table, sortedAttempt: true), rowGroupSize ?? SortedArchiveRowGroupSize, rowGroupBytes: null, orderBy, onMemorySample);
             return true;
         }
         catch (DuckDBException ex) when (IsOutOfMemoryOrTempSpace(ex))
@@ -542,22 +544,18 @@ public static class ParquetCompaction
        stamp or an old one is judged by the row and byte rule, so a file written before the stamp is cut at most once more. */
     internal static bool NeedsRecut(DuckDBConnection con, string path, int targetRows = SortedArchiveRowGroupSize)
     {
-        if (IsStampedWithCurrentRule(SortedCutStamp(con, path)))
-        {
-            return false;
-        }
-
         var (groups, maxRows) = RowGroupShape(con, path);
-        return NeedsRecut(con, path, groups, maxRows, stamp: null, targetRows);
+        return NeedsRecut(groups, maxRows, () => SortedCutStamp(con, path), () => MaxRowGroupUncompressedBytes(con, path), targetRows);
     }
 
-    /* The same rule for a caller that has already read the footer: its row-group shape and the file's stamp (null when
-       it has none). */
-    internal static bool NeedsRecut(DuckDBConnection con, string path, long groups, long maxGroupRows, string? stamp, int targetRows = SortedArchiveRowGroupSize) =>
-        !IsStampedWithCurrentRule(stamp)
-        && groups > 1
+    /* The one rule, from a shape already read, so the store health layout read and the re-cut agree on which files are due
+       (#9421). The stamp and the byte bound are read lazily: the row checks come first, so a file they already clear costs
+       no footer read, and a file stamped with the current rule is never due whatever its byte size. */
+    internal static bool NeedsRecut(long groups, long maxGroupRows, Func<string?> stamp, Func<long> maxGroupBytes, int targetRows = SortedArchiveRowGroupSize) =>
+        groups > 1
         && maxGroupRows < Math.Min(RecutBelowRowGroupRows, targetRows)
-        && MaxRowGroupUncompressedBytes(con, path) < RecutAtByteTarget;
+        && !IsStampedWithCurrentRule(stamp())
+        && maxGroupBytes() < RecutAtByteTarget;
 
     internal static bool IsStampedWithCurrentRule(string? stamp) =>
         string.Equals(stamp, SortedCutRule, StringComparison.Ordinal);
@@ -612,7 +610,8 @@ public static class ParquetCompaction
         int threads,
         int rowGroupSize,
         long? rowGroupBytes,
-        string? orderBy)
+        string? orderBy,
+        Action<long>? onMemorySample = null)
     {
         MergeAttemptObservedForTests?.Invoke(outputPath, orderBy is not null, threads);
 
@@ -641,7 +640,110 @@ public static class ParquetCompaction
         cmd.CommandText = $"COPY (SELECT {selectClause} FROM read_parquet([{pathList}], union_by_name=true)" +
                           (orderBy is null ? "" : $" ORDER BY {orderBy}") + ") " +
                           $"TO '{EscapeSqlPath(outputPath)}' ({BuildArchiveCopyOptions(rowGroupSize, groupBytes, stampSortedCut: orderBy is not null)})";
-        cmd.ExecuteNonQuery();
+        using (var sampler = onMemorySample is null ? null : new DuckDbMemorySampler(con, onMemorySample))
+        {
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /* The highest memory DuckDB reports for a merge's own database while the COPY runs (#9424). DuckDB keeps no peak for a
+       statement, so a second connection to the same in-memory database reads duckdb_memory() every SampleMilliseconds (every FastSampleMilliseconds for the first 100 ms, and once more when the merge has ended) and hands
+       each total to the callback, which keeps the highest. It is a sample: a spike shorter than the interval can be missed, and
+       allocations the parquet writer makes outside DuckDB's buffer manager are not in the figure (see the memory_limit note on
+       MergeBatchToFile). The process working set sampled beside it is the figure that sees those. Best effort: a sampler that
+       cannot start or read reports nothing and never fails the merge. */
+    internal sealed class DuckDbMemorySampler : IDisposable
+    {
+        public const int SampleMilliseconds = 50;
+        private const int FastSampleMilliseconds = 2;
+        private const int FastSamples = 50;
+
+        private readonly System.Threading.ManualResetEventSlim _stop = new(false);
+        private readonly DuckDBConnection? _probe;
+        private readonly System.Threading.Thread? _thread;
+        private readonly TimeSpan _joinTimeout;
+        private int _handoff;
+
+        /* Tests only (#9421): true once the probe connection and the stop event are disposed. */
+        internal bool ResourcesDisposedForTests => System.Threading.Volatile.Read(ref _resourcesDisposed) == 1;
+        private int _resourcesDisposed;
+
+        public DuckDbMemorySampler(DuckDBConnection merge, Action<long> onSample, TimeSpan? joinTimeout = null)
+        {
+            _joinTimeout = joinTimeout ?? TimeSpan.FromSeconds(2);
+            try
+            {
+                _probe = merge.Duplicate();
+                _probe.Open();
+            }
+            catch (Exception)
+            {
+                _probe?.Dispose();
+                _probe = null;
+                return;
+            }
+
+            var probe = _probe;
+            _thread = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    using var cmd = probe.CreateCommand();
+                    cmd.CommandText = "SELECT coalesce(sum(memory_usage_bytes), 0)::BIGINT FROM duckdb_memory()";
+                    void Sample() => onSample(Convert.ToInt64(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+
+                    /* A merge of a few thousand rows ends in a few milliseconds, before a 50 ms interval fires, and a read
+                       taken before the COPY allocates sees 0 (#9421: the cut of a 12,000-row file reported no peak under
+                       load). So the first reads come fast, and one more is taken once the merge has ended: DuckDB still
+                       holds its parquet caches then, so a merge that ran always reports a figure above 0. */
+                    var fast = 0;
+                    Sample();
+                    while (!_stop.Wait(fast++ < FastSamples ? FastSampleMilliseconds : SampleMilliseconds))
+                    {
+                        Sample();
+                    }
+
+                    Sample();
+                }
+                catch (Exception)
+                {
+                    /* A merge that finishes under the sampler, or a read that fails, ends the sampling. */
+                }
+                finally
+                {
+                    /* Whoever of this thread and Dispose arrives second disposes the probe: Dispose when the thread has already
+                       gone, this thread when Dispose gave up waiting for it (#9421). */
+                    if (System.Threading.Interlocked.Exchange(ref _handoff, 1) == 1)
+                    {
+                        DisposeResources();
+                    }
+                }
+            }) { IsBackground = true, Name = "CompactionDuckDbMemory" };
+            _thread.Start();
+        }
+
+        public void Dispose()
+        {
+            _stop.Set();
+            if (_thread is null || System.Threading.Interlocked.Exchange(ref _handoff, 1) == 1)
+            {
+                DisposeResources();
+                return;
+            }
+
+            /* The sampler may be inside ExecuteScalar on the native handle, so a probe disposed under it is a use after free.
+               On a timeout the thread disposes the probe on its way out instead. */
+            _thread.Join(_joinTimeout);
+
+            /* No log line on a timeout: this file is also compiled on its own by tools/CompactionRepro, which has no AppLogger. */
+        }
+
+        private void DisposeResources()
+        {
+            _probe?.Dispose();
+            _stop.Dispose();
+            System.Threading.Volatile.Write(ref _resourcesDisposed, 1);
+        }
     }
 
     internal static string BuildPragma(string memoryLimit, int threads, string spillDirSql) =>
