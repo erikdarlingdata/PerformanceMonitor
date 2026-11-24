@@ -218,13 +218,15 @@ calls AS MATERIALIZED (
     /// azdata_metadata and dbatools_metadata (the matched call is that tool's metadata work). On a store with no <c>aborted</c> rows the join
     /// is empty and the read gives today's numbers.
     /// </summary>
+    /* The relation is wrapped before it takes an alias: the Darling legacy-table read passes a derived table that already ends in
+       "AS attention_events" (AttentionReadRelation.DerivedRelation), and a second alias on it is a syntax error (42601). */
     private static string MatchedCte(string eventsRelation, string range) => $"""
 matched AS (
     SELECT
         s.attention_event_id AS id,
         bool_or(c.azdata_metadata) AS azdata_metadata,
         bool_or(c.dbatools_metadata) AS dbatools_metadata
-    FROM {eventsRelation} AS s
+    FROM (SELECT * FROM {eventsRelation}) AS s
     INNER JOIN calls AS c
         ON {MatchOn("c", "s")}
     WHERE s.server_id = $1
@@ -503,7 +505,7 @@ ORDER BY n.collection_time DESC, n.event_time DESC NULLS LAST, n.attention_event
 WITH {CallsCte(eventsRelation, "collection_time >= $2" + Ceiling(true))},
 hit AS (
     SELECT DISTINCT c.id
-    FROM {eventsRelation} AS s
+    FROM (SELECT * FROM {eventsRelation}) AS s
     INNER JOIN calls AS c
         ON {MatchOn("c", "s")}
     WHERE s.server_id = $1
@@ -523,7 +525,7 @@ SELECT
     e.session_id,
     e.interrupt_duration_us,
     e.statement_text
-FROM {eventsRelation} AS e
+FROM (SELECT * FROM {eventsRelation}) AS e
 INNER JOIN hit AS h
     ON h.id = e.attention_event_id
 WHERE e.server_id = $1
