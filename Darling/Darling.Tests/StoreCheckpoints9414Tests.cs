@@ -252,6 +252,76 @@ public sealed class StoreCheckpoints9414LiveTests
         Assert.Equal(300, hours.Max(h => h.GetProperty("max_files_synced").GetInt32()));
     });
 
+    /// <summary>The log sweep sees only the lines written so far, and a sweep a capture later sees the next ones. Each call hands the sweep the log as it stands, from the start.</summary>
+    private static Task SweepLaterAsync(NpgsqlConnection connection, string logSoFar, int capturesAgo, CancellationToken ct) =>
+        StoreLogSweep.SweepAsync(connection, DateTime.UtcNow.AddMinutes(-capturesAgo), null, new FixedLogFiles("postgresql-Tue.log", Encoding.UTF8.GetBytes(logSoFar)), ct);
+
+    [Fact]
+    public Task ACheckpointStillRunningIsNotCounted_UntilALaterOneOfTheSameKindStarts() => WithStoreAsync(false, async (connection, postgres, ct) =>
+    {
+        var now = DateTime.UtcNow.Date.AddHours(DateTime.UtcNow.Hour);
+        string At(int minutes, int seconds) => now.AddMinutes(-minutes).AddSeconds(seconds).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + ".000";
+        var log = new StringBuilder();
+        log.Append($"{At(40, 0)} UTC [88] LOG:  checkpoint starting: time\n");
+        log.Append(Complete(At(40, 30), 900, "30.000", 300));
+        log.Append($"{At(30, 0)} UTC [88] LOG:  checkpoint starting: time\n");
+
+        // The newest checkpoint's start line is read before its complete line: it is still running, not lost.
+        await SweepLaterAsync(connection, log.ToString(), 3, ct);
+        var json = await ReadAsync(postgres, 24, LoggingOnEnglish, ct);
+        Assert.Equal(0L, json.GetProperty("hours").EnumerateArray().Sum(h => h.GetProperty("not_completed").GetInt64()));
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("checkpoints")[0].GetProperty("ended_at").ValueKind);
+
+        // A later checkpoint of the same kind started, so the open one cannot still be running.
+        log.Append($"{At(20, 0)} UTC [88] LOG:  checkpoint starting: time\n");
+        await SweepLaterAsync(connection, log.ToString(), 2, ct);
+        json = await ReadAsync(postgres, 24, LoggingOnEnglish, ct);
+        Assert.Equal(1L, json.GetProperty("hours").EnumerateArray().Sum(h => h.GetProperty("not_completed").GetInt64()));
+
+        // Its complete line is then the newest checkpoint's, and pairs with it, not with the older open one.
+        log.Append(Complete(At(20, 10), 400, "10.000", 40));
+        await SweepLaterAsync(connection, log.ToString(), 1, ct);
+        json = await ReadAsync(postgres, 24, LoggingOnEnglish, ct);
+        var rows = json.GetProperty("checkpoints").EnumerateArray().ToList();
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(40, rows[0].GetProperty("files_synced").GetInt32());
+        Assert.NotEqual(JsonValueKind.Null, rows[0].GetProperty("ended_at").ValueKind);
+        Assert.Equal(JsonValueKind.Null, rows[1].GetProperty("ended_at").ValueKind);
+        Assert.Equal(1L, json.GetProperty("hours").EnumerateArray().Sum(h => h.GetProperty("not_completed").GetInt64()));
+    });
+
+    [Fact]
+    public Task ACatchUpSweepWithTheCompleteLineOfOneCheckpointAndAWholeLaterOne_PairsEachRightWithNoDuplicate() => WithStoreAsync(false, async (connection, postgres, ct) =>
+    {
+        var now = DateTime.UtcNow.Date.AddHours(DateTime.UtcNow.Hour);
+        string At(int minutes, int seconds) => now.AddMinutes(-minutes).AddSeconds(seconds).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + ".000";
+        var log = new StringBuilder();
+        log.Append($"{At(40, 0)} UTC [88] LOG:  checkpoint starting: time\n");
+
+        // Sweep 1 reads checkpoint A's start line only.
+        await SweepLaterAsync(connection, log.ToString(), 3, ct);
+
+        // Sweep 2 reads A's complete line, then all of checkpoint B (start and complete) in the order the log has them.
+        log.Append(Complete(At(40, 30), 900, "30.000", 300));
+        log.Append($"{At(30, 0)} UTC [88] LOG:  checkpoint starting: wal\n");
+        log.Append(Complete(At(30, 10), 400, "10.000", 40));
+        await SweepLaterAsync(connection, log.ToString(), 2, ct);
+
+        // Sweep 3 reads the next checkpoint's pair.
+        log.Append($"{At(20, 0)} UTC [88] LOG:  checkpoint starting: time\n");
+        log.Append(Complete(At(20, 20), 50, "20.000", 7));
+        await SweepLaterAsync(connection, log.ToString(), 1, ct);
+
+        var json = await ReadAsync(postgres, 24, LoggingOnEnglish, ct);
+        var rows = json.GetProperty("checkpoints").EnumerateArray().ToList();
+        Assert.Equal(3, rows.Count);
+        Assert.Equal(new[] { 7, 40, 300 }, rows.Select(r => r.GetProperty("files_synced").GetInt32()).ToArray());
+        Assert.Equal(new[] { "time", "wal", "time" }, rows.Select(r => r.GetProperty("reason").GetString()!).ToArray());
+        Assert.All(rows, r => Assert.NotEqual(JsonValueKind.Null, r.GetProperty("ended_at").ValueKind));
+        Assert.Equal(new[] { 20L, 10L, 30L }, rows.Select(r => (long)(r.GetProperty("ended_at").GetDateTime() - r.GetProperty("started_at").GetDateTime()).TotalSeconds).ToArray());
+        Assert.Equal(0L, json.GetProperty("hours").EnumerateArray().Sum(h => h.GetProperty("not_completed").GetInt64()));
+    });
+
     [Fact]
     public Task AnEmptyWindowWithLogCheckpointsOff_AnswersPreconditionNamingTheSetting() => WithStoreAsync(false, async (_, postgres, ct) =>
     {

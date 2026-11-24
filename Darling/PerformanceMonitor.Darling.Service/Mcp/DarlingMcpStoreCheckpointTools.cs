@@ -38,7 +38,7 @@ public sealed class DarlingMcpStoreCheckpointTools
         + "hour may not be read yet. Start-up and shutdown checkpoints are kept. started_by_wal in an hour is how many checkpoints WAL volume "
         + "started rather than the clock: a settings trial compares those, max_files_synced and longest_sync_ms across the same hours before and after. "
         + "A row with no reason is a checkpoint whose start line was never read (log_checkpoints was off, or the line was rotated out); "
-        + "ended_at null is one that started and never finished (a crash). unparsed = true is a complete line this build could not read, kept with no figures. "
+        + "ended_at null is a checkpoint that had not finished when the log was last read: the newest one is usually still running. It means a crash or restart only when a later checkpoint of the same kind has started, and the hour summary counts only those in not_completed. unparsed = true is a complete line this build could not read, kept with no figures. "
         + "Times are UTC. status precondition means log_checkpoints is off or lc_messages is not English, so the log cannot give rows, and the "
         + "message names the setting; not_collected means the store log has not been read in the window. Page with offset when budget_truncated is true.")]
     public static Task<string> GetStoreCheckpoints(
