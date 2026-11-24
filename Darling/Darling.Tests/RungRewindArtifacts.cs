@@ -985,6 +985,10 @@ DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
         // adds them again, empty. Safe on a store that never had them.
         new(304, "hasStatementHistoryWriteCounters", @"ALTER TABLE collect.store_statement_history DROP COLUMN IF EXISTS delta_shared_blks_dirtied, DROP COLUMN IF EXISTS delta_shared_blks_written, DROP COLUMN IF EXISTS delta_wal_bytes, DROP COLUMN IF EXISTS delta_wal_fpi;
 ALTER TABLE config.store_statement_baseline DROP COLUMN IF EXISTS shared_blks_dirtied, DROP COLUMN IF EXISTS shared_blks_written, DROP COLUMN IF EXISTS wal_bytes, DROP COLUMN IF EXISTS wal_fpi;"),
+        // V305 (#9427): the store setting state and changes tables. The probe's newest sentinel is both. The rewind drops both, so a re-run of V305 creates them empty. Safe on a store
+        // that never had them.
+        new(305, "hasStoreSettingChanges", @"DROP TABLE IF EXISTS collect.store_setting_changes;
+DROP TABLE IF EXISTS collect.store_setting_state;"),
     ];
 
     /// <summary>

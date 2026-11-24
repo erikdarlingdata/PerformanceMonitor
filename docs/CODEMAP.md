@@ -15,9 +15,9 @@ The Full Dashboard and the CLI installer are frozen in a zip file. Nothing in th
 In numbers:
 
 - 23 projects (4 app, 10 library, 5 test, 4 tool).
-- 290 Darling MCP tools and 115 Lite MCP tools.
-- 297 store migrations. The newest is version 298.
-- 4772 test classes in 5 test projects.
+- 293 Darling MCP tools and 116 Lite MCP tools.
+- 304 store migrations. The newest is version 305.
+- 4820 test classes in 5 test projects.
 - 19 CI workflows.
 
 To build, run these from the repository root:
@@ -228,13 +228,13 @@ Start here:
 
 ## Store migrations
 
-Darling's PostgreSQL store has 297 migrations. The newest is version 298. The list is in [`Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs`](../Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs). Version numbers are not gapless, so the count is lower than the newest version.
+Darling's PostgreSQL store has 304 migrations. The newest is version 305. The list is in [`Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs`](../Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs). Version numbers are not gapless, so the count is lower than the newest version.
 
 ## MCP tools
 
 A tool is a method that carries the `McpServerTool` attribute. Each row names the tool and the file that declares it.
 
-### Darling MCP tools (290)
+### Darling MCP tools (293)
 
 | Tool | Declared in |
 |---|---|
@@ -250,6 +250,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `assign_server_tag` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerTagTools.cs) |
 | `audit_config` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpTools.cs) |
 | `backtest_custom_alert_rule` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs) |
+| `call_tool` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingLeanToolProfile.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingLeanToolProfile.cs) |
 | `claim_investigation_request` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs) |
 | `clear_quiet_window` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQuietWindowTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpQuietWindowTools.cs) |
 | `close_investigation_request` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs) |
@@ -283,6 +284,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `find_database` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFindDatabaseTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFindDatabaseTools.cs) |
 | `find_queries_by_text` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFindQueriesByTextTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFindQueriesByTextTools.cs) |
 | `find_schema_objects` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSchemaTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSchemaTools.cs) |
+| `find_tools` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpToolSearchTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpToolSearchTools.cs) |
 | `force_query_store_plan` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpPlanForceTools.cs) |
 | `generate_webhook_signing_key` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.SigningKeys.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpAlertTools.SigningKeys.cs) |
 | `get_active_queries` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSessionTools.cs) |
@@ -447,6 +449,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `get_store_metrics` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMetricsTools.cs) |
 | `get_store_query_history` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreQueryHistoryTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreQueryHistoryTools.cs) |
 | `get_store_query_stats` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreQueryStatsTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreQueryStatsTools.cs) |
+| `get_store_setting_changes` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreSettingChangesTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreSettingChangesTools.cs) |
 | `get_store_table_health` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreTableHealthTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreTableHealthTools.cs) |
 | `get_sweep_reports` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFleetSweepTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpFleetSweepTools.cs) |
 | `get_table_index_sizes` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpObjectStatsTools.cs) |
@@ -529,7 +532,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `wait_for_investigation_requests` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs) |
 | `write_investigation_note` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs) |
 
-### Lite MCP tools (115)
+### Lite MCP tools (116)
 
 | Tool | Declared in |
 |---|---|
@@ -548,6 +551,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `delete_query_tag` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 | `delete_query_tag_rule` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 | `find_database` | [`Lite/Mcp/McpDiscoveryTools.cs`](../Lite/Mcp/McpDiscoveryTools.cs) |
+| `find_tools` | [`Lite/Mcp/McpToolSearchTools.cs`](../Lite/Mcp/McpToolSearchTools.cs) |
 | `get_active_queries` | [`Lite/Mcp/McpSessionTools.cs`](../Lite/Mcp/McpSessionTools.cs) |
 | `get_alert_history` | [`Lite/Mcp/McpAlertTools.cs`](../Lite/Mcp/McpAlertTools.cs) |
 | `get_alert_settings` | [`Lite/Mcp/McpAlertTools.cs`](../Lite/Mcp/McpAlertTools.cs) |
@@ -656,10 +660,10 @@ A test class is a file whose name ends in `Tests.cs`.
 | Test project | Test classes |
 |---|---|
 | [`Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj`](../Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj) | 0 |
-| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3529 |
+| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3561 |
 | [`Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj`](../Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj) | 0 |
 | [`Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj`](../Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj) | 69 |
-| [`Lite.Tests/Lite.Tests.csproj`](../Lite.Tests/Lite.Tests.csproj) | 1174 |
+| [`Lite.Tests/Lite.Tests.csproj`](../Lite.Tests/Lite.Tests.csproj) | 1190 |
 
 ## CI
 
@@ -687,4 +691,4 @@ A test class is a file whose name ends in `Tests.cs`.
 
 ---
 
-Generated from commit `f39c77072`. To refresh it, run `python tools/codemap/codemap.py`.
+Generated from commit `4cdb1b893`. To refresh it, run `python tools/codemap/codemap.py`.

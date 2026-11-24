@@ -158,6 +158,7 @@ public static partial class CustomViewValidation
         "get_store_log",
         "get_store_query_history",
         "get_store_query_stats",
+        "get_store_setting_changes",
         "get_store_host",
         "get_collector_cost",
         "get_collector_stall_probes",

@@ -574,7 +574,7 @@
       ]
     }
   ],
-  "generated_from": "f39c77072",
+  "generated_from": "4cdb1b893",
   "mcp_tools": [
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
@@ -634,6 +634,11 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCustomAlertTools.cs",
       "name": "backtest_custom_alert_rule",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingLeanToolProfile.cs",
+      "name": "call_tool",
       "product": "Darling"
     },
     {
@@ -799,6 +804,11 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSchemaTools.cs",
       "name": "find_schema_objects",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpToolSearchTools.cs",
+      "name": "find_tools",
       "product": "Darling"
     },
     {
@@ -1622,6 +1632,11 @@
       "product": "Darling"
     },
     {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreSettingChangesTools.cs",
+      "name": "get_store_setting_changes",
+      "product": "Darling"
+    },
+    {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreTableHealthTools.cs",
       "name": "get_store_table_health",
       "product": "Darling"
@@ -2099,6 +2114,11 @@
     {
       "file": "Lite/Mcp/McpDiscoveryTools.cs",
       "name": "find_database",
+      "product": "Lite"
+    },
+    {
+      "file": "Lite/Mcp/McpToolSearchTools.cs",
+      "name": "find_tools",
       "product": "Lite"
     },
     {
@@ -2603,9 +2623,9 @@
     }
   ],
   "migrations": {
-    "count": 297,
+    "count": 304,
     "file": "Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs",
-    "newest_version": 298
+    "newest_version": 305
   },
   "overview": [
     "This repository holds two products you can build and run. Darling is a headless collector service that keeps its data in PostgreSQL with TimescaleDB, and it comes with a WPF viewer and a web dashboard. Lite is a portable WPF app that keeps its data in DuckDB.",
@@ -2831,7 +2851,7 @@
     {
       "name": "Darling.Tests",
       "project": "Darling/Darling.Tests/Darling.Tests.csproj",
-      "test_classes": 3529
+      "test_classes": 3561
     },
     {
       "name": "PerformanceMonitor.Exporter.TestChild",
@@ -2846,7 +2866,7 @@
     {
       "name": "Lite.Tests",
       "project": "Lite.Tests/Lite.Tests.csproj",
-      "test_classes": 1174
+      "test_classes": 1190
     }
   ]
 }
