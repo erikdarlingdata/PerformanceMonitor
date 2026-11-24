@@ -50,8 +50,11 @@ public sealed class DarlingMcpStoreCheckpointTools
         CancellationToken cancellationToken = default) =>
         GetStoreCheckpoints(postgres, hours_back, limit, as_of, offset, McpResponseBudget.DefaultBytes, cancellationToken);
 
+    /// <param name="settingsOverride">Tests only. <c>log_checkpoints</c> can only change in the server's config file and <c>lc_messages</c>
+    /// only to a locale the host has installed, so a test that needs the store to answer "off" or "not English" hands the settings in.</param>
     internal static async Task<string> GetStoreCheckpoints(
-        NpgsqlDataSource postgres, int hours_back, int limit, string? as_of, int offset, int? responseByteBudget, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, int hours_back, int limit, string? as_of, int offset, int? responseByteBudget, CancellationToken cancellationToken,
+        DarlingStoreCheckpointReader.Settings? settingsOverride = null)
     {
         var validation = DarlingReadWindow.Validate(hours_back, as_of, out var windowEnd);
         if (validation != null)
@@ -73,7 +76,7 @@ public sealed class DarlingMcpStoreCheckpointTools
         try
         {
             var windowStart = windowEnd.AddHours(-hours_back);
-            var settings = await DarlingStoreCheckpointReader.GetSettingsAsync(postgres, cancellationToken);
+            var settings = settingsOverride ?? await DarlingStoreCheckpointReader.GetSettingsAsync(postgres, cancellationToken);
             if (!settings.TableExists)
             {
                 return McpHelpers.Status(

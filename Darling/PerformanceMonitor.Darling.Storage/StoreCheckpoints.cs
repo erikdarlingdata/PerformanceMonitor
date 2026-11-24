@@ -36,12 +36,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// timestamp and converted there with the server's own <c>log_timezone</c>, so no zone is guessed here. A line with no
 /// stamp at all (a <c>log_line_prefix</c> that carries no time) cannot be placed in time and is counted, not stored.</para>
 ///
-/// <para><b>Formats.</b> PostgreSQL 15 and 16 write
+/// <para><b>Formats</b>, from <c>LogCheckpointEnd</c> in <c>xlog.c</c> of each stable branch. PostgreSQL 14 and 15 write
 /// <c>checkpoint complete: wrote N buffers (P%); A WAL file(s) added, R removed, C recycled; write=..., sync=..., total=...;
-/// sync files=N, longest=..., average=...; distance=N kB, estimate=N kB; lsn=X/X, redo lsn=X/X</c>. PostgreSQL 17 and 18
-/// add <c>, wrote N SLRU buffers</c> after the buffer count. A restartpoint is the same line with that word. Earlier
-/// versions end after <c>estimate</c>, which the parser also reads. The start line is <c>checkpoint starting:</c> followed by
-/// space-separated flag words. A line this parser does not recognise as a complete line is left alone. A line it recognises
+/// sync files=N, longest=..., average=...; distance=N kB, estimate=N kB</c>. PostgreSQL 16 and 17 add
+/// <c>; lsn=X/X, redo lsn=X/X</c>. PostgreSQL 18 adds <c>, wrote N SLRU buffers</c> after the buffer count. A restartpoint is the
+/// same line with that word. The start line is <c>checkpoint starting:</c> followed by space-separated flag words, the same on
+/// every major. A line this parser does not recognise as a complete line is left alone. A line it recognises
 /// as one but cannot read the figures of is stored with no figures and <c>unparsed</c> set, never guessed.</para>
 ///
 /// <para><b>Retention.</b> The store log's: <see cref="StoreLogSweep.RetentionDays"/>.</para>
@@ -180,7 +180,6 @@ FROM (SELECT " + StampToUtc("$2") + @" AS ended) AS e";
 
     /// <summary>The most checkpoint lines one slab (4 MiB of log) writes: the newest ones. A slab holds a few hundred in a heavy hour, so this
     /// only bounds the time a log full of checkpoint lines (a test log, a store that checkpoints every second) holds the sweep's transaction.</summary>
-    /// </summary>
     public const int MaxLinesPerSlab = 2000;
 
     /// <summary>What a slab held: the lines in order, how many checkpoint lines had no stamp to place them by, and how many the cap left out.</summary>

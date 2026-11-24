@@ -21,7 +21,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #9414: the checkpoint lines of PostgreSQL 16, 17 and 18 (a time start, a WAL start, a shutdown, an end-of-recovery, a restartpoint) read into figures,
+/// #9414: the checkpoint lines of PostgreSQL 14 to 18 (a time start, a WAL start, a shutdown, an end-of-recovery, a restartpoint) read into figures,
 /// and a line that does not read is kept as unparsed rather than guessed. The live class below runs the same lines through the sweep and the read.
 /// </summary>
 public sealed class StoreCheckpoints9414Tests
@@ -76,6 +76,58 @@ public sealed class StoreCheckpoints9414Tests
         Assert.Equal(101L, line.Figures.TotalMs);
     }
 
+    /// <summary>The complete line each major writes, built from <c>LogCheckpointEnd</c> in that major's <c>xlog.c</c> (the REL_14 to REL_18 stable branches).
+    /// 14 and 15 end after the estimate, 16 and 17 add the two LSNs, 18 adds the SLRU buffer count after the buffer figure.</summary>
+    private static string CompleteLineOfMajor(int major, string kind)
+    {
+        var buffers = major >= 18 ? "wrote 1204 buffers (7.3%), wrote 3 SLRU buffers; " : "wrote 1204 buffers (7.3%); ";
+        var tail = major >= 16 ? "; lsn=0/5A3F2C8, redo lsn=0/5A3E000" : string.Empty;
+        return $"2026-11-24 10:05:31.412 UTC [88] LOG:  {kind} complete: {buffers}0 WAL file(s) added, 1 removed, 3 recycled; "
+            + "write=29.931 s, sync=0.012 s, total=29.987 s; sync files=212, longest=0.004 s, average=0.001 s; "
+            + "distance=48211 kB, estimate=51337 kB" + tail;
+    }
+
+    [Theory]
+    [InlineData(14, "checkpoint")]
+    [InlineData(14, "restartpoint")]
+    [InlineData(15, "checkpoint")]
+    [InlineData(15, "restartpoint")]
+    [InlineData(16, "checkpoint")]
+    [InlineData(16, "restartpoint")]
+    [InlineData(17, "checkpoint")]
+    [InlineData(17, "restartpoint")]
+    [InlineData(18, "checkpoint")]
+    [InlineData(18, "restartpoint")]
+    public void TheCompleteLineOfEveryMajor_ReadsIntoItsFigures(int major, string kind)
+    {
+        var line = Only(CompleteLineOfMajor(major, kind));
+        Assert.Equal(kind, line.Kind);
+        Assert.False(line.Unparsed);
+        var f = line.Figures!;
+        Assert.Equal(1204, f.BuffersWritten);
+        Assert.Equal(7.3f, f.BuffersPct);
+        Assert.Equal(major >= 18 ? 3 : null, f.SlruBuffersWritten);
+        Assert.Equal((0, 1, 3), (f.WalFilesAdded, f.WalFilesRemoved, f.WalFilesRecycled));
+        Assert.Equal((29931L, 12L, 29987L), (f.WriteMs, f.SyncMs, f.TotalMs));
+        Assert.Equal((212, 4L, 1L), (f.FilesSynced, f.LongestSyncMs, f.AverageSyncMs));
+        Assert.Equal((48211L, 51337L), (f.DistanceKb, f.EstimateKb));
+        Assert.Equal(major >= 16 ? "0/5A3F2C8" : null, f.Lsn);
+        Assert.Equal(major >= 16 ? "0/5A3E000" : null, f.RedoLsn);
+    }
+
+    [Theory]
+    [InlineData("checkpoint")]
+    [InlineData("restartpoint")]
+    public void TheStartLine_IsTheSameOnEveryMajorAndKeepsItsFlagWords(string kind)
+    {
+        // The flag words and their order are the same in the 14 to 18 sources (shutdown, end-of-recovery, immediate, force, wait, wal, time, flush-all).
+        var line = Only($"2026-11-24 10:05:01.000 UTC [88] LOG:  {kind} starting: immediate force wait wal flush-all");
+        Assert.True(line.IsStart);
+        Assert.Equal(kind, line.Kind);
+        Assert.Equal("wal", line.Reason);
+        Assert.Equal("immediate force wait wal flush-all", line.Flags);
+    }
+
     [Theory]
     [InlineData("time", "time")]
     [InlineData("wal", "wal")]
@@ -120,7 +172,10 @@ public sealed class StoreCheckpoints9414Tests
     }
 }
 
-/// <summary>#9414: a log with a shutdown checkpoint, a time one and a WAL one goes through the sweep and comes back through the read, paired and in order.</summary>
+/// <summary>
+/// #9414: a log with a shutdown checkpoint, a time one and a WAL one goes through the sweep and comes back through the read, paired and in order.
+/// The read's four empty answers (precondition, not_collected, empty, unavailable) are each reached on a store of their own.
+/// </summary>
 [Collection("live-postgres")]
 public sealed class StoreCheckpoints9414LiveTests
 {
@@ -134,21 +189,44 @@ public sealed class StoreCheckpoints9414LiveTests
     }
 
     private static string Complete(string stamp, int buffers, string total, int files) =>
-        $"{stamp} UTC [88] LOG:  checkpoint complete: wrote {buffers} buffers (1.0%); 0 WAL file(s) added, 0 removed, 2 recycled; write=1.000 s, sync=2.000 s, total={total} s; sync files={files}, longest=1.500 s, average=0.500 s; distance=100 kB, estimate=200 kB; lsn=0/1, redo lsn=0/0\n";
+        $"{stamp} UTC [88] LOG:  checkpoint complete: wrote {buffers} buffers (1.0%); 0 WAL file(s) added, 0 removed, 2 recycled; write=1.000 s, sync=2.000 s, total={total} s; sync files={files}, longest=1.500 s, average=0.500 s; distance=100 kB, estimate=200 kB; lsn=0/1000, redo lsn=0/900\n";
 
-    [Fact]
-    public async Task SweepPairsStartAndCompleteLines_AndTheReadListsThemNewestFirstWithAnHourSummary()
+    /// <summary>Runs a body against a scratch store of its own (#1776 own-store), cleaned up the way every live class here is.</summary>
+    private static async Task WithStoreAsync(bool emptyStore, Func<NpgsqlConnection, NpgsqlDataSource, CancellationToken, Task> body)
     {
         var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #9414 checkpoint tests.");
         var ct = TestContext.Current.CancellationToken;
         // #1776 own-store: a scratch clone of the migrated template, on its own database.
-        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
-        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
-        await connection.OpenAsync(ct);
-        await PgMigrations.MigrateAsync(connection, ct);
-        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, emptyStore: emptyStore);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await body(connection, postgres, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
 
+    private static Task SweepAsync(NpgsqlConnection connection, string log, CancellationToken ct) =>
+        StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, new FixedLogFiles("postgresql-Tue.log", Encoding.UTF8.GetBytes(log)), ct);
+
+    private static async Task<JsonElement> ReadAsync(
+        NpgsqlDataSource postgres, int hours, DarlingStoreCheckpointReader.Settings? settings, CancellationToken ct) =>
+        JsonDocument.Parse(await DarlingMcpStoreCheckpointTools.GetStoreCheckpoints(postgres, hours, 100, null, 0, null, ct, settings)).RootElement;
+
+    private static readonly DarlingStoreCheckpointReader.Settings LoggingOnEnglish = new(true, "on", "C");
+
+    [Fact]
+    public Task SweepPairsStartAndCompleteLines_AndTheReadListsThemNewestFirstWithAnHourSummary() => WithStoreAsync(false, async (connection, postgres, ct) =>
+    {
         var now = DateTime.UtcNow.Date.AddHours(DateTime.UtcNow.Hour);
         string At(int minutes, int seconds) => now.AddMinutes(-minutes).AddSeconds(seconds).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + ".000";
         var log = new StringBuilder();
@@ -160,9 +238,9 @@ public sealed class StoreCheckpoints9414LiveTests
         log.Append(Complete(At(20, 10), 400, "10.000", 40));
         log.Append(Complete(At(10, 5), 7, "5.000", 1));
 
-        await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, new FixedLogFiles("postgresql-Tue.log", Encoding.UTF8.GetBytes(log.ToString())), ct);
+        await SweepAsync(connection, log.ToString(), ct);
 
-        var json = JsonDocument.Parse(await DarlingMcpStoreCheckpointTools.GetStoreCheckpoints(postgres, 24, 100, null, 0, null, ct)).RootElement;
+        var json = await ReadAsync(postgres, 24, null, ct);
         var rows = json.GetProperty("checkpoints").EnumerateArray().ToList();
         Assert.Equal(4, rows.Count);
         Assert.Equal(new[] { 1L, 40L, 300L, 9L }, rows.Select(r => (long)r.GetProperty("files_synced").GetInt32()).ToArray());
@@ -172,10 +250,49 @@ public sealed class StoreCheckpoints9414LiveTests
         var hours = json.GetProperty("hours").EnumerateArray().ToList();
         Assert.Equal(4L, hours.Sum(h => h.GetProperty("checkpoints").GetInt64()));
         Assert.Equal(300, hours.Max(h => h.GetProperty("max_files_synced").GetInt32()));
+    });
 
-        // Revert proof of the read's precondition: with no rows in a window the read says why, never an empty success.
-        var empty = JsonDocument.Parse(await DarlingMcpStoreCheckpointTools.GetStoreCheckpoints(postgres, 1, 100, now.AddDays(-30).ToString("o", System.Globalization.CultureInfo.InvariantCulture), 0, null, ct)).RootElement;
-        Assert.NotEqual("ok", empty.GetProperty("status").GetString());
+    [Fact]
+    public Task AnEmptyWindowWithLogCheckpointsOff_AnswersPreconditionNamingTheSetting() => WithStoreAsync(false, async (_, postgres, ct) =>
+    {
+        // log_checkpoints only changes in the server's config file, so the setting is handed to the read. The store, its table and its window are real.
+        var json = await ReadAsync(postgres, 24, new DarlingStoreCheckpointReader.Settings(true, "off", "C"), ct);
+        Assert.Equal("precondition", json.GetProperty("status").GetString());
+        Assert.Contains("log_checkpoints", json.GetProperty("message").GetString(), StringComparison.Ordinal);
+    });
 
-    }
+    [Fact]
+    public Task AnEmptyWindowWithANonEnglishLcMessages_AnswersPreconditionNamingTheSetting() => WithStoreAsync(false, async (_, postgres, ct) =>
+    {
+        // lc_messages only takes a locale the host has installed, so the setting is handed to the read.
+        var json = await ReadAsync(postgres, 24, new DarlingStoreCheckpointReader.Settings(true, "on", "de_DE.UTF-8"), ct);
+        Assert.Equal("precondition", json.GetProperty("status").GetString());
+        Assert.Contains("lc_messages", json.GetProperty("message").GetString(), StringComparison.Ordinal);
+    });
+
+    [Fact]
+    public Task AWindowTheStoreLogWasNeverReadIn_AnswersNotCollected() => WithStoreAsync(false, async (_, postgres, ct) =>
+    {
+        var json = await ReadAsync(postgres, 24, LoggingOnEnglish, ct);
+        Assert.Equal("not_collected", json.GetProperty("status").GetString());
+    });
+
+    [Fact]
+    public Task AWindowTheLogWasReadInWithNoCheckpointLine_AnswersEmpty() => WithStoreAsync(false, async (connection, postgres, ct) =>
+    {
+        await SweepAsync(connection, $"{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}.000 UTC [88] LOG:  database system is ready to accept connections\n", ct);
+
+        var json = await ReadAsync(postgres, 24, LoggingOnEnglish, ct);
+        Assert.Equal("empty", json.GetProperty("status").GetString());
+    });
+
+    [Fact]
+    public Task AStoreBelowTheCheckpointMigration_AnswersUnavailable() => WithStoreAsync(true, async (connection, postgres, ct) =>
+    {
+        // Migrated in full, then rewound below the checkpoint rung the way the ladder tests do, so the store is the one the previous build left.
+        await RungRewindArtifacts.DropSentinelsAboveAsync(connection, StoreCheckpoints.Version - 1, ct);
+
+        var json = await ReadAsync(postgres, 24, null, ct);
+        Assert.Equal("unavailable", json.GetProperty("status").GetString());
+    });
 }
