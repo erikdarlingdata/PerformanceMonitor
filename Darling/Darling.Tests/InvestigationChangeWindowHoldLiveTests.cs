@@ -174,7 +174,8 @@ public sealed class InvestigationChangeWindowHoldLiveTests
             using var exclude = JsonDocument.Parse(await DarlingMcpInvestigationTools.ListInvestigationRequests(dataSource, held: "exclude", cancellationToken: ct));
             Assert.Equal([unheld], exclude.RootElement.GetProperty("requests").EnumerateArray().Select(r => r.GetProperty("request_id").GetGuid()));
             using var refused = JsonDocument.Parse(await DarlingMcpInvestigationTools.ListInvestigationRequests(dataSource, held: "sometimes", cancellationToken: ct));
-            Assert.Equal("held", refused.RootElement.GetProperty("parameter").GetString());
+            Assert.Equal("invalid", refused.RootElement.GetProperty("status").GetString());
+            Assert.Equal("held", refused.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
         });
     }
 
