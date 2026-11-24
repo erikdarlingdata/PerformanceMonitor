@@ -205,6 +205,8 @@ schema_triggers,collected,yes,captured trigger definitions
 server_config,collected,yes,
 server_properties,collected,yes,
 servers,internal,yes,server registry mapping server_id to a name
+service_start_rungs,internal,no,migration rungs each service start tried
+service_starts,internal,no,service start history
 session_stats,collected,yes,
 session_stats_baseline,derived,derived,rollup view
 session_summary_stats,collected,yes,
@@ -213,6 +215,7 @@ spinlock_stats,collected,yes,
 store_log_captures,internal,no,store log capture progress
 store_log_events,internal,no,store log events
 store_metrics,internal,no,store size telemetry
+store_pass_steps,internal,no,background pass step history
 store_relation_sizes_latest,derived,derived,newest measured size of each relation
 store_relation_sizes_measured,internal,no,when the relation sizes were measured
 store_statement_captures,internal,no,store statement capture progress
