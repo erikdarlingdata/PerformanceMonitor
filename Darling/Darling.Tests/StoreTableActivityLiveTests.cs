@@ -166,6 +166,83 @@ ANALYZE;";
     }
 
     /// <summary>
+    /// A statistics reset between captures where the busiest table writes MORE rows than its old baseline held before the next capture. The counter
+    /// is above its baseline, so only the stored reset time can say a reset ran: the hour's rows are the value counted since the reset (25), not the
+    /// value minus the old baseline (15).
+    /// </summary>
+    [Fact]
+    public async Task AResetFollowedByMoreWritesThanTheOldBaseline_CountsTheValueSinceTheReset()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        var bodySucceeded = false;
+        try
+        {
+            await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await ExecAsync(store, SeedSql, ct);
+            var t0 = HourThreeDaysBack();
+            var t1 = t0.AddHours(1);
+
+            await ExecAsync(store, "INSERT INTO zz9413.pt SELECT g, 'x' FROM generate_series(1, 10) AS g", ct);
+            Assert.Equal(0, await CaptureAsync(scratch.ConnectionString, t0, ct));
+
+            await ExecAsync(store, "SELECT pg_stat_reset()", ct);
+            await ExecAsync(store, "INSERT INTO zz9413.pt SELECT g, 'y' FROM generate_series(100, 124) AS g", ct);
+            Assert.True(await CaptureAsync(scratch.ConnectionString, t1, ct) > 0);
+
+            var afterReset = Assert.Single(await ActivityAsync(store, t1, ct), r => (string)r["table_name"] == "pt");
+            Assert.Equal(25L, (long)afterReset["tup_inserted"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// One table's counters reset alone do not move the database's reset time, so the fall below the baseline stays the sign: the new value
+    /// is the hour's difference.
+    /// </summary>
+    [Fact]
+    public async Task OneTablesCountersResetAlone_StillCountFromZero_ByTheFallRule()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipMessage);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "TimescaleDB is not enabled on this cluster.");
+        var bodySucceeded = false;
+        try
+        {
+            await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await ExecAsync(store, SeedSql, ct);
+            var t0 = HourThreeDaysBack();
+            var t1 = t0.AddHours(1);
+
+            await ExecAsync(store, "INSERT INTO zz9413.pt SELECT g, 'x' FROM generate_series(1, 10) AS g", ct);
+            Assert.Equal(0, await CaptureAsync(scratch.ConnectionString, t0, ct));
+
+            await ExecAsync(store, "SELECT pg_stat_reset_single_table_counters('zz9413.pt'::regclass)", ct);
+            await ExecAsync(store, "INSERT INTO zz9413.pt SELECT g, 'y' FROM generate_series(100, 102) AS g", ct);
+            Assert.True(await CaptureAsync(scratch.ConnectionString, t1, ct) > 0);
+
+            var afterReset = Assert.Single(await ActivityAsync(store, t1, ct), r => (string)r["table_name"] == "pt");
+            Assert.Equal(3L, (long)afterReset["tup_inserted"]);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
     /// The ranking window ends at as_of. Two captures an hour apart each have their own activity, and an as_of between them (one hour wide)
     /// ranks only the first hour, an as_of at the second capture only the second, and a two-hour window both. A bad as_of is refused, not read as now.
     /// </summary>
@@ -218,6 +295,16 @@ ANALYZE;";
             {
                 Assert.Equal(t2, json.RootElement.GetProperty("window_end").GetDateTime().ToUniversalTime());
                 Assert.Equal(t1, json.RootElement.GetProperty("window_start").GetDateTime().ToUniversalTime());
+            }
+
+            // The tool carries the same anchor: a past as_of through get_store_metrics reads that past window and not the current one.
+            using (var viaTool = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(
+                store, table_activity: true, hours_back: 1, as_of: AsOf(t1.AddMinutes(30)), cancellationToken: ct)))
+            {
+                var names = viaTool.RootElement.GetProperty("tables").EnumerateArray().Select(t => t.GetProperty("table_name").GetString()).ToList();
+                Assert.Contains("first_hour", names);
+                Assert.DoesNotContain("second_hour", names);
+                Assert.Equal(t1.AddMinutes(30), viaTool.RootElement.GetProperty("window_end").GetDateTime().ToUniversalTime());
             }
 
             // A value that is not a time is refused and not read as now.

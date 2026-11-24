@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -182,7 +183,7 @@ internal sealed class RetentionWalPacer
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionWalPacer, cancellationToken);
             await using var command = new NpgsqlCommand(SettingsSql, connection) { CommandTimeout = ReadTimeoutSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 

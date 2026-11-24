@@ -299,7 +299,7 @@ public sealed class DarlingMcpStoreMetricsTools
 
             /* #9419: the store's own WAL as an hourly series, differenced from the stored cumulative counters. A store below V305 answers unavailable
                inside the reader, so this read never turns a missing column into a tool error. */
-            var wal = await DarlingStoreWalReader.GetAsync(postgres, wal_hours_back, DateTime.UtcNow, cancellationToken);
+            var wal = await DarlingStoreWalReader.GetAsync(postgres, wal_hours_back, ClockNowUtc(), cancellationToken);
 
             /* #3582: two more LIVE catalog reads, both failure-isolated to null (never to an empty list,
                which would read as "no aggregates" / "nothing un-enumerated" and drop a section without a

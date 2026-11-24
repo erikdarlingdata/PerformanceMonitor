@@ -829,7 +829,7 @@ public sealed partial class DarlingCollectorRunner
             try
             {
                 /* The databases the store saw a non-primary replica_role for in the last 24 hours, with their newest collection_time. */
-                await using var seedConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                await using var seedConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
                 await using var seedCommand = new NpgsqlCommand(
                     "SELECT database_name, max(collection_time) FROM collect.query_store_stats WHERE server_id = $1 "
                     + "AND collection_time > (now() AT TIME ZONE 'UTC') - interval '24 hours' "

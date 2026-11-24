@@ -492,7 +492,7 @@ ORDER BY h.bucket;";
 
         int hoursBuilt = 0, serverHours = 0, failed = 0, started = 0;
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.QueryStatsHostHourly, cancellationToken);
         var removed = await PruneAsync(connection, nowUtc, retentionDays, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, retentionDays, cancellationToken);
 

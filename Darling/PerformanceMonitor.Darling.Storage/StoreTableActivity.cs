@@ -30,12 +30,14 @@ namespace PerformanceMonitor.Darling.Storage;
 /// cannot tell that from a statistics reset. The difference has to be taken per relation, before the roll-up.</para>
 ///
 /// <para><b>Baseline.</b> <c>collect.store_table_activity_baseline</c> holds the last capture's counters per relation (the
-/// relation's oid is the key), so a restart of the service costs nothing: the previous capture is on disk. It holds only relations
+/// relation's oid is the key) and the database's statistics reset time it was read at, so a restart of the service costs nothing: the previous capture is on disk. It holds only relations
 /// with a non-zero counter. A relation it does not hold has a baseline of zero, which is the same thing, so a chunk created in
 /// the hour counts its whole life as the hour's activity. The first capture on a store has no baseline and writes none of the
-/// activity rows: its counters began at the last statistics reset, which is not an hour. A counter below its baseline means a
-/// statistics reset (or a restart that kept no statistics) ran between the two captures, and the new value is taken as the
-/// difference: it is everything counted since the reset, which is inside the interval. The checkpointer rows store NULL there
+/// activity rows: its counters began at the last statistics reset, which is not an hour. When the database's statistics reset time
+/// differs from the one stored with the baseline, a reset (<c>pg_stat_reset()</c>, or the discard of every statistic after a crash) ran between the
+/// two captures, and every counter of that capture is counted from zero: the value is everything counted since the reset, which is inside the
+/// interval, even where the counter has already climbed back above its old baseline. A counter below its baseline with no change of reset time
+/// means one table's counters were reset alone, and its new value is taken as the difference the same way. The checkpointer rows store NULL there
 /// because they keep raw counters. Each row carries <c>interval_seconds</c>, the time since the previous capture, so a skipped
 /// tick shows as a longer interval and not as a busy hour.</para>
 ///
@@ -85,6 +87,7 @@ CREATE TABLE IF NOT EXISTS collect.store_table_activity_baseline
 (
     rel_oid bigint NOT NULL,
     captured_at timestamp(6) without time zone NOT NULL,
+    stats_reset timestamp(6) without time zone NULL,
     seq_scans bigint NOT NULL,
     idx_scans bigint NOT NULL,
     tup_inserted bigint NOT NULL,
@@ -134,14 +137,21 @@ CREATE TABLE IF NOT EXISTS collect.store_table_activity_baseline
         "SELECT s.relid::bigint AS rel_oid, " + string.Join(", ", Counters.Select(c => c.Source + " AS " + c.Column))
         + " FROM pg_stat_user_tables s JOIN pg_statio_user_tables io ON io.relid = s.relid";
 
+    /// <summary>The database's statistics reset time (naive UTC), read in the same snapshot as the counters. NULL when the database's statistics were never
+    /// reset. <c>pg_stat_reset()</c> moves it, and so does the discard of every statistic after a crash. A clean restart keeps both the counters and this
+    /// value, which is why the postmaster start time is not the identity: it would call every clean restart a reset and report the table's whole life as one hour.</summary>
+    private const string StatsResetSql = "(SELECT d.stats_reset AT TIME ZONE 'UTC' FROM pg_stat_database d WHERE d.datname = current_database())";
+
     private static string Sum(string alias) => string.Join(" + ", Counters.Select(c => alias + "." + c.Column));
 
     /// <summary>
-    /// One relation's difference per counter. A counter at or above its baseline is the difference. A counter below it ran from a reset inside
-    /// the interval, so its whole value is the difference. No baseline row is a baseline of zero.
+    /// One relation's difference per counter. When the database's statistics reset time differs from the one stored with the baseline, every counter
+    /// is counted from zero (the difference is the current value), whatever the baseline says: a busy table's counter can climb back above its old
+    /// baseline before the next capture. Otherwise a counter at or above its baseline is the difference, and a counter below it ran from a reset of
+    /// that table alone inside the interval, so its whole value is the difference. No baseline row is a baseline of zero.
     /// </summary>
     private static readonly string DeltaColumnsSql = string.Join(", ", Counters.Select(c =>
-        "CASE WHEN c." + c.Column + " >= coalesce(p." + c.Column + ", 0) THEN c." + c.Column + " - coalesce(p." + c.Column + ", 0) ELSE c." + c.Column + " END AS " + c.Column));
+        "CASE WHEN rs.seen THEN c." + c.Column + " WHEN c." + c.Column + " >= coalesce(p." + c.Column + ", 0) THEN c." + c.Column + " - coalesce(p." + c.Column + ", 0) ELSE c." + c.Column + " END AS " + c.Column));
 
     private static readonly string RolledColumnsSql = string.Join(", ", Counters.Select(c => "sum(m." + c.Column + ")::bigint AS " + c.Column));
 
@@ -176,10 +186,13 @@ INSERT INTO collect.store_table_activity
     (metric_time, interval_seconds, table_schema, table_name, table_kind, relations_active, relations_scanned, " + ColumnList + @")
 WITH cur AS MATERIALIZED (" + CurrentCountersSql + @"),
 base AS MATERIALIZED (SELECT * FROM collect.store_table_activity_baseline),
+ident AS (SELECT " + StatsResetSql + @" AS stats_reset),
+reset AS (SELECT coalesce(bool_or(b.stats_reset IS DISTINCT FROM i.stats_reset), false) AS seen FROM base b CROSS JOIN ident i),
 span AS (SELECT greatest(extract(epoch FROM ($1::timestamp - max(captured_at))), 0)::integer AS seconds FROM base),
 delta AS (
     SELECT c.rel_oid, " + DeltaColumnsSql + @"
     FROM cur c
+    CROSS JOIN reset rs
     LEFT JOIN base p ON p.rel_oid = c.rel_oid
     WHERE EXISTS (SELECT 1 FROM base)
 ),
@@ -210,8 +223,8 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 
     /// <summary>The new baseline: every relation with a non-zero counter, stamped $1 (naive UTC).</summary>
     public static readonly string BaselineInsertSql =
-        "INSERT INTO collect.store_table_activity_baseline (rel_oid, captured_at, " + ColumnList + ") "
-        + "SELECT c.rel_oid, $1::timestamp, " + string.Join(", ", Counters.Select(x => "c." + x.Column))
+        "INSERT INTO collect.store_table_activity_baseline (rel_oid, captured_at, stats_reset, " + ColumnList + ") "
+        + "SELECT c.rel_oid, $1::timestamp, " + StatsResetSql + ", " + string.Join(", ", Counters.Select(x => "c." + x.Column))
         + " FROM (" + CurrentCountersSql + ") c WHERE " + Sum("c") + " > 0";
 
     /// <summary>The newest capture's time (naive UTC), or NULL when no capture has ever stored a baseline. One row.</summary>

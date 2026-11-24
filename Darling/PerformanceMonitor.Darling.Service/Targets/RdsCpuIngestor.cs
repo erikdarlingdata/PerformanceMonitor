@@ -534,8 +534,9 @@ public sealed class RdsCpuIngestor
 
     private async Task<DateTime?> GetWatermarkAsync(int serverId, CancellationToken cancellationToken)
     {
-        await using var command = _postgres.CreateCommand(
-            "SELECT MAX(sample_time) FROM collect.pg_cpu_utilization WHERE server_id = $1");
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.RdsIntake, cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT MAX(sample_time) FROM collect.pg_cpu_utilization WHERE server_id = $1", connection);
         command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
         command.Parameters.AddWithValue(serverId);
 

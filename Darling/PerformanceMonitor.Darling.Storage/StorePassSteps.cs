@@ -116,11 +116,14 @@ LIMIT $5";
     /// <summary>The window read's answer: the rows newest first, and how many rows matched in all.</summary>
     public sealed record Page(IReadOnlyList<Row> Rows, long Total);
 
-    /// <summary>Reads the rows that started in <c>[from, to)</c>, newest first, at most <paramref name="limit"/>.</summary>
+    /// <summary>Reads the rows that started in <c>[from, to)</c>, newest first, at most <paramref name="limit"/>.
+    /// <paramref name="commandTimeoutSeconds"/> is the read's own deadline, so a stalled store cannot hold the pooled connection on Npgsql's default.</summary>
     public static async Task<Page> ReadAsync(
-        NpgsqlDataSource dataSource, DateTime from, DateTime to, string? pass, string? step, int limit, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime from, DateTime to, string? pass, string? step, int limit, CancellationToken cancellationToken,
+        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds)
     {
         await using var command = dataSource.CreateCommand(ReadSql);
+        command.CommandTimeout = commandTimeoutSeconds;
         command.Parameters.AddWithValue(Unspecified(from));
         command.Parameters.AddWithValue(Unspecified(to));
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)pass ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
@@ -169,6 +172,9 @@ LIMIT $5";
     {
         /// <summary>How long one write, and the retention DELETE that follows it, may take before the recorder gives up on it.</summary>
         public static readonly TimeSpan WriteBudget = TimeSpan.FromSeconds(10);
+
+        /// <summary>The write commands' own deadline, the same 10 s as <see cref="WriteBudget"/>, so the budget token and the command agree.</summary>
+        private static readonly int WriteCommandSeconds = (int)WriteBudget.TotalSeconds;
 
         /// <summary>The detail of a step that ran out its time budget, in the words the retention and convergence rows use.</summary>
         public const string CutShortDetail = "cut short by its time budget";
@@ -245,6 +251,7 @@ LIMIT $5";
             {
                 using var budget = new CancellationTokenSource(WriteBudget);
                 await using var command = _dataSource.CreateCommand(InsertSql);
+                command.CommandTimeout = WriteCommandSeconds;
                 command.Parameters.AddWithValue(pass);
                 command.Parameters.AddWithValue(step);
                 command.Parameters.AddWithValue(Unspecified(startedUtc));
@@ -260,6 +267,7 @@ LIMIT $5";
                 {
                     _lastPrune = now;
                     await using var prune = _dataSource.CreateCommand(RetentionDeleteSql);
+                    prune.CommandTimeout = WriteCommandSeconds;
                     prune.Parameters.AddWithValue(Unspecified(now.AddDays(-RetentionDays)));
                     await prune.ExecuteNonQueryAsync(budget.Token);
                 }

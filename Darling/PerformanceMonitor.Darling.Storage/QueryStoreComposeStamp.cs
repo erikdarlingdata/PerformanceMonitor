@@ -1907,7 +1907,7 @@ WHERE hour < $1;";
         int builtStale = 0, builtMissing = 0, builtBacklog = 0, failed = 0, started = 0, deferredForWriters = 0, backedOff = 0;
         var watch = options?.Watch ?? DeferralWatch.Shared;
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.ComposeRollup, cancellationToken);
         var removed = await GcAsync(connection, nowUtc, retentionDays, cancellationToken);
         var planned = await PlanAsync(connection, nowUtc, retentionDays, cancellationToken, options?.StoreNow);
         var plan = planned.Builds;
