@@ -143,7 +143,7 @@ internal static class StoreServerCertificate
                 CommandTimeout = (int)HandshakeTimeout.TotalSeconds,
             };
             var dataSourceBuilder = new NpgsqlDataSourceBuilder(builder.ConnectionString);
-            dataSourceBuilder.UseUserCertificateValidationCallback((_, certificate, presentedChain, _) =>
+            dataSourceBuilder.UseSslClientAuthenticationOptionsCallback(options => options.RemoteCertificateValidationCallback = (_, certificate, presentedChain, _) =>
             {
                 if (certificate is not null)
                 {
