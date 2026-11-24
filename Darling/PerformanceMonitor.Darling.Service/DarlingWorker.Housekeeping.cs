@@ -339,14 +339,13 @@ public sealed partial class DarlingWorker
     /// </summary>
     private async Task EvaluateCompressionJobHealthAsync(CancellationToken cancellationToken)
     {
-        var readClock = Stopwatch.StartNew();
-
         /* #9411: the step's row, written once after the try so a shutdown (which records nothing) and the awaits inside the pass stay as they were. */
         var stepStarted = DateTime.UtcNow;
         var stepClock = Stopwatch.StartNew();
         var stepRan = false;
         string? stepFailure = null;
 
+        var readClock = Stopwatch.StartNew();
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
