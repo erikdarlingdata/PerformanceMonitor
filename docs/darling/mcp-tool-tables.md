@@ -182,7 +182,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `test_custom_alert_rule` | The table that the rule's measure names. Also its hourly or daily aggregate, when the window uses one.<br>`config.custom_alert_rules` (when rule_id given)<br>`config.server_tags`<br>`config.server_tag_map` (tag scope) |
 | `test_query_tag_rule` | `collect.query_tag_sightings`<br>`config.query_tag_rules`<br>`config.query_tags`<br>`config.query_tag_assignments`<br>`collect.servers` |
 
-## Tools about Darling itself (49)
+## Tools about Darling itself (50)
 
 | Tool | Store objects |
 |---|---|
@@ -192,6 +192,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_agent_changes` | `config.investigation_journal`<br>`config.config_alert_log`<br>`config.investigation_requests`<br>`config.investigation_evidence`<br>`config.config_service`<br>`collect.servers` |
 | `get_alert_settings` | `config.config_alert_settings`<br>`config.config_notification`<br>`config.config_threshold_overrides` |
 | `get_change_watches` | `config.change_watches`<br>`config.change_watch_changes` |
+| `get_change_windows` | `config.investigation_change_windows`<br>`config.investigation_requests`<br>`collect.servers` |
 | `get_collection_health` | `collect.collection_log_hourly`<br>`collect.collection_log`<br>`collect.database_size_stats`<br>`config.config_collector_schedules`<br>`config.config_collector_run_times`<br>`collect.analysis_collection_caveats`<br>`collect.v_collection_log`<br>`collect.v_database_size_stats` |
 | `get_collection_log` | `collect.collection_log`<br>`collect.servers`<br>`collect.v_collection_log` |
 | `get_collection_state` | `config.config_service`<br>`config.config_monitored_servers` |
@@ -228,7 +229,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `list_custom_alert_rules` | `config.custom_alert_rules`<br>`config.config_alert_log` |
 | `list_custom_alert_templates` | None. The templates are built into the service. |
 | `list_custom_views` | `config.custom_views` |
-| `list_investigation_requests` | `config.investigation_requests`<br>`config.investigation_request_alerts`<br>`collect.servers` |
+| `list_investigation_requests` | `config.investigation_requests`<br>`config.investigation_request_alerts`<br>`config.investigation_change_windows`<br>`collect.servers` |
 | `list_query_tag_rules` | `config.query_tag_rules`<br>`config.query_tags`<br>`config.query_tag_state` |
 | `list_query_tags` | `config.query_tags`<br>`config.query_tag_assignments`<br>`config.query_tag_rules`<br>`config.query_tag_state`<br>`collect.servers` |
 | `list_servers` | `collect.servers`<br>`config.config_monitored_servers`<br>`collect.collection_log`<br>`collect.v_collection_log` |
