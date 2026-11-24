@@ -252,6 +252,10 @@ WHERE e.extname = 'pg_stat_statements'";
         s.shared_blks_hit,
         s.shared_blks_read,
         s.temp_blks_written,
+        s.shared_blks_dirtied,
+        s.shared_blks_written,
+        s.wal_fpi,
+        s.wal_bytes,
         CASE
             WHEN s.query IS NULL THEN NULL
             WHEN s.query = {QuoteLiteral(InsufficientPrivilegeText)} THEN s.query
@@ -271,8 +275,26 @@ WHERE e.extname = 'pg_stat_statements'";
         WHERE d.datname = pg_catalog.current_database()
     );";
         var tag = DollarTag("fn", readerBody, infoBody);
+        var dropTag = DollarTag("drop", config);
 
+        /* #9410: the reader gained four columns, and CREATE OR REPLACE cannot change a function's result columns, so a function from before them is
+           dropped first. Only then: a drop on every start would take the grants with it each time. The pass grants right after this. */
         return $@"
+DO {dropTag}
+BEGIN
+    IF EXISTS
+    (
+        SELECT 1
+        FROM pg_catalog.pg_proc AS p
+        WHERE p.oid = pg_catalog.to_regprocedure({QuoteLiteral(config + "." + FunctionName + "()")})
+        AND   NOT ('wal_fpi' = ANY (COALESCE(p.proargnames, ARRAY[]::text[])))
+    )
+    THEN
+        DROP FUNCTION {config}.{FunctionName}();
+    END IF;
+END
+{dropTag};
+
 CREATE OR REPLACE FUNCTION {config}.{FunctionName}()
 RETURNS TABLE
 (
@@ -287,6 +309,10 @@ RETURNS TABLE
     shared_blks_hit bigint,
     shared_blks_read bigint,
     temp_blks_written bigint,
+    shared_blks_dirtied bigint,
+    shared_blks_written bigint,
+    wal_fpi bigint,
+    wal_bytes numeric,
     query text
 )
 LANGUAGE sql
