@@ -372,7 +372,7 @@ SET gc_before = GREATEST(COALESCE(gc_before, $1::date), $1::date);";
         int steps = 0, failed = 0;
         var deferred = false;
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.JobOutcomeDaily, cancellationToken);
         DateTime now;
         if (nowUtc is { } given)
         {

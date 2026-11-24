@@ -62,6 +62,10 @@ public sealed class CrossAppMcpToolInventoryPinTests
         /* #8788: the health of Lite's own DuckDB store (size against the 512 MB reset, parquet archives, housekeeping history).
            Darling's store is PostgreSQL, and its own store-health page is its own issue (#8787), so there is no twin tool. */
         "get_store_health",
+        /* #9423: the slow MCP calls and the per-tool call figures in one answer. Darling answers the same questions with get_slow_reads and
+           get_read_latency, which carry a different contract (statements, server_name, surface), and a shared name must carry a byte-identical
+           description head on both editions, so Lite has its own name. */
+        "get_slow_mcp_calls",
     };
 
     [Fact]

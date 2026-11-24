@@ -2539,7 +2539,7 @@ ALTER TABLE config.store_statement_baseline
     ADD COLUMN IF NOT EXISTS wal_fpi bigint;";
 
     /// <summary>
-    /// V305 (#9433): <c>collect.slow_reads</c> gains <c>reply_bytes</c>, the size in bytes of the reply the caller received, and
+    /// V309 (#9433): <c>collect.slow_reads</c> gains <c>reply_bytes</c>, the size in bytes of the reply the caller received, and
     /// <c>collect.read_latency</c> gains <c>reply_bytes_total</c>, the sum of those sizes over the reads the row counts. Both are nullable
     /// <c>bigint</c> with no default: a row written before this rung has no size, and a NULL says so where a 0 would claim an empty reply.
     /// A read that sent no reply (it threw, the caller left, the store refused it busy) adds 0 to the total, so the average over a
@@ -2549,7 +2549,7 @@ ALTER TABLE config.store_statement_baseline
     /// <para><b>An older build ignores the columns.</b> Its writer names its own column list and its reads name theirs, so it neither fills
     /// nor reads them.</para>
     /// </summary>
-    private const string V305Sql = @"
+    private const string V309Sql = @"
 ALTER TABLE collect.slow_reads
     ADD COLUMN IF NOT EXISTS reply_bytes bigint;
 
@@ -4088,7 +4088,23 @@ END $$;";
         /* V304 (#9410): the dirtied blocks, written blocks, WAL bytes and full-page images of each statement in the store's own statement history, on the history
            table and its baseline. Four nullable columns on each, no default, no rewrite. A row from before the rung reads NULL. An older build never names them. */
         new Migration(StoreStatementHistory.WriteCountersVersion, "store-statement-history-write-counters", V304Sql),
-        new Migration(ReadReplyBytes.Version, "read-reply-bytes", V305Sql),
+        /* V305 (#9419): the store's own WAL figures, eleven nullable columns on collect.store_metrics filled on the object_kind = 'wal' row only. No data moves
+           and existing rows keep NULL. An older build ignores the columns and the row: its store reads list only the kinds it knows. */
+        new Migration(StoreWalFigures.Version, "store-wal-figures", StoreWalFigures.AddColumnsSql),
+        /* V306 (#9411): the background pass step history (collect.store_pass_steps), one row per step of the hourly store-maintenance tick, the Query Store compose
+           rollup and the store self-metrics tick. One plain table and its newest-first index created empty: no data moves. An older build ignores it and records
+           nothing there. */
+        new Migration(StorePassSteps.Version, "store-pass-steps", StorePassSteps.CreateSql),
+        /* V307 (#9415): the service start history (collect.service_starts and collect.service_start_rungs): a row per service start with its build, schema
+           change, ERROR and WARN counts, and a row per migration rung the start tried. Two plain tables created empty: no data moves. An older build ignores
+           them and writes no start rows. */
+        new Migration(ServiceStartHistory.Version, "service-start-history", ServiceStartHistory.CreateSql),
+        /* V308 (#9413): what each store table did every hour (collect.store_table_activity) and the last capture's per-relation counters those differences are taken
+           from (collect.store_table_activity_baseline). Two plain tables created empty: no data moves, and the service fills them from the hourly self-metrics sweep.
+           An older build ignores them. */
+        new Migration(StoreTableActivity.Version, "store-table-activity", StoreTableActivity.CreateSql),
+        /* V309 (#9433): the reply size in bytes on the slow read record and the read latency histogram, two nullable columns. No data moves and old rows keep NULL. An older build ignores the columns. */
+        new Migration(ReadReplyBytes.Version, "read-reply-bytes", V309Sql),
     };
 
     /// <summary>
@@ -11775,7 +11791,12 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// below this build's version in that situation throws <see cref="TimeoutException"/> instead.</para>
     /// </summary>
     public static Task<int> MigrateAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
-        => MigrateAsync(connection, logger: null, cancellationToken);
+        => MigrateAsync(connection, logger: null, observer: null, cancellationToken);
+
+    /// <summary>The logger-aware overload without a rung observer.</summary>
+    public static Task<int> MigrateAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        => MigrateAsync(connection, logger, observer: null, cancellationToken);
 
     /// <summary>
     /// The logger-aware overload: after applying migrations it best-effort sets the database-default
@@ -11787,7 +11808,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// Path anyway (see <see cref="TrySetDatabaseSearchPathAsync"/>).
     /// </summary>
     public static async Task<int> MigrateAsync(
-        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        NpgsqlConnection connection, ILogger? logger, IMigrationRungObserver? observer, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
@@ -11807,7 +11828,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         int applied;
         try
         {
-            applied = await MigrateLockedAsync(connection, logger, Scripts, MigrationCommandTimeoutSeconds, cancellationToken);
+            applied = await MigrateLockedAsync(connection, logger, Scripts, MigrationCommandTimeoutSeconds, observer, cancellationToken);
         }
         finally
         {
@@ -12016,12 +12037,12 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// test can show in seconds what a rung's command timeout does. The same code path: the ladder and the default
     /// bound are the only things a test may change, and a rung's entry in
     /// <see cref="DeclaredRungCommandTimeoutSeconds"/> is read exactly as it is for the shipped ladder. The caller
-    /// does not hold the advisory lock, so this is for a store no other migrator can reach.
+    /// does not hold the advisory lock, so this is for a store no other migrator can reach. The optional observer hears each rung as the service's start history does (#9415).
     /// </summary>
     internal static Task<int> ApplyLadderForTestsAsync(
         NpgsqlConnection connection, ILogger? logger, IReadOnlyList<Migration> ladder, int defaultCommandTimeoutSeconds,
-        CancellationToken cancellationToken)
-        => MigrateLockedAsync(connection, logger, ladder, defaultCommandTimeoutSeconds, cancellationToken);
+        CancellationToken cancellationToken, IMigrationRungObserver? observer = null)
+        => MigrateLockedAsync(connection, logger, ladder, defaultCommandTimeoutSeconds, observer, cancellationToken);
 
     /// <summary>
     /// Applies every rung of <paramref name="ladder"/> above the store's stamped version, each in its own transaction
@@ -12031,7 +12052,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// </summary>
     private static async Task<int> MigrateLockedAsync(
         NpgsqlConnection connection, ILogger? logger, IReadOnlyList<Migration> ladder, int defaultCommandTimeoutSeconds,
-        CancellationToken cancellationToken)
+        IMigrationRungObserver? observer, CancellationToken cancellationToken)
     {
         /* Resolve bare names through collect/config for this migrate session. Load-bearing from V8
            on: V8 moves darling_schema_version into collect, and the version stamp below writes it by
@@ -12060,6 +12081,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
            applies nothing, since every rung this build has is at or below the stamp. */
         WarnIfStoreNewerThanBuild(logger, currentVersion, Scripts[^1].Version);
 
+        observer?.LadderStarted(currentVersion);
+
         var applied = 0;
         foreach (var migration in ladder)
         {
@@ -12080,34 +12103,50 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                     migration.Version, migration.Name, rungTimeoutSeconds);
             }
 
+            /* #9415: the rung's own clock, from its transaction to its commit, so the start history says how long each rung took
+               (darling_schema_version.applied_at gives only the gap between rungs). A rung that throws is reported as failed. */
+            var rungStartedUtc = DateTime.UtcNow;
+            var rungClock = System.Diagnostics.Stopwatch.StartNew();
             using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
             try
             {
-                using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = rungTimeoutSeconds };
-                await apply.ExecuteNonQueryAsync(cancellationToken);
+                try
+                {
+                    using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = rungTimeoutSeconds };
+                    await apply.ExecuteNonQueryAsync(cancellationToken);
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+                {
+                    /* #5582: the rung's SET LOCAL lock_timeout fired, so a session holds a lock on a table the rung needs. Roll back first
+                       (the aborted transaction cannot run the diagnostic query), say who holds what, then let the failure go on: the
+                       store-migrate loop retries the rung, and collection waits behind that loop. */
+                    await TryRollbackAsync(transaction);
+                    await LogLockHoldersAsync(connection, logger, migration.Version, migration.Name, ex.MessageText, cancellationToken);
+                    throw;
+                }
+
+                using (var stamp = new NpgsqlCommand(
+                    "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ($1, $2, $3)", connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds })
+                {
+                    stamp.Parameters.AddWithValue(migration.Version);
+                    stamp.Parameters.AddWithValue(migration.Name);
+                    /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
+                    stamp.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+                    await stamp.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
             }
-            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+            catch (Exception ex)
             {
-                /* #5582: the rung's SET LOCAL lock_timeout fired, so a session holds a lock on a table the rung needs. Roll back first
-                   (the aborted transaction cannot run the diagnostic query), say who holds what, then let the failure go on: the
-                   store-migrate loop retries the rung, and collection waits behind that loop. */
-                await TryRollbackAsync(transaction);
-                await LogLockHoldersAsync(connection, logger, migration.Version, migration.Name, ex.MessageText, cancellationToken);
+                observer?.RungFinished(migration.Version, migration.Name, rungStartedUtc, rungClock.ElapsedMilliseconds,
+                    MigrationRungOutcome.Failed, ex.Message);
                 throw;
             }
 
-            using (var stamp = new NpgsqlCommand(
-                "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ($1, $2, $3)", connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds })
-            {
-                stamp.Parameters.AddWithValue(migration.Version);
-                stamp.Parameters.AddWithValue(migration.Name);
-                /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
-                stamp.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
-                await stamp.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            await transaction.CommitAsync(cancellationToken);
+            observer?.RungFinished(migration.Version, migration.Name, rungStartedUtc, rungClock.ElapsedMilliseconds,
+                MigrationRungOutcome.Applied, null);
             applied++;
         }
 

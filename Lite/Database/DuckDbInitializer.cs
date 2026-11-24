@@ -677,7 +677,23 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 85;
+    internal const int CurrentSchemaVersion = 86;
+
+    /* #9425: what this instance's start did to the schema, for the build history row. The version stamp the file carried before
+       the first open (0 for a fresh file), the stamp after the last one, and the milliseconds the migration steps took. A start
+       that opens the store more than once (the headless retry, a rebuild) keeps the first "before" and sums the migration time. */
+    private int? _startupSchemaBefore;
+    private int _startupSchemaAfter;
+    private long _startupMigrationMs;
+
+    /// <summary>The schema version stamped in the store file before this start's first open. Null until a start has run.</summary>
+    internal int? StartupSchemaBefore => _startupSchemaBefore;
+
+    /// <summary>The schema version stamped in the store file after this start's last open.</summary>
+    internal int StartupSchemaAfter => _startupSchemaAfter;
+
+    /// <summary>Milliseconds the schema migration steps took across this start. Zero when none ran.</summary>
+    internal long StartupMigrationMs => _startupMigrationMs;
 
     private readonly string _archivePath;
 
@@ -1683,10 +1699,13 @@ public partial class DuckDbInitializer : IDisposable
                expecting CREATE TABLE to follow, which is destructive on a blank DB.
                Just create tables with the current schema and stamp the version. */
             _versionHeldBackAt = null;
+            _startupSchemaBefore ??= existingVersion;
             if (existingVersion > 0 && existingVersion < CurrentSchemaVersion)
             {
                 _logger?.LogInformation("Schema upgrade needed: v{Old} -> v{New}", existingVersion, CurrentSchemaVersion);
+                var migrationClock = System.Diagnostics.Stopwatch.StartNew();
                 await RunMigrationsAsync(connection, existingVersion);
+                _startupMigrationMs += migrationClock.ElapsedMilliseconds;
             }
 
             foreach (var tableStatement in Schema.GetAllTableStatements())
@@ -1722,6 +1741,8 @@ public partial class DuckDbInitializer : IDisposable
             {
                 await SetSchemaVersionAsync(connection, _versionHeldBackAt ?? CurrentSchemaVersion);
             }
+
+            _startupSchemaAfter = existingVersion < CurrentSchemaVersion ? _versionHeldBackAt ?? CurrentSchemaVersion : existingVersion;
 
             /* Exact duplicate deadlock rows an older build stored twice (a master-registered Azure database's own
                session and the server's telemetry): removed on every start, keeping the earliest of each. A no-op
@@ -3542,6 +3563,23 @@ public partial class DuckDbInitializer : IDisposable
                the table statements that run after the migrations. An older build refuses a file stamped v85 (SchemaVersionTooNewException). */
             _logger?.LogInformation("Running migration to v85: adding query_text_digest to query_store_stats, query_stats and plan_correction");
             await AddMissingColumnsAsync(connection, LiteTextDimensions.DigestColumns(85));
+        }
+
+        if (fromVersion < 86)
+        {
+            /* v86 (#9423): mcp_slow_calls, the MCP calls that took two seconds or more. A new table with no row to backfill: a database older
+               than v86 has no slow calls recorded, which is the state before the feature. Non-fatal, matching v69: without the table a row
+               write fails and is logged at Debug, the read tool answers an error, and every other tool is untouched. The table statements
+               that follow retry the CREATE on the next start. An older build refuses a file stamped v86 (SchemaVersionTooNewException). */
+            _logger?.LogInformation("Running migration to v86: adding mcp_slow_calls (the slow MCP call rows)");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, Schema.CreateMcpSlowCallsTable);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v86 encountered an error (non-fatal): {Error}", ex.Message);
+            }
         }
     }
 

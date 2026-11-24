@@ -71,6 +71,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// that the checkpointer had been there; the per-interval figures the MCP surface and the self-alert judge
 /// are DIFFERENCES between consecutive rows, computed at read time — see <see cref="CheckpointerInsertSql"/>
 /// for why the counters are stored raw;</item>
+/// <item>one row carrying the store's own WAL figures (<c>object_kind = 'wal'</c>, #9419): <c>pg_stat_wal</c>'s cumulative counters and the size and file count of <c>pg_wal</c>, written by <see cref="StoreWalFigures"/> into its own columns (V305)</item>
 /// <item>one summary row (<c>object_kind = 'store'</c>): <c>pg_database_size</c> plus the enabled-server
 /// count (the fleet reader's <c>WHERE is_enabled</c> registry predicate), so the per-server ingest rate —
 /// daily growth divided by servers, the number onboarding N primaries multiplies — is derivable from the
@@ -1731,6 +1732,9 @@ WHERE metric_time < $1";
             written += await checkpointer.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        /* #9419: the store's own WAL figures, raw like the checkpointer row. Failure-isolated inside: a role that cannot read them never fails the sweep. */
+        written += await StoreWalFigures.CaptureAsync(connection, metricTime, logger, cancellationToken);
+
         /* #3582: the product-owned plain tables the inventory knows by name. */
         using (var tables = new NpgsqlCommand(TableInsertSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
@@ -1763,6 +1767,10 @@ WHERE metric_time < $1";
             retention.Parameters.AddWithValue(metricTime.AddDays(-RetentionDays));
             await retention.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        /* #9413: what each store table did this hour, as deltas. Its own rows and its own retention, so it adds nothing to the count above, and a failure
+           inside it is logged there and never fails the sweep. */
+        await StoreTableActivity.CaptureAsync(connection, timescaleAvailable, utcNow, logger, SweepTimeoutSeconds, cancellationToken);
 
         logger?.LogDebug("Store self-metrics sweep wrote {Rows} rows at {MetricTime}", written, metricTime);
         return written;
