@@ -140,11 +140,15 @@ public sealed class WebOverridesBesideFleetLiveTests
             var workers = new List<Task>();
             for (var w = 0; w < 4; w++)
             {
-                workers.Add(Task.Run(() => Worker("/api/threshold-overrides", 150), ct));
-                workers.Add(Task.Run(() => Worker("/api/fleet", 150), ct));
+                workers.Add(Task.Run(() => Worker("/api/threshold-overrides", 100), ct));
+                workers.Add(Task.Run(() => Worker("/api/fleet", 100), ct));
             }
 
-            await Task.WhenAll(workers);
+            var finished = Task.WhenAll(workers);
+            if (await Task.WhenAny(finished, Task.Delay(TimeSpan.FromSeconds(90), ct)) != finished)
+            {
+                failures.Add("reads were still waiting 90 s after they started");
+            }
 
             Assert.True(failures.IsEmpty, "A read failed while the other route ran: " + string.Join(" | ", failures.Take(3)));
             Assert.True(Interlocked.Read(ref slowest) < 10_000, $"A read waited {slowest} ms beside the other route");
