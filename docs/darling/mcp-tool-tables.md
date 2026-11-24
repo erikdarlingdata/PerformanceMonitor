@@ -213,6 +213,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_server_settings` | `config.config_monitored_servers` |
 | `get_slow_reads` | `collect.slow_reads` |
 | `get_store_host` | `collect.store_metrics` |
+| `get_store_lock_waits` | `collect.store_lock_waits` |
 | `get_store_log` | `collect.store_log_captures`<br>`collect.store_log_events` |
 | `get_store_metrics` | `collect.store_metrics`<br>`collect.query_store_compose_stamp_failures` |
 | `get_store_query_history` | `collect.store_statement_history`<br>`collect.store_statement_captures`<br>`config.store_statement_stats()` (function over pg_stat_statements) |

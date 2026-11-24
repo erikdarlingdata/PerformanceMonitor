@@ -43,7 +43,7 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class StoreLockWaits
 {
     /// <summary>The store schema version that adds <c>collect.store_lock_waits</c>.</summary>
-    public const int Version = 305;
+    public const int Version = 306;
 
     /// <summary>A wait shorter than this gets no row.</summary>
     public const int ThresholdMilliseconds = 5000;
@@ -86,7 +86,7 @@ public static class StoreLockWaits
     /// <summary>The time one read of the sessions may take, in seconds.</summary>
     public const int PidMapRefreshTimeoutSeconds = 15;
 
-    /// <summary>The rung (V305): one empty plain table and two indexes. No data moves. An older build never reads it.</summary>
+    /// <summary>The rung (V306): one empty plain table and two indexes. No data moves. An older build never reads it.</summary>
     public const string CreateSql = @"
 CREATE TABLE IF NOT EXISTS collect.store_lock_waits
 (
