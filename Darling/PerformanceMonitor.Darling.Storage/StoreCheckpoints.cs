@@ -187,7 +187,7 @@ FROM (SELECT " + StampToUtc("$2") + @" AS ended) AS e";
     public sealed record Parsed(IReadOnlyList<Line> Lines, int NoStamp, int Dropped = 0);
 
     private static readonly Regex s_head = new(
-        @"^(?<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\b.*?\bLOG:  (?<kind>checkpoint|restartpoint) (?<what>starting|complete): (?<rest>.*?)\s*$",
+        @"^(?<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)\b.*?\bLOG:  (?<kind>checkpoint|restartpoint) (?<what>starting|complete):s*(?<rest>.*?)\s*$",
         RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     private static readonly Regex s_headNoStamp = new(
