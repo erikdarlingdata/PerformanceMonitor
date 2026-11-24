@@ -290,36 +290,93 @@ public sealed class StoreCheckpoints9414LiveTests
         Assert.Equal(1L, json.GetProperty("hours").EnumerateArray().Sum(h => h.GetProperty("not_completed").GetInt64()));
     });
 
-    [Fact]
-    public Task ACatchUpSweepWithTheCompleteLineOfOneCheckpointAndAWholeLaterOne_PairsEachRightWithNoDuplicate() => WithStoreAsync(false, async (connection, postgres, ct) =>
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
-        var now = DateTime.UtcNow.Date.AddHours(DateTime.UtcNow.Hour);
-        string At(int minutes, int seconds) => now.AddMinutes(-minutes).AddSeconds(seconds).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + ".000";
-        var log = new StringBuilder();
-        log.Append($"{At(40, 0)} UTC [88] LOG:  checkpoint starting: time\n");
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
 
-        // Sweep 1 reads checkpoint A's start line only.
-        await SweepLaterAsync(connection, log.ToString(), 3, ct);
+    private static async Task<string> LogTimezoneAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT current_setting('log_timezone')", connection);
+        return (string)(await command.ExecuteScalarAsync(ct))!;
+    }
 
-        // Sweep 2 reads A's complete line, then all of checkpoint B (start and complete) in the order the log has them.
-        log.Append(Complete(At(40, 30), 900, "30.000", 300));
-        log.Append($"{At(30, 0)} UTC [88] LOG:  checkpoint starting: wal\n");
-        log.Append(Complete(At(30, 10), 400, "10.000", 40));
-        await SweepLaterAsync(connection, log.ToString(), 2, ct);
+    /// <summary>
+    /// The whole write path on a server whose log clock is not UTC, read back through the tool: a start line and its complete line in one slab,
+    /// a complete line whose start line was never read, a start line that never completes, and a catch-up sweep that reads one checkpoint's
+    /// complete line together with a whole later checkpoint. Every time must come back as UTC, each complete line on its own checkpoint.
+    /// log_timezone only changes by reload, so the test sets it on the scratch cluster and puts it back.
+    /// </summary>
+    [Fact]
+    public Task ALogOnANonUtcClock_IsKeptAsUtc_EachCompleteLineOnItsOwnCheckpoint_AndOnlyACheckpointAnotherFollowedIsNotCompleted() => WithStoreAsync(false, async (connection, postgres, ct) =>
+    {
+        const string Zone = "Asia/Kolkata";
+        try
+        {
+            try
+            {
+                await ExecAsync(connection, $"ALTER SYSTEM SET log_timezone = '{Zone}'", ct);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
+            {
+                Assert.Skip("The test login may not ALTER SYSTEM, so the log clock cannot be moved off UTC here.");
+            }
 
-        // Sweep 3 reads the next checkpoint's pair.
-        log.Append($"{At(20, 0)} UTC [88] LOG:  checkpoint starting: time\n");
-        log.Append(Complete(At(20, 20), 50, "20.000", 7));
-        await SweepLaterAsync(connection, log.ToString(), 1, ct);
+            await ExecAsync(connection, "SELECT pg_reload_conf()", ct);
+            for (var attempt = 0; attempt < 50 && await LogTimezoneAsync(connection, ct) != Zone; attempt++)
+            {
+                await Task.Delay(100, ct);
+            }
 
-        var json = await ReadAsync(postgres, 24, LoggingOnEnglish, ct);
-        var rows = json.GetProperty("checkpoints").EnumerateArray().ToList();
-        Assert.Equal(3, rows.Count);
-        Assert.Equal(new[] { 7, 40, 300 }, rows.Select(r => r.GetProperty("files_synced").GetInt32()).ToArray());
-        Assert.Equal(new[] { "time", "wal", "time" }, rows.Select(r => r.GetProperty("reason").GetString()!).ToArray());
-        Assert.All(rows, r => Assert.NotEqual(JsonValueKind.Null, r.GetProperty("ended_at").ValueKind));
-        Assert.Equal(new[] { 20L, 10L, 30L }, rows.Select(r => (long)(r.GetProperty("ended_at").GetDateTime() - r.GetProperty("started_at").GetDateTime()).TotalSeconds).ToArray());
-        Assert.Equal(0L, json.GetProperty("hours").EnumerateArray().Sum(h => h.GetProperty("not_completed").GetInt64()));
+            Assert.Equal(Zone, await LogTimezoneAsync(connection, ct));
+
+            var now = DateTime.UtcNow.Date.AddHours(DateTime.UtcNow.Hour);
+            DateTime Utc(int minutes, int seconds) => now.AddMinutes(-minutes).AddSeconds(seconds);
+            // The log writes the stamp on the server's clock: UTC plus five and a half hours.
+            string Stamp(int minutes, int seconds) => Utc(minutes, seconds).AddHours(5.5).ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + ".000";
+            var log = new StringBuilder();
+
+            // Sweep 1 reads checkpoint A's start line only.
+            log.Append($"{Stamp(50, 0)} IST [88] LOG:  checkpoint starting: time\n");
+            await SweepLaterAsync(connection, log.ToString(), 3, ct);
+
+            // Sweep 2 reads A's complete line, a complete line with no start line (B), and all of a later checkpoint (E).
+            log.Append(Complete(Stamp(50, 30), 900, "30.000", 300));
+            log.Append(Complete(Stamp(40, 10), 60, "10.000", 40));
+            log.Append($"{Stamp(30, 0)} IST [88] LOG:  checkpoint starting: wal\n");
+            log.Append(Complete(Stamp(30, 20), 50, "20.000", 7));
+            await SweepLaterAsync(connection, log.ToString(), 2, ct);
+
+            // Sweep 3 reads a start line that never completes (C) and a newer one still running (D).
+            log.Append($"{Stamp(20, 0)} IST [88] LOG:  checkpoint starting: wal\n");
+            log.Append($"{Stamp(10, 0)} IST [88] LOG:  checkpoint starting: time\n");
+            await SweepLaterAsync(connection, log.ToString(), 1, ct);
+
+            var json = await ReadAsync(postgres, 24, LoggingOnEnglish, ct);
+            var rows = json.GetProperty("checkpoints").EnumerateArray().ToList();
+            Assert.Equal(5, rows.Count);
+            Assert.Equal(new[] { Utc(10, 0), Utc(20, 0), Utc(30, 0), Utc(40, 10).AddSeconds(-10), Utc(50, 0) },
+                rows.Select(r => r.GetProperty("started_at").GetDateTime()).ToArray());
+            Assert.Equal(new[] { "time", "wal", "wal", "none", "time" },
+                rows.Select(r => r.GetProperty("reason").ValueKind == JsonValueKind.Null ? "none" : r.GetProperty("reason").GetString()!).ToArray());
+
+            // D and C are open. E, B and A closed on their own complete lines, at their own end times, with their own figures.
+            Assert.Equal(JsonValueKind.Null, rows[0].GetProperty("ended_at").ValueKind);
+            Assert.Equal(JsonValueKind.Null, rows[1].GetProperty("ended_at").ValueKind);
+            Assert.Equal(new[] { Utc(30, 20), Utc(40, 10), Utc(50, 30) }, rows.Skip(2).Select(r => r.GetProperty("ended_at").GetDateTime()).ToArray());
+            Assert.Equal(new[] { 20000L, 10000L, 30000L }, rows.Skip(2).Select(r => r.GetProperty("total_ms").GetInt64()).ToArray());
+            Assert.Equal(new[] { 7, 40, 300 }, rows.Skip(2).Select(r => r.GetProperty("files_synced").GetInt32()).ToArray());
+            Assert.Equal(new[] { 50, 60, 900 }, rows.Skip(2).Select(r => r.GetProperty("buffers_written").GetInt32()).ToArray());
+
+            // Only C is counted: D started last, so it may still be running.
+            Assert.Equal(1L, json.GetProperty("hours").EnumerateArray().Sum(h => h.GetProperty("not_completed").GetInt64()));
+        }
+        finally
+        {
+            await ExecAsync(connection, "ALTER SYSTEM RESET log_timezone", CancellationToken.None);
+            await ExecAsync(connection, "SELECT pg_reload_conf()", CancellationToken.None);
+        }
     });
 
     [Fact]
