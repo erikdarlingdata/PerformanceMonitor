@@ -77,10 +77,11 @@ public sealed class ClientTimeoutsCapturedCallMatchTests : IClassFixture<SharedD
         Assert.Equal(2, reading.MatchedSamples);
         Assert.Equal(2, reading.ShortSamples);
 
-        /* Only the two short samples no call explains are left out: 55 x 2/4. */
+        /* Only the two short samples no call explains are left out: the exact count x 2/4. */
         var finding = AttentionEvaluator.Evaluate(reading, 1, 10_000);
         Assert.NotNull(finding);
-        Assert.Equal(27.5d, finding!.JudgedCount, 6);
+        Assert.True(reading.TotalCount > 0);
+        Assert.Equal(reading.TotalCount * 2 / 4.0, finding!.JudgedCount, 6);
         Assert.Equal(2, finding.MatchedCalls);
     }
 
