@@ -64,7 +64,10 @@ public sealed class StoreServerCertificateTests
             Assert.Equal(DateTimeKind.Utc, report.Server.NotAfterUtc.Kind);
             Assert.Equal(leaf.NotBefore.ToUniversalTime(), report.Server.NotBeforeUtc);
             Assert.InRange(StoreServerCertificate.DaysToExpiry(report.Server.NotAfterUtc, DateTime.UtcNow), 3640, 3660);
-            Assert.Equal(-1, StoreServerCertificate.DaysToExpiry(report.Server.NotAfterUtc, report.Server.NotAfterUtc.AddHours(30)));
+            /* Rounded down, so anything past the expiry reads negative: 6 hours past is -1, and 30 hours past is -2. */
+            Assert.Equal(-1, StoreServerCertificate.DaysToExpiry(report.Server.NotAfterUtc, report.Server.NotAfterUtc.AddHours(6)));
+            Assert.Equal(-2, StoreServerCertificate.DaysToExpiry(report.Server.NotAfterUtc, report.Server.NotAfterUtc.AddHours(30)));
+            Assert.Equal(0, StoreServerCertificate.DaysToExpiry(report.Server.NotAfterUtc, report.Server.NotAfterUtc.AddHours(-6)));
         }
         finally
         {
@@ -173,7 +176,7 @@ public sealed class StoreServerCertificateTests
             var postgres = new PostgresConfig { Managed = false };
             var report = await StoreServerCertificate.ReadAsync(postgres, "on", $"Host=127.0.0.1;Port={port};Username=u;Database=d", ct);
 
-            Assert.Equal("on", report.Tls);
+            Assert.True(report.Tls == "on", $"tls={report.Tls}: {report.Message}");
             Assert.Equal("tls_handshake", report.Source);
             Assert.Equal(Hex(leaf), report.Server!.Sha256);
             Assert.Equal(leaf.NotAfter.ToUniversalTime(), report.Server.NotAfterUtc);
