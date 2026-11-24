@@ -981,6 +981,10 @@ DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
         // V303 (#9384): the clutter-day stamp table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V303 creates it empty. Safe on a store
         // that never had it.
         new(303, "hasClutterDayBuilt", @"DROP TABLE IF EXISTS collect.query_store_clutter_day_built;"),
+        // V304 (#9415): the service start history's two tables. The pair is the probe's newest sentinel. The rewind drops both, so a re-run of V304 creates them empty. Safe on a
+        // store that never had them.
+        new(304, "hasServiceStartHistory", @"DROP TABLE IF EXISTS collect.service_start_rungs;
+DROP TABLE IF EXISTS collect.service_starts;"),
     ];
 
     /// <summary>

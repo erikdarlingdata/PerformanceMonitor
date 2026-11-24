@@ -118,6 +118,12 @@ public sealed partial class DarlingWorker
            job and no reloptions. No rung uses CREATE INDEX CONCURRENTLY or any other statement that
            cannot be transacted. */
         var storeRetryBudget = System.Diagnostics.Stopwatch.StartNew();
+        /* #9415: this start's row in the store's start history, and a row per migration rung it tries. The recorder hears the runner as it goes and
+           holds what it hears until the history's tables exist (a rung makes them). It flushes when the store is ready, after a failed attempt (so a
+           start that dies in a rung shows it), once a minute for the ERROR and WARN counts, and once more at shutdown. Never fails or delays the start. */
+        var startRecorder = ServiceStartRecorder.ForThisProcess(ServiceLogTally.Shared, ProcessStartUtc());
+        using var startHistoryStop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        var startHistoryFlusher = startRecorder.RunAsync(postgres, _logger, startHistoryStop.Token);
         /* #4508: set once, the first time the fast budget above runs out on a failure that is still
            retryable — see the arm below. Gates CRITICAL-once/WARNING-per-retry the same way the config
            and bootstrap sites' single terminal LogCritical already is "once": this is the sustained arm's
@@ -133,9 +139,11 @@ public sealed partial class DarlingWorker
                    collect/config for every future connection (V8 security split); a least-privilege BYO
                    login that cannot ALTER DATABASE is warned, not failed — the managed connection strings
                    carry Search Path regardless. */
-                var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken);
+                var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken, startRecorder);
                 _logger.LogInformation("Postgres store ready (schema v{Version}, {Applied} migration(s) applied)",
                     StorageVersion.SchemaVersion, applied);
+                startRecorder.StoreReady();
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
                 /* #4961: this install's id, made (or read back) now that the schema is current and before any worker
                    starts. Inside this try, on the same connection, so a failure to make it is retried and triaged exactly
                    like a failed migration. The CLI and the Viewer only read the row. */
@@ -167,6 +175,7 @@ public sealed partial class DarlingWorker
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException
@@ -206,6 +215,7 @@ public sealed partial class DarlingWorker
 
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts, sustained: true);
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
                 await Task.Delay(next.Delay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -215,6 +225,10 @@ public sealed partial class DarlingWorker
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
                 _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store);
+                /* #9415: the flush loop's last flush writes the failed rung, if the history's tables exist, before the service stands down and the
+                   data source goes. */
+                startHistoryStop.Cancel();
+                await startHistoryFlusher;
                 return;
             }
         }
@@ -2060,6 +2074,9 @@ public sealed partial class DarlingWorker
 
         /* And the relation sizes writer (#9374): it ends at shutdown and never throws. */
         await relationSizesWriter;
+
+        /* And the start history's flush loop (#9415): it ends at shutdown with one last flush, bounded at five seconds, and never throws. */
+        await startHistoryFlusher;
 
         /* And the slow-read writer (#5097): a record still queued at shutdown is dropped. */
         try

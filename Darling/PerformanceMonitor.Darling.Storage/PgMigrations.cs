@@ -4039,6 +4039,10 @@ END $$;";
            after midnight and not wait for the grid's close. One plain table created empty: no data moves. An older build ignores it and serves a clutter day
            only from the grid's own stamp, so a day built from its hours is read from the hourly or raw rows there. */
         new Migration(QueryStoreClutterDayFold.Version, "query-store-clutter-day-built", QueryStoreClutterDayFold.CreateSql),
+        /* V304 (#9415): the service start history (collect.service_starts and collect.service_start_rungs): a row per service start with its build, schema
+           change, ERROR and WARN counts, and a row per migration rung the start tried. Two plain tables created empty: no data moves. An older build ignores
+           them and writes no start rows. */
+        new Migration(ServiceStartHistory.Version, "service-start-history", ServiceStartHistory.CreateSql),
     };
 
     /// <summary>
@@ -11737,7 +11741,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// Path anyway (see <see cref="TrySetDatabaseSearchPathAsync"/>).
     /// </summary>
     public static async Task<int> MigrateAsync(
-        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default,
+        IMigrationRungObserver? observer = null)
     {
         if (connection is null)
         {
@@ -11757,7 +11762,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         int applied;
         try
         {
-            applied = await MigrateLockedAsync(connection, logger, Scripts, MigrationCommandTimeoutSeconds, cancellationToken);
+            applied = await MigrateLockedAsync(connection, logger, Scripts, MigrationCommandTimeoutSeconds, cancellationToken, observer);
         }
         finally
         {
@@ -11970,8 +11975,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// </summary>
     internal static Task<int> ApplyLadderForTestsAsync(
         NpgsqlConnection connection, ILogger? logger, IReadOnlyList<Migration> ladder, int defaultCommandTimeoutSeconds,
-        CancellationToken cancellationToken)
-        => MigrateLockedAsync(connection, logger, ladder, defaultCommandTimeoutSeconds, cancellationToken);
+        CancellationToken cancellationToken, IMigrationRungObserver? observer = null)
+        => MigrateLockedAsync(connection, logger, ladder, defaultCommandTimeoutSeconds, cancellationToken, observer);
 
     /// <summary>
     /// Applies every rung of <paramref name="ladder"/> above the store's stamped version, each in its own transaction
@@ -11981,7 +11986,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// </summary>
     private static async Task<int> MigrateLockedAsync(
         NpgsqlConnection connection, ILogger? logger, IReadOnlyList<Migration> ladder, int defaultCommandTimeoutSeconds,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, IMigrationRungObserver? observer = null)
     {
         /* Resolve bare names through collect/config for this migrate session. Load-bearing from V8
            on: V8 moves darling_schema_version into collect, and the version stamp below writes it by
@@ -12010,6 +12015,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
            applies nothing, since every rung this build has is at or below the stamp. */
         WarnIfStoreNewerThanBuild(logger, currentVersion, Scripts[^1].Version);
 
+        observer?.LadderStarted(currentVersion);
+
         var applied = 0;
         foreach (var migration in ladder)
         {
@@ -12030,34 +12037,50 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                     migration.Version, migration.Name, rungTimeoutSeconds);
             }
 
+            /* #9415: the rung's own clock, from its transaction to its commit, so the start history says how long each rung took
+               (darling_schema_version.applied_at gives only the gap between rungs). A rung that throws is reported as failed. */
+            var rungStartedUtc = DateTime.UtcNow;
+            var rungClock = System.Diagnostics.Stopwatch.StartNew();
             using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
             try
             {
-                using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = rungTimeoutSeconds };
-                await apply.ExecuteNonQueryAsync(cancellationToken);
+                try
+                {
+                    using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = rungTimeoutSeconds };
+                    await apply.ExecuteNonQueryAsync(cancellationToken);
+                }
+                catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+                {
+                    /* #5582: the rung's SET LOCAL lock_timeout fired, so a session holds a lock on a table the rung needs. Roll back first
+                       (the aborted transaction cannot run the diagnostic query), say who holds what, then let the failure go on: the
+                       store-migrate loop retries the rung, and collection waits behind that loop. */
+                    await TryRollbackAsync(transaction);
+                    await LogLockHoldersAsync(connection, logger, migration.Version, migration.Name, ex.MessageText, cancellationToken);
+                    throw;
+                }
+
+                using (var stamp = new NpgsqlCommand(
+                    "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ($1, $2, $3)", connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds })
+                {
+                    stamp.Parameters.AddWithValue(migration.Version);
+                    stamp.Parameters.AddWithValue(migration.Name);
+                    /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
+                    stamp.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
+                    await stamp.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
             }
-            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+            catch (Exception ex)
             {
-                /* #5582: the rung's SET LOCAL lock_timeout fired, so a session holds a lock on a table the rung needs. Roll back first
-                   (the aborted transaction cannot run the diagnostic query), say who holds what, then let the failure go on: the
-                   store-migrate loop retries the rung, and collection waits behind that loop. */
-                await TryRollbackAsync(transaction);
-                await LogLockHoldersAsync(connection, logger, migration.Version, migration.Name, ex.MessageText, cancellationToken);
+                observer?.RungFinished(migration.Version, migration.Name, rungStartedUtc, rungClock.ElapsedMilliseconds,
+                    MigrationRungOutcome.Failed, ex.Message);
                 throw;
             }
 
-            using (var stamp = new NpgsqlCommand(
-                "INSERT INTO darling_schema_version (version, name, applied_at) VALUES ($1, $2, $3)", connection, transaction) { CommandTimeout = MigrationCommandTimeoutSeconds })
-            {
-                stamp.Parameters.AddWithValue(migration.Version);
-                stamp.Parameters.AddWithValue(migration.Name);
-                /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
-                stamp.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
-                await stamp.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            await transaction.CommitAsync(cancellationToken);
+            observer?.RungFinished(migration.Version, migration.Name, rungStartedUtc, rungClock.ElapsedMilliseconds,
+                MigrationRungOutcome.Applied, null);
             applied++;
         }
 

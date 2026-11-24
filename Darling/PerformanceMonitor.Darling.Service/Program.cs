@@ -557,6 +557,9 @@ builder.Services.AddWindowsService(options =>
 var fileLoggerProvider = new DarlingFileLoggerProvider();
 builder.Logging.AddProvider(fileLoggerProvider);
 
+/* #9415: counts the service's own ERROR and WARN lines (and keeps the first of each) for the start history row. It writes nothing. */
+builder.Logging.AddProvider(new ServiceLogTallyProvider(ServiceLogTally.Shared));
+
 if (OperatingSystem.IsWindows())
 {
     /* Pin the Event Log source to the SERVICE NAME so operators find events where the docs say to

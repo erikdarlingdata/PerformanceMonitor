@@ -1554,6 +1554,23 @@ AND   j.hypertable_name = '{relation}'", connection))
                     ex.SqlState, ex.Message);
             }
 
+            /* #9415: the service start history's retention, on the same hourly tick. Its own catch: a failed purge costs the passes below nothing. */
+            try
+            {
+                if (_postgres is { } startHistorySource)
+                {
+                    await ServiceStartHistory.PurgeAsync(startHistorySource, DateTime.UtcNow, budget.Token);
+                }
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
+            {
+                /* A store below V304 has no start history to purge. */
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "The service start history retention could not run this hour");
+            }
+
             /* #3021: the store reading its OWN server log, on the same hourly tick and the same connection.
                It rides this cadence rather than carrying its own for two reasons. The log grows slowly (a
                production day is ~1,400 entries worth classifying), so an hourly bucket is the finest grain
