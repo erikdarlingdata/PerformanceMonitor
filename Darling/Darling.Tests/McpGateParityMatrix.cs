@@ -77,7 +77,7 @@ internal interface IGateHost
 /// <para>
 /// The apps differ by intent in two places, each written once below: <see cref="TokenInForce"/> (Lite's tokenless setting
 /// ignores a stored token, Darling's applies only when no token is stored) and <see cref="Registers"/> (the investigations
-/// arm serves 2 tools in Lite and 19 in Darling).
+/// arm serves 2 tools in Lite and 21 in Darling).
 /// </para>
 /// </summary>
 internal static class McpGateParityMatrix
@@ -146,10 +146,15 @@ internal static class McpGateParityMatrix
         "recompile_module", "create_plan_guide", "drop_plan_guide",
     };
 
-    /// <summary>The 17 tools Darling's investigations arm serves beyond the 2 shared ones. Lite has no tool of these names
+    /// <summary>Darling's change window tools (#9485): writes that the investigations arm serves as well, behind the per-call
+    /// agent switch. Not Level 2 action tools, so not in <see cref="DarlingAgentActionTools"/>. Spelled here because Lite.Tests compiles
+    /// this file and cannot reference the Darling service. The tools/list comparison fails when the product serves a name this table lacks.</summary>
+    internal static readonly string[] DarlingChangeWindowTools = { "declare_change_window", "clear_change_window" };
+
+    /// <summary>The 19 tools Darling's investigations arm serves beyond the 2 shared ones. Lite has no tool of these names
     /// (<see cref="Registers"/>).</summary>
     internal static readonly string[] DarlingInvestigationArmTools =
-        DarlingAgentActionTools.Append(DarlingInvestigationMessageTool).ToArray();
+        DarlingAgentActionTools.Concat(DarlingChangeWindowTools).Append(DarlingInvestigationMessageTool).ToArray();
 
     /// <summary>Lite's tools with no Darling tool of the same name: a read each. Darling's twin of get_blocked_process_reports is <c>get_blocking</c>; get_store_health (#8788) has none, Darling's store page being #8787.</summary>
     internal static readonly string[] LiteOnlyReads = { "get_blocked_process_reports", "get_store_health", "get_slow_mcp_calls" };
@@ -271,7 +276,7 @@ internal static class McpGateParityMatrix
 
     /// <summary>INTENDED DIFFERENCE: whether the app has a tool of this name at all. Lite has none of
     /// <see cref="DarlingInvestigationArmTools"/>, so its investigations arm serves the 2 shared investigation tools where
-    /// Darling's serves 19. Darling has no tool named as Lite's <see cref="LiteOnlyReads"/>.</summary>
+    /// Darling's serves 21. Darling has no tool named as Lite's <see cref="LiteOnlyReads"/>.</summary>
     internal static bool Registers(GateApp app, string tool) => app == GateApp.Lite
         ? !DarlingInvestigationArmTools.Contains(tool)
         : !LiteOnlyReads.Contains(tool);
@@ -339,7 +344,7 @@ internal static class McpGateParityMatrix
         {
             served = investigations;
         }
-        else if (DarlingAgentActionTools.Contains(tool))
+        else if (DarlingAgentActionTools.Contains(tool) || DarlingChangeWindowTools.Contains(tool))
         {
             served = investigations || writes;
         }
@@ -425,7 +430,7 @@ internal static class McpGateParityMatrix
 
     /// <summary>
     /// The investigations arm, by the whole of <c>tools/list</c>: turning the switch on adds exactly the names the rule
-    /// serves under the arm, 2 in Lite and 19 in Darling, and takes none away. The two full lists are compared, so a tool
+    /// serves under the arm, 2 in Lite and 21 in Darling, and takes none away. The two full lists are compared, so a tool
     /// outside the matrix that the arm serves fails here.
     /// </summary>
     internal static async Task AssertInvestigationsArmAddsWhatTheRuleNamesAsync(GateApp app, IGateHost readsOnly, IGateHost investigationsArm)
@@ -439,7 +444,7 @@ internal static class McpGateParityMatrix
             Tools.Where(tool => Expected(app, InvestigationsArm, GateCaller.StoredToken, tool) == GateOutcome.Served
                 && Expected(app, ReadsOnly, GateCaller.StoredToken, tool) != GateOutcome.Served),
             StringComparer.Ordinal);
-        Assert.Equal(app == GateApp.Lite ? 2 : 19, expected.Count);
+        Assert.Equal(app == GateApp.Lite ? 2 : 21, expected.Count);
         Assert.Equal(expected, new SortedSet<string>(armOn.Names!.Except(armOff.Names!), StringComparer.Ordinal));
         Assert.Empty(armOff.Names!.Except(armOn.Names!));
     }

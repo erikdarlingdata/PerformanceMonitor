@@ -168,7 +168,7 @@ public sealed class DarlingMcpInvestigationToolsTests
             Assert.False(byName[name].DestructiveHint);
         }
 
-        /* #5915, #5916: the investigations arm serves exactly the nine Level 2 action tools of the writes, each through the gate. The
+        /* #5915, #5916: the investigations arm serves exactly the nine Level 2 action tools of the writes, each through the gate, plus the change window tools (#9485, served to an agent without an agent_action). The
            literal is the behaviour pin: a write added to or dropped from the served set changes this list on purpose. */
         var servedWrites = byName.Keys.Where(DarlingMcpWritePolicy.IsWrite).OrderBy(n => n, StringComparer.Ordinal).ToArray();
         Assert.Equal(
@@ -176,7 +176,7 @@ public sealed class DarlingMcpInvestigationToolsTests
             {
                 "create_custom_alert_rule", "create_mute_rule", "create_plan_guide", "delete_custom_alert_rule", "delete_mute_rule",
                 "drop_plan_guide", "evict_cached_plan", "force_query_store_plan", "kill_session", "merge_deadlock_signatures", "recompile_module", "set_alert_threshold_override", "set_mute_rule_enabled", "unforce_query_store_plan", "update_custom_alert_rule", "update_mute_rule",
-            },
+            }.Concat(DarlingMcpWritePolicy.ChangeWindowTools).OrderBy(n => n, StringComparer.Ordinal).ToArray(),
             servedWrites);
         /* Every other write stays unserved: alert settings, the finding mute, routes, Custom Views, server tags, server admin. */
         foreach (var never in new[]
