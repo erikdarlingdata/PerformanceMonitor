@@ -101,7 +101,8 @@ FROM range({RowsPerKey}) AS a(r), range({Keys}) AS b(k)";
             await seed.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
-        await new ArchiveService(initializer, _archiveDir).ArchiveAllAndResetAsync();
+        /* The tie order only varies across several row groups, and a sorted merge writes one (#9407): ask for the small size. */
+        await new ArchiveService(initializer, _archiveDir) { SortedRowGroupSizeOverride = ParquetCompaction.ArchiveRowGroupSize }.ArchiveAllAndResetAsync();
         return initializer;
     }
 

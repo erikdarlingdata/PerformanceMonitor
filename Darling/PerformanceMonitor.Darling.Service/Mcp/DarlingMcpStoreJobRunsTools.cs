@@ -28,6 +28,33 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpStoreJobRunsTools
 {
+    /// <summary>This tool's entries on the web read surface and in Custom Views validation, kept here and not in the shared lists (#9477).</summary>
+    internal sealed class Registration : IReadToolRegistration
+    {
+        public ReadToolRegistration Read { get; } = new(
+            "get_store_job_runs",
+            (c, pg, an) => GetStoreJobRuns(
+                pg,
+                DarlingWebEndpoints.Hours(c, 24),
+                DarlingWebEndpoints.Str(c, "job_kind"),
+                DarlingWebEndpoints.Str(c, "hypertable"),
+                DarlingWebEndpoints.Rows(c, "limit", DefaultLimit),
+                DarlingWebEndpoints.AsOf(c),
+                responseByteBudget: null,
+                c.RequestAborted),
+            new(
+                DarlingWebEndpoints.CatOverview,
+                "Each run of the monitoring store's own TimescaleDB background jobs (compression, retention, refresh), newest first, with start, end, outcome and error, read live from TimescaleDB's own job history.",
+                new[]
+                {
+                    DarlingWebEndpoints.PHours(24),
+                    DarlingWebEndpoints.PText("job_kind"),
+                    DarlingWebEndpoints.PText("hypertable"),
+                    DarlingWebEndpoints.PLimit(DefaultLimit),
+                    DarlingWebEndpoints.PAsOf(),
+                }));
+    }
+
     /// <summary>Default runs returned. A busy store runs its jobs many times an hour, so this is a recent slice and the filters reach the rest.</summary>
     public const int DefaultLimit = 50;
 
