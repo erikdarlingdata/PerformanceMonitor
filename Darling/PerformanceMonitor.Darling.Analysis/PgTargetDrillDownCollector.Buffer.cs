@@ -104,6 +104,9 @@ totals AS (
         CAST(max(pool_buffers_used) AS bigint)                                                 AS pool_buffers_used,
         CAST(count(buffers) AS integer)                                                        AS relations_in_capture,
         CAST(coalesce(SUM(buffers), 0) AS bigint)                                              AS buffers_listed,
+        /* #9508: a capture over the pool cap is one totals row (buffers NULL) whose dirty_buffers is the whole pool's
+           dirty count, so on that capture this is pool-wide while buffers_listed is 0. Kept that way on purpose: it is
+           what dirty_share_of_pool needs to stay a true share of the pool. */
         CAST(coalesce(SUM(dirty_buffers), 0) AS bigint)                                        AS dirty_buffers_listed,
         CAST(coalesce(SUM(buffers) FILTER (WHERE relation_kind IN ('r', 'm')), 0) AS bigint)   AS heap_buffers,
         CAST(coalesce(SUM(buffers) FILTER (WHERE relation_kind = 'i'), 0) AS bigint)           AS index_buffers,
@@ -295,6 +298,7 @@ AND   e.extension_name = 'pg_buffercache'";
             PoolBytes: poolTotal * PgSettingValue.DefaultBlockBytes,
             PoolFill: poolUsed is { } used ? Share(used, poolTotal) : null,
             BuffersListed: listed,
+            // On a capture over the pool cap (#9508) this is the pool's own dirty count, not a sum of listed relations.
             DirtyBuffersListed: dirtyListed,
             DirtyShareOfPool: Share(dirtyListed, poolTotal),
             HeapShare: Share(heap, listed),
