@@ -16,6 +16,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -187,11 +188,23 @@ GROUP BY server_id, collector_name";
 
             /* "aa-late" sorts first by name, but its collector ran three minutes inside its interval before the start, so it came due after
                the start and is the youngest wait. With the list cut at 200 it must be the one cut, and the total must still count it. */
-            var late = CollectorCatalog.All
-                .Select(d => d.Name)
-                .First(name => CollectorScheduleDefaults.All.TryGetValue(name, out var e) && e.DefaultEnabled
-                    && CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(e.FrequencyMinutes) is >= 5 and < 1440);
-            var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(CollectorScheduleDefaults.All[late].FrequencyMinutes);
+            var overrides = await DarlingDataReader.ReadScheduleOverridesAsync(postgres, serverId: null, ct, throwOnFailure: true);
+            var schedules = StoreConfigProvider.MergeRunTimes(overrides, new List<RunTimeOverride>());
+            string? late = null;
+            var interval = 0;
+            foreach (var name in CollectorCatalog.All.Select(d => d.Name).Where(CollectorScheduleDefaults.All.ContainsKey))
+            {
+                var schedule = StoreConfigProvider.ResolveSchedule(name, SeedServerBase + 600, schedules);
+                var minutes = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(schedule.FrequencyMinutes);
+                if (schedule.Enabled && schedule.RunAtMinute is null && minutes is >= 5 and < 1440)
+                {
+                    late = name;
+                    interval = minutes;
+                    break;
+                }
+            }
+
+            Assert.NotNull(late);
             await RegisterServerAsync(connection, SeedServerBase + 600, "aa-late", ct);
             await InsertErrorAsync(connection, SeedServerBase + 600, "aa-late", late, start.AddMinutes(-(interval - 3)), ct);
 
@@ -256,8 +269,10 @@ SELECT 9417000000000 + row_number() OVER (),
             ELSE 'SUCCESS' END,
        10,
        CASE WHEN (r.s + r.c) % 101 = 3 THEN 0 WHEN (r.s + r.c) % 103 = 5 THEN NULL ELSE 5 END,
-       CASE WHEN (r.s + r.c) % 97 = 0 OR (r.s + r.c) % 101 <> 3 AND r.n % 23 = 1 AND (r.s + r.c) % 103 <> 5 THEN 'simulated failure ' || r.n
+       CASE WHEN (r.s + r.c) % 97 = 0 THEN 'simulated failure ' || r.n
             WHEN (r.s + r.c) % 101 = 3 THEN 'wall-clock budget (60s) reached; cycle abandoned'
+            WHEN (r.s + r.c) % 103 = 5 THEN NULL
+            WHEN r.n % 23 = 1 THEN 'simulated failure ' || r.n
             ELSE NULL END
 FROM (
     SELECT s, c.ordinality::int - 1 AS c, c.name, 1 + ((s * 7 + (c.ordinality::int - 1) * 3) % 15) AS iv, n
