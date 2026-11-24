@@ -17,7 +17,7 @@ In numbers:
 - 23 projects (4 app, 10 library, 5 test, 4 tool).
 - 294 Darling MCP tools and 117 Lite MCP tools.
 - 305 store migrations. The newest is version 306.
-- 4833 test classes in 5 test projects.
+- 4831 test classes in 5 test projects.
 - 19 CI workflows.
 
 To build, run these from the repository root:
@@ -662,7 +662,7 @@ A test class is a file whose name ends in `Tests.cs`.
 | Test project | Test classes |
 |---|---|
 | [`Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj`](../Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj) | 0 |
-| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3570 |
+| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3568 |
 | [`Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj`](../Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj) | 0 |
 | [`Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj`](../Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj) | 69 |
 | [`Lite.Tests/Lite.Tests.csproj`](../Lite.Tests/Lite.Tests.csproj) | 1194 |
@@ -693,4 +693,4 @@ A test class is a file whose name ends in `Tests.cs`.
 
 ---
 
-Generated from commit `37abd720a`. To refresh it, run `python tools/codemap/codemap.py`.
+Generated from commit `866355042`. To refresh it, run `python tools/codemap/codemap.py`.

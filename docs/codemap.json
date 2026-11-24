@@ -574,7 +574,7 @@
       ]
     }
   ],
-  "generated_from": "37abd720a",
+  "generated_from": "866355042",
   "mcp_tools": [
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
@@ -2861,7 +2861,7 @@
     {
       "name": "Darling.Tests",
       "project": "Darling/Darling.Tests/Darling.Tests.csproj",
-      "test_classes": 3570
+      "test_classes": 3568
     },
     {
       "name": "PerformanceMonitor.Exporter.TestChild",
