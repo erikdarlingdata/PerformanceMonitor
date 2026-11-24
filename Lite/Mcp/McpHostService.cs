@@ -272,7 +272,7 @@ public sealed class McpHostService : BackgroundService
 
         /* #9423: the per-tool figures and the slow-call rows. The timing filter (AddCallToolFilters) finds this singleton on each call; a host
            that registers none passes every call straight through. */
-        services.AddSingleton<McpCallTimingRecorder>(sp => new McpCallTimingRecorder(sp.GetRequiredService<LocalDataService>()));
+        services.AddSingleton<McpCallTimingRecorder>(sp => sp.GetService<LocalDataService>() is { } data ? new McpCallTimingRecorder(data) : null!);
 
         /* #5820: mcp_data_detail, read once per start. McpDataDetailFilter (AddCallToolFilters) reads this singleton on
            every call; Full passes everything through. */
@@ -349,7 +349,7 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpToolGuideTools>()
             /* #9388: find_tools searches the tools this request serves (the served ToolCollection). Darling twin: DarlingMcpToolSearchTools. */
             .WithGeminiCompatibleTools<McpToolSearchTools>()
-            /* #9423: get_slow_reads, the MCP calls that took 2 seconds or more and the per-tool figures. Darling's tool name. */
+            /* #9423: get_slow_mcp_calls, the MCP calls that took 2 seconds or more and the per-tool figures. */
             .WithGeminiCompatibleTools<McpSlowCallTools>()
             /* The unknown-argument guard (#3870): ONE call-tool filter, registered once, covering
                every tool with no per-tool change. A call carrying an argument no tool parameter

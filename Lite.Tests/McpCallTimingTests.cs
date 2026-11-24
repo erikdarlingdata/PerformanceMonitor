@@ -213,11 +213,11 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         await _data.RecordMcpSlowCallAsync(Row("tool_a", now.AddHours(-3)));
         var recorder = new McpCallTimingRecorder(_data);
 
-        using var all = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_reads", ("hours_back", 24))).Text);
+        using var all = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_mcp_calls", ("hours_back", 24))).Text);
         var tools = all.RootElement.GetProperty("slow_calls").EnumerateArray().Select(r => r.GetProperty("tool").GetString()).ToArray();
         Assert.Equal(new[] { "tool_b", "tool_a", "tool_a" }, tools);
 
-        using var one = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_reads", ("hours_back", 24), ("tool", "tool_a"), ("limit", 1))).Text);
+        using var one = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_mcp_calls", ("hours_back", 24), ("tool", "tool_a"), ("limit", 1))).Text);
         var only = Assert.Single(one.RootElement.GetProperty("slow_calls").EnumerateArray());
         Assert.Equal("tool_a", only.GetProperty("tool").GetString());
         Assert.Equal(now.AddHours(-3), only.GetProperty("call_time_utc").GetDateTime().ToUniversalTime(), TimeSpan.FromSeconds(1));
@@ -230,7 +230,7 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         await CallAsync(recorder, "timing_probe", ("secret", "s"));
         await CallAsync(recorder, "timing_probe", ("secret", "s"));
 
-        using var doc = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_reads")).Text);
+        using var doc = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_mcp_calls")).Text);
         var probe = doc.RootElement.GetProperty("per_tool").EnumerateArray().Single(t => t.GetProperty("tool").GetString() == "timing_probe");
         Assert.Equal(2, probe.GetProperty("count").GetInt64());
         Assert.Equal(0, probe.GetProperty("slow_calls").GetInt64());

@@ -16,9 +16,9 @@ using PerformanceMonitorLite.Services;
 namespace PerformanceMonitorLite.Mcp;
 
 /// <summary>
-/// <c>get_slow_reads</c> (#9423, #9424): the MCP calls Lite itself answered slowly, and the per-tool figures of every call since Lite
-/// started. The name is Darling's (<c>get_slow_reads</c>), which also carries the per-tool figures in its own <c>get_read_latency</c>;
-/// Lite returns both in one answer. Reads no monitored server.
+/// <c>get_slow_mcp_calls</c> (#9423, #9424): the MCP calls Lite itself answered slowly, and the per-tool figures of every call since Lite
+/// started. Darling has get_slow_reads and get_read_latency for the same job, with a different contract (statements, server_name, surface), and a shared tool name must carry a byte-identical description head on both editions (McpToolGuide), so Lite uses its own name and returns the slow rows and the per-tool figures in one answer.
+/// Reads no monitored server.
 /// </summary>
 [McpServerToolType]
 public sealed class McpSlowCallTools
@@ -38,7 +38,7 @@ public sealed class McpSlowCallTools
         "per_tool: for each tool called since Lite started, count, total_ms, mean_ms, max_ms, p50_ms, p95_ms and p99_ms (bucket upper bounds, never interpolated, capped at max_ms), " +
         "slow_calls and errors. Rows are kept 7 days, at most 1000. Optional tool filter on slow_calls. Empty slow_calls means no call was slow, not a failure.";
 
-    [McpServerTool(Name = "get_slow_reads"), Description(Description)]
+    [McpServerTool(Name = "get_slow_mcp_calls"), Description(Description)]
     public static async Task<string> GetSlowReads(
         LocalDataService dataService,
         McpCallTimingRecorder recorder,
@@ -95,7 +95,7 @@ public sealed class McpSlowCallTools
         }
         catch (Exception ex)
         {
-            return McpHelpers.FormatError("get_slow_reads", ex);
+            return McpHelpers.FormatError("get_slow_mcp_calls", ex);
         }
     }
 }
