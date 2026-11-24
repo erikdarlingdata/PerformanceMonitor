@@ -378,9 +378,11 @@ SELECT
         {
             var filtered = scrub.Text(reader.IsDBNull(7) ? null : reader.GetString(7));
             var aborted = !reader.IsDBNull(8) && string.Equals(reader.GetString(8), KindAborted, StringComparison.Ordinal);
-            if (aborted && !reader.IsDBNull(9) && filtered is not null)
+            if (aborted && !reader.IsDBNull(9) && filtered is not null
+                && !string.Equals(filtered, SensitiveStatements.PlaceholderText, StringComparison.Ordinal))
             {
-                /* An RPC names its object: "dbo.proc: <statement>". A batch has no object name. */
+                /* An RPC names its object: "dbo.proc: <statement>". A batch has no object name. A withheld statement stays the bare
+                   marker: prefixed, it would get a fingerprint and group every withheld call of one object together (#4348). */
                 filtered = reader.GetString(9) + ": " + filtered;
             }
 
