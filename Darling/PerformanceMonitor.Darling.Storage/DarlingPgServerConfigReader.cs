@@ -80,7 +80,8 @@ public static class DarlingPgServerConfigReader
     /// (#3937) carries at least one of the two scope names and one of <c>changed</c>, <c>set</c>
     /// (<see cref="OldValue"/> NULL: nothing was there before) or <c>reset</c> (<see cref="NewValue"/> NULL:
     /// nothing is there now), and no unit, context or description, which the catalog does not hold.
-    /// <see cref="PlatformResized"/> (#9500) is set in C# by <see cref="GetConfigChangesAsync"/>, never by the SQL.
+    /// <see cref="PlatformResized"/> and <see cref="PlatformResizeUndecided"/> (#9500) are set in C# by
+    /// <see cref="GetConfigChangesAsync"/>, never by the SQL.
     /// </summary>
     public readonly record struct PgConfigChangeRow(
         DateTime ChangedAtUtc,
@@ -94,7 +95,8 @@ public static class DarlingPgServerConfigReader
         string? DatabaseName = null,
         string? RoleName = null,
         string ChangeKind = PgConfigChangeKind.Changed,
-        bool PlatformResized = false);
+        bool PlatformResized = false,
+        bool PlatformResizeUndecided = false);
 
     /// <summary>The three <see cref="PgConfigChangeRow.ChangeKind"/> spellings, as <see cref="ScopedConfigChangesSql"/>
     /// projects them (#3937).</summary>
@@ -618,18 +620,21 @@ public static class DarlingPgServerConfigReader
     /// <summary>
     /// #9500: for each server-wide change (<c>$2</c> names, <c>$3</c> the snapshot times that first reported the new
     /// value), the <c>postmaster_start_time</c> of the newest <c>pg_write_stats</c> row at or before the PREVIOUS snapshot of
-    /// that setting and of the newest at or before the snapshot that reported the move. The previous snapshot is
+    /// that setting, and of the EARLIEST row at or after the snapshot that reported the move. The previous snapshot is
     /// found the way <see cref="ConfigChangesSql"/>'s <c>LAG</c> finds it: the newest earlier row of the same
-    /// name, server-wide, with the same source exclusion. A row comes back only when a previous snapshot exists. A
-    /// start time is NULL when no <c>pg_write_stats</c> row exists at or before the time or the row was written
-    /// before V139.
+    /// name, server-wide, with the same source exclusion. The two reads bracket the move, so two equal start times
+    /// prove the server did not restart between them, however long the gap. A row comes back only when a previous
+    /// snapshot exists. A start time is NULL when no <c>pg_write_stats</c> row exists on that side or the row was written
+    /// before V139. The fifth column is the time of the row after the move, NULL when none exists yet (the row is then
+    /// undecided, not a restart).
     /// </summary>
     public const string PlatformResizeProbeSql = """
         SELECT
             cand.name,
             cand.changed_at,
             ws_prev.postmaster_start_time,
-            ws_new.postmaster_start_time
+            ws_new.postmaster_start_time,
+            ws_new.collection_time
         FROM unnest($2::text[], $3::timestamp[]) AS cand(name, changed_at)
         CROSS JOIN LATERAL
         (
@@ -655,11 +660,11 @@ public static class DarlingPgServerConfigReader
         ) AS ws_prev ON true
         LEFT JOIN LATERAL
         (
-            SELECT w.postmaster_start_time
+            SELECT w.postmaster_start_time, w.collection_time
             FROM pg_write_stats AS w
             WHERE w.server_id = $1
-            AND   w.collection_time <= cand.changed_at
-            ORDER BY w.collection_time DESC
+            AND   w.collection_time >= cand.changed_at
+            ORDER BY w.collection_time ASC
             LIMIT 1
         ) AS ws_new ON true
         """;
@@ -669,8 +674,11 @@ public static class DarlingPgServerConfigReader
     /// (<c>shared_buffers</c> follows the allocated capacity) moves with no restart. A <c>postmaster</c> setting
     /// takes effect only at a restart, so a move the server's own start time says had none can only come from the
     /// platform. All three must hold: the target is Aurora PostgreSQL, the row's context is <c>postmaster</c>, and
-    /// both ends' start times are known and equal (<see cref="PostmasterRestart.BothKnownAndEqual"/>). Anything
-    /// missing leaves the row exactly as it was reported before. The context decides, not a named list of settings.
+    /// the start time read before the previous snapshot and the one read after the move are known and equal
+    /// (<see cref="PostmasterRestart.BothKnownAndEqual"/>). Anything missing leaves the row exactly as it was reported
+    /// before. The context decides, not a named list of settings. When the earlier start is known and no write-stats row
+    /// exists after the move yet, the row is UNDECIDED (<see cref="PgConfigChangeRow.PlatformResizeUndecided"/>): it is
+    /// reported unflagged, and Change Watch reads it again on its next detect, when the after row exists.
     /// </summary>
     private static async Task<List<PgConfigChangeRow>> MarkPlatformResizedAsync(
         NpgsqlDataSource postgres, int serverId, List<PgConfigChangeRow> serverWide, CancellationToken cancellationToken)
@@ -698,6 +706,7 @@ public static class DarlingPgServerConfigReader
         }
 
         var resized = new HashSet<(string Name, DateTime At)>();
+        var undecided = new HashSet<(string Name, DateTime At)>();
         await using (var command = postgres.CreateCommand(PlatformResizeProbeSql))
         {
             command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
@@ -708,24 +717,28 @@ public static class DarlingPgServerConfigReader
             while (await reader.ReadAsync(cancellationToken))
             {
                 DateTime? previousStart = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
-                DateTime? newestStart = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
-                if (PostmasterRestart.BothKnownAndEqual(previousStart, newestStart))
+                DateTime? afterStart = reader.IsDBNull(3) ? null : reader.GetDateTime(3);
+                if (PostmasterRestart.BothKnownAndEqual(previousStart, afterStart))
                 {
                     resized.Add((reader.GetString(0), reader.GetDateTime(1)));
+                }
+                else if (previousStart is not null && reader.IsDBNull(4))
+                {
+                    undecided.Add((reader.GetString(0), reader.GetDateTime(1)));
                 }
             }
         }
 
-        if (resized.Count == 0)
-        {
-            return serverWide;
-        }
-
         foreach (var i in candidates)
         {
-            if (resized.Contains((serverWide[i].Name, serverWide[i].ChangedAtUtc)))
+            var key = (serverWide[i].Name, serverWide[i].ChangedAtUtc);
+            if (resized.Contains(key))
             {
                 serverWide[i] = serverWide[i] with { PlatformResized = true };
+            }
+            else if (undecided.Contains(key))
+            {
+                serverWide[i] = serverWide[i] with { PlatformResizeUndecided = true };
             }
         }
 

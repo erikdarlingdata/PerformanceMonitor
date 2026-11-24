@@ -26,9 +26,10 @@ namespace Darling.Tests;
 /// #9500: a serverless PostgreSQL target's platform resizes <c>shared_buffers</c> with its capacity, with no restart. The move is a
 /// real value change in two snapshots, but not a configuration change anyone made. The rule is exactly: the target is Aurora, the
 /// setting is <c>postmaster</c> context, and the server's start time is known and equal at the newest <c>pg_write_stats</c> row
-/// before each of the two snapshots. The MCP read keeps the row and labels it; Change Watch emits nothing for it. Every other
-/// shape (stock PostgreSQL, no write-stats rows, a NULL start, a start time that moved, a setting that is not <c>postmaster</c>
-/// context) reports as it always did.
+/// at or before the previous snapshot and at the earliest row at or after the change. The MCP read keeps the row and labels it;
+/// Change Watch emits nothing for it. Every other shape (stock PostgreSQL, no write-stats rows, a NULL start, a start time that
+/// moved, a setting that is not <c>postmaster</c> context) reports as it always did. A row with no write-stats row after the
+/// change yet is undecided: reported unflagged, and Change Watch holds it back only while it is inside the mark slack.
 /// </summary>
 /* #1776 own-store: every fact mints its own scratch database through ChangeWatchLiveTests.RunAsync (ScratchPostgres), so the class is deliberately NOT [Collection("live-postgres")]. */
 public sealed class PlatformResizedConfigLiveTests
@@ -41,8 +42,14 @@ public sealed class PlatformResizedConfigLiveTests
 
     private static DateTime Naive(DateTime utc) => DateTime.SpecifyKind(utc, DateTimeKind.Unspecified);
 
-    /// <summary>What a fact seeds beside the two config snapshots: which write-stats rows exist and the start time each carries.</summary>
-    private sealed record Shape(string EngineKind, string Name, string Context, bool WriteStatsRows, DateTime? StartBeforePrevious, DateTime? StartBeforeChange);
+    /// <summary>
+    /// What a fact seeds beside the two config snapshots: which write-stats rows exist and the start time each carries. The row at
+    /// the previous snapshot (when <paramref name="WriteStatsRows"/>), an optional row just before the change, an optional row just
+    /// after it, and how late the second pass runs (the change is 5 minutes into the run).
+    /// </summary>
+    private sealed record Shape(
+        string EngineKind, string Name, string Context, bool WriteStatsRows, DateTime? StartBeforePrevious, DateTime? StartAfterChange,
+        bool RowAfterChange = true, DateTime? RowJustBeforeChange = null, bool RowBeforePrevious = false, int PassMinutes = 10);
 
     private static Shape Resized(string engineKind = MonitoredEngineKind.AuroraPostgres) =>
         new(engineKind, "shared_buffers", "postmaster", true, StartA, StartA);
@@ -93,22 +100,28 @@ public sealed class PlatformResizedConfigLiveTests
             await ConfigAsync(h.Connection, previous, shape, "16384", ct);
             if (shape.WriteStatsRows)
             {
-                /* The newest write-stats row at or before each snapshot: the one at the previous snapshot, and the one at the move. */
-                await WriteStatsAsync(h.Connection, previous, shape.StartBeforePrevious, ct);
+                /* The newest write-stats row at or before the previous snapshot: the one the "before" start comes from. */
+                await WriteStatsAsync(h.Connection, shape.RowBeforePrevious ? previous.AddMinutes(-5) : previous, shape.StartBeforePrevious, ct);
             }
 
             await h.NewPassAt(() => start).DetectAsync(ct);
 
-            await ConfigAsync(h.Connection, change, shape, "524288", ct);
-            if (shape.WriteStatsRows)
+            if (shape.RowJustBeforeChange is { } justBefore)
             {
-                await WriteStatsAsync(h.Connection, change, shape.StartBeforeChange, ct);
+                await WriteStatsAsync(h.Connection, change.AddMinutes(-1), justBefore, ct);
             }
 
-            await h.NewPassAt(() => start.AddMinutes(10)).DetectAsync(ct);
+            await ConfigAsync(h.Connection, change, shape, "524288", ct);
+            if (shape.WriteStatsRows && shape.RowAfterChange)
+            {
+                /* The earliest write-stats row at or after the move: the one the "after" start comes from. */
+                await WriteStatsAsync(h.Connection, change.AddMinutes(1), shape.StartAfterChange, ct);
+            }
+
+            await h.NewPassAt(() => start.AddMinutes(shape.PassMinutes)).DetectAsync(ct);
             watches = await CountAsync(h.Connection, "SELECT count(*) FROM config.change_watches", ct);
 
-            var asOf = start.AddMinutes(10).ToString("yyyy-MM-ddTHH:mm:ss'Z'", CultureInfo.InvariantCulture);
+            var asOf = start.AddMinutes(shape.PassMinutes).ToString("yyyy-MM-ddTHH:mm:ss'Z'", CultureInfo.InvariantCulture);
             page = JsonDocument.Parse(await DarlingMcpPgServerStateTools.GetPgServerConfigChanges(h.Source, PgServerName, 168, 50, asOf)).RootElement.Clone();
         });
         return (page, watches);
@@ -146,7 +159,47 @@ public sealed class PlatformResizedConfigLiveTests
     [Fact]
     public async Task AuroraSharedBuffersMoves_WithADifferentStartBetweenTheSnapshots_IsReportedAndNotFlagged()
     {
-        var (page, watches) = await RunShapeAsync(Resized() with { StartBeforeChange = StartB });
+        var (page, watches) = await RunShapeAsync(Resized() with { StartAfterChange = StartB });
+
+        AssertReportedUnflagged(page, watches, "shared_buffers");
+    }
+
+    /* The start time read before the previous snapshot is the same row the old read took after the move, because the write-stats
+       series stopped there. No row exists after the move, so nothing proves the server stayed up. */
+    [Fact]
+    public async Task AuroraWhoseWriteStatsStoppedBeforeThePreviousSnapshot_IsReportedAndNotFlagged_AndChangeWatchRecordsIt()
+    {
+        var (page, watches) = await RunShapeAsync(Resized() with { RowAfterChange = false, RowBeforePrevious = true, PassMinutes = 30 });
+
+        AssertReportedUnflagged(page, watches, "shared_buffers");
+    }
+
+    [Fact]
+    public async Task AuroraWhoseLastWriteStatsRowBeforeTheChangeCarriesTheOldStart_AndTheFirstRowAfterCarriesANewOne_IsReportedAndNotFlagged()
+    {
+        var (page, watches) = await RunShapeAsync(Resized() with { RowJustBeforeChange = StartA, StartAfterChange = StartB });
+
+        AssertReportedUnflagged(page, watches, "shared_buffers");
+    }
+
+    /* Undecided: no write-stats row after the change yet. The page reports a plain change. Change Watch holds the row back while the
+       change is inside the slack of this detect's end, because the next detect's mark sits that far back and reads it again. */
+    [Fact]
+    public async Task AuroraWithNoWriteStatsRowAfterTheChangeYet_InsideTheSlack_IsReportedUnflagged_AndChangeWatchRecordsNothingThisDetect()
+    {
+        var (page, watches) = await RunShapeAsync(Resized() with { RowAfterChange = false, PassMinutes = 7 });
+
+        var row = OnlyChange(page);
+        Assert.Equal("shared_buffers", row.GetProperty("name").GetString());
+        Assert.False(row.TryGetProperty("resized_by_platform", out _));
+        Assert.False(page.TryGetProperty("resized_by_platform_note", out _));
+        Assert.Equal(0, watches);
+    }
+
+    [Fact]
+    public async Task AuroraWithNoWriteStatsRowAfterTheChange_OlderThanTheSlack_ChangeWatchRecordsIt()
+    {
+        var (page, watches) = await RunShapeAsync(Resized() with { RowAfterChange = false, RowJustBeforeChange = StartA, PassMinutes = 30 });
 
         AssertReportedUnflagged(page, watches, "shared_buffers");
     }
@@ -170,7 +223,7 @@ public sealed class PlatformResizedConfigLiveTests
     [Fact]
     public async Task AuroraWithANullStartAtTheMove_IsReportedAndNotFlagged()
     {
-        var (page, watches) = await RunShapeAsync(Resized() with { StartBeforeChange = null });
+        var (page, watches) = await RunShapeAsync(Resized() with { StartAfterChange = null });
 
         AssertReportedUnflagged(page, watches, "shared_buffers");
     }

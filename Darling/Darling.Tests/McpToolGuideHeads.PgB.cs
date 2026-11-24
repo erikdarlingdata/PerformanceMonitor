@@ -48,7 +48,6 @@ public sealed class McpToolGuideHeadsPgBTests
         ("get_pg_server_config_changes", "NOT reported as a change"),
         ("get_pg_server_config_changes", "Session-scoped rows are excluded"),
         ("get_pg_server_config_changes", "change_kind: changed, set (old_value null) or reset (new_value null)"),
-        ("get_pg_server_config_changes", "Platform-resized rows carry resized_by_platform"),
     ];
 
     [Fact]
