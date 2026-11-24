@@ -81,7 +81,10 @@ internal static class StoreServerCertificate
         bounded.CancelAfter(timeout);
         try
         {
-            return await read(bounded.Token).ConfigureAwait(false);
+            /* WaitAsync makes the deadline real: Npgsql does not stop a read that is waiting for the store's reply to the SSL request when
+               the token is cancelled, so without it a silent store would hold this call until Npgsql's own timeout. The abandoned read ends
+               on its own timeouts and closes its connection. */
+            return await read(bounded.Token).WaitAsync(bounded.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
