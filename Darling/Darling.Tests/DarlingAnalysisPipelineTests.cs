@@ -285,6 +285,8 @@ public sealed class DarlingAnalysisPipelineTests
             /* #5794: JOIN LATERAL (subquery) names no relation, and unnest() is a set-returning function, not a table. */
             scanSql = Regex.Replace(scanSql, @"\bLATERAL\b", " ", RegexOptions.IgnoreCase);
             scanSql = Regex.Replace(scanSql, @"\bFROM\s+unnest\s*\(", "FROM (", RegexOptions.IgnoreCase);
+            /* #9492: EXTRACT(epoch FROM col) is a function's argument syntax, so its FROM names a column, not a relation. */
+            scanSql = Regex.Replace(scanSql, @"\bEXTRACT\s*\(\s*\w+\s+FROM\b", "EXTRACT(", RegexOptions.IgnoreCase);
 
             /* CTE names defined by this query are legal FROM targets too (WITH x AS ( / , y AS (). */
             var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*(?:(?:NOT\s+)?MATERIALIZED\s*)?\(", RegexOptions.Singleline)
