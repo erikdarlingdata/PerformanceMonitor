@@ -332,7 +332,7 @@ public class StartupFailureTriageTests
         var storeBudgetAt = source.IndexOf("var storeRetryBudget = System.Diagnostics.Stopwatch.StartNew();", StringComparison.Ordinal);
         Assert.True(storeBudgetAt > 0, "the store site's retry budget is gone");
         var loopAt = source.IndexOf("for (var attempt = 1; ; attempt++)", storeBudgetAt + 1, StringComparison.Ordinal);
-        var openAt = source.IndexOf("await postgres.OpenConnectionAsync(stoppingToken)", StringComparison.Ordinal);
+        var openAt = source.IndexOf("await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken)", StringComparison.Ordinal);
         var migrateAt = source.IndexOf("await PgMigrations.MigrateAsync(migrateConnection, _logger, startRecorder, stoppingToken)", StringComparison.Ordinal);
 
         Assert.True(loopAt > 0, "the retry loop around the migrate is gone");

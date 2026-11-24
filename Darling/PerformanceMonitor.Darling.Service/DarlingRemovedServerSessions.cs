@@ -110,7 +110,7 @@ internal static class DarlingRemovedServerSessions
 
         try
         {
-            await using var store = await runner.Store.OpenConnectionAsync(cancellationToken);
+            await using var store = await runner.Store.OpenConnectionAsync(StoreSessionNames.RemovedServer, cancellationToken);
             var recorded = await SchemaCaptureStateStore.WithSessionAsync(store, leaving, cancellationToken);
             return recorded.Contains;
         }

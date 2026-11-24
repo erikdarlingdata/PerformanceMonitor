@@ -55,7 +55,7 @@ LIMIT 1";
         string? planHandle = null;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PlanHandleLookupSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -161,7 +161,7 @@ LIMIT 1";
             /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
                before the CPU-only parse; the scoping is kept so the connection closes before
                the parse, even though PG holds no lock. */
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken))
             {
                 using var cmd = new NpgsqlCommand(PlanAdvisoryXmlSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
                 cmd.Parameters.AddWithValue(context.ServerId);
