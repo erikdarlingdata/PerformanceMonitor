@@ -1315,6 +1315,54 @@ COPY (
             return true;
         }
 
+        /* One history row per pass that merged, re-cut or failed (#9422). The memory samplers run for the pass and stop
+           with it (#9424). Recording is best effort and never changes what the pass returns or throws. */
+        var stats = new CompactionPassStats();
+        var clock = Stopwatch.StartNew();
+        using var workingSet = new PeakWorkingSetSampler();
+        try
+        {
+            var complete = CompactParquetFilesCore(reportIdle, cancellationToken, stats);
+            RecordCompactionPass(stats, clock, workingSet, complete ? null : "incomplete", null);
+            return complete;
+        }
+        catch (Exception ex)
+        {
+            stats.FirstError ??= ex.Message;
+            RecordCompactionPass(stats, clock, workingSet, "failed", ex.Message);
+            throw;
+        }
+    }
+
+    private void RecordCompactionPass(CompactionPassStats stats, Stopwatch clock, PeakWorkingSetSampler workingSet, string? state, string? error)
+    {
+        try
+        {
+            if (History is null || !stats.DidWork)
+            {
+                return;
+            }
+
+            var seconds = clock.Elapsed.TotalSeconds;
+            var outcome = stats.FailedGroups > 0 || error is not null
+                ? StoreHousekeepingHistory.OutcomeFailed
+                : stats.Incomplete || state == "incomplete" || stats.FirstError is not null
+                    ? StoreHousekeepingHistory.OutcomeIncomplete : StoreHousekeepingHistory.OutcomeOk;
+            History.Record(new StoreHousekeepingEvent(
+                DateTime.UtcNow, StoreHousekeepingHistory.KindCompaction, outcome,
+                Files: stats.FilesOut + stats.FilesRecut,
+                Message: stats.FirstError,
+                Compaction: stats.ToDetail(seconds, workingSet.Stop())));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Could not record the compaction history entry");
+        }
+    }
+
+    private bool CompactParquetFilesCore(bool reportIdle, CancellationToken cancellationToken, CompactionPassStats stats)
+    {
+
         var runClock = Stopwatch.StartNew();
         var cancelled = false;
         var failedGroups = 0;
@@ -1691,8 +1739,10 @@ COPY (
                     ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql,
                         memoryLimit: MergeMemoryLimit,
                         rowGroupSize: ParquetCompaction.ServerOrderByFor(table) is null ? null : SortedRowGroupSizeOverride,
+                        onMemorySample: stats.NoteDuckDbMemory,
                         onSortedAtSmallGroups: (retryTable, files, error) =>
                         {
+                            stats.SortedAtSmallGroupBatches++;
                             /* The output is sorted but in 2,048-row groups: the re-cut below would sort it at the large size
                                and run out of memory again, so it leaves the file alone (#9407). */
                             SkipRecut(outputFinalPath);
@@ -1702,6 +1752,7 @@ COPY (
                         },
                         onSortFallback: (fallbackTable, files, error) =>
                         {
+                            stats.UnsortedFallbackBatches++;
                             /* The output is in the unsorted order at the small size: the re-cut below would sort it again
                                and fall back again, so it leaves the file alone (#9407). */
                             SkipRecut(outputFinalPath);
@@ -1746,18 +1797,26 @@ COPY (
                        It counts now, so a rebuild that throws below is not reported as a compaction that failed. */
                     totalMerged++;
                     totalRemoved += removed;
+                    stats.GroupsMerged++;
+                    stats.FilesIn += sourcePaths.Count;
+                    stats.FilesOut += batchOutputs.Count;
+                    stats.BytesIn += keptBytes;
+                    stats.BytesOut += batchOutputs.Sum(o => FileLengthOrZero(o.FinalPath));
 
                     AfterCompactionSwapForTests?.Invoke(table);
 
                     /* A failed rebuild is logged for what it is and does not reach the group's catch below, which
                        is for a merge or a swap that failed. Both callers rebuild the views again in a finally when
                        compaction ends, so the views are not left behind for good. */
+                    var rebuildClock = Stopwatch.StartNew();
                     try
                     {
                         _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
+                        stats.ViewRebuildMs += rebuildClock.ElapsedMilliseconds;
                     }
                     catch (Exception rebuildEx)
                     {
+                        stats.ViewRebuildMs += rebuildClock.ElapsedMilliseconds;
                         viewRebuildFailures++;
                         _logger?.LogError(rebuildEx, "Compacted {Month}/{Table} ({Count} files), but the archive views could not be rebuilt; they are rebuilt again when compaction ends", month, table, files.Count);
                     }
@@ -1799,6 +1858,8 @@ COPY (
             catch (Exception ex)
             {
                 failedGroups++;
+                stats.FailedGroups++;
+                stats.FirstError ??= $"{table} ({month}): {ex.Message}";
                 _logger?.LogError(ex, "Failed to compact {Month}/{Table} ({Count} files)", month, table, files.Count);
 
                 /* A swap that threw after a failed undo leaves a "swapping" journal: the group stays out of the re-cut (#9407). */
@@ -1820,7 +1881,7 @@ COPY (
         if (!cancelled)
         {
             var (recutCancelled, recutLockTimeouts) = RecutSmallRowGroupFiles(
-                unresolvedGroups, compactionClock, dailyMergesStarted, dailyGroupsDeferred > 0, cancellationToken);
+                unresolvedGroups, compactionClock, dailyMergesStarted, dailyGroupsDeferred > 0, stats, cancellationToken);
             cancelled = recutCancelled;
             lockTimeouts += recutLockTimeouts;
         }
@@ -1833,6 +1894,7 @@ COPY (
         }
 
         LastCompactionLargestNeedBytes = largestNeedBytes;
+        stats.Incomplete = cancelled || lockTimeouts > 0 || dailyGroupsDeferred > 0 || lowSpaceGroups.Count > 0 || viewRebuildFailures > 0;
         if (lowSpaceGroups.Count > 0)
         {
             var details = string.Join("; ", lowSpaceGroups.Select(g => FormattableString.Invariant(
@@ -1892,7 +1954,7 @@ COPY (
         }
     }
 
-    private static bool IsRecutSkipped(string path)
+    internal static bool IsRecutSkipped(string path)
     {
         lock (s_recutSkipped)
         {
@@ -1903,7 +1965,7 @@ COPY (
     /* The files the compaction merge writes: YYYYMMDD_table or YYYYMMDD_table_ptNNN (a table merged per day), and
        YYYYMM_table or YYYYMM_table_ptNNN (a monthly table, or a day table's month file from a build before daily grouping,
        which compaction skips today). Per-cycle, reset-export, imported_ and legacy names do not match. */
-    private static readonly Regex s_recutFileName = new(@"^(?<period>\d{8}|\d{6})_(?<table>[a-z][a-z0-9_]*?)(_pt\d{3})?\.parquet$", RegexOptions.Compiled);
+    internal static readonly Regex s_recutFileName = new(@"^(?<period>\d{8}|\d{6})_(?<table>[a-z][a-z0-9_]*?)(_pt\d{3})?\.parquet$", RegexOptions.Compiled);
 
     /// <summary>
     /// The one-time re-cut (#9407). A file of a table that merges in server order, written by compaction at the old
@@ -1918,6 +1980,7 @@ COPY (
         Stopwatch compactionClock,
         int dailyMergesStarted,
         bool dailyMergesDeferred,
+        CompactionPassStats stats,
         CancellationToken cancellationToken)
     {
         var candidates = new List<(string Period, string Path)>();
@@ -1978,6 +2041,7 @@ COPY (
 
             if (pending.Contains(Path.GetFileName(path)))
             {
+                if (RecutIsDue(probe, path)) stats.RecutSkippedLiveJournal++;
                 continue;
             }
 
@@ -1985,6 +2049,20 @@ COPY (
                pass that merged nothing still starts its first. */
             if ((started > 0 || dailyMergesStarted > 0 || dailyMergesDeferred) && compactionClock.Elapsed >= DailyCompactionPassBudget)
             {
+                /* The files this pass did not reach that the re-cut would take: counted from their footers, so the history says
+                   how much is left rather than how many candidates the folder holds. */
+                var reached = false;
+                foreach (var (_, later) in candidates
+                    .OrderByDescending(c => c.Period.PadRight(8, '9'), StringComparer.Ordinal)
+                    .ThenByDescending(c => c.Path, StringComparer.Ordinal))
+                {
+                    if (later == path) reached = true;
+                    if (reached && !pending.Contains(Path.GetFileName(later)) && RecutIsDue(probe, later))
+                    {
+                        stats.RecutSkippedTimeBudget++;
+                    }
+                }
+
                 break;
             }
 
@@ -1998,6 +2076,7 @@ COPY (
             if (File.Exists(SwapJournalPathFor(period, table)))
             {
                 unresolvedGroups.Add((period, table));
+                if (RecutIsDue(probe, path)) stats.RecutSkippedLiveJournal++;
                 continue;
             }
 
@@ -2016,6 +2095,7 @@ COPY (
                         table, CompactionBatchInputBytes, DailyCompactionBatchInputBytes, SortedCompactionBatchInputBytes))
                 {
                     tooLarge++;
+                    stats.RecutSkippedOverBatchBudget++;
                     continue;
                 }
 
@@ -2024,6 +2104,7 @@ COPY (
                 if (freeBytes is long free && 2 * sourceBytes + DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath) > free)
                 {
                     lowSpace++;
+                    stats.RecutSkippedFreeDisk++;
                     continue;
                 }
 
@@ -2033,9 +2114,10 @@ COPY (
                     File.Delete(tempPath);
                 }
 
-                if (!ParquetCompaction.TryRecutToFile(table, path, tempPath, spillDirSql, RecutMemoryLimit, SortedRowGroupSizeOverride))
+                if (!ParquetCompaction.TryRecutToFile(table, path, tempPath, spillDirSql, RecutMemoryLimit, SortedRowGroupSizeOverride, stats.NoteDuckDbMemory))
                 {
                     SkipRecut(path);
+                    stats.RecutSkippedSortOutOfMemory++;
                     _logger?.LogWarning(
                         "Re-cut of {File}: the server-ordered sort ran out of memory or temp space, so the file stays as it is and is not tried again until the service restarts",
                         Path.GetFileName(path));
@@ -2065,6 +2147,7 @@ COPY (
                 }
 
                 recut++;
+                stats.FilesRecut++;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -2080,6 +2163,7 @@ COPY (
             catch (Exception ex)
             {
                 SkipRecut(path);
+                stats.FirstError ??= $"Re-cut of {Path.GetFileName(path)}: {ex.Message}";
                 _logger?.LogError(ex, "Re-cut of {File} failed; the file stays as it is and is not tried again until the service restarts", Path.GetFileName(path));
                 try { File.Delete(tempPath); } catch { /* best effort */ }
             }
@@ -2100,6 +2184,31 @@ COPY (
         }
 
         return (false, lockTimeouts);
+    }
+
+    /* Whether the re-cut would take this file: a footer read, false when the file cannot be read. For the skip counts only. */
+    private bool RecutIsDue(DuckDBConnection probe, string path)
+    {
+        try
+        {
+            return ParquetCompaction.NeedsRecut(probe, path, SortedRowGroupSizeOverride ?? ParquetCompaction.SortedArchiveRowGroupSize);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static long FileLengthOrZero(string path)
+    {
+        try
+        {
+            return new FileInfo(path).Length;
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
     }
 
     /* A file already in its final monthly form: YYYYMM_table or YYYYMM_table_ptNNN, with or without the imported_

@@ -26,6 +26,7 @@ namespace PerformanceMonitorLite.Database;
 /// <param name="UsedMb">Data in the store when the pass started, in MB. Null when it could not be read.</param>
 /// <param name="Message">The error text of a failure, or a short note on an incomplete pass.</param>
 /// <param name="Count">How many identical passes this entry stands for (see <see cref="StoreHousekeepingHistory.Record"/>).</param>
+/// <param name="Compaction">What a Parquet compaction pass did (#9422). Set only on a <see cref="StoreHousekeepingHistory.KindCompaction"/> entry.</param>
 public sealed record StoreHousekeepingEvent(
     DateTime TimeUtc,
     string Kind,
@@ -34,7 +35,51 @@ public sealed record StoreHousekeepingEvent(
     int? Files = null,
     double? UsedMb = null,
     string? Message = null,
-    int Count = 1);
+    int Count = 1,
+    CompactionPassDetail? Compaction = null);
+
+/// <summary>
+/// One Parquet compaction pass that merged, re-cut or failed (#9422, #9424). Every figure is for that pass alone.
+/// </summary>
+/// <param name="StartUtc">When the pass started. The entry's own time is when it ended.</param>
+/// <param name="Seconds">How long the pass ran.</param>
+/// <param name="GroupsMerged">Month or day groups whose merged files replaced their inputs.</param>
+/// <param name="FilesIn">Archive files the merges read and removed.</param>
+/// <param name="FilesOut">Archive files the merges wrote.</param>
+/// <param name="BytesIn">Bytes of the files read.</param>
+/// <param name="BytesOut">Bytes of the files written.</param>
+/// <param name="SortedAtSmallGroupBatches">Batches whose sorted merge ran out of memory at the large row-group size and were sorted again in 2,048-row groups.</param>
+/// <param name="UnsortedFallbackBatches">Batches that ran out of memory even then and were written in the unsorted order.</param>
+/// <param name="FilesRecut">Files the one-time re-cut rewrote sorted by server.</param>
+/// <param name="RecutSkippedOverBatchBudget">Files due for the re-cut but larger than the table's merge batch budget.</param>
+/// <param name="RecutSkippedFreeDisk">Files due for the re-cut that the free disk space could not hold.</param>
+/// <param name="RecutSkippedLiveJournal">Files due for the re-cut whose swap journal or archive-pending journal was still live.</param>
+/// <param name="RecutSkippedSortOutOfMemory">Files whose re-cut sort ran out of memory or temp space, so the file stays as it was.</param>
+/// <param name="RecutSkippedTimeBudget">Files due for the re-cut that the pass's time budget left for the next pass.</param>
+/// <param name="ViewRebuildMs">Milliseconds the pass spent rebuilding the archive views after its swaps.</param>
+/// <param name="ProcessPeakWorkingSetBytes">The highest working set of the whole Lite process, sampled every 75 ms while the pass ran. Collection and the UI share the process, so it can include their memory.</param>
+/// <param name="DuckDbPeakMemoryBytes">The highest memory DuckDB reported for the merge connections (duckdb_memory(), sampled every 50 ms). Null when no merge ran or nothing was sampled.</param>
+/// <param name="MemorySource">Where the two memory figures came from, in words.</param>
+public sealed record CompactionPassDetail(
+    DateTime StartUtc,
+    double Seconds,
+    int GroupsMerged = 0,
+    int FilesIn = 0,
+    int FilesOut = 0,
+    long BytesIn = 0,
+    long BytesOut = 0,
+    int SortedAtSmallGroupBatches = 0,
+    int UnsortedFallbackBatches = 0,
+    int FilesRecut = 0,
+    int RecutSkippedOverBatchBudget = 0,
+    int RecutSkippedFreeDisk = 0,
+    int RecutSkippedLiveJournal = 0,
+    int RecutSkippedSortOutOfMemory = 0,
+    int RecutSkippedTimeBudget = 0,
+    long ViewRebuildMs = 0,
+    long? ProcessPeakWorkingSetBytes = null,
+    long? DuckDbPeakMemoryBytes = null,
+    string? MemorySource = null);
 
 /// <summary>
 /// Lite's housekeeping history (#8788): the last <see cref="MaxEvents"/> timed archives, size resets and retention cleanups,
@@ -62,6 +107,7 @@ public sealed class StoreHousekeepingHistory
     public const string KindArchive = "archive";
     public const string KindSizeReset = "size_reset";
     public const string KindRetention = "retention";
+    public const string KindCompaction = "compaction";
 
     public const string OutcomeOk = "ok";
     public const string OutcomeIncomplete = "incomplete";
@@ -170,7 +216,9 @@ public sealed class StoreHousekeepingHistory
             return string.Equals(previous.Message, entry.Message, StringComparison.Ordinal);
         }
 
+        /* A compaction entry is written only for a pass that merged or re-cut something, so an ok one is never idle (#9422). */
         return entry.Outcome == OutcomeOk
+            && entry.Kind != KindCompaction
             && (previous.Rows ?? 0) == 0 && (previous.Files ?? 0) == 0
             && (entry.Rows ?? 0) == 0 && (entry.Files ?? 0) == 0;
     }

@@ -51,7 +51,8 @@ public sealed record StoreHealthSnapshot(
     ArchiveFolderInfo Archives,
     IReadOnlyList<StoreHousekeepingEvent> History,
     IReadOnlyList<StoreTableInfo>? Tables,
-    string? StoreNote);
+    string? StoreNote,
+    ArchiveLayoutInfo? Layout = null);
 
 /// <summary>
 /// Reads Lite's own store health (#8788): the data in <c>monitor.duckdb</c> against the reset point (512 MB unless hot_store_reset_mb says otherwise), the parquet archive
@@ -84,6 +85,15 @@ public sealed class StoreHealthReader
     /// <summary>How long a read waits for the store's read lock. A size reset holds the write lock while it exports every table,
     /// so a longer wait would only freeze the window for a number that is about to be replaced.</summary>
     internal TimeSpan ReadLockBudget { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>How long the archive layout read (#9421) may run before it reports what it covered and says it is partial.</summary>
+    internal TimeSpan LayoutBudget { get; set; } = TimeSpan.FromSeconds(4);
+
+    /* Tests only (#9421): called with a file's path just before the layout read opens it. */
+    internal Action<string>? BeforeLayoutFileReadForTests { get; set; }
+
+    /* Tests only (#9421): the merge batch budget the layout read judges a file against, null for the production budgets. */
+    internal Func<string, long>? LayoutBatchBudgetForTests { get; set; }
 
     public StoreHealthSnapshot Read()
     {
@@ -128,7 +138,25 @@ public sealed class StoreHealthReader
             ReadArchiveFolder(_archivePath),
             _history.Read(),
             tables,
-            note);
+            note,
+            ReadLayout());
+    }
+
+    private ArchiveLayoutInfo? ReadLayout()
+    {
+        try
+        {
+            return new ArchiveLayoutReader(_archivePath, _duckDb.DatabasePath, _duckDb.AvailableFreeBytesProvider, LayoutBudget)
+            {
+                BeforeFileReadForTests = BeforeLayoutFileReadForTests,
+                BatchBudgetForTests = LayoutBatchBudgetForTests
+            }.Read();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("StoreHealth", $"The archive layout could not be read: {ex.Message}");
+            return null;
+        }
     }
 
     private static double FileMegabytes(string path)
@@ -243,6 +271,7 @@ public static class StoreHealthText
         StoreHousekeepingHistory.KindArchive => "Timed archive",
         StoreHousekeepingHistory.KindSizeReset => "Size reset",
         StoreHousekeepingHistory.KindRetention => "Retention cleanup",
+        StoreHousekeepingHistory.KindCompaction => "Compaction",
         _ => kind
     };
 
@@ -259,6 +288,11 @@ public static class StoreHealthText
     {
         var rows = e.Rows ?? 0;
         var files = e.Files ?? 0;
+        if (e.Kind == StoreHousekeepingHistory.KindCompaction && e.Compaction is { } c)
+        {
+            return CompactionSummary(c);
+        }
+
         if (e.Kind == StoreHousekeepingHistory.KindRetention)
         {
             return files == 0 ? "no files expired" : string.Create(CultureInfo.InvariantCulture, $"{files:N0} files deleted");
@@ -267,6 +301,82 @@ public static class StoreHealthText
         return rows == 0 && files == 0
             ? "no rows moved"
             : string.Create(CultureInfo.InvariantCulture, $"{rows:N0} rows in {files:N0} files");
+    }
+
+    /// <summary>What one compaction pass did, in plain words (#9422, #9424).</summary>
+    public static string CompactionSummary(CompactionPassDetail c)
+    {
+        var ci = CultureInfo.InvariantCulture;
+        var sb = new StringBuilder();
+        sb.Append(ci, $"started {c.StartUtc:HH:mm:ss} UTC, took {c.Seconds:0.0} s, merged {c.GroupsMerged:N0} groups ({c.FilesIn:N0} files, {Bytes(c.BytesIn)} in, {c.FilesOut:N0} files, {Bytes(c.BytesOut)} out)");
+        if (c.SortedAtSmallGroupBatches > 0 || c.UnsortedFallbackBatches > 0)
+        {
+            sb.Append(ci, $"; {c.SortedAtSmallGroupBatches:N0} batches sorted again at 2,048-row groups, {c.UnsortedFallbackBatches:N0} batches fell back to unsorted");
+        }
+
+        var skipped = c.RecutSkippedOverBatchBudget + c.RecutSkippedFreeDisk + c.RecutSkippedLiveJournal + c.RecutSkippedSortOutOfMemory + c.RecutSkippedTimeBudget;
+        if (c.FilesRecut > 0 || skipped > 0)
+        {
+            sb.Append(ci, $"; re-cut {c.FilesRecut:N0} files");
+            if (skipped > 0)
+            {
+                sb.Append(ci, $", skipped {skipped:N0} (over the batch budget {c.RecutSkippedOverBatchBudget:N0}, free disk {c.RecutSkippedFreeDisk:N0}, live journal {c.RecutSkippedLiveJournal:N0}, sort ran out of memory {c.RecutSkippedSortOutOfMemory:N0}, time budget {c.RecutSkippedTimeBudget:N0})");
+            }
+        }
+
+        sb.Append(ci, $"; view rebuild {c.ViewRebuildMs:N0} ms");
+        if (c.ProcessPeakWorkingSetBytes is not null || c.DuckDbPeakMemoryBytes is not null)
+        {
+            sb.Append("; peak memory");
+            if (c.ProcessPeakWorkingSetBytes is { } proc) sb.Append(ci, $" process {Bytes(proc)}");
+            if (c.DuckDbPeakMemoryBytes is { } duck) sb.Append(ci, $" DuckDB {Bytes(duck)}");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>The archive layout section's lines (#9421), indented under ARCHIVES.</summary>
+    public static void AppendLayout(StringBuilder sb, ArchiveLayoutInfo layout, int maxTables = 40)
+    {
+        var ci = CultureInfo.InvariantCulture;
+        sb.AppendLine(ci, $"  Layout, read from parquet footers only: {layout.FilesRead:N0} of {layout.FilesTotal:N0} files in {layout.Seconds:0.0} s");
+        if (layout.Partial)
+        {
+            sb.AppendLine(ci, $"  PARTIAL: the layout read stopped at its {layout.BudgetSeconds:0.#} s budget. The figures below cover only the files it reached.");
+        }
+
+        if (layout.FilesUnreadable > 0)
+        {
+            sb.AppendLine(ci, $"  {layout.FilesUnreadable:N0} files could not be read (damaged footer or locked) and are not in the figures below.");
+        }
+
+        foreach (var t in layout.Tables.Take(maxTables))
+        {
+            sb.Append(ci, $"  {t.Table}: {t.Files:N0} files, {Bytes(t.Bytes)}, {t.RowGroups:N0} row groups, largest group {t.LargestGroupRows:N0} rows");
+            if (t.MixedServerGroups is { } mixed)
+            {
+                sb.Append(ci, $", {mixed:N0} row groups mix servers");
+            }
+
+            if (t.FilesNeedingRecut > 0)
+            {
+                var skipped = t.RecutSkips.Sum(s => s.Files);
+                sb.Append(ci, $", {t.FilesNeedingRecut:N0} files still need the re-cut");
+                if (skipped > 0)
+                {
+                    sb.Append(ci, $", the re-cut is skipping {skipped:N0} of them (").Append(string.Join("; ", t.RecutSkips.Select(s => string.Create(ci, $"{s.Files:N0} {s.Reason}")))).Append(')');
+                }
+            }
+
+            sb.AppendLine();
+        }
+
+        if (layout.Tables.Count > maxTables)
+        {
+            sb.AppendLine(ci, $"  ... and {layout.Tables.Count - maxTables:N0} smaller tables.");
+        }
+
+        sb.AppendLine(ci, $"  Leftover files in the archive folder: {layout.LeftoverTmp:N0} .tmp, {layout.LeftoverSwap:N0} .swap, {layout.LeftoverReplaced:N0} .replaced. A count above zero after startup cleanup means a swap did not finish.");
     }
 
     /// <summary>The whole snapshot as text, for <c>get_store_health</c>. <paramref name="maxTables"/> keeps the reply small on a store
@@ -295,6 +405,11 @@ public static class StoreHealthText
         if (a.UndatedFiles > 0)
         {
             sb.AppendLine("  " + UndatedSentence(a.UndatedFiles));
+        }
+
+        if (snapshot.Layout is { } layout)
+        {
+            AppendLayout(sb, layout);
         }
 
         sb.AppendLine();
