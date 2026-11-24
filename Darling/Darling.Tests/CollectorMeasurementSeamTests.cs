@@ -623,6 +623,11 @@ public class CollectorMeasurementSeamTests
                    DefaultTraceEventsCollector.cs; the expectation names the label the readers parse (DefaultTraceOffNote.Label), so the
                    collector's const drifting from it fails here. */
                 PerformanceMonitor.Common.DefaultTraceOffNote.Label,
+                /* #9508: a skipped per-relation pg_buffercache scan. Measured by pg_buffer_usage's own ReadAsync from consts in PgBufferUsageCollector.cs. */
+                PgBufferUsageCollector.ScanSkippedMeasurement,
+                PgBufferUsageCollector.PoolBuffersMeasurement,
+                PgBufferUsageCollector.CapBuffersMeasurement,
+                PgBufferUsageCollector.SummaryMissingMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }
