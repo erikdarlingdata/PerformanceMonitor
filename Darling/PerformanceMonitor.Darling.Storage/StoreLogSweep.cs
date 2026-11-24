@@ -341,10 +341,19 @@ FROM config.store_log_read_marker AS m";
         DateTime utcNow,
         ILogger? logger,
         IStoreLogFiles? files,
-        CancellationToken cancellationToken = default,
-        StoreLockWaits.PidMap? pids = null)
+        CancellationToken cancellationToken = default) =>
+        SweepAsync(connection, utcNow, logger, files, StoreLockWaits.Shared, cancellationToken);
+
+    /// <summary>The sweep over a given set of log files and a given map of sessions (#9439): the service's own map in
+    /// production, a test's in a test.</summary>
+    internal static async Task<List<FileCapture>> SweepAsync(
+        NpgsqlConnection connection,
+        DateTime utcNow,
+        ILogger? logger,
+        IStoreLogFiles? files,
+        StoreLockWaits.PidMap pids,
+        CancellationToken cancellationToken)
     {
-        pids ??= StoreLockWaits.Shared;
         if (connection is null)
         {
             throw new ArgumentNullException(nameof(connection));
