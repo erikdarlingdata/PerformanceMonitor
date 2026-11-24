@@ -194,7 +194,8 @@ public class StoreLogSelfMonitoringStoreTests
         Assert.Contains("hours", descriptor.Params.Select(p => p.Name));
         Assert.Contains("as_of", descriptor.Params.Select(p => p.Name));
 
-        Assert.Contains("get_store_log", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        /* #9474: the instructions name the store's own reads as the group get_store_*, which covers get_store_log. */
+        Assert.Contains("get_store_*", DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
     /// <summary>

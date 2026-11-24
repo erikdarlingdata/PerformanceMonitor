@@ -407,7 +407,12 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     internal const int PendingListLimitKb = 65536;
 
     /// <summary>The time between cleans of the pending list. The list grows with the collector's calls, and the clean must run often enough
-    /// that a store far busier than the largest field store still never fills it between cleans.</summary>
+    /// that a store far busier than the largest field store still never fills it between cleans.
+    /// <para>#9460 measured a longer interval and found 2 minutes is the longest safe one. At 60,000 new distinct texts an hour into one table
+    /// (texts of about 1.4 KB with about 460 distinct trigrams, so about 2 pending pages a row) the list peaked at about 4,000 pages between
+    /// cleans every 2 minutes, just under half of the 8,192-page limit, and no insert merged it. Cleaning every 5 or 10 minutes let it reach the
+    /// limit: the inserts then merged it inline, the stall #9303 fixed. A longer interval
+    /// would save WAL only by moving the merge into the collection insert. <see cref="QueryStoreTextTrigramIndex.CleanInterval"/> stays the same.</para></summary>
     public static readonly TimeSpan CleanInterval = TimeSpan.FromMinutes(2);
 
     /// <summary>#9303: the wait before the first clean after a start. Zero: the clean does not wait for the build's <see cref="StartDelay"/>,
