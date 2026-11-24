@@ -617,7 +617,15 @@ public sealed class InvestigationRequestEventsLiveTests
             }
             else
             {
-                /* The tail ends 30 minutes after the window: this join is new evidence from outside it. */
+                /* Same-metric joins inside the tail keep the 30 minute grouping window open without releasing. The tail ends 30 minutes after the
+                   window (T0 + 50): the join after it is new evidence from outside the window. */
+                foreach (var minutes in new[] { 25, 45 })
+                {
+                    _now = T0.AddMinutes(minutes);
+                    Assert.False((await store.OpenOrJoinAsync(Alert(_now, "High CPU", InvestigationEvents.Warning), ct)).Evented);
+                }
+
+                Assert.Empty(await store.PendingDeliveriesAsync(T0.AddHours(-1), 100, ct));
                 _now = T0.AddMinutes(55);
                 Assert.True((await store.OpenOrJoinAsync(Alert(_now, "Disk Space", InvestigationEvents.Warning), ct)).Evented);
             }

@@ -190,7 +190,16 @@ public sealed class InvestigationChangeWindowHoldLiveTests
             var id = (await store.OpenOrJoinAsync(Alert(_now, 7), ct)).RequestId!.Value;
             Assert.Empty(await store.OpenedSinceAsync(T0.AddHours(-1), null, 10, ct));
 
-            /* A join after the tail (60 + 30 minutes) releases it. */
+            /* Same-metric joins every 25 minutes keep the 30 minute grouping window open through the tail (60 + 30 minutes) without releasing. */
+            foreach (var minutes in new[] { 30, 55, 80 })
+            {
+                _now = T0.AddMinutes(minutes);
+                Assert.Equal(InvestigationOpenOutcome.Joined, (await store.OpenOrJoinAsync(Alert(_now, 7), ct)).Outcome);
+            }
+
+            Assert.Empty(await store.OpenedSinceAsync(T0.AddHours(-1), null, 10, ct));
+
+            /* A join after the tail releases it. */
             _now = T0.AddMinutes(95);
             Assert.Equal(InvestigationOpenOutcome.Joined, (await store.OpenOrJoinAsync(Alert(_now, 7), ct)).Outcome);
 
