@@ -981,6 +981,10 @@ DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
         // V303 (#9384): the clutter-day stamp table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V303 creates it empty. Safe on a store
         // that never had it.
         new(303, "hasClutterDayBuilt", @"DROP TABLE IF EXISTS collect.query_store_clutter_day_built;"),
+        // V304 (#9410): the write counters on the statement history and its baseline. The first history column is the probe's newest sentinel. The rewind drops all eight, so a re-run of V304
+        // adds them again, empty. Safe on a store that never had them.
+        new(304, "hasStatementHistoryWriteCounters", @"ALTER TABLE collect.store_statement_history DROP COLUMN IF EXISTS delta_shared_blks_dirtied, DROP COLUMN IF EXISTS delta_shared_blks_written, DROP COLUMN IF EXISTS delta_wal_bytes, DROP COLUMN IF EXISTS delta_wal_fpi;
+ALTER TABLE config.store_statement_baseline DROP COLUMN IF EXISTS shared_blks_dirtied, DROP COLUMN IF EXISTS shared_blks_written, DROP COLUMN IF EXISTS wal_bytes, DROP COLUMN IF EXISTS wal_fpi;"),
     ];
 
     /// <summary>
