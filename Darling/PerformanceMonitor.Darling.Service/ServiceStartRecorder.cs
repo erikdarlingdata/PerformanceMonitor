@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>Held in memory until the table exists.</b> The migration that creates the history tables is itself a rung, so the rungs the runner
 /// reports before it cannot be written when they finish. This hears them as an <see cref="IMigrationRungObserver"/>, keeps them, and
-/// <see cref="FlushAsync"/> writes what it holds as soon as the tables exist. A flush that finds no tables (a store still below V304) keeps
+/// <see cref="FlushAsync"/> writes what it holds as soon as the tables exist. A flush that finds no tables (a store still below V307) keeps
 /// everything and tries again, quietly. A rung that fails is reported by the runner too, so a start that dies in a rung still shows it.</para>
 ///
 /// <para><b>The counts</b> come from <see cref="ServiceLogTally"/>. <see cref="RunAsync"/> flushes them once a minute and writes the two fixed
@@ -197,7 +197,7 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
             {
-                /* A store below V304: the table is made by a rung that has not run yet. Everything is kept. */
+                /* A store below V307: the table is made by a rung that has not run yet. Everything is kept. */
                 return false;
             }
 #pragma warning disable CA1031 // A failed flush keeps what it holds and tries again: the start history never fails or delays the service.

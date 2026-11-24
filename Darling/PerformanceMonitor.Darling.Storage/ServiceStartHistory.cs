@@ -77,7 +77,7 @@ public sealed record ServiceStartRecord(ServiceStartRow Start, IReadOnlyList<Ser
 public sealed record ServiceBuildChange(string ServiceHost, DateTime StartedUtc, string FromBuild, string ToBuild);
 
 /// <summary>
-/// The store's record of each service start (V304, #9415): one row per start in <c>collect.service_starts</c>, one row per migration rung that
+/// The store's record of each service start (V307, #9415): one row per start in <c>collect.service_starts</c>, one row per migration rung that
 /// start tried in <c>collect.service_start_rungs</c>. <c>config.service_version</c> (V174) stays as it is: it holds the version each host last
 /// reported, and this holds every start.
 ///
@@ -90,7 +90,7 @@ public sealed record ServiceBuildChange(string ServiceHost, DateTime StartedUtc,
 public static class ServiceStartHistory
 {
     /// <summary>The migration that creates the two tables. One constant, so a renumber is one edit.</summary>
-    public const int Version = 304;
+    public const int Version = 307;
 
     /// <summary>Days a start is kept after its last flush. Equals <see cref="StoreSelfMetrics.RetentionDays"/>.</summary>
     public const int RetentionDays = StoreSelfMetrics.RetentionDays;
@@ -229,7 +229,7 @@ WHERE start_id = ANY($1)
 ORDER BY start_id, attempt, started_at, rung_version;";
 
     /// <summary>
-    /// Writes the start row. A store without the tables (a store below V304 that has not migrated yet) throws
+    /// Writes the start row. A store without the tables (a store below V307 that has not migrated yet) throws
     /// <see cref="PostgresException"/> with <see cref="PostgresErrorCodes.UndefinedTable"/>, and the caller keeps what it holds and tries again.
     /// </summary>
     public static async Task UpsertStartAsync(NpgsqlDataSource dataSource, ServiceStartRow row, CancellationToken cancellationToken = default)

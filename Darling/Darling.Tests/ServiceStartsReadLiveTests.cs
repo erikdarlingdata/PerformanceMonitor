@@ -67,11 +67,11 @@ public sealed class ServiceStartsReadLiveTests
         {
             var older = Guid.NewGuid();
             var newer = Guid.NewGuid();
-            await ServiceStartHistory.UpsertStartAsync(source, Start(older, "svc-a", "3.13.0", 30, before: 303, after: 304, errors: 2, warns: 1, firstErrors: ["boom one", "boom two"]), ct);
+            await ServiceStartHistory.UpsertStartAsync(source, Start(older, "svc-a", "3.13.0", 30, before: 306, after: 307, errors: 2, warns: 1, firstErrors: ["boom one", "boom two"]), ct);
             await ServiceStartHistory.InsertRungsAsync(source,
             [
-                new ServiceStartRung(older, 304, "service-start-history", 1, Now.AddHours(-30), 1200, "failed", "relation is locked"),
-                new ServiceStartRung(older, 304, "service-start-history", 2, Now.AddHours(-30).AddSeconds(5), 850, "applied", null),
+                new ServiceStartRung(older, 307, "service-start-history", 1, Now.AddHours(-30), 1200, "failed", "relation is locked"),
+                new ServiceStartRung(older, 307, "service-start-history", 2, Now.AddHours(-30).AddSeconds(5), 850, "applied", null),
             ], ct);
             await ServiceStartHistory.UpsertStartAsync(source, Start(newer, "svc-a", "3.14.0", 2), ct);
 
@@ -87,7 +87,7 @@ public sealed class ServiceStartsReadLiveTests
 
             var first = starts[1];
             Assert.Equal(303, first.GetProperty("schema_version_before").GetInt32());
-            Assert.Equal(304, first.GetProperty("schema_version_after").GetInt32());
+            Assert.Equal(307, first.GetProperty("schema_version_after").GetInt32());
             Assert.Equal(2, first.GetProperty("error_count").GetInt64());
             Assert.Equal(["boom one", "boom two"], first.GetProperty("first_errors").EnumerateArray().Select(e => e.GetString()).ToArray());
             var rungs = first.GetProperty("rungs").EnumerateArray().ToArray();
