@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /* #1776 own-store: every test here stands up its own throwaway cluster from the bundled runtime, same as
    ManagedConfFileLiveTests -- not a DARLING_TEST_PG store. */
 [SupportedOSPlatform("windows")]
+[Collection("timing")]
 public sealed class ManagedConfVerdictsLiveTests
 {
     private const string RuntimeGateMessage =
@@ -174,6 +175,21 @@ public sealed class ManagedConfVerdictsLiveTests
             Assert.Equal(HostSettingVerdict.PendingRestart, pendingRow.Verdict);
             Assert.Contains("restart", pendingRow.Detail, StringComparison.OrdinalIgnoreCase);
 
+            /* #9418: the provenance read uses the same rule for a pending restart (a postmaster-context setting with a
+               file line the server could not apply), because pg_settings.pending_restart reads f on Windows after a
+               reload. shared_buffers is pending, work_mem is not. */
+            await using (var provenanceConnection = await OpenAsync(connectionString, ct))
+            {
+                var pendingProvenance = await StoreSettingProvenance.ReadAsync(
+                    provenanceConnection, ["shared_buffers", "work_mem"], 30, ct);
+                Assert.True(pendingProvenance.ByName["shared_buffers"].PendingRestart);
+                Assert.False(pendingProvenance.ByName["work_mem"].PendingRestart);
+                var pendingLine = Assert.Single(
+                    pendingProvenance.ByName["shared_buffers"].UnappliedFileRows,
+                    r => r.Error == StoreSettingProvenance.FileSettingNotAppliedError);
+                Assert.Equal("256MB", pendingLine.Value);
+            }
+
             /* Reload-context invalid value: never PendingRestart, always RejectedValue -- the same guc.c
                errmsg text covers both causes (#4215), so context is what tells them apart. */
             var body2 = File.ReadAllText(managedConfPath);
@@ -202,6 +218,178 @@ public sealed class ManagedConfVerdictsLiveTests
             Assert.NotNull(overrideRow.SourceFile);
             Assert.EndsWith("postgresql.auto.conf", overrideRow.SourceFile, StringComparison.OrdinalIgnoreCase);
             Assert.NotNull(overrideRow.SourceLine);
+        }
+        finally
+        {
+            await owner.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #9418: <c>ALTER SYSTEM</c> over a managed line gives ONE start warning that names the winning file, line and
+    /// value and the managed line it hides, and the same facts read back through the provenance read. A role that
+    /// cannot read <c>pg_file_settings</c> is told the grant, not shown a blank.
+    /// </summary>
+    [Fact]
+    public async Task AlterSystemOverManagedLine_WarnsOnceNamingBothFilesLinesAndValues_Gated()
+    {
+        var runtimeRoot = SkipUnlessRuntimeAvailable();
+        var root = Directory.CreateTempSubdirectory("darling-managedconf-provenance-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var config = new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory };
+        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            var ct = timeout.Token;
+            var connectionString = await owner.EnsureRunningAsync(ct);
+
+            await using (var migrateConnection = await OpenAsync(connectionString, ct))
+            {
+                await PgMigrations.MigrateAsync(migrateConnection, ct);
+            }
+
+            await using (var dataSource = NpgsqlDataSource.Create(
+                new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString))
+            {
+                await DarlingManagedRoles.EnsureProvisionedAsync(dataSource, dataDirectory, NullLogger.Instance, ct);
+            }
+
+            var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+            var managedLine = File.ReadAllLines(managedConfPath)
+                .Select((text, index) => (text, line: index + 1))
+                .Single(l => Regex.IsMatch(l.text, @"^work_mem = "));
+            var managedValue = Regex.Match(managedLine.text, @"^work_mem = '?([^']*)'?").Groups[1].Value;
+
+            await using (var alterConnection = await OpenAsync(connectionString, ct))
+            await using (var alterCommand = new NpgsqlCommand("ALTER SYSTEM SET work_mem = '77MB'", alterConnection))
+            {
+                await alterCommand.ExecuteNonQueryAsync(ct);
+            }
+
+            await ReloadAsync(connectionString, ct);
+
+            var logger = new CapturingTestLogger();
+            await using (var ownerConnection = await OpenAsync(connectionString, ct))
+            {
+                var profile = await DarlingStoreHostProfile.GatherStartupProfileAsync(config, ownerConnection, ct);
+                await DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync(
+                    ownerConnection, dataDirectory, profile.Memory.EffectiveBytes, profile.DataVolume.FreeBytes,
+                    owner.LastManagedConfWriteResult, logger, ct);
+
+                var warning = Assert.Single(logger.Lines, l => l.Contains("overridden", StringComparison.Ordinal));
+                var autoLine = File.ReadAllLines(Path.Combine(dataDirectory, "postgresql.auto.conf"))
+                    .Select((text, index) => (text, line: index + 1))
+                    .Single(l => Regex.IsMatch(l.text, @"^work_mem\s*="));
+                Assert.Contains("postgresql.auto.conf line " + autoLine.line, warning, StringComparison.Ordinal);
+                Assert.Contains("77MB", warning, StringComparison.Ordinal);
+                Assert.Contains(ManagedConfFile.FileName + " line " + managedLine.line + " = " + managedValue, warning, StringComparison.Ordinal);
+
+                /* The stored verdict carries the same sentence, which is what every later reader shows. */
+                var stored = (await DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync(ownerConnection, ct))
+                    .Single(r => r.SettingName == "work_mem");
+                Assert.Contains("77MB", stored.Detail, StringComparison.Ordinal);
+
+                var profileRow = (await DarlingStoreHostProfile.GatherSettingProfilesAsync(
+                    ownerConnection, config, profile.Memory.EffectiveBytes, profile.DataVolume.FreeBytes, ct))
+                    .Single(r => r.Name == "work_mem");
+                Assert.Null(profileRow.ProvenanceUnreadable);
+                Assert.NotNull(profileRow.Provenance);
+                Assert.EndsWith("postgresql.auto.conf", profileRow.Provenance!.SourceFile, StringComparison.OrdinalIgnoreCase);
+                var hidden = Assert.Single(profileRow.Provenance.UnappliedFileRows);
+                Assert.EndsWith(ManagedConfFile.FileName, hidden.File, StringComparison.OrdinalIgnoreCase);
+                Assert.Equal(managedLine.line, hidden.Line);
+            }
+
+            /* The viewer role cannot read pg_file_settings: the read says so with the grant that fixes it. */
+            var viewerConnectionString = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config);
+            Assert.NotNull(viewerConnectionString);
+            await using var viewerConnection = await OpenAsync(viewerConnectionString!, ct);
+            var viewerRead = await StoreSettingProvenance.ReadAsync(viewerConnection, ["work_mem"], 30, ct);
+            Assert.False(viewerRead.FileSettingsReadable);
+            Assert.Contains("GRANT SELECT ON pg_file_settings", StoreSettingProvenance.DescribeUnreadable(viewerRead), StringComparison.Ordinal);
+            Assert.Equal("configuration file", viewerRead.ByName["work_mem"].Source);
+        }
+        finally
+        {
+            await owner.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// #9418: the running value of a setting reads back exactly as <c>SHOW</c> prints it, including a setting whose
+    /// <c>pg_settings.unit</c> is a multiple (<c>shared_buffers</c> and <c>effective_cache_size</c> count 8kB pages),
+    /// a plain <c>kB</c> setting and a <c>ms</c> setting. A <c>pg_file_settings</c> value stays as the file wrote it.
+    /// The whole settings gather, with its added provenance reads, is also timed against the startup deadline.
+    /// </summary>
+    [Fact]
+    public async Task ProvenanceValueReadsBackLikeShow_AndTheGatherStaysInsideItsDeadline_Gated()
+    {
+        var runtimeRoot = SkipUnlessRuntimeAvailable();
+        var root = Directory.CreateTempSubdirectory("darling-managedconf-showvalue-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var config = new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory };
+        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            var ct = timeout.Token;
+            var connectionString = await owner.EnsureRunningAsync(ct);
+
+            await using (var migrateConnection = await OpenAsync(connectionString, ct))
+            {
+                await PgMigrations.MigrateAsync(migrateConnection, ct);
+            }
+
+            await using (var alterConnection = await OpenAsync(connectionString, ct))
+            await using (var alterCommand = new NpgsqlCommand("ALTER SYSTEM SET work_mem = '77MB'", alterConnection))
+            {
+                await alterCommand.ExecuteNonQueryAsync(ct);
+            }
+
+            await ReloadAsync(connectionString, ct);
+
+            string[] names = ["shared_buffers", "effective_cache_size", "work_mem", "maintenance_work_mem", "max_wal_size", "deadlock_timeout"];
+            await using var connection = await OpenAsync(connectionString, ct);
+            var read = await StoreSettingProvenance.ReadAsync(connection, names, 30, ct);
+
+            foreach (var name in names)
+            {
+                await using var show = new NpgsqlCommand("SHOW " + name, connection);
+                var shown = (string)(await show.ExecuteScalarAsync(ct))!;
+                Assert.Equal(shown, read.ByName[name].ValueDisplay);
+            }
+
+            /* The cases that went wrong: an 8kB-page unit, a kB unit and a ms unit. */
+            Assert.Equal("8kB", read.ByName["shared_buffers"].Unit);
+            Assert.Equal("8kB", read.ByName["effective_cache_size"].Unit);
+            Assert.Equal("kB", read.ByName["work_mem"].Unit);
+            Assert.Equal("ms", read.ByName["deadlock_timeout"].Unit);
+            Assert.DoesNotContain("8kB", read.ByName["shared_buffers"].ValueDisplay, StringComparison.Ordinal);
+
+            /* The winning ALTER SYSTEM line keeps the text it was written with. */
+            Assert.Equal("77MB", read.ByName["work_mem"].AppliedFileValue);
+            Assert.Equal("77MB", read.ByName["work_mem"].ValueDisplay);
+
+            /* Timing: the whole settings gather, which now carries three more catalog reads, against the startup deadline. */
+            var profile = await DarlingStoreHostProfile.GatherStartupProfileAsync(config, connection, ct);
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            for (var i = 0; i < 5; i++)
+            {
+                await DarlingStoreHostProfile.GatherSettingProfilesAsync(
+                    connection, config, profile.Memory.EffectiveBytes, profile.DataVolume.FreeBytes, ct);
+            }
+
+            stopwatch.Stop();
+            var perGatherMs = stopwatch.Elapsed.TotalMilliseconds / 5;
+            TestContext.Current.SendDiagnosticMessage(FormattableString.Invariant(
+                $"GatherSettingProfilesAsync with provenance: {perGatherMs:F1} ms per gather (startup deadline {ServiceCommandDeadlines.StartupHostProfileSeconds} s)."));
+            Console.WriteLine(FormattableString.Invariant($"GATHER-MS {perGatherMs:F1}"));
+            Assert.True(
+                perGatherMs < ServiceCommandDeadlines.StartupHostProfileSeconds * 1000 / 10.0,
+                FormattableString.Invariant($"one gather took {perGatherMs:F0} ms, over a tenth of the {ServiceCommandDeadlines.StartupHostProfileSeconds} s startup deadline."));
         }
         finally
         {
