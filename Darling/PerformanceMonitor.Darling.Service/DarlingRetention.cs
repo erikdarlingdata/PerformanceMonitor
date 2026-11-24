@@ -330,7 +330,7 @@ public static class DarlingRetention
         "DELETE FROM config.investigation_signature_days WHERE day < $1::date";
 
     /// <summary>
-    /// The planned change windows (config.investigation_change_windows, V310, #9485) a request still points at are never deleted, so a window
+    /// The planned change windows (config.investigation_change_windows, V318, #9485) a request still points at are never deleted, so a window
     /// ages out no earlier than the requests it held. A window goes when it ended before the cutoff (<c>$1</c>, the same year as the requests)
     /// and no request names it. A request that is still open or claimed is kept by the request purge, and so keeps its window here.
     /// </summary>
@@ -1258,7 +1258,7 @@ public static class DarlingRetention
                 PurgeInvestigationSignatureDaysSql,
                 utcNow.AddDays(-InvestigationSignatureDayRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
-            /* config.investigation_change_windows (V310, #9485): a window is pruned a year after it ended, and only once no request names it, so
+            /* config.investigation_change_windows (V318, #9485): a window is pruned a year after it ended, and only once no request names it, so
                it outlives the requests it held (the request purge runs first, above). Failure-isolated like its siblings. */
             var investigationChangeWindowsDeleted = await PurgeOneAsync(
                 postgres, "config.investigation_change_windows",

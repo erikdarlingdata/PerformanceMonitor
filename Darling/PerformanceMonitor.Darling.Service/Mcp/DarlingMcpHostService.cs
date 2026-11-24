@@ -1827,10 +1827,19 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #9414 get_store_checkpoints - one row per checkpoint of the store's own server, from the same log. */
             .WithGeminiCompatibleTools<DarlingMcpStoreCheckpointTools>()
             /* #9411 get_store_pass_steps - what the service's own background passes did, step by step. Darling-only, like get_store_log. */
+            /* #9437 get_store_connections: the store's OWN connections by role, application, state and wait type a minute at a time,
+               with the slots left before new logins are refused. Darling-only: Lite has no PostgreSQL store. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreConnectionsTools>()
             .WithGeminiCompatibleTools<DarlingMcpStorePassStepsTools>()
+            /* #9439 get_store_lock_waits - the lock waits the store's own sessions suffered, from the store log. Darling-only, on the
+               central store host: Lite has no PostgreSQL store. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreLockWaitTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreTableHealthTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreTableMeasureTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreMaintenanceReadinessTools>()
+            .WithGeminiCompatibleTools<DarlingMcpStoreSettingChangesTools>()
+            /* #9440 get_store_job_runs: each TimescaleDB job run, from TimescaleDB's own history. Darling-only, like get_store_log: it reads the store, and Lite has no store. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreJobRunsTools>()
             .WithGeminiCompatibleTools<DarlingMcpReadLatencyTools>()
             .WithGeminiCompatibleTools<DarlingMcpSlowReadTools>()
             /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store

@@ -315,6 +315,68 @@ public sealed class ReadLatencyFlushLiveTests
         Assert.Equal(new[] { ("24h", 3, 4, 42L, 2), ("7d", 1, 1, 0L, 0) }, rows);
     }
 
+    /// <summary>#9433 (V317): the reply bytes of two flushes of one hour add, and the read's mean covers only the hours that carry a size: an hour
+    /// an older build wrote (NULL, no size) is left out of the average and never counted as an empty reply. The slow-read row keeps its size, and
+    /// a row without one reads back null.</summary>
+    [Fact]
+    public async Task ReplyBytes_AreSummedAcrossFlushes_TheMeanSkipsHoursWithoutASize_AndTheSlowReadRowKeepsItsSize()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the V317 reply-bytes pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var hour = DateTime.UtcNow.AddHours(-1);
+        var metricTime = new DateTime(hour.Year, hour.Month, hour.Day, hour.Hour, 0, 0, DateTimeKind.Utc);
+
+        /* An hour an older build wrote: the row names no reply total, so the column is NULL. 4 runs, no size. */
+        await using (var older = new NpgsqlCommand(@"
+INSERT INTO collect.read_latency (metric_time, surface, route, outcome, window_band, run_count, total_ms, max_ms, bucket_counts)
+VALUES ($1, 'mcp', 'get_wait_stats', 'ok', 'none', 4, 400, 200, ARRAY[4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]::bigint[]);", connection))
+        {
+            older.Parameters.AddWithValue(metricTime.AddHours(-1));
+            await older.ExecuteNonQueryAsync(ct);
+        }
+
+        var first = new ReadLatencyAccumulator();
+        first.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, 0, 0, null, replyBytes: 100);
+        first.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, 0, 0, null, replyBytes: 300);
+        await first.FlushAsync(connection, metricTime, logger: null, ct);
+        var second = new ReadLatencyAccumulator();
+        second.Record(ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, 0, 0, null, replyBytes: 200);
+        await second.FlushAsync(connection, metricTime, logger: null, ct);
+
+        using (var stored = new NpgsqlCommand("SELECT reply_bytes_total FROM collect.read_latency WHERE metric_time = $1", connection))
+        {
+            stored.Parameters.AddWithValue(metricTime);
+            Assert.Equal(600L, await stored.ExecuteScalarAsync(ct));
+        }
+
+        var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, metricTime.AddHours(-3), "mcp", "get_wait_stats", ct);
+        var row = Assert.Single(rows);
+        Assert.Equal(7, row.RunCount);
+        Assert.Equal(600L, row.ReplyBytesTotal);
+        Assert.Equal(3L, row.ReplyBytesRuns);
+        Assert.Equal(200L, row.MeanReplyBytes);
+
+        var onlyOlder = await DarlingReadLatencyReader.GetSummaryAsync(postgres, metricTime.AddHours(-3), "mcp", "get_wait_stats", ct);
+        Assert.NotNull(Assert.Single(onlyOlder).MeanReplyBytes);
+
+        var log = new SlowReadLog(0);
+        var scope = ReadScope.Open(null).Scope;
+        await log.StoreAsync(postgres, SlowReadLog.Build(scope, ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 9_000, null, null, DateTime.UtcNow, null, 4_321), null);
+        await log.StoreAsync(postgres, SlowReadLog.Build(scope, ReadSurface.Mcp, "get_wait_stats", ReadOutcome.Ok, 9_000, null, null, DateTime.UtcNow.AddSeconds(-5)), null);
+        var page = await DarlingSlowReadReader.GetAsync(postgres, DateTime.UtcNow.AddHours(-1), null, null, "get_wait_stats", 10, ct);
+        Assert.Equal(new long?[] { 4_321, null }, page.Reads.Select(r => r.ReplyBytes).ToArray());
+    }
+
     [Fact]
     public async Task AFlushWithNothingRecorded_WritesNoRows()
     {

@@ -2159,7 +2159,7 @@ GRANT SELECT ON {config}.investigation_request_askers TO {admin};
 REVOKE ALL ON {config}.investigation_person_messages FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.investigation_person_messages TO {admin};
 
--- 10e8. The planned change windows (V310, #9485): when a planned change touches which servers. The service opens requests as the owner and reads the windows to
+-- 10e8. The planned change windows (V318, #9485): when a planned change touches which servers. The service opens requests as the owner and reads the windows to
 --       hold a request that opens inside one, so nothing else needs to write. Every role reads the windows (the web dashboard and the MCP read name them).
 --       REVOKE ALL ... CASCADE takes every privilege the default privileges gave, then SELECT goes back to all four. The declare and clear writes are a later grant.
 --       provision-roles.sql step 3j8 does the same.

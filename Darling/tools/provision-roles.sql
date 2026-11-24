@@ -3921,8 +3921,8 @@ BEGIN
    GRANT SELECT ON config.investigation_person_messages TO admin;
 END $do$;
 
--- 3j8. The planned change windows (V310, #9485), mirroring managed provisioning's section 10e8: REVOKE ALL ... CASCADE, then SELECT back to every
---     role. The service opens requests as the owner and reads the windows to hold a request that opens inside one. It is created by V310: on a store below
+-- 3j8. The planned change windows (V318, #9485), mirroring managed provisioning's section 10e8: REVOKE ALL ... CASCADE, then SELECT back to every
+--     role. The service opens requests as the owner and reads the windows to hold a request that opens inside one. It is created by V318: on a store below
 --     it the block warns and skips, so the rest of the script still runs.
 DO $do$
 BEGIN

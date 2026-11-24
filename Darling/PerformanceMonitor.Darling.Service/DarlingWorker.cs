@@ -480,6 +480,17 @@ public sealed partial class DarlingWorker : BackgroundService
                 logger,
                 ct) == StoreStatementStats.SetupOutcome.Ready ? 1 : 0),
 
+        /* #9440: collect.store_job_runs, the SECURITY DEFINER function get_store_job_runs reads TimescaleDB's per-run job history through, because
+           the mcp and viewer logins see no row of that history themselves. Created here (not in a migration) so the roles it is granted to exist,
+           and healed hourly like the statement readers above. Ungated: PL/pgSQL, so it is created on a store with no TimescaleDB too. */
+        new("store job runs reader", StoreObjectConvergenceStage.Ungated, StoreObjectChangeSignal.InPlace,
+            async (connection, logger, ct) => await StoreJobRunsFunction.CreateAndGrantAsync(
+                connection,
+                PgSchemaGenerator.CollectSchema,
+                [DarlingManagedPostgres.AdminRoleName, DarlingManagedPostgres.ViewerRoleName, DarlingManagedPostgres.WebRoleName, DarlingManagedPostgres.McpRoleName],
+                logger,
+                ct) ? 1 : 0),
+
         /* #3573 and the composer's covering indexes: CREATE INDEX IF NOT EXISTS (a catalog check) and the
            per-table autovacuum overrides, plus the catalog-FILTERED hypertable insert-tuning sweep, which
            finds nothing once every hypertable carries the reloption. Wrapped whole rather than per-statement
@@ -571,6 +582,7 @@ public sealed partial class DarlingWorker : BackgroundService
        budget bounds the whole sample, connection wait included, because it is awaited on the main loop. */
     private static readonly TimeSpan s_checkpointSyncSampleInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan s_checkpointSyncSampleBudget = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan s_storeSettingCaptureBudget = TimeSpan.FromSeconds(20);
 
     /* The Query Store backfill worker's tick (#2022): its OWN loop like the command plane, so a slow
        byte-budgeted slice can never delay or starve the collection sweep — the two share only the
@@ -1269,6 +1281,9 @@ public sealed partial class DarlingWorker : BackgroundService
     /* #4823: the once-a-minute checkpointer sync-time sample. MinValue = the first sample is taken on the first pass,
        which only sets the sampler's baseline. The sampler is in memory: a service restart starts a new baseline. */
     private DateTime _nextCheckpointSyncSampleUtc = DateTime.MinValue;
+
+    /// <summary>#9439: true while the minute read of the store's sessions is failing, so it warns once per failure run.</summary>
+    private bool _storeSessionMapFailing;
     private readonly CheckpointSyncSampler _checkpointSyncSampler = new();
 
     /* #2674: per-collector cost on the monitored servers, accumulated in memory and flushed hourly on the
