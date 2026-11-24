@@ -28,7 +28,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #9452: <see cref="OversizedPlanBacklog.RecordSightingsSql"/> counts a server's pending rows on every collection cycle. Through the
-/// server index it visited the heap row of every row the server has. V305 adds a partial index of the pending rows alone, so the count
+/// server index it visited the heap row of every row the server has. V310 adds a partial index of the pending rows alone, so the count
 /// reads that index. The gate's second test needs <c>last_seen_at</c>, which the index must not hold, so it is read only when the first
 /// test is already over the cap. The skip decision must stay exactly what it was, and a re-sighting must stay a heap-only update.
 /// </summary>

@@ -61,7 +61,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// index chosen for an ORDER BY nobody has measured would be a guess; the ORDER BYs below name the index to add if
 /// it ever stops being one.</para>
 ///
-/// <para><b>One more index, for the sightings count (#9452).</b> <see cref="PendingIndexName"/> (V305) is partial to the pending rows, on
+/// <para><b>One more index, for the sightings count (#9452).</b> <see cref="PendingIndexName"/> (V310) is partial to the pending rows, on
 /// <c>(server_id)</c> alone, so the upsert's per-cycle pending count reads it without the heap. See <see cref="PendingIndexName"/>
 /// for why it names no <c>last_seen_at</c>.</para>
 ///
@@ -752,7 +752,7 @@ SET last_attempt_at = $7,
         AND   last_attempt_at IS NULL";
 
     /// <summary>The store schema version of the rung that adds <see cref="PendingIndexName"/> (#9452).</summary>
-    public const int PendingIndexVersion = 305;
+    public const int PendingIndexVersion = 310;
 
     /// <summary>
     /// #9452: the partial index of the rows <see cref="NeverTriedPendingPredicate"/> names, on <c>(server_id)</c> and nothing else.

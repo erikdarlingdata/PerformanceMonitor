@@ -392,11 +392,14 @@ public static partial class DarlingWebEndpoints
             ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), registryState, logger, responseByteBudget: null, c.RequestAborted),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), card_offset: 0, responseByteBudget: null, Str(c, "band"), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c), Rows(c, "limit", DarlingMcpAgTools.DefaultGroupLimit), c.RequestAborted),
-            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), c.RequestAborted),
+            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), QueryInt(c, "wal_hours_back", null, DarlingStoreWalReader.DefaultHoursBack), QueryBool(c, "table_activity", false), Hours(c, DarlingStoreTableActivityRead.DefaultHours), Str(c, "rank_by"), AsOf(c), c.RequestAborted),
             ["get_store_table_health"] = (c, pg, an) => DarlingMcpStoreTableHealthTools.GetStoreTableHealth(pg, Rows(c, "top", DarlingMcpStoreTableHealthTools.DefaultTop), QueryBool(c, "candidates_only", false), First(c, "section"), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["measure_store_table"] = (c, pg, an) => DarlingMcpStoreTableMeasureTools.MeasureStoreTable(pg, Str(c, "table"), c.RequestAborted),
             ["get_store_maintenance_readiness"] = (c, pg, an) => DarlingMcpStoreMaintenanceReadinessTools.GetStoreMaintenanceReadiness(pg, c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, responseByteBudget: null, c.RequestAborted),
+            ["get_service_starts"] = (c, pg, an) => DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), c.RequestAborted),
+            ["get_store_checkpoints"] = (c, pg, an) => DarlingMcpStoreCheckpointTools.GetStoreCheckpoints(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreCheckpointTools.DefaultLimit), AsOf(c), offset: 0, responseByteBudget: null, c.RequestAborted),
+            ["get_store_pass_steps"] = (c, pg, an) => DarlingMcpStorePassStepsTools.GetStorePassSteps(pg, Hours(c, 24), Str(c, "pass"), Str(c, "step"), Rows(c, "limit", DarlingMcpStorePassStepsTools.DefaultLimit), AsOf(c), responseByteBudget: null, c.RequestAborted),
             ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), Str(c, "order_by"), logger: logger, cancellationToken: c.RequestAborted),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
             /* #4214 part 2: postgresConfig rides by closure (this method's own doc comment), the same way
@@ -1094,7 +1097,7 @@ public static partial class DarlingWebEndpoints
     internal static readonly string[] IntegerQueryKeys =
     [
         "hours", "hours_back", "days_back", "trend_hours_back", "baseline_hours_back", "limit", "top",
-        "bucket_minutes", "min_dop", "worst_count", "statements", "min_sessions", "offset"
+        "bucket_minutes", "min_dop", "worst_count", "statements", "min_sessions", "offset", "wal_hours_back"
     ];
 
     /// <summary>
