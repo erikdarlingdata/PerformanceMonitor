@@ -554,6 +554,64 @@ ORDER BY 1", connection);
     private static Task<string> InfoDefinitionAsync(NpgsqlConnection connection, CancellationToken ct) =>
         ScalarAsync<string>(connection, $"SELECT pg_catalog.pg_get_functiondef('config.{StoreStatementStats.InfoFunctionName}()'::regprocedure)", ct);
 
+    /// <summary>
+    /// #9484: the grant gives EXECUTE only to a role that already has USAGE on the config schema, so a role that does not (yet) is skipped
+    /// without an error and picks the grant up on the next pass once it has USAGE. The hourly pass is that next pass.
+    /// </summary>
+    [Fact]
+    public async Task TheGrant_SkipsARoleWithoutUsage_WithoutAnError_AndGivesItExecuteOnTheNextPassOnceItHasUsage_AgainstScratchPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(baseConnectionString),
+            "Set DARLING_TEST_PG to a superuser connection string to run the #9484 grant proof in a scratch database.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var c = await OpenAsync(scratch.ConnectionString, ct);
+        await ExecAsync(c, "CREATE SCHEMA IF NOT EXISTS config", ct);
+
+        var withUsage = "pgss_usage_" + RunSuffix;
+        var withoutUsage = "pgss_nousage_" + RunSuffix;
+        await ExecAsync(c, $"CREATE ROLE {withUsage} NOLOGIN", ct);
+        await ExecAsync(c, $"CREATE ROLE {withoutUsage} NOLOGIN", ct);
+        try
+        {
+            await ExecAsync(c, $"GRANT USAGE ON SCHEMA config TO {withUsage}", ct);
+            string[] roles = [withUsage, withoutUsage];
+
+            var outcome = await StoreStatementStats.EnsureAsync(c, "config", roles, NullLogger.Instance, ct);
+            Assert.SkipWhen(outcome is StoreStatementStats.SetupOutcome.NotAvailable or StoreStatementStats.SetupOutcome.NotPermitted or StoreStatementStats.SetupOutcome.Outdated,
+                $"The readers are not built here ({outcome}), so there is no grant to read.");
+
+            string[] functions = [StoreStatementStats.FunctionName, StoreStatementStats.InfoFunctionName, StoreStatementStats.WriteCounterFunctionName];
+            foreach (var function in functions)
+            {
+                Assert.True(await CanExecuteAsync(c, withUsage, function, ct), $"{function}: the role with USAGE got no EXECUTE");
+                Assert.False(await CanExecuteAsync(c, withoutUsage, function, ct), $"{function}: the role without USAGE got EXECUTE");
+            }
+
+            /* Once the role has USAGE, the next pass (the hourly tick) gives it EXECUTE, and the first role keeps it. */
+            await ExecAsync(c, $"GRANT USAGE ON SCHEMA config TO {withoutUsage}", ct);
+            Assert.Equal(outcome, await StoreStatementStats.EnsureAsync(c, "config", roles, NullLogger.Instance, ct));
+            foreach (var function in functions)
+            {
+                Assert.True(await CanExecuteAsync(c, withoutUsage, function, ct), $"{function}: the role that gained USAGE got no EXECUTE on the next pass");
+                Assert.True(await CanExecuteAsync(c, withUsage, function, ct), $"{function}: the first role lost EXECUTE");
+            }
+        }
+        finally
+        {
+            foreach (var role in new[] { withUsage, withoutUsage })
+            {
+                await ExecAsync(c, $"DROP OWNED BY {role}", ct);
+                await ExecAsync(c, $"DROP ROLE {role}", ct);
+            }
+        }
+    }
+
+    private static Task<bool> CanExecuteAsync(NpgsqlConnection connection, string role, string function, CancellationToken ct) =>
+        ScalarAsync<bool>(connection, $"SELECT pg_catalog.has_function_privilege('{role}', 'config.{function}()', 'EXECUTE')", ct);
+
     private static async Task<NpgsqlConnection> OpenAsync(string connectionString, CancellationToken ct)
     {
         var connection = new NpgsqlConnection(connectionString);

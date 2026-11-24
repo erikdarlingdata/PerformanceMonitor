@@ -293,7 +293,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 20000, $10, 1024, 2048, 0, 0, $11, $
                dimension read for the kept plans. */
             var oracleSql = PgDrillDownCollector.ParameterSensitiveSql
                 .Replace("query_text IS NOT NULL AS has_inline_text,", "query_text,", StringComparison.Ordinal)
-                .Replace("        has_inline_text,", "        query_text,", StringComparison.Ordinal)
+                .Replace("        t.has_inline_text,", "        t.query_text,", StringComparison.Ordinal)
                 .Replace("    o.has_inline_text,", "    o.query_text,", StringComparison.Ordinal);
             Assert.DoesNotContain("has_inline_text", oracleSql, StringComparison.Ordinal);
             var kept = new List<(object?[] Row, string? Inline, byte[]? Digest)>();

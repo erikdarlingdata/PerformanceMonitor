@@ -182,4 +182,56 @@ public sealed class UpgradeRunPickupTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }
+
+    /// <summary>
+    /// The review of #9493: an older copy of a run's file (the rollback backup copies the in_progress file, and a manual restore puts it back)
+    /// must not move a finished row back to in_progress. The row keeps its state, and the stale file is removed.
+    /// </summary>
+    [Fact]
+    public async Task AnOlderCopyOfTheRunFile_NeverMovesAFinishedRowBack_AndIsRemoved()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        var folder = Directory.CreateTempSubdirectory("darling-9432-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            var pickup = new UpgradeRunPickup(new CountingLogger());
+            var file = Path.Combine(folder, UpgradeRunPickup.FileName);
+            var now = DateTime.UtcNow;
+
+            var verified = Guid.NewGuid();
+            File.WriteAllText(file, RunJson(verified, "verified"));
+            Assert.Equal(UpgradeRunPickupOutcome.RecordedAndRemoved, (await pickup.PickUpAsync(connection, folder, now, ct)).Outcome);
+            File.WriteAllText(file, RunJson(verified, "in_progress"));
+            Assert.Equal(UpgradeRunPickupOutcome.RecordedAndRemoved, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(1), ct)).Outcome);
+            Assert.Equal((1L, "verified"), await RowAsync(connection, verified));
+            Assert.False(File.Exists(file), "a file behind the stored row is stale and goes");
+
+            var failed = Guid.NewGuid();
+            File.WriteAllText(file, RunJson(failed, "failed", "the copy failed twice"));
+            Assert.Equal(UpgradeRunPickupOutcome.RecordedAndRemoved, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(2), ct)).Outcome);
+            File.WriteAllText(file, RunJson(failed, "in_progress"));
+            Assert.Equal(UpgradeRunPickupOutcome.RecordedAndRemoved, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(3), ct)).Outcome);
+            Assert.Equal((2L, "failed"), await RowAsync(connection, failed));
+
+            /* A run that moves forward is still recorded: succeeded after in_progress, with the file kept until it is verified. */
+            var forward = Guid.NewGuid();
+            File.WriteAllText(file, RunJson(forward, "in_progress"));
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(4), ct)).Outcome);
+            File.WriteAllText(file, RunJson(forward, "succeeded"));
+            Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(5), ct)).Outcome);
+            Assert.Equal((3L, "succeeded"), await RowAsync(connection, forward));
+            bodySucceeded = true;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
 }
