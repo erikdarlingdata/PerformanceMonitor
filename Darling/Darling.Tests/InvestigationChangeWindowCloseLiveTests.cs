@@ -75,7 +75,7 @@ VALUES ({servers}, {Stamp(starts)}, {Stamp(ends)}, '{reason}', 'test', {(cleared
 
             /* A cursor from just before the late join: the held request has been invisible to the wait until now. */
             _now = T0.AddMinutes(99);
-            using var signal = new InvestigationOpenSignal();
+            var signal = new InvestigationOpenSignal();
             var started = JsonDocument.Parse(await DarlingMcpInvestigationTools.WaitAsync(store.OpenedSinceAsync, signal, () => _now, null, null, 0, ct));
             Assert.Equal("empty", started.RootElement.GetProperty("status").GetString());
             var cursor = started.RootElement.GetProperty("cursor").GetString();
