@@ -222,6 +222,8 @@ store_metrics,internal,no,store size telemetry
 store_pass_steps,internal,no,background pass step history
 store_relation_sizes_latest,derived,derived,newest measured size of each relation
 store_relation_sizes_measured,internal,no,when the relation sizes were measured
+store_setting_changes,internal,no,changes to the store settings between captures
+store_setting_state,internal,no,the last captured reading of each store setting
 store_statement_captures,internal,no,store statement capture progress
 store_statement_history,internal,no,store own statement history
 store_table_activity,internal,no,hourly activity of each store table
