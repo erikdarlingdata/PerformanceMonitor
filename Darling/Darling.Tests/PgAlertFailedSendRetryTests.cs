@@ -381,20 +381,20 @@ public sealed class PgAlertFailedSendRetryTests
     }
 
     [Fact]
-    public void DarlingWorker_HasNoDiscardingSend_AndExactlySixRetryingSends_PlusTheOneHeldRowSend()
+    public void DarlingWorker_HasNoDiscardingSend_AndExactlySevenRetryingSends_PlusTheHeldRowSends()
     {
         /* Census: a seventh PostgreSQL arm has to choose a send and wire the same report, and an arm turned
            back to the discarding send fails the per-arm pins above and this count. */
         var worker = Worker();
 
         Assert.DoesNotContain("_alertDeliverer.DeliverAsync(", worker, StringComparison.Ordinal);
-        /* Nine sends: the six pages above, plus three held-back rows: the held Blocking Detected row (#7083 part 2) and the two
-           #7082 writes (the capacity-at-the-ceiling High CPU row and the held Poison Wait Warning). A held row is a digest row, not a page, so it has no failed-send retry
-           and no AfterPgFire; the AfterPgFire count below stays at the six pages. */
+        /* Nine sends: the seven pages above (#9501 added the Capacity at ceiling page and removed the held High CPU row), plus two
+           held-back rows: the held Blocking Detected row (#7083 part 2) and the held Poison Wait Warning (#7082). A held row is a
+           digest row, not a page, so it has no failed-send retry and no AfterPgFire; the AfterPgFire count below is the seven pages. */
         Assert.Equal(9, CountOccurrences(worker, "_alertDeliverer.DeliverAndReportAsync("));
 
-        /* The definition is "bool AfterPgFire(" and "AfterPgFireCore(" does not match; the rest are the six retrying calls. */
-        Assert.Equal(6, CountOccurrences(worker, "AfterPgFire(") - CountOccurrences(worker, "bool AfterPgFire("));
+        /* The definition is "bool AfterPgFire(" and "AfterPgFireCore(" does not match; the rest are the seven retrying calls. */
+        Assert.Equal(7, CountOccurrences(worker, "AfterPgFire(") - CountOccurrences(worker, "bool AfterPgFire("));
     }
 
     private static int CountOccurrences(string source, string value)

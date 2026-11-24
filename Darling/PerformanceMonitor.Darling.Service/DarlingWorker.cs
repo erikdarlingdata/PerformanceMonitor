@@ -1439,10 +1439,6 @@ public sealed partial class DarlingWorker : BackgroundService
     /// digest row. Cleared when the subject pages or drops under the Warning bar, so the next episode writes its own.</summary>
     private readonly ConcurrentDictionary<string, bool> _heldPgPoisonWaitEpisode = new(StringComparer.Ordinal);
 
-    /// <summary>#7082: per server, when a held "capacity at the ceiling, low instance CPU" High CPU row was last written, so
-    /// the digest gets at most one such row per cooldown per server.</summary>
-    private readonly ConcurrentDictionary<string, DateTime> _lastPgCpuHeldRow = new(StringComparer.Ordinal);
-
     /// <summary>#7082: per server, the deadlock reports (identity to first-seen time) already counted into the signature
     /// store, so a report the window re-reads every sweep is counted once.</summary>
     private readonly ConcurrentDictionary<string, Dictionary<string, DateTime>> _pgDeadlockCounted = new(StringComparer.Ordinal);
@@ -1484,6 +1480,15 @@ public sealed partial class DarlingWorker : BackgroundService
     private readonly ConcurrentDictionary<string, DateTime> _lastPgCpuAlert = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _pgCpuPersistence = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _pgCpuPersistenceSeeded = new(StringComparer.Ordinal);
+
+    /* #9501: the "Capacity at ceiling" gate's own state, the four members above under its own metric name. It has its own persisted
+       record (config.alert_persistence_state, keyed by AlertEngine.PgCapacityCeilingMetric), its own cooldown stamp and its own
+       observed-sample watermark, so it neither moves nor waits on the High CPU gate. _pgCapacityRun is the in-memory first and
+       latest sample of the held run, for the alert's detail; a restart loses it and the detail then starts at the first sample seen. */
+    private readonly ConcurrentDictionary<string, DateTime> _lastPgCapacityAlert = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, AlertPersistenceRecord> _pgCapacityPersistence = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, bool> _pgCapacityPersistenceSeeded = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PgCapacityRun> _pgCapacityRun = new(StringComparer.Ordinal);
 
     /* #2716: none of the Postgres alerts' watermarks above survive a restart — AlertEngine seeds its
        own SQL Server twins of _lastAlertedPgDeadlockCount/_lastAlertedPgBlockingCount from

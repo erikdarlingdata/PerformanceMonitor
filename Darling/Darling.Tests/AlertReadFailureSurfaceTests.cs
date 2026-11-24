@@ -931,6 +931,7 @@ public sealed class AlertReadFailureSurfaceTests
         "EvaluateAlertsAsync",
         "EvaluatePostgresAlertsAsync",
         "EvaluatePgCpuAsync",
+        "EvaluatePgCapacityCeilingAsync",
         "EvaluatePgDeadlocksAsync",
         "EvaluatePgBlockingAsync",
         "EvaluatePgLongRunningQueryAsync",
