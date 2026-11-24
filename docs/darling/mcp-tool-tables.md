@@ -182,7 +182,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `test_custom_alert_rule` | The table that the rule's measure names. Also its hourly or daily aggregate, when the window uses one.<br>`config.custom_alert_rules` (when rule_id given)<br>`config.server_tags`<br>`config.server_tag_map` (tag scope) |
 | `test_query_tag_rule` | `collect.query_tag_sightings`<br>`config.query_tag_rules`<br>`config.query_tags`<br>`config.query_tag_assignments`<br>`collect.servers` |
 
-## Tools about Darling itself (47)
+## Tools about Darling itself (48)
 
 | Tool | Store objects |
 |---|---|
@@ -214,6 +214,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_server_settings` | `config.config_monitored_servers` |
 | `get_service_starts` | `collect.service_starts`<br>`collect.service_start_rungs`<br>`collect.service_start_rung_objects` |
 | `get_slow_reads` | `collect.slow_reads` |
+| `get_store_connections` | `collect.store_connection_samples`<br>`collect.store_connection_slots` |
 | `get_store_host` | `collect.store_metrics` |
 | `get_store_log` | `collect.store_log_captures`<br>`collect.store_log_events` |
 | `get_store_checkpoints` | `collect.store_checkpoints` |
