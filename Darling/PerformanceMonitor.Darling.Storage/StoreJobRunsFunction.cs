@@ -56,7 +56,7 @@ public static class StoreJobRunsFunction
 #variable_conflict use_column
 DECLARE
     v_limit integer := LEAST(GREATEST(COALESCE(p_limit, 50), 1), {MaxRows});
-    v_db_owner oid := (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database());
+    v_db_owner oid := (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database());
 BEGIN
     IF pg_catalog.to_regclass('timescaledb_information.job_history') IS NULL THEN
         RETURN;
@@ -78,7 +78,7 @@ BEGIN
         (SELECT pg_catalog.min(a.start_time) FROM timescaledb_information.job_history AS a)
     FROM timescaledb_information.job_history AS h
     LEFT JOIN timescaledb_information.jobs AS j
-      ON j.job_id OPERATOR(pg_catalog.=) h.job_id
+      ON j.job_id = h.job_id
     CROSS JOIN LATERAL
     (
         SELECT
@@ -87,8 +87,8 @@ BEGIN
     ) AS r
     WHERE h.start_time >= p_from
     AND   h.start_time < p_to
-    AND   (p_job_kind IS NULL OR h.proc_name::text OPERATOR(pg_catalog.=) p_job_kind OR h.proc_name::text OPERATOR(pg_catalog.=) 'policy_' OPERATOR(pg_catalog.||) p_job_kind)
-    AND   (p_hypertable IS NULL OR j.hypertable_name::text OPERATOR(pg_catalog.=) p_hypertable)
+    AND   (p_job_kind IS NULL OR h.proc_name::text = p_job_kind OR h.proc_name::text = 'policy_' || p_job_kind)
+    AND   (p_hypertable IS NULL OR j.hypertable_name::text = p_hypertable)
     ORDER BY h.start_time DESC, h.id DESC
     LIMIT v_limit;
 END;
