@@ -31,7 +31,8 @@ public sealed class ServiceStartsReadLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
-    private static readonly DateTime Now = ServiceStartHistory.Naive(DateTime.UtcNow);
+    /* Kind Utc, so the store keeps these instants as written: ServiceStartHistory.Naive reads an unspecified kind as local time. */
+    private static readonly DateTime Now = DateTime.SpecifyKind(ServiceStartHistory.Naive(DateTime.UtcNow), DateTimeKind.Utc);
 
     private static async Task<(ScratchPostgres Scratch, NpgsqlDataSource Source)> StartAsync(CancellationToken ct)
     {
