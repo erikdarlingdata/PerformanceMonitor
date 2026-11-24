@@ -1673,7 +1673,7 @@ SELECT
     /* V310 (#9452) adds the partial index of the oversized-plan backlog's pending rows, never dropped. Found by catalog, as the V309 line above is. */
     to_regclass('collect.idx_oversized_plan_backlog_pending') IS NOT NULL,
     /* V311 (#9438) adds what each migration rung changed, one plain table on every store and never dropped. Found by catalog, as the V310 line above is. */
-    to_regclass('collect.service_start_rung_objects') IS NOT NULL",
+    to_regclass('collect.service_start_rung_objects') IS NOT NULL,
     /* V312 (#9432) adds the upgrade run table, a plain table on every store and never dropped. Found by catalog, as the V311 line above is. */
     to_regclass('collect.upgrade_runs') IS NOT NULL";
 
