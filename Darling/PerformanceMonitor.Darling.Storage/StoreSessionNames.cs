@@ -89,6 +89,8 @@ public static class StoreSessionNames
     public const string MuteRules = Slash + "mute-rules";
     public const string CustomAlertRules = Slash + "custom-alert-rules";
     public const string ChangeWatch = Slash + "change-watch";
+    public const string ExternalAlerts = Slash + "external-alerts";
+    public const string CollectionCaveats = Slash + "collection-caveats";
 
     // Command plane and on-demand work.
     public const string CommandPlane = Slash + "command-plane";
