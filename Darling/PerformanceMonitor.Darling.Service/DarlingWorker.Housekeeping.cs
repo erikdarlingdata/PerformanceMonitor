@@ -340,6 +340,13 @@ public sealed partial class DarlingWorker
     private async Task EvaluateCompressionJobHealthAsync(CancellationToken cancellationToken)
     {
         var readClock = Stopwatch.StartNew();
+
+        /* #9411: the step's row, written once after the try so a shutdown (which records nothing) and the awaits inside the pass stay as they were. */
+        var stepStarted = DateTime.UtcNow;
+        var stepClock = Stopwatch.StartNew();
+        var stepRan = false;
+        string? stepFailure = null;
+
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
@@ -495,6 +502,7 @@ public sealed partial class DarlingWorker
                this tick's raw rows are the exact ones EvaluateRetentionHoldsAsync and the cadence merge just
                judged. */
             await _selfAlerts!.EvaluateRawPurgeOverHorizonAsync(rawPurgeOverHorizon, cancellationToken);
+            stepRan = true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -502,6 +510,7 @@ public sealed partial class DarlingWorker
         }
         catch (Exception ex)
         {
+            stepFailure = ex.Message;
             /* WHAT THIS SITE'S ELAPSED CAN AND CANNOT CLAIM, stated because the shared finding sentence
                frames every entry against the alert pass's own command deadline and this one does not fit
                that frame.
@@ -521,6 +530,12 @@ public sealed partial class DarlingWorker
             _logger.LogError(ex, "Compression-job health check failed after {ElapsedMs} ms: {Message}", readClock.ElapsedMilliseconds, ex.Message);
             _readFailures.RecordReadFailure(
                 null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
+        }
+
+        if (stepRan || stepFailure is not null)
+        {
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "compression_job_health", stepStarted, stepClock.Elapsed, default, stepFailure);
         }
     }
 
@@ -731,6 +746,11 @@ public sealed partial class DarlingWorker
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(s_retentionReevaluationBudget);
 
+        /* #9411: the step's row, written once after the try so a shutdown (which records nothing) and the awaits inside the pass stay as they were. */
+        var stepStarted = DateTime.UtcNow;
+        var stepRan = false;
+        string? stepFailure = null;
+
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
@@ -873,6 +893,8 @@ public sealed partial class DarlingWorker
                     _periodicHoleRepair = RunMaterializationHoleRepairAsync(_postgres, cancellationToken);
                 }
             }
+
+            stepRan = true;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -880,15 +902,23 @@ public sealed partial class DarlingWorker
         }
         catch (OperationCanceledException) when (budget.IsCancellationRequested)
         {
+            stepFailure = "cut short by its time budget";
             _logger.LogWarning(
                 "Retention re-evaluation exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short - the policies it had not reached keep the state they were in and are re-judged next hour (and at the next start). A store that cannot answer twenty catalog reads and twenty chunk-pruned min() probes inside that budget is the finding here, not the retention.",
                 (long)s_retentionReevaluationBudget.TotalSeconds, passClock.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
+            stepFailure = ex.Message;
             _logger.LogWarning(
                 "Retention re-evaluation could not run after {ElapsedMs} ms - every held policy stays held until the next hour retries (or the next start): {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
+        }
+
+        if (stepRan || stepFailure is not null)
+        {
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "retention_reevaluation", stepStarted, passClock.Elapsed, default, stepFailure);
         }
     }
 
