@@ -78,6 +78,7 @@ internal sealed class DarlingFrontDoorWebProxy
     private readonly Func<CollectorRuntimeState.Snapshot?>? _collector;
     private readonly bool? _oidcRoleMapping;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastLogged = new();
+    private readonly DateTimeOffset _processStart = DarlingFrontDoorVersion.ProcessStartUtc;
 
     /* Each store's own admin_writes_off and managed_store, as its /api/session last said (null: it did not say), and when. */
     private readonly ConcurrentDictionary<string, (DateTimeOffset At, StoreFlags Flags)> _storeFlags = new(StringComparer.OrdinalIgnoreCase);
@@ -112,6 +113,14 @@ internal sealed class DarlingFrontDoorWebProxy
             logger,
             collector: collector,
             oidcRoleMapping: oidcRoleMapping);
+
+    /// <summary>#9431: whether this request is the unauthenticated <c>GET /version</c> (<see cref="DarlingFrontDoorVersion"/>). The web pipeline asks
+    /// before its sign-in gate and calls <see cref="WriteVersionAsync"/> when it is.</summary>
+    internal static bool IsVersionRequest(HttpRequest request) => DarlingFrontDoorVersion.IsVersionRequest(request);
+
+    /// <summary>#9431: answers <c>GET /version</c> with the build, the commit, the start time and each store's reachability.</summary>
+    internal Task WriteVersionAsync(HttpContext context)
+        => DarlingFrontDoorVersion.WriteAsync(context, _directory.Stores, _processStart);
 
     /// <summary>Maps every <c>/api/*</c> route. It runs where the dashboard's own endpoints would, after the sign-in and role gates.</summary>
     internal void AddRoutes(WebApplication app)

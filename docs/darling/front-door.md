@@ -224,6 +224,27 @@ The first five accept `GET` only.
 
 `admin_writes_off` and `managed_store` are the flags that a store's own `/api/session` reports. A store runs with Admin writes off when `web.allowAdminWrites` is off on a managed store. The front door reads both from each store through the sign-in it already holds, keeps the answer for 30 seconds, and leaves them out for a store that is down, has no `webUrl`, or runs a build that does not report them. The front door's own `/api/session` always says `false` for both, because one flag cannot speak for several stores. The page takes the flags of the store in use, so a store with Admin writes off shows no Admin write controls, the same as when you open that store directly.
 
+### Check the build and the stores: `/version`
+
+`GET /version` on the web address needs no sign-in and no `health` block. It works on a front door with default settings. It still follows the Host check and `web.network.allowFrom`, so an address outside the list is refused as it is on every other route. It answers 200 with JSON:
+
+```json
+{"build":"Version 3.13.0 (commit 0993a1441)","commit":"0993a1441...","started_utc":"2026-11-24T06:00:00Z","upstreams":[{"name":"east","state":"up"},{"name":"west","state":"down"}]}
+```
+
+- `build` is the same line the web footer shows. `commit` is the full commit, or null for a build made outside a git checkout.
+- `started_utc` is when the service process started, so a restart after an upgrade shows.
+- `upstreams` has one entry per store with its `name` and a `state` of `up` or `down`. A store is `up` when its last refresh worked. A store that was never reached, refused the token or answered last time but not this time is `down`. The answer has no address and no error text.
+- The answer comes from the front door's last result for each store. A request to `/version` sends nothing to any store.
+
+Read the body of the answer, not only the status code. A front door built before this endpoint answers 200 with the sign-in page for any path, so a 200 alone does not show that `/version` exists. Check that the body is JSON with a `build` key:
+
+```bash
+curl -s https://front-door.example/version
+```
+
+When the [health port](network-endpoints.md#the-health-port) is on, a front door's `/readyz` sends its usual word on the first line and the same JSON on the second line.
+
 ### Which store gets a forwarded call
 
 The front door forwards every other `/api/*` call to one store. It picks the store in this order.
