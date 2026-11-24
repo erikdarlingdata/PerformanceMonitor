@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
@@ -70,6 +71,14 @@ public partial class StoreHealthTab : UserControl
     private DateTime? _lastSizesAtUtc;
     private bool _tablesFromLastSizes;
 
+    /// <summary>#9364: whether the tables and the indexes on screen are the rows the Viewer saved after its last live read of this store (a first
+    /// open in a new process), with the time the store answered each. Each flag clears when that part's live read lands. A failed live read
+    /// leaves the rows and the flag, so the strip keeps saying where they are from.</summary>
+    private bool _tablesFromSnapshot;
+    private bool _indexesFromSnapshot;
+    private DateTime _snapshotTablesAtUtc;
+    private DateTime _snapshotIndexesAtUtc;
+
     /// <summary>How long after a successful refresh another one that nothing forced is skipped (#8819). The tables read takes seconds on a
     /// large store, and a trigger queued behind a running load starts the moment it ends. The Refresh button is never skipped.</summary>
     internal TimeSpan FreshFor { get; set; } = TimeSpan.FromSeconds(5);
@@ -95,6 +104,13 @@ public partial class StoreHealthTab : UserControl
     internal Func<Task<StoreLastSizesHealth?>>? LastSizesRead { get; set; }
     internal Func<bool>? HoldsTablesRead { get; set; }
 
+    /// <summary>#9364: where the tab saves its rows after each live read and shows them from on a first open in a new process. The shell's
+    /// <see cref="Initialize"/> sets the file for the connected store. Null (a test with no store) saves and shows nothing.</summary>
+    internal StoreHealthSnapshotStore? Snapshots { get; set; }
+
+    /// <summary>The saves queued so far, one after another. A test awaits it to read the file.</summary>
+    internal Task SnapshotSaves { get; private set; } = Task.CompletedTask;
+
     /// <summary>Test seam for the autovacuum settings read (#8950), which runs beside the tables read and fills the line under the header.
     /// Null reads the store through the data service; with no data service either, the line stays hidden.</summary>
     internal Func<bool, Task<StoreHealthRead<DarlingStoreTableHealthReader.StoreAutovacuumSettings>>>? AutovacuumSettingsRead { get; set; }
@@ -114,7 +130,11 @@ public partial class StoreHealthTab : UserControl
     }
 
     /// <summary>Wires the data service.</summary>
-    public void Initialize(ViewerDataService dataService) => _dataService = dataService;
+    public void Initialize(ViewerDataService dataService)
+    {
+        _dataService = dataService;
+        Snapshots = StoreHealthSnapshotStore.ForStore(dataService.StoreConnectionIdentity);
+    }
 
     /// <summary>Reruns the tables, indexes and maintenance reads together (the shell calls this when the tab becomes visible and on its timer).
     /// Skipped when a refresh is running, or when one succeeded less than <see cref="FreshFor"/> ago.</summary>
@@ -149,10 +169,13 @@ public partial class StoreHealthTab : UserControl
                arrive and the live read replaces them. The live reads start beside the last sizes read, never after it, so the refresh costs
                the longer of the two. The last sizes never overwrite a live result that landed first. */
             var readiness = LoadReadinessAsync(timer);
-            var lastSizes = !force && !_tablesLoaded && TablesDataGrid.Items.Count == 0 && !(HoldsTablesRead?.Invoke() ?? _dataService?.HoldsStoreTables ?? false)
-                ? ShowLastSizesAsync(timer)
-                : Task.CompletedTask;
-            await Task.WhenAll(LoadTablesAsync(timer, fresh: force), LoadIndexesAsync(timer, fresh: force), readiness, lastSizes);
+            var firstOpen = !force && !_tablesLoaded && TablesDataGrid.Items.Count == 0 && !(HoldsTablesRead?.Invoke() ?? _dataService?.HoldsStoreTables ?? false);
+            /* #9364: the rows the Viewer saved after its last live read (a local file, read at once) and the store's last measured sizes
+               are both read, and the tables on screen are whichever was measured later (the store's last sizes win a tie). The file's indexes
+               stay, since the last sizes have no index rows. Both are shown beside the live reads, which start now. */
+            var snapshot = firstOpen ? ShowSnapshotAsync(timer) : Task.FromResult(false);
+            var lastSizes = firstOpen ? ShowLastSizesAsync(timer) : Task.CompletedTask;
+            await Task.WhenAll(LoadTablesAsync(timer, fresh: force), LoadIndexesAsync(timer, fresh: force), readiness, snapshot, lastSizes);
             if (!StampIfLoaded())
             {
                 ShowStamp();
@@ -181,13 +204,103 @@ public partial class StoreHealthTab : UserControl
 
     /// <summary>The strip beside Refresh while a refresh runs: it keeps the last stamp, so the page is still read against the time it was true.</summary>
     private void ShowRefreshing() =>
-        LastRefreshedIndicator.Text = OnLastSizes() ? LastSizesText() + " A live read is running…"
+        LastRefreshedIndicator.Text = ProvisionalText() is { } provisional ? provisional + " A live read is running…"
             : _lastStamp is null ? "Loading…" : $"Refreshing… (last refreshed {_lastStamp}{CatalogsReadText()})";
 
     /// <summary>The strip beside Refresh when no refresh runs: the last stamp, or nothing before the first.</summary>
     private void ShowStamp() =>
-        LastRefreshedIndicator.Text = OnLastSizes() ? LastSizesText() + " The live read failed."
+        LastRefreshedIndicator.Text = ProvisionalText() is { } provisional ? provisional + " The live read failed."
             : _lastStamp is null ? "" : "Last refreshed " + _lastStamp + CatalogsReadText();
+
+    /// <summary>#9364: what the strip says while any rows on screen are not from a live read of this open: where they are from and how old
+    /// they are. Null when every section on screen is live.</summary>
+    private string? ProvisionalText()
+    {
+        var parts = new List<string>();
+        if (OnLastSizes())
+        {
+            parts.Add(LastSizesText());
+        }
+
+        if (_tablesFromSnapshot || _indexesFromSnapshot)
+        {
+            var oldest = (_tablesFromSnapshot, _indexesFromSnapshot) switch
+            {
+                (true, true) => _snapshotTablesAtUtc < _snapshotIndexesAtUtc ? _snapshotTablesAtUtc : _snapshotIndexesAtUtc,
+                (true, false) => _snapshotTablesAtUtc,
+                _ => _snapshotIndexesAtUtc,
+            };
+            var which = (_tablesFromSnapshot, _indexesFromSnapshot) switch
+            {
+                (true, true) => "Tables and indexes are",
+                (true, false) => "Tables are",
+                _ => "Indexes are",
+            };
+            parts.Add($"{which} from the last measurement, {StoreHealthRows.SnapshotAge(oldest, DateTime.UtcNow)} ago.");
+        }
+
+        return parts.Count == 0 ? null : string.Join(" ", parts);
+    }
+
+    /// <summary>#9364: puts the rows the Viewer saved after its last live read of this store on screen with the strip saying how old they are,
+    /// unless the live read of a part has already landed (live rows are never overwritten). Leaves the screen alone when there is no file or it
+    /// cannot be read. The file's tables yield to the store's last sizes when those are on screen and were measured at the same time or later.
+    /// Returns whether the tables are on screen from the file.</summary>
+    private async Task<bool> ShowSnapshotAsync(ViewerLoadTimer timer)
+    {
+        if (Snapshots is not { } store)
+        {
+            return false;
+        }
+
+        var saved = await ViewerServerTab.Timed(timer, "store saved rows read", Task.Run(store.Load));
+        if (saved is null)
+        {
+            return false;
+        }
+
+        var tablesShown = false;
+        if (!_tablesLoaded && saved.Tables is { } tables && saved.TablesReadAtUtc is { } tablesAt && !(OnLastSizes() && _lastSizesAtUtc >= tablesAt))
+        {
+            ShowTables(tables);
+            _snapshotTablesAtUtc = tablesAt;
+            _tablesFromSnapshot = true;
+            _tablesFromLastSizes = false;
+            tablesShown = true;
+        }
+
+        if (!_indexesLoaded && saved.Indexes is { } indexes && saved.IndexesReadAtUtc is { } indexesAt)
+        {
+            ShowIndexes(new StoreIndexHealth(indexes, saved.Coverage ?? [], saved.CoverageLeftOutNote, indexesAt));
+            _snapshotIndexesAtUtc = indexesAt;
+            _indexesFromSnapshot = true;
+        }
+
+        if (tablesShown || _indexesFromSnapshot)
+        {
+            timer.NotePhase("store saved rows read", $"showed {(tablesShown ? CountText.Plural(saved.Tables!.Count, "table") : "no tables")} and {(_indexesFromSnapshot ? CountText.Plural(saved.Indexes!.Count, "index") : "no indexes")} from the last measurement");
+            ShowRefreshing();
+        }
+
+        return tablesShown;
+    }
+
+    /// <summary>#9364: saves a live read for the next process's first open, off the UI thread, one save after another. A failed save is a log
+    /// line (the store's own), never a message on screen.</summary>
+    private void QueueSnapshotSave(Action<StoreHealthSnapshotStore> save)
+    {
+        if (Snapshots is not { } store)
+        {
+            return;
+        }
+
+        var previous = SnapshotSaves;
+        SnapshotSaves = Task.Run(async () =>
+        {
+            await previous;
+            save(store);
+        });
+    }
 
     /// <summary>#9374: whether the tables still show the store's last measured sizes.</summary>
     private bool OnLastSizes() => _lastSizesAtUtc is not null && _tablesFromLastSizes;
@@ -198,7 +311,8 @@ public partial class StoreHealthTab : UserControl
 
     /// <summary>#9374: reads the store's last measured sizes and puts the tables rows on screen, with the strip saying so, unless the live
     /// tables read has already landed (its rows are never overwritten). Leaves the screen alone when the store has no sizes to give (the live
-    /// read then runs as it always did). The caller starts the live reads before awaiting this one.</summary>
+    /// read then runs as it always did). Tables the Viewer saved (#9364) stay when they were measured later than these sizes, so a tie goes
+    /// to these. The caller starts the live reads before awaiting this one.</summary>
     private async Task ShowLastSizesAsync(ViewerLoadTimer timer)
     {
         var read = LastSizesRead?.Invoke() ?? _dataService?.GetStoreLastSizesHealthAsync();
@@ -214,7 +328,7 @@ public partial class StoreHealthTab : UserControl
         }
 
         timer.NotePhase("store last sizes read", StoreHealthRows.LastSizesNote(last.Tables.Rows.Count, last.MeasuredAtUtc, DateTime.UtcNow));
-        if (_tablesLoaded)
+        if (_tablesLoaded || (_tablesFromSnapshot && _snapshotTablesAtUtc > last.MeasuredAtUtc))
         {
             return;
         }
@@ -222,6 +336,7 @@ public partial class StoreHealthTab : UserControl
         ShowTables(last.Tables.Rows);
         _lastSizesAtUtc = last.MeasuredAtUtc;
         _tablesFromLastSizes = true;
+        _tablesFromSnapshot = false;
         ShowRefreshing();
     }
 
@@ -308,7 +423,9 @@ public partial class StoreHealthTab : UserControl
             ShowTables(read.Rows);
             _tablesReadAtUtc = read.ReadAtUtc;
             _tablesFromLastSizes = false;
+            _tablesFromSnapshot = false;
             _tablesLoaded = true;
+            QueueSnapshotSave(store => store.SaveTables(read.Rows, read.ReadAtUtc));
         }
         catch (Exception ex)
         {
@@ -318,7 +435,7 @@ public partial class StoreHealthTab : UserControl
             _tablesReadAtUtc = null;
             /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the tab and the status bar, never the driver's text. */
             var text = ViewerRefreshFailure.Report("Store Health", timer, ex);
-            if (!_tablesFromLastSizes)
+            if (!_tablesFromLastSizes && !_tablesFromSnapshot)
             {
                 /* #9374: rows that are the store's last measured sizes stay when the live read fails, and the strip keeps saying so. */
                 TablesDataGrid.ItemsSource = null;
@@ -403,7 +520,9 @@ public partial class StoreHealthTab : UserControl
 
             ShowIndexes(read);
             _indexesReadAtUtc = read.ReadAtUtc;
+            _indexesFromSnapshot = false;
             _indexesLoaded = true;
+            QueueSnapshotSave(store => store.SaveIndexes(read));
         }
         catch (Exception ex)
         {
@@ -413,14 +532,18 @@ public partial class StoreHealthTab : UserControl
             _indexesReadAtUtc = null;
             /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the tab and the status bar, never the driver's text. */
             var text = ViewerRefreshFailure.Report("Store Health", timer, ex);
-            IndexesDataGrid.ItemsSource = null;
-            CoverageDataGrid.ItemsSource = null;
-            CoverageDataGrid.Visibility = Visibility.Collapsed;
-            IndexHeaderText.Text = "The store indexes failed to load.";
-            IndexesMessage.Text = text;
-            IndexesMessage.Visibility = Visibility.Visible;
-            CoverageMessage.Text = "Partition index coverage failed to load.";
-            CoverageMessage.Visibility = Visibility.Visible;
+            if (!_indexesFromSnapshot)
+            {
+                /* #9364: rows that are the saved last measurement stay when the live read fails, and the strip keeps saying so. */
+                IndexesDataGrid.ItemsSource = null;
+                CoverageDataGrid.ItemsSource = null;
+                CoverageDataGrid.Visibility = Visibility.Collapsed;
+                IndexHeaderText.Text = "The store indexes failed to load.";
+                IndexesMessage.Text = text;
+                IndexesMessage.Visibility = Visibility.Visible;
+                CoverageMessage.Text = "Partition index coverage failed to load.";
+                CoverageMessage.Visibility = Visibility.Visible;
+            }
 
             StatusChanged?.Invoke(text);
         }

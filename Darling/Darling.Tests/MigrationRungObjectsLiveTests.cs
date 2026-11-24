@@ -321,4 +321,106 @@ public sealed class MigrationRungObjectsLiveTests
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
         }
     }
+
+    /// <summary>
+    /// #9486: the snapshot is taken before a rung sets its own lock timeout, so it must never wait behind a lock another session holds on a view. Session A
+    /// holds <c>ACCESS EXCLUSIVE</c> on a view and session B takes the snapshot under a short statement timeout. The snapshot finishes with no wait.
+    /// </summary>
+    [Fact]
+    public async Task TheSnapshot_DoesNotWaitBehindAnExclusiveLockOnAView()
+    {
+        await SnapshotDoesNotWaitAsync(
+            "CREATE VIEW collect.probe_locked_view AS SELECT 1 AS one;", "LOCK TABLE collect.probe_locked_view IN ACCESS EXCLUSIVE MODE");
+    }
+
+    /// <summary>#9486: the same for a table that has a column default: session A holds <c>ACCESS EXCLUSIVE</c> on it and the snapshot does not wait.</summary>
+    [Fact]
+    public async Task TheSnapshot_DoesNotWaitBehindAnExclusiveLockOnATableWithAColumnDefault()
+    {
+        await SnapshotDoesNotWaitAsync(
+            "CREATE TABLE collect.probe_locked_table (id integer NOT NULL, note text DEFAULT 'x', stamp timestamptz DEFAULT now());",
+            "LOCK TABLE collect.probe_locked_table IN ACCESS EXCLUSIVE MODE");
+    }
+
+    private static async Task SnapshotDoesNotWaitAsync(string setupSql, string lockSql)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using (var setup = new NpgsqlConnection(scratch.ConnectionString))
+            {
+                await setup.OpenAsync(ct);
+                await using var create = new NpgsqlCommand(setupSql, setup);
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var holder = new NpgsqlConnection(scratch.ConnectionString);
+            await holder.OpenAsync(ct);
+            await using var holderTransaction = await holder.BeginTransactionAsync(ct);
+            await using (var hold = new NpgsqlCommand(lockSql, holder, holderTransaction))
+            {
+                await hold.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var reader = new NpgsqlConnection(scratch.ConnectionString);
+            await reader.OpenAsync(ct);
+            await using var transaction = await reader.BeginTransactionAsync(ct);
+            await using (var limit = new NpgsqlCommand("SET LOCAL statement_timeout = '4s'", reader, transaction))
+            {
+                await limit.ExecuteNonQueryAsync(ct);
+            }
+
+            var clock = Stopwatch.StartNew();
+            var snapshot = await MigrationCatalogSnapshot.TryTakeAsync(reader, transaction, null, 60, ct);
+            clock.Stop();
+
+            Assert.NotNull(snapshot);
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(4), $"The snapshot took {clock.Elapsed.TotalMilliseconds:F0} ms behind a held exclusive lock.");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #9486: a snapshot also must not leave a lock behind, because the rung's transaction holds every lock the snapshot took until the rung ends. After a
+    /// snapshot, the backend holds no relation lock on a relation in <c>collect</c> or <c>config</c>.
+    /// </summary>
+    [Fact]
+    public async Task TheSnapshot_HoldsNoRelationLockOnTheStoresOwnTablesOrViews()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await using var transaction = await connection.BeginTransactionAsync(ct);
+            var snapshot = await MigrationCatalogSnapshot.TryTakeAsync(connection, transaction, null, 60, ct);
+            Assert.NotNull(snapshot);
+
+            await using var locks = new NpgsqlCommand(
+                @"SELECT count(*) FROM pg_locks AS l
+                  JOIN pg_class AS c ON c.oid = l.relation
+                  JOIN pg_namespace AS n ON n.oid = c.relnamespace
+                  WHERE l.pid = pg_backend_pid() AND l.locktype = 'relation' AND n.nspname IN ('collect', 'config')", connection, transaction);
+            Assert.Equal(0L, (long)(await locks.ExecuteScalarAsync(ct))!);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
 }

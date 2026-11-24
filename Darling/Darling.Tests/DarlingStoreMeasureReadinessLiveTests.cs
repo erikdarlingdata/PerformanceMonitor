@@ -210,7 +210,7 @@ CREATE VIEW collect.zz_measure_view AS SELECT id FROM collect.zz_measure;", ct);
             var ownership = new StoreProcessOwnership();
             ownership.Publish(started);
             using var doc = JsonDocument.Parse(await DarlingMcpStoreHostTools.GetStoreHost(
-                dataSource, config, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), ownership, ct));
+                dataSource, config, new StoreHostProfileCache(TimeSpan.FromMinutes(1)), ownership, cancellationToken: ct));
             var owner = doc.RootElement.GetProperty("postgres_owner");
             Assert.Equal(expectedOwner, owner.GetProperty("owner").GetString());
             Assert.Equal(started, owner.GetProperty("started_by_this_service").GetBoolean());

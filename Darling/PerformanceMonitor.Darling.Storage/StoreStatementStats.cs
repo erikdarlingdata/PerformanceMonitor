@@ -559,7 +559,8 @@ DECLARE
 BEGIN
     FOREACH grantee IN ARRAY ARRAY[{array}]::text[]
     LOOP
-        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = grantee) THEN
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = grantee)
+        AND pg_catalog.has_schema_privilege(grantee, {QuoteLiteral(configSchema)}, 'USAGE') THEN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.{FunctionName}() TO %I', {QuoteLiteral(configSchema)}, grantee);
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.{InfoFunctionName}() TO %I', {QuoteLiteral(configSchema)}, grantee);
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.{WriteCounterFunctionName}() TO %I', {QuoteLiteral(configSchema)}, grantee);

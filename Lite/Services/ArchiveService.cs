@@ -135,6 +135,12 @@ public class ArchiveService
        pass makes progress whatever this is set to. A merge already running is not interrupted. */
     internal TimeSpan DailyCompactionPassBudget { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>How long the count of re-cut files the time budget left may read footers while it holds the archive lock (#9421). Past it the count stops and is a lower bound.</summary>
+    internal TimeSpan RecutCountTimeCap { get; set; } = TimeSpan.FromMilliseconds(250);
+
+    /* Tests only (#9421): called with a file's path just before the count of left-over re-cut files reads its footer. */
+    internal Action<string>? BeforeRecutCountProbeForTests { get; set; }
+
     /* #5731: how long a periodic housekeeping step waits for the store's write lock before it skips its unit and
        retries on a later pass. The lock is a ReaderWriterLockSlim, and a waiting writer makes every NEW reader wait,
        so an unbounded wait behind one slow read held every collector off for as long as the read ran. Same number
@@ -1316,6 +1322,54 @@ COPY (
             return true;
         }
 
+        /* One history row per pass that merged, re-cut or failed (#9422). The memory samplers run for the pass and stop
+           with it (#9424). Recording is best effort and never changes what the pass returns or throws. */
+        var stats = new CompactionPassStats();
+        var clock = Stopwatch.StartNew();
+        using var workingSet = new PeakWorkingSetSampler();
+        try
+        {
+            var complete = CompactParquetFilesCore(reportIdle, stats, cancellationToken);
+            RecordCompactionPass(stats, clock, workingSet, complete ? null : "incomplete", null);
+            return complete;
+        }
+        catch (Exception ex)
+        {
+            stats.FirstError ??= ex.Message;
+            RecordCompactionPass(stats, clock, workingSet, "failed", ex.Message);
+            throw;
+        }
+    }
+
+    private void RecordCompactionPass(CompactionPassStats stats, Stopwatch clock, PeakWorkingSetSampler workingSet, string? state, string? error)
+    {
+        try
+        {
+            if (History is null || !stats.DidWork)
+            {
+                return;
+            }
+
+            var seconds = clock.Elapsed.TotalSeconds;
+            var outcome = stats.FailedGroups > 0 || error is not null
+                ? StoreHousekeepingHistory.OutcomeFailed
+                : stats.Incomplete || state == "incomplete" || stats.FirstError is not null
+                    ? StoreHousekeepingHistory.OutcomeIncomplete : StoreHousekeepingHistory.OutcomeOk;
+            History.Record(new StoreHousekeepingEvent(
+                DateTime.UtcNow, StoreHousekeepingHistory.KindCompaction, outcome,
+                Files: stats.FilesOut + stats.FilesRecut,
+                Message: stats.FirstError,
+                Compaction: stats.ToDetail(seconds, workingSet.Stop())));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Could not record the compaction history entry");
+        }
+    }
+
+    private bool CompactParquetFilesCore(bool reportIdle, CompactionPassStats stats, CancellationToken cancellationToken)
+    {
+
         var runClock = Stopwatch.StartNew();
         var cancelled = false;
         var failedGroups = 0;
@@ -1697,8 +1751,10 @@ COPY (
                     ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql,
                         memoryLimit: MergeMemoryLimit,
                         rowGroupSize: ParquetCompaction.ServerOrderByFor(table) is null ? null : SortedRowGroupSizeOverride,
+                        onMemorySample: stats.NoteDuckDbMemory,
                         onSortedAtSmallGroups: (retryTable, files, error) =>
                         {
+                            stats.SortedAtSmallGroupBatches++;
                             /* The output is sorted but in 2,048-row groups: the re-cut below would sort it at the large size
                                and run out of memory again, so it leaves the file alone (#9407). */
                             pendingRecutSkips.Add((RecutSkipReason.MergeSortedAtSmallGroups, outputFinalPath));
@@ -1708,6 +1764,7 @@ COPY (
                         },
                         onSortFallback: (fallbackTable, files, error) =>
                         {
+                            stats.UnsortedFallbackBatches++;
                             /* The output is in the unsorted order at the small size: the re-cut below would sort it again
                                and fall back again, so it leaves the file alone (#9407). */
                             pendingRecutSkips.Add((RecutSkipReason.MergeFellBackUnsorted, outputFinalPath));
@@ -1742,7 +1799,7 @@ COPY (
 
                     foreach (var (reason, skippedPath) in pendingRecutSkips)
                     {
-                        NoteRecutSkip(reason, skippedPath);
+                        NoteRecutSkip(reason, skippedPath, stats);
                     }
 
                     /* A swap that could not delete an input or a set-aside file leaves its journal. The group is unresolved
@@ -1757,18 +1814,26 @@ COPY (
                        It counts now, so a rebuild that throws below is not reported as a compaction that failed. */
                     totalMerged++;
                     totalRemoved += removed;
+                    stats.GroupsMerged++;
+                    stats.FilesIn += sourcePaths.Count;
+                    stats.FilesOut += batchOutputs.Count;
+                    stats.BytesIn += keptBytes;
+                    stats.BytesOut += batchOutputs.Sum(o => FileLengthOrZero(o.FinalPath));
 
                     AfterCompactionSwapForTests?.Invoke(table);
 
                     /* A failed rebuild is logged for what it is and does not reach the group's catch below, which
                        is for a merge or a swap that failed. Both callers rebuild the views again in a finally when
                        compaction ends, so the views are not left behind for good. */
+                    var rebuildClock = Stopwatch.StartNew();
                     try
                     {
                         _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
+                        stats.ViewRebuildMs += rebuildClock.ElapsedMilliseconds;
                     }
                     catch (Exception rebuildEx)
                     {
+                        stats.ViewRebuildMs += rebuildClock.ElapsedMilliseconds;
                         viewRebuildFailures++;
                         _logger?.LogError(rebuildEx, "Compacted {Month}/{Table} ({Count} files), but the archive views could not be rebuilt; they are rebuilt again when compaction ends", month, table, files.Count);
                     }
@@ -1810,6 +1875,8 @@ COPY (
             catch (Exception ex)
             {
                 failedGroups++;
+                stats.FailedGroups++;
+                stats.FirstError ??= $"{table} ({month}): {ex.Message}";
                 _logger?.LogError(ex, "Failed to compact {Month}/{Table} ({Count} files)", month, table, files.Count);
 
                 /* A swap that threw after a failed undo leaves a "swapping" journal: the group stays out of the re-cut (#9407). */
@@ -1831,7 +1898,7 @@ COPY (
         if (!cancelled)
         {
             cancelled = RecutSmallRowGroupFiles(
-                unresolvedGroups, compactionClock, dailyMergesStarted, dailyGroupsDeferred > 0, cancellationToken);
+                unresolvedGroups, compactionClock, dailyMergesStarted, dailyGroupsDeferred > 0, stats, cancellationToken);
         }
 
         if (dailyGroupsDeferred > 0)
@@ -1842,6 +1909,7 @@ COPY (
         }
 
         LastCompactionLargestNeedBytes = largestNeedBytes;
+        stats.Incomplete = cancelled || lockTimeouts > 0 || dailyGroupsDeferred > 0 || lowSpaceGroups.Count > 0 || viewRebuildFailures > 0;
         if (lowSpaceGroups.Count > 0)
         {
             var details = string.Join("; ", lowSpaceGroups.Select(g => FormattableString.Invariant(
@@ -1915,7 +1983,7 @@ COPY (
 
     private Dictionary<string, string>? _recutSkips;
 
-    private static string CurrentBuildId()
+    internal static string CurrentBuildId()
     {
         var assembly = typeof(ArchiveService).Assembly;
         return assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
@@ -1923,15 +1991,16 @@ COPY (
             ?? "unknown";
     }
 
-    private Dictionary<string, string> RecutSkips() => _recutSkips ??= LoadRecutSkips();
+    private Dictionary<string, string> RecutSkips() => _recutSkips ??= ReadRecutSkipList(_archivePath);
 
-    /* A missing or unreadable list is an empty one, and a line that is not "name, tab, build" is dropped. */
-    private Dictionary<string, string> LoadRecutSkips()
+    /* A missing or unreadable list is an empty one, and a line that is not "name, tab, build" is dropped. The layout read
+       uses this too, so a file skipped at this build shows as skipped there (#9421). */
+    internal static Dictionary<string, string> ReadRecutSkipList(string archivePath)
     {
         var skips = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            foreach (var line in File.ReadAllLines(Path.Combine(_archivePath, RecutSkipListFileName)))
+            foreach (var line in File.ReadAllLines(Path.Combine(archivePath, RecutSkipListFileName)))
             {
                 var tab = line.IndexOf('\t', StringComparison.Ordinal);
                 if (tab > 0 && tab < line.Length - 1)
@@ -1969,9 +2038,11 @@ COPY (
         }
     }
 
-    /* Every skip of the re-cut goes through here. The persisted reasons write the file's entry. */
-    private void NoteRecutSkip(RecutSkipReason reason, string path)
+    /* Every skip of the re-cut goes through here. The pass's history row counts it by reason, and the persisted reasons
+       write the file's entry (#9422). */
+    internal void NoteRecutSkip(RecutSkipReason reason, string path, CompactionPassStats stats)
     {
+        stats.NoteRecutSkip(reason);
         if (reason is RecutSkipReason.LockTimeout or RecutSkipReason.ExpiresSoon
             or RecutSkipReason.LowDiskSpace or RecutSkipReason.OverBatchBudget)
         {
@@ -2003,13 +2074,18 @@ COPY (
         SaveRecutSkips();
     }
 
+    /* The re-cut's free-disk rule, shared with the layout read: the output (about the source) plus RecutTempSpillMultiple
+       times the source for the sort's spill, plus the reserve. Unknown free space does not block. */
+    internal static bool RecutLacksDiskSpace(long sourceBytes, long? freeBytes, long reserveBytes) =>
+        freeBytes is long free && (1L + ParquetCompaction.RecutTempSpillMultiple) * sourceBytes + reserveBytes > free;
+
     /* A file retention deletes within this long is not cut: a sort that has the file open makes that delete fail (#9407). */
-    private static readonly TimeSpan RecutRetentionWindow = TimeSpan.FromDays(1);
+    internal static readonly TimeSpan RecutRetentionWindow = TimeSpan.FromDays(1);
 
     /* The files the compaction merge writes: YYYYMMDD_table or YYYYMMDD_table_ptNNN (a table merged per day), and
        YYYYMM_table or YYYYMM_table_ptNNN (a monthly table, or a day table's month file from a build before daily grouping,
        which compaction skips today). Per-cycle, reset-export, imported_ and legacy names do not match. */
-    private static readonly Regex s_recutFileName = new(@"^(?<period>\d{8}|\d{6})_(?<table>[a-z][a-z0-9_]*?)(_pt\d{3})?\.parquet$", RegexOptions.Compiled);
+    internal static readonly Regex s_recutFileName = new(@"^(?<period>\d{8}|\d{6})_(?<table>[a-z][a-z0-9_]*?)(_pt\d{3})?\.parquet$", RegexOptions.Compiled);
 
     /// <summary>
     /// The one-time re-cut (#9407). A file of a table that merges in server order, written by compaction at the old
@@ -2024,6 +2100,7 @@ COPY (
         Stopwatch compactionClock,
         int dailyMergesStarted,
         bool dailyMergesDeferred,
+        CompactionPassStats stats,
         CancellationToken cancellationToken)
     {
         var candidates = new List<(string Period, string Path)>();
@@ -2051,7 +2128,7 @@ COPY (
             var path = Path.Combine(_archivePath, file).Replace("\\", "/");
             if (RetentionService.ExpiresWithin(file, RecutRetentionWindow, utcNow))
             {
-                NoteRecutSkip(RecutSkipReason.ExpiresSoon, path);
+                NoteRecutSkip(RecutSkipReason.ExpiresSoon, path, stats);
                 continue;
             }
 
@@ -2092,6 +2169,38 @@ COPY (
                pass that merged nothing still starts its first. */
             if ((started > 0 || dailyMergesStarted > 0 || dailyMergesDeferred) && compactionClock.Elapsed >= DailyCompactionPassBudget)
             {
+                /* The files this pass did not reach that the re-cut would take: counted from their footers, so the history says
+                   how much is left rather than how many candidates the folder holds. */
+                var reached = false;
+                var countClock = Stopwatch.StartNew();
+                var probed = 0;
+                foreach (var (_, later) in candidates
+                    .OrderByDescending(c => c.Period.PadRight(8, '9'), StringComparer.Ordinal)
+                    .ThenByDescending(c => c.Path, StringComparer.Ordinal))
+                {
+                    if (later == path) reached = true;
+                    if (!reached)
+                    {
+                        continue;
+                    }
+
+                    /* This count runs under s_archiveLock, which the hourly archive and a store reset wait on, and it reads one footer per
+                       file. After its time cap it stops and reports what it has as a lower bound (#9421). The first file is always read,
+                       so the count never says nothing about a pass that left files. */
+                    if (probed > 0 && countClock.Elapsed >= RecutCountTimeCap)
+                    {
+                        stats.RecutSkippedTimeBudgetIsLowerBound = true;
+                        break;
+                    }
+
+                    probed++;
+                    BeforeRecutCountProbeForTests?.Invoke(later);
+                    if (RecutIsDue(probe, later))
+                    {
+                        stats.RecutSkippedTimeBudget++;
+                    }
+                }
+
                 break;
             }
 
@@ -2107,6 +2216,7 @@ COPY (
             if (File.Exists(SwapJournalPathFor(period, table)))
             {
                 unresolvedGroups.Add((period, table));
+                if (RecutIsDue(probe, path)) stats.RecutSkippedLiveJournal++;
                 continue;
             }
 
@@ -2125,7 +2235,7 @@ COPY (
                         table, CompactionBatchInputBytes, DailyCompactionBatchInputBytes, SortedCompactionBatchInputBytes))
                 {
                     tooLarge++;
-                    NoteRecutSkip(RecutSkipReason.OverBatchBudget, path);
+                    NoteRecutSkip(RecutSkipReason.OverBatchBudget, path, stats);
                     continue;
                 }
 
@@ -2133,11 +2243,10 @@ COPY (
                    folder's volume, and #5410 measured spills of about 4 and 11 times the input, so it needs the output
                    (about the source) plus RecutTempSpillMultiple times the source, plus the same reserve. */
                 var freeBytes = _duckDb.AvailableFreeBytesProvider(_archivePath);
-                if (freeBytes is long free
-                    && (1L + ParquetCompaction.RecutTempSpillMultiple) * sourceBytes + DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath) > free)
+                if (RecutLacksDiskSpace(sourceBytes, freeBytes, DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath)))
                 {
                     lowSpace++;
-                    NoteRecutSkip(RecutSkipReason.LowDiskSpace, path);
+                    NoteRecutSkip(RecutSkipReason.LowDiskSpace, path, stats);
                     continue;
                 }
 
@@ -2147,9 +2256,9 @@ COPY (
                     File.Delete(tempPath);
                 }
 
-                if (!ParquetCompaction.TryRecutToFile(table, path, tempPath, spillDirSql, RecutMemoryLimit, SortedRowGroupSizeOverride))
+                if (!ParquetCompaction.TryRecutToFile(table, path, tempPath, spillDirSql, RecutMemoryLimit, SortedRowGroupSizeOverride, stats.NoteDuckDbMemory))
                 {
-                    NoteRecutSkip(RecutSkipReason.SortRanOutOfResources, path);
+                    NoteRecutSkip(RecutSkipReason.SortRanOutOfResources, path, stats);
                     _logger?.LogWarning(
                         "Re-cut of {File}: the server-ordered sort ran out of memory or temp space, so the file stays as it is and is not tried again until the next build",
                         Path.GetFileName(path));
@@ -2184,6 +2293,7 @@ COPY (
                 }
 
                 recut++;
+                stats.FilesRecut++;
                 _logger?.LogInformation(
                     "Re-cut {File}: {Rows} rows, {GroupsBefore} row groups (largest {MaxRowsBefore} rows) before, {GroupsAfter} row groups (largest {MaxRowsAfter} rows) after",
                     Path.GetFileName(path), rowCount, shapeBefore.Groups, shapeBefore.MaxGroupRows, shapeAfter.Groups, shapeAfter.MaxGroupRows);
@@ -2199,14 +2309,15 @@ COPY (
                    not in the skip list, and the pass is not reported incomplete, since a busy store is not a failed
                    compaction and the next pass tries the file again anyway. The rest of this pass would find the same busy
                    store and drop a sort each, so it stops here. */
-                NoteRecutSkip(RecutSkipReason.LockTimeout, path);
+                NoteRecutSkip(RecutSkipReason.LockTimeout, path, stats);
                 _logger?.LogInformation("Re-cut of {File} deferred: {Message} It is tried again on a later pass", Path.GetFileName(path), ex.Message);
                 try { File.Delete(tempPath); } catch { /* best effort */ }
                 break;
             }
             catch (Exception ex)
             {
-                NoteRecutSkip(RecutSkipReason.RecutFailed, path);
+                NoteRecutSkip(RecutSkipReason.RecutFailed, path, stats);
+                stats.FirstError ??= $"Re-cut of {Path.GetFileName(path)}: {ex.Message}";
                 _logger?.LogError(ex, "Re-cut of {File} failed; the file stays as it is and is not tried again until the next build", Path.GetFileName(path));
                 try { File.Delete(tempPath); } catch { /* best effort */ }
             }
@@ -2227,6 +2338,31 @@ COPY (
         }
 
         return false;
+    }
+
+    /* Whether the re-cut would take this file: a footer read, false when the file cannot be read. For the skip counts only. */
+    private bool RecutIsDue(DuckDBConnection probe, string path)
+    {
+        try
+        {
+            return ParquetCompaction.NeedsRecut(probe, path, SortedRowGroupSizeOverride ?? ParquetCompaction.SortedArchiveRowGroupSize);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static long FileLengthOrZero(string path)
+    {
+        try
+        {
+            return new FileInfo(path).Length;
+        }
+        catch (IOException)
+        {
+            return 0;
+        }
     }
 
     /* A file already in its final monthly form: YYYYMM_table or YYYYMM_table_ptNNN, with or without the imported_
