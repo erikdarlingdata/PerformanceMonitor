@@ -136,7 +136,7 @@ WHERE request_id = $1";
 
     /* #9485: an alert that joins a held request after the window's tail has ended is new evidence from outside the window, so it releases the
        hold. $1 request, $2 the joining alert's time, $3 now (the store's clock, written once and never moved: the guard is hold_released_at IS NULL).
-       Returns the window's id when it released one, and no row for a request that is not held, is already released, or joined inside the tail. */
+       Returns the window's id when it released one, and no row for a request that is not held, is already released, or joined inside the tail. A cleared window releases at cleared_at, not at the end of its tail. */
     internal static readonly string ReleaseHoldSql = @"
 UPDATE config.investigation_requests AS r
 SET hold_released_at = $3
@@ -144,7 +144,7 @@ FROM config.investigation_change_windows AS w
 WHERE r.request_id = $1
   AND r.held_window_id = w.window_id
   AND r.hold_released_at IS NULL
-  AND $2 > w.ends_at + " + InvestigationChangeWindows.TailIntervalSql + @"
+  AND $2 > least(w.ends_at + " + InvestigationChangeWindows.TailIntervalSql + @", coalesce(w.cleared_at, 'infinity'::timestamptz))
 RETURNING w.window_id";
 
     /* #9485: the close summary. A window is closed when its tail has ended (ends_at + tail), or at cleared_at when that is earlier. One journal
@@ -187,7 +187,8 @@ WHERE w.window_id = d.window_id";
 
     /* A chat request (#7659) is counted apart, by ChatCountsSql, so a busy thread cannot block the route's alerts. A request that is still held by a
        change window (#9485) is left out, so one window cannot use up a route's limit and make a real request after the tail read limit_reached. A
-       released request counts. */
+       released request counts, and so does a held one an agent has claimed (claim_count above 0): a claim ignores the hold, so an agent that
+       lists held=only could otherwise claim more than the route allows. */
     internal const string CountRouteSql = @"
 SELECT count(*) FILTER (WHERE opened_at > $2 - interval '1 hour'),
        count(*)
@@ -196,7 +197,7 @@ WHERE route_id = $1
   AND practice_of IS NULL
   AND force_check_of IS NULL
   AND trigger_kind <> 'chat'
-  AND (held_window_id IS NULL OR hold_released_at IS NOT NULL)
+  AND (held_window_id IS NULL OR hold_released_at IS NOT NULL OR claim_count > 0)
   AND opened_at > $2 - interval '1 day'";
 
     /* #8578: server_name is the registry's display name for server_id when the server is registered, else the name the caller passed. An alert
@@ -560,7 +561,7 @@ SELECT route_id,
 FROM config.investigation_requests
 WHERE opened_at > $1 - interval '1 day'
   AND practice_of IS NULL
-  AND (held_window_id IS NULL OR hold_released_at IS NOT NULL)
+  AND (held_window_id IS NULL OR hold_released_at IS NOT NULL OR claim_count > 0)
 GROUP BY route_id";
 
     internal const string RefusalServerSql = @"

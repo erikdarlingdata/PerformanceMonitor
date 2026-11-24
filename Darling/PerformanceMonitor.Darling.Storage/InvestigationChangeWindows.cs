@@ -137,15 +137,18 @@ CREATE INDEX IF NOT EXISTS ix_investigation_requests_held_window
 
 REVOKE ALL ON config.investigation_change_windows FROM PUBLIC;
 DO $do$
+DECLARE
+   r text;
 BEGIN
-   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'admin') THEN
-      REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.investigation_change_windows FROM admin;
-   END IF;
-   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'viewer') THEN
-      REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.investigation_change_windows FROM viewer;
-   END IF;
-   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'mcp') THEN
-      REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.investigation_change_windows FROM mcp;
-   END IF;
+   /* Every role provision-roles.sql makes (admin, viewer, web, mcp) may read the table and none may write it: the service writes it as the store
+      owner. The SELECT grant matters for mcp on a store the operator provisioned himself: that script gives mcp no default read on config, and
+      list_investigation_requests now joins this table, so without the grant the tool fails until the script is run again. */
+   FOREACH r IN ARRAY ARRAY['admin', 'viewer', 'web', 'mcp']
+   LOOP
+      IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = r) THEN
+         EXECUTE pg_catalog.format('REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON config.investigation_change_windows FROM %I', r);
+         EXECUTE pg_catalog.format('GRANT SELECT ON config.investigation_change_windows TO %I', r);
+      END IF;
+   END LOOP;
 END $do$;";
 }

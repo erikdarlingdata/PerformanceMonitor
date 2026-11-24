@@ -108,6 +108,20 @@ SELECT server_id, COALESCE(display_name, server_name) FROM collect.servers WHERE
             }
         }
 
+        /* A login scoped to some servers sees a window that also names others, but not which: the list keeps only the ids in its scope, before
+           the name lookup below, so another server's name is never read. A window with no list (every server) stays as it is. */
+        if (ReadServerIds is { } scope)
+        {
+            var allowed = scope.ToHashSet();
+            for (var i = 0; i < rows.Count; i++)
+            {
+                if (rows[i].ServerIds is { } listed)
+                {
+                    rows[i] = rows[i] with { ServerIds = listed.Where(allowed.Contains).ToArray() };
+                }
+            }
+        }
+
         var windowsTruncated = windowId is null && rows.Count > limit;
         if (windowsTruncated)
         {
