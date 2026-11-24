@@ -4070,7 +4070,10 @@ END $$;";
         /* V304 (#9410): the dirtied blocks, written blocks, WAL bytes and full-page images of each statement in the store's own statement history, on the history
            table and its baseline. Four nullable columns on each, no default, no rewrite. A row from before the rung reads NULL. An older build never names them. */
         new Migration(StoreStatementHistory.WriteCountersVersion, "store-statement-history-write-counters", V304Sql),
-        /* V305 (#9427): the last captured state of the store's settings and a row for each change between starts (old and new value, source, source file and line,
+        /* V305 (#9419): the store's own WAL figures, eleven nullable columns on collect.store_metrics filled on the object_kind = 'wal' row only. No data moves
+           and existing rows keep NULL. An older build ignores the columns and the row: its store reads list only the kinds it knows. */
+        new Migration(StoreWalFigures.Version, "store-wal-figures", StoreWalFigures.AddColumnsSql),
+        /* V306 (#9427): the last captured state of the store's settings and a row for each change between starts (old and new value, source, source file and line,
            pending_restart, when seen, and when the server last loaded its configuration). Two plain tables created empty: no data moves, and the first capture on a
            store writes only the baseline. An older build ignores both. */
         new Migration(StoreSettingChanges.Version, "store-setting-changes", StoreSettingChanges.CreateSql),

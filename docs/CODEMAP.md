@@ -16,8 +16,8 @@ In numbers:
 
 - 23 projects (4 app, 10 library, 5 test, 4 tool).
 - 293 Darling MCP tools and 116 Lite MCP tools.
-- 304 store migrations. The newest is version 305.
-- 4820 test classes in 5 test projects.
+- 305 store migrations. The newest is version 306.
+- 4824 test classes in 5 test projects.
 - 19 CI workflows.
 
 To build, run these from the repository root:
@@ -228,7 +228,7 @@ Start here:
 
 ## Store migrations
 
-Darling's PostgreSQL store has 304 migrations. The newest is version 305. The list is in [`Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs`](../Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs). Version numbers are not gapless, so the count is lower than the newest version.
+Darling's PostgreSQL store has 305 migrations. The newest is version 306. The list is in [`Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs`](../Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs). Version numbers are not gapless, so the count is lower than the newest version.
 
 ## MCP tools
 
@@ -660,7 +660,7 @@ A test class is a file whose name ends in `Tests.cs`.
 | Test project | Test classes |
 |---|---|
 | [`Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj`](../Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj) | 0 |
-| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3561 |
+| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3565 |
 | [`Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj`](../Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj) | 0 |
 | [`Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj`](../Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj) | 69 |
 | [`Lite.Tests/Lite.Tests.csproj`](../Lite.Tests/Lite.Tests.csproj) | 1190 |
@@ -691,4 +691,4 @@ A test class is a file whose name ends in `Tests.cs`.
 
 ---
 
-Generated from commit `4cdb1b893`. To refresh it, run `python tools/codemap/codemap.py`.
+Generated from commit `7b2bf590a`. To refresh it, run `python tools/codemap/codemap.py`.
