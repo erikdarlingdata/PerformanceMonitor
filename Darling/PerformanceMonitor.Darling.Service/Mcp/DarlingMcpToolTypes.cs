@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol.Server;
@@ -47,6 +48,18 @@ internal static class DarlingMcpToolTypes
 
     /// <summary>Every registered tool by its served name, with the method that implements it, in ordinal order of the name.</summary>
     internal static IReadOnlyList<(string Name, MethodInfo Method)> Tools => AllTools.Value;
+
+    /// <summary>Where the web page loads <see cref="ToolNamesModule"/> from: <c>wwwroot/js/plain-text.js</c> imports it beside itself.</summary>
+    internal const string ToolNamesModulePath = "/js/mcp-tool-names.js";
+
+    private static readonly Lazy<string> NamesModule = new(
+        () => "/* The MCP tools this service registers, written by the service from its tool registry. */\n"
+            + "export const MCP_REGISTERED_TOOL_NAMES = " + JsonSerializer.Serialize(AllTools.Value.Select(t => t.Name)) + ";\n",
+        LazyThreadSafetyMode.ExecutionAndPublication);
+
+    /// <summary>The JavaScript module the web page's plain-text rules read the tool names from: every name in <see cref="Tools"/>, so the
+    /// page's list is the registry and a new tool needs no line in the page's scripts.</summary>
+    internal static string ToolNamesModule => NamesModule.Value;
 
     /// <summary>Registers every tool class in <see cref="All"/> with <see cref="McpSchemaCompat.WithGeminiCompatibleTools(IMcpServerBuilder, Type)"/>.</summary>
     internal static IMcpServerBuilder WithDarlingTools(this IMcpServerBuilder builder)
