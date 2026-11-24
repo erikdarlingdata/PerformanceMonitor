@@ -53,6 +53,26 @@ public sealed class InvestigationToolsLiveTests
             throw new InvalidOperationException("brief source read failed");
     }
 
+    /* #9511: a reader whose source row is gone once the claim is written, so the composer returns no brief. */
+    private sealed class NoSourceReader : IInvestigationBriefSourceReader
+    {
+        public Task<InvestigationBriefSources?> ReadAsync(Guid requestId, CancellationToken cancellationToken = default) =>
+            Task.FromResult<InvestigationBriefSources?>(null);
+    }
+
+    /* #9511: a reader that moves the request to a new claim id while the brief composes, so storing the brief under the old claim finds
+       no row and answers false. */
+    private sealed class ClaimStealingReader(IInvestigationBriefSourceReader inner, NpgsqlDataSource dataSource) : IInvestigationBriefSourceReader
+    {
+        public async Task<InvestigationBriefSources?> ReadAsync(Guid requestId, CancellationToken cancellationToken = default)
+        {
+            await using var command = dataSource.CreateCommand(
+                $"UPDATE config.investigation_requests SET claim_id = gen_random_uuid() WHERE request_id = '{requestId}'");
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            return await inner.ReadAsync(requestId, cancellationToken);
+        }
+    }
+
     private static JsonElement Root(string json) => JsonDocument.Parse(json).RootElement;
 
     [Fact]
@@ -146,6 +166,108 @@ public sealed class InvestigationToolsLiveTests
             Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
             Assert.Contains(openedId.ToString(), logger.Lines.Single(), StringComparison.Ordinal);
             Assert.Single(logger.ExceptionsAtLevel(LogLevel.Error));
+
+            var again = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(), "agent-a", null, null, ct));
+            Assert.Equal("claimed", again.GetProperty("status").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task ABriefThatComposesToNothing_ReleasesTheClaim_JournalsBriefFailed_AndLogs()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var composer = new InvestigationBriefComposer(new NoSourceReader(), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var logger = new CapturingTestLogger();
+
+            var failed = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(), "agent-a", null, null, ct, logger: logger));
+
+            Assert.Equal("error", failed.GetProperty("status").GetString());
+            Assert.Equal("open", await ScalarAsync(connection, $"SELECT state FROM config.investigation_requests WHERE request_id = '{openedId}'", ct));
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:brief_failed'", ct));
+            Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+            Assert.Contains(openedId.ToString(), logger.Lines.Single(), StringComparison.Ordinal);
+
+            var working = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var again = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, working, openedId.ToString(), "agent-a", null, null, ct));
+            Assert.Equal("claimed", again.GetProperty("status").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task AStoreThatFindsNoClaimToHoldTheBrief_JournalsBriefFailed_AndLogs()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var composer = new InvestigationBriefComposer(new ClaimStealingReader(new PgInvestigationBriefSourceReader(dataSource), dataSource),
+                new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var logger = new CapturingTestLogger();
+
+            var failed = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(), "agent-a", null, null, ct, logger: logger));
+
+            Assert.Equal("error", failed.GetProperty("status").GetString());
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:brief_failed'", ct));
+            Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+            Assert.Contains(openedId.ToString(), logger.Lines.Single(), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task AThrowingBriefStore_ReleasesTheClaim_JournalsARefusal_Logs_AndTheNextClaimSucceeds()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var logger = new CapturingTestLogger();
+            /* #9511: the store's brief write throws, as a lock timeout or a dropped connection would. */
+            await ExecAsync(connection,
+                "CREATE FUNCTION public.fail_brief_store() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'brief store failed'; END $$", ct);
+            await ExecAsync(connection,
+                "CREATE TRIGGER fail_brief_store BEFORE UPDATE ON config.investigation_requests FOR EACH ROW " +
+                "WHEN (OLD.brief IS NULL AND NEW.brief IS NOT NULL) EXECUTE FUNCTION public.fail_brief_store()", ct);
+
+            var failed = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(), "agent-a", null, null, ct, logger: logger));
+
+            Assert.Equal("error", failed.GetProperty("status").GetString());
+            Assert.Contains("released", failed.GetProperty("message").GetString(), StringComparison.Ordinal);
+            Assert.Equal("open", await ScalarAsync(connection, $"SELECT state FROM config.investigation_requests WHERE request_id = '{openedId}'", ct));
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:answer_failed'", ct));
+            Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+            Assert.Contains(openedId.ToString(), logger.Lines.Single(), StringComparison.Ordinal);
+
+            await ExecAsync(connection, "DROP TRIGGER fail_brief_store ON config.investigation_requests", ct);
+            var again = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(), "agent-a", null, null, ct));
+            Assert.Equal("claimed", again.GetProperty("status").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task ACancelAfterTheClaimIsWritten_ReleasesTheClaim_AndStillCancels_WithoutAnErrorLine()
+    {
+        await RunAsync(async (store, dataSource, connection, ct) =>
+        {
+            var openedId = (await store.OpenOrJoinAsync(Alert(), ct)).RequestId!.Value;
+            var composer = new InvestigationBriefComposer(new PgInvestigationBriefSourceReader(dataSource), new McpDataDetailSetting(McpDataDetail.Full), DarlingInvestigationBriefTools.Tools);
+            var logger = new CapturingTestLogger();
+            using var caller = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+            /* The caller's token is cancelled while the answer builds, after the claim row and the brief are written. */
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(),
+                "agent-a", null, null, caller.Token, logger: logger, parseBrief: _ =>
+                {
+                    caller.Cancel();
+                    caller.Token.ThrowIfCancellationRequested();
+                    return null;
+                }));
+
+            Assert.Equal("open", await ScalarAsync(connection, $"SELECT state FROM config.investigation_requests WHERE request_id = '{openedId}'", ct));
+            Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
 
             var again = Root(await DarlingMcpInvestigationTools.ClaimAsync(store, composer, openedId.ToString(), "agent-a", null, null, ct));
             Assert.Equal("claimed", again.GetProperty("status").GetString());

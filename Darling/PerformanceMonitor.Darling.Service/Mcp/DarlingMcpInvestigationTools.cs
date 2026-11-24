@@ -407,6 +407,7 @@ public sealed partial class DarlingMcpInvestigationTools
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
 
         var step = "claim";
+        Guid? claimWritten = null;
         try
         {
             /* #6542: a named agent token is the agent's identity. An agent_id that names another agent is refused and journaled
@@ -483,6 +484,7 @@ public sealed partial class DarlingMcpInvestigationTools
                 return InvestigationToolCore.Status(InvestigationToolCore.ClaimStatus(claim.Outcome), InvestigationToolCore.ClaimMessage(claim));
 
             var claimId = claim.ClaimId!.Value;
+            claimWritten = claimId;
             string? brief;
             step = "compose_brief";
             try
@@ -507,9 +509,15 @@ public sealed partial class DarlingMcpInvestigationTools
                 step = "store_brief";
                 if (brief is null || !await store.SetBriefAsync(requestId, claimId, InvestigationFormats.BriefFormat, brief, cancellationToken))
                 {
+                    /* A null brief means no source row for the request, and a false store means the claim no longer holds it. Neither throws,
+                       so the log line and the journal row are written here, the same as the throwing paths. */
+                    if (brief is null)
+                        step = "compose_brief";
+                    logger?.LogError("claim_investigation_request {RequestId}: step {Step} failed, the claim was released", requestId, step);
                     await store.ReleaseAsync(requestId, claimId, CancellationToken.None);
+                    await store.RecordRefusalAsync(requestId, agent_id, "claim", "brief_failed", null, CancellationToken.None);
                     return McpHelpers.FormatError("claim_investigation_request",
-                        new InvalidOperationException("the brief could not be stored under this claim, so the claim was released."));
+                        new InvalidOperationException("the brief could not be stored under this claim. The claim was released if it still held the request."));
                 }
 
                 step = "build_answer";
@@ -558,6 +566,14 @@ public sealed partial class DarlingMcpInvestigationTools
                 return McpHelpers.FormatError("claim_investigation_request",
                     new InvalidOperationException("the claim answer could not be built, so the claim was released: " + ex.Message, ex));
             }
+        }
+        catch (OperationCanceledException) when (claimWritten is not null)
+        {
+            /* #9511: the caller cancelled after the claim row was written. The claim would stay live until the lease lapses, which is the
+               lock-out this method guards against, so it is released with a token that cannot be cancelled before the cancel goes on. A cancel
+               is not a failure, so nothing is logged as an error or journaled. */
+            await store.ReleaseAsync(requestId, claimWritten.Value, CancellationToken.None);
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
