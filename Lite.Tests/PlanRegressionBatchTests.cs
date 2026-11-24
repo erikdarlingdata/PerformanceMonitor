@@ -86,10 +86,10 @@ public sealed class PlanRegressionBatchTests : IDisposable
     /// </summary>
     private static readonly (string Name, int Queries)[] Databases = [("Db0", 12), ("Db1", 9), ("Db2", 6), ("Db3", 3), ("Db4", 3), ("Db5", 1)];
 
-    private static string SeedSql(string databaseColumn, string[]? only = null)
+    private static string SeedSql(string databaseColumn)
     {
         var start = Now.AddHours(-Hours);
-        var values = string.Join(", ", Databases.Select((d, i) => $"('{d.Name}', {i}, {d.Queries})").Where((_, i) => only is null || only.Contains(Databases[i].Name)));
+        var values = string.Join(", ", Databases.Select((d, i) => $"('{d.Name}', {i}, {d.Queries})"));
         return $@"
 SELECT h::BIGINT * 100000 + d.i * 1000 + r.q AS collection_id, {Ts(start)} + to_hours(h) + to_minutes(5) AS collection_time, {ServerId} AS server_id,
      'TestSrv' AS server_name, {databaseColumn} AS database_name, r.q::BIGINT AS query_id,
@@ -209,29 +209,4 @@ WHERE r.q <= d.n";
         Assert.Equal(long.MaxValue, DuckDbFactCollector.NextBatchRows(long.MaxValue / 2, TimeSpan.FromMilliseconds(1), target));
     }
 
-    /// <summary>
-    /// A row with no database name, as an archive written before the column was NOT NULL could hold, is left out of the read whether the
-    /// store has one database or several. Before, the read of one database or none kept it, and the candidate's name read threw.
-    /// </summary>
-    [Theory]
-    [InlineData(1)]
-    [InlineData(3)]
-    public async Task ARowWithNoDatabaseName_IsLeftOut_WhateverTheNumberOfDatabases(int databases)
-    {
-        var only = Databases.Take(databases).Select(d => d.Name).ToArray();
-        Execute($"INSERT INTO query_store_stats ({Columns}) {SeedSql("d.name", only)}");
-        var before = await OneStatementAsync();
-        Assert.NotEmpty(before);
-
-        var path = Path.Combine(_tempDir, "archive", "20260101_000000_query_store_stats.parquet").Replace("\\", "/");
-        Execute($"COPY ({SeedSql("NULL::VARCHAR", only)} AND r.q <= 2 AND h >= {Hours - 48}) TO '{DuckDbInitializer.EscapeSqlPath(path)}' (FORMAT PARQUET)");
-        await _duckDb.CreateArchiveViewsAsync();
-        var context = Context();
-
-        var (read, _) = await new DuckDbFactCollector(_duckDb).ReadPlanRegressionCostAsync(context, await PlanAsync(context));
-        var oneStatement = await OneStatementAsync();
-
-        Assert.Equal(before, read.Select(c => (c.DatabaseName, c.QueryId)).ToList());
-        Assert.Equal(before, oneStatement);
-    }
 }

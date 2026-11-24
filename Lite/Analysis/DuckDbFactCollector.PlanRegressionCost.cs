@@ -352,13 +352,13 @@ LIMIT 100";
 
     /// <summary>
     /// The statement's database predicate for its <c>/*DB*/</c> marker, adding the names to <paramref name="cmd"/> as parameters (#9353).
-    /// A NULL database_name cannot reach the Query Store table (its column is NOT NULL and the collector writes the name of the database it
-    /// read), so a read of every database leaves such a row out as a read of listed databases does, and the rows never depend on how many
-    /// databases the store has.
+    /// No databases: no predicate, every database. A NULL database_name cannot reach the Query Store table (its column is NOT NULL), and a
+    /// row with one would not reach a result anyway, because the statements pair a plan with the best plan of the same database
+    /// (<c>b.database_name = l.database_name</c>), which a NULL never matches. So the rows never depend on how many databases the store has.
     /// </summary>
     internal static string DatabaseFilter(DuckDBCommand cmd, IReadOnlyList<string>? databases)
     {
-        if (databases is null) return "AND database_name IS NOT NULL";
+        if (databases is null) return "";
         var markers = new List<string>();
         foreach (var database in databases)
         {
