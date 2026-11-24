@@ -1096,7 +1096,7 @@ public static partial class DarlingWebEndpoints
     internal static readonly string[] IntegerQueryKeys =
     [
         "hours", "hours_back", "days_back", "trend_hours_back", "baseline_hours_back", "limit", "top",
-        "bucket_minutes", "min_dop", "worst_count", "statements", "min_sessions", "offset"
+        "bucket_minutes", "min_dop", "worst_count", "statements", "min_sessions", "offset", "wal_hours_back"
     ];
 
     /// <summary>
