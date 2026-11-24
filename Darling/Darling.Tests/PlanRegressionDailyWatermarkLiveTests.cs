@@ -523,6 +523,178 @@ VALUES (@s, 'wmdb', 1, 1, NULL, 1, @f, @f + interval '35 minutes', 'hashb', 'qhb
         Assert.Equal(await TableRowsAsync(connection, window, ct), await DailyRowsAsync(connection, window, built, ct));
     }
 
+    /// <summary>
+    /// #9458: a partial day that advances adds the new hours to its stored totals instead of deleting the day and building it
+    /// again. Five plans are built through the watermark less an hour, then plans 1 and 2 get interval rows in that hour (plan
+    /// 2's has no <c>avg_rowcount</c>, is forced and has failures), and one tick runs. Every column of every row equals a
+    /// from-scratch whole build to the same watermark, and the rows of plans 3 to 5, which had no new interval, keep their
+    /// <c>xmin</c> (a delete and rebuild gives every row a new one).
+    /// </summary>
+    [Fact]
+    public async Task AnAdvancingPartialDay_AddsTheNewHoursToItsTotals_EqualsAFullBuild_AndLeavesPlansWithNoNewIntervalsUntouched()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9458 slice test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var (now, todayDay, watermark) = await PrepareSliceDayAsync(connection, ct);
+        var newHour = watermark.AddHours(-1);
+        var untouchedBefore = await XminsAsync(connection, todayDay, "3, 4, 5", ct);
+        var touchedBefore = await XminsAsync(connection, todayDay, "1, 2", ct);
+
+        await PlanRowAsync(connection, 1, newHour.AddMinutes(5), 7, 3, false, 0, ct);
+        await PlanRowAsync(connection, 2, newHour.AddMinutes(10), 5, null, true, 3, ct);
+        await PlanRowAsync(connection, 2, newHour.AddMinutes(30), 6, 4, false, 1, ct);
+
+        await TickAsync(scratch, now, ct);
+
+        Assert.Equal(StampText(watermark), await TextAsync(connection, StampOfTheDay, ct, ("s", ServerA), ("d", todayDay)));
+        Assert.Equal(untouchedBefore, await XminsAsync(connection, todayDay, "3, 4, 5", ct));
+        Assert.NotEqual(touchedBefore, await XminsAsync(connection, todayDay, "1, 2", ct));
+        Assert.Equal("NULL", await TextAsync(connection, "SELECT COALESCE(rowcount_sum::text, 'NULL') FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d AND query_id = 2", ct, ("s", ServerA), ("d", todayDay)));
+        Assert.Equal("NULL", await TextAsync(connection, "SELECT COALESCE(rowcount_sum::text, 'NULL') FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d AND query_id = 3", ct, ("s", ServerA), ("d", todayDay)));
+        Assert.Equal("true", await TextAsync(connection, "SELECT (execs = 10 + 20 + 7)::text FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d AND query_id = 1", ct, ("s", ServerA), ("d", todayDay)));
+        Assert.Equal("true", await TextAsync(connection, "SELECT (execs = 10 + 20 + 5 + 6 AND is_forced_plan AND force_failure_count = 3)::text FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d AND query_id = 2", ct, ("s", ServerA), ("d", todayDay)));
+
+        var sliced = await TotalsAsync(connection, todayDay, ct);
+        await BuildAsync(connection, todayDay, watermark, ct);
+        Assert.Equal(await TotalsAsync(connection, todayDay, ct), sliced);
+    }
+
+    /// <summary>
+    /// #9458: a late row below the watermark moves <c>late_seq</c>, so the day is not a valid partial day and takes the whole
+    /// build. The build checks the day's state in its own transaction, so a build planned from the slice queue and then
+    /// invalidated takes the same path. The result equals a from-scratch whole build, late row included.
+    /// </summary>
+    [Fact]
+    public async Task ALateRowBelowTheWatermark_SendsTheDayToAWholeBuild_ThatEqualsAFullBuild()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9458 late-row test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var (now, todayDay, watermark) = await PrepareSliceDayAsync(connection, ct);
+        var newHour = watermark.AddHours(-1);
+        var untouchedBefore = await XminsAsync(connection, todayDay, "3, 4, 5", ct);
+        await PlanRowAsync(connection, 2, newHour.AddMinutes(10), 5, null, true, 3, ct);
+
+        /* The real trigger is on for this one write: a row that starts at 00:02 is well below the trigger's bound. */
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest ENABLE TRIGGER trg_plan_regression_daily_late", ct);
+        await PlanRowAsync(connection, 1, todayDay.ToDateTime(TimeOnly.MinValue).AddMinutes(2), 40, 8, true, 6, ct);
+        Assert.Equal(1L, await ScalarAsync(connection, "SELECT (late_seq > partial_seq)::int FROM collect.plan_regression_daily_built WHERE server_id = @s AND day = @d", ct, ("s", ServerA), ("d", todayDay)));
+        Assert.Contains(new PlanRegressionDaily.Build(ServerA, todayDay), await PlanRegressionDaily.PlanBuildsAsync(connection, now, ct));
+
+        await TickAsync(scratch, now, ct);
+
+        Assert.Equal(StampText(watermark), await TextAsync(connection, StampOfTheDay, ct, ("s", ServerA), ("d", todayDay)));
+        Assert.NotEqual(untouchedBefore, await XminsAsync(connection, todayDay, "3, 4, 5", ct));
+        Assert.Equal("true", await TextAsync(connection, "SELECT (execs = 10 + 20 + 40 AND is_forced_plan)::text FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d AND query_id = 1", ct, ("s", ServerA), ("d", todayDay)));
+
+        var built = await TotalsAsync(connection, todayDay, ct);
+        await BuildAsync(connection, todayDay, watermark, ct);
+        Assert.Equal(await TotalsAsync(connection, todayDay, ct), built);
+    }
+
+    /// <summary>#9458: a plan whose first interval is in the new hour has no stored row, so the slice inserts it.</summary>
+    [Fact]
+    public async Task APlanThatFirstAppearsInTheNewHour_IsInsertedBySlice_AndTheOtherPlansAreNotTouched()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #9458 new-plan test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var (now, todayDay, watermark) = await PrepareSliceDayAsync(connection, ct);
+        var before = await XminsAsync(connection, todayDay, "1, 2, 3, 4, 5", ct);
+        Assert.Equal(0L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d AND query_id = 6", ct, ("s", ServerA), ("d", todayDay)));
+
+        await PlanRowAsync(connection, 6, watermark.AddHours(-1).AddMinutes(15), 9, null, false, 0, ct);
+
+        await TickAsync(scratch, now, ct);
+
+        Assert.Equal(before, await XminsAsync(connection, todayDay, "1, 2, 3, 4, 5", ct));
+        Assert.Equal(1L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d AND query_id = 6", ct, ("s", ServerA), ("d", todayDay)));
+        Assert.Equal(StampText(watermark), await TextAsync(connection, StampOfTheDay, ct, ("s", ServerA), ("d", todayDay)));
+
+        var sliced = await TotalsAsync(connection, todayDay, ct);
+        await BuildAsync(connection, todayDay, watermark, ct);
+        Assert.Equal(await TotalsAsync(connection, todayDay, ct), sliced);
+    }
+
+    private static string StampText(DateTime watermark) => "-|" + watermark.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+
+    private const string StampOfTheDay = "SELECT COALESCE(built_seq::text, '-') || '|' || to_char(built_through, 'YYYY-MM-DD HH24:MI') FROM collect.plan_regression_daily_built "
+        + "WHERE server_id = @s AND day = @d AND partial_seq = late_seq";
+
+    /// <summary>One tick on the store clock. The block step and the other days are not what these tests assert on.</summary>
+    private static async Task TickAsync(ScratchPostgres scratch, DateTime now, CancellationToken ct)
+    {
+        await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+        await PlanRegressionDaily.RunTickAsync(source, now, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct);
+    }
+
+    /// <summary>Server A's today with five plans (query q, plan q), two interval rows each, built partially through the
+    /// watermark less an hour. The trigger stays off, since the rows the tests add later stand for the collector's writes of
+    /// the hour that was above the trigger's bound when they were written. Plan 3's first interval has no
+    /// <c>avg_rowcount</c>, plan 4 is forced with failures.</summary>
+    private static async Task<(DateTime Now, DateOnly Day, DateTime Watermark)> PrepareSliceDayAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var now = await SettledStoreNowAsync(connection, ct);
+        var today = now.Date;
+        var todayDay = DateOnly.FromDateTime(today);
+        var watermark = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(-PlanRegressionDaily.PartialWatermarkLagHours);
+
+        await ExecAsync(connection, "ALTER TABLE collect.query_store_interval_latest DISABLE TRIGGER trg_plan_regression_daily_late", ct);
+        await EnrollAsync(connection, ServerA, today.AddDays(-1), ct);
+        for (var q = 1; q <= 5; q++)
+        {
+            await PlanRowAsync(connection, q, today.AddMinutes(10 * q), 10, q == 3 ? null : 7, q == 4, q == 4 ? 2 : 0, ct);
+            await PlanRowAsync(connection, q, today.AddMinutes(10 * q + 5), 20, 9, false, 0, ct);
+        }
+
+        await BuildAsync(connection, todayDay, watermark.AddHours(-1), ct);
+        Assert.Equal(5L, await ScalarAsync(connection, "SELECT count(*) FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d", ct, ("s", ServerA), ("d", todayDay)));
+        return (now, todayDay, watermark);
+    }
+
+    /// <summary>One interval row of server A, query and plan <paramref name="query"/>, 20 minutes long.</summary>
+    private static Task PlanRowAsync(
+        NpgsqlConnection connection, int query, DateTime first, long executions, long? rowcount, bool forced, long failures, CancellationToken ct) =>
+        ExecAsync(connection, @"
+INSERT INTO collect.query_store_interval_latest
+(
+    server_id, database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time,
+    collection_time, query_plan_hash, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
+    last_execution_time, is_forced_plan, force_failure_count, avg_rowcount
+)
+VALUES (@s, 'wmdb', @q, @q, NULL, @q, @f, @f + interval '35 minutes', 'hashp' || @q, 'qhp' || @q, @e, 1000 + 10 * @q, 2000 + @q,
+        @f + interval '20 minutes', @fp, @fc, @r::bigint)",
+            ct, ("s", ServerA), ("q", query), ("f", first), ("e", executions), ("fp", forced), ("fc", failures), ("r", rowcount is { } r ? (object)r : DBNull.Value));
+
+    /// <summary>The <c>xmin</c> of each row of the day for the queries in <paramref name="queries"/> (a literal list), in query order.</summary>
+    private static Task<string> XminsAsync(NpgsqlConnection connection, DateOnly day, string queries, CancellationToken ct) =>
+        TextAsync(connection, $"SELECT COALESCE(string_agg(query_id || ':' || xmin::text, ',' ORDER BY query_id), '') FROM collect.plan_regression_daily WHERE server_id = @s AND day = @d AND query_id IN ({queries})",
+            ct, ("s", ServerA), ("d", day));
+
+    /// <summary>Every column of every row of the day, as the row's own text, in key order.</summary>
+    private static Task<string> TotalsAsync(NpgsqlConnection connection, DateOnly day, CancellationToken ct) =>
+        TextAsync(connection, "SELECT COALESCE(string_agg(t::text, ';' ORDER BY t.query_id, t.plan_id), '') FROM collect.plan_regression_daily AS t WHERE t.server_id = @s AND t.day = @d",
+            ct, ("s", ServerA), ("d", day));
+
     private const int ServerB = -5812402;
 
     /// <summary>The store's clock (naive UTC), settled: skips before 05:00 UTC (the watermark's lag plus two hours) unless <paramref name="skipEarlyHours"/> is
