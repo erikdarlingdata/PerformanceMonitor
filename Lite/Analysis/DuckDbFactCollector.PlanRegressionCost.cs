@@ -81,6 +81,8 @@ WITH deduped AS
         -- instant ranks the plans that instant had; the dedup keeps each interval's newest row collected by then.
         AND   collection_time <= $3
         /*SEC*/
+        -- #9353: one database at a time when the pass reads its databases in turn. The marker is gone from the statement otherwise.
+        /*DB*/
         GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
     )
 ),
@@ -262,7 +264,9 @@ SELECT
     c.best_plan_id,
     -- #5631: appended for the same reason.
     c.latest_rows,
-    c.best_rows
+    c.best_rows,
+    -- #9353: appended, the ranking key, so a read that took the databases one at a time can put their rows in this statement's order.
+    c.lost_cpu_us
 FROM candidates AS c
 LEFT JOIN texts AS t
   ON  t.collection_id = c.text_collection_id
@@ -283,8 +287,17 @@ LIMIT 100";
     /// </summary>
     internal static async Task<List<PlanRegressionCandidate>> ReadPlanRegressionCandidatesAsync(
         DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string sql)
+        => (await ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, sql, database: null)).ConvertAll(r => r.Candidate);
+
+    /// <summary>
+    /// The cost statement's rows with the CPU each lost, the key the statement ranks by. <paramref name="database"/> limits the read to
+    /// one database (#9353): every comparison in the statement stays inside one database, so its rows are that database's rows of the
+    /// whole read, and a pass that reads its databases in turn lets go of the store's lock between them.
+    /// </summary>
+    internal static async Task<List<(PlanRegressionCandidate Candidate, double LostCpu)>> ReadRankedPlanRegressionCandidatesAsync(
+        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string sql, string? database)
     {
-        var candidates = new List<PlanRegressionCandidate>();
+        var candidates = new List<(PlanRegressionCandidate, double)>();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -293,11 +306,17 @@ LIMIT 100";
         /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
            primary stay in the window, so the read skips those databases. */
         cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 4);
-        cmd.CommandText = plan.Apply(cmd.CommandText);
+        var databaseFilter = "";
+        if (database is not null)
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = database });
+            databaseFilter = $"AND database_name = ${cmd.Parameters.Count}";
+        }
+        cmd.CommandText = plan.Apply(cmd.CommandText.Replace("/*DB*/", databaseFilter));
         using var reader = await cmd.ExecuteProfiledReaderAsync("plan-regression-cost", context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
-            candidates.Add(new PlanRegressionCandidate(
+            var candidate = new PlanRegressionCandidate(
                 QueryId: reader.IsDBNull(0) ? 0L : ToInt64(reader.GetValue(0)),
                 LatestCpu: reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
                 LatestIsForced: (!reader.IsDBNull(3) && Convert.ToBoolean(reader.GetValue(3))) ? 1 : 0,
@@ -310,8 +329,43 @@ LIMIT 100";
                 LatestPlanId: reader.IsDBNull(11) ? null : ToInt64(reader.GetValue(11)),
                 BestPlanId: reader.IsDBNull(12) ? null : ToInt64(reader.GetValue(12)),
                 LatestRows: reader.IsDBNull(13) ? null : Convert.ToDouble(reader.GetValue(13)),
-                BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14))));
+                BestRows: reader.IsDBNull(14) ? null : Convert.ToDouble(reader.GetValue(14)));
+            /* NULL sorts last in the statement's ORDER BY, so a row with no lost CPU ranks below every other. */
+            var lostCpu = reader.FieldCount > 15 && !reader.IsDBNull(15) ? Convert.ToDouble(reader.GetValue(15)) : double.NegativeInfinity;
+            candidates.Add((candidate, lostCpu));
         }
         return candidates;
+    }
+
+    /// <summary>The most rows the cost statement returns, and so the most a pass that reads its databases in turn keeps of all of them.</summary>
+    internal const int PlanRegressionCandidateLimit = 100;
+
+    /// <summary>
+    /// The databases that hold Regular runs inside the cost statement's window, for the pass that reads them in turn (#9353). It is
+    /// read under its own short hold of the store's read lock.
+    /// </summary>
+    internal static async Task<List<string>> ReadPlanRegressionDatabasesAsync(
+        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan)
+    {
+        var databases = new List<string>();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = plan.Apply(@"
+SELECT DISTINCT database_name
+FROM v_query_store_stats
+WHERE server_id = $1
+AND   execution_type_desc = 'Regular'
+AND   last_execution_time >= $2
+AND   collection_time <= $3
+AND   database_name IS NOT NULL
+ORDER BY database_name");
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        using var reader = await cmd.ExecuteProfiledReaderAsync("plan-regression-databases", context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            databases.Add(reader.GetString(0));
+        }
+        return databases;
     }
 }

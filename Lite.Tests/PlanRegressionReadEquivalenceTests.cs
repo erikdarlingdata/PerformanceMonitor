@@ -220,6 +220,43 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         Assert.Equal(reference.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId), shipped.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId));
     }
 
+    /// <summary>
+    /// #9353: the pass reads its databases one at a time, each under its own hold of the read lock, and puts their rows in the order the
+    /// one statement gives them. Same store, both ways: the offenders the pass reports are the one statement's rows in the one statement's order.
+    /// </summary>
+    [Fact]
+    public async Task ReadingTheDatabasesInTurn_RanksTheOffendersAsTheOneStatementDoes()
+    {
+        await SeedAsync();
+        var context = Context();
+
+        await new DuckDbFactCollector(_duckDb).CollectPlanRegressionFactsAsync(context, new List<Fact>());
+
+        var oneStatement = (await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql)).Select(c => (c.DatabaseName, c.QueryId)).ToList();
+        var offenders = context.PlanRegressionOffenders!.Select(o => (o.DatabaseName, o.QueryId)).ToList();
+        Assert.Contains(offenders, o => o.DatabaseName == "Db1");
+        Assert.Contains(offenders, o => o.DatabaseName == "Db2");
+        Assert.Equal(oneStatement.Where(offenders.Contains).ToList(), offenders);
+    }
+
+    [Fact]
+    public async Task AWriterThatAsksBetweenTwoDatabases_TakesTheLock()
+    {
+        await SeedAsync();
+        var collector = new DuckDbFactCollector(_duckDb);
+        var writes = 0;
+        collector.AfterPlanRegressionDatabaseReadForTests = () =>
+        {
+            /* The 5 s budget the housekeeping writers use. The store holds two databases with regressions, so there is one gap. */
+            using var write = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(5));
+            writes++;
+        };
+
+        await collector.CollectPlanRegressionFactsAsync(Context(), new List<Fact>());
+
+        Assert.Equal(1, writes);
+    }
+
     [Fact]
     public async Task TheFact_NamesTheOffendersTheReferenceReadFinds()
     {
