@@ -186,7 +186,7 @@ ORDER BY sum(g.occurrences) DESC, g.event_class";
     ///
     /// <para>$4 is the <c>query_id</c> filter (#9435), or NULL for none. A slow plan's message ends in
     /// <c>queryid=&lt;id&gt;</c> and that text is the only place the id is kept (the row has no column for it), so the
-    /// filter is one exact test of the message's tail on the plan class, in the WHERE ahead of the LIMIT: an id that
+    /// filter is one exact test of the message's tail on the plan class ($5, passed so this text names no class), in the WHERE ahead of the LIMIT: an id that
     /// is a prefix or suffix of another statement's does not match it.</para>
     ///
     /// <para><c>message_text IS NOT NULL</c> is the whole predicate, and it is a structural test rather than
@@ -209,7 +209,7 @@ WHERE e.capture_time > $1
 AND   e.capture_time <= $2
 AND   e.message_text IS NOT NULL
 AND   ($4::text IS NULL
-       OR (e.event_class = 'slow_plan' AND right(e.message_text, length($4::text)) = $4::text))
+       OR (e.event_class = $5 AND right(e.message_text, length($4::text)) = $4::text))
 GROUP BY e.event_class, e.severity, e.message_text
 ORDER BY max(e.capture_time) DESC,
          CASE WHEN e.severity IN ('WARNING', 'ERROR', 'FATAL', 'PANIC') THEN 0 ELSE 1 END,
@@ -826,6 +826,7 @@ WHERE e.sample_line IS NOT NULL";
             Value = queryId is long id ? " queryid=" + id.ToString(CultureInfo.InvariantCulture) : DBNull.Value,
             NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text,
         });
+        command.Parameters.AddWithValue(StoreLogClassifier.SlowPlanClass);
 
         await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         while (await reader.ReadAsync(cancellationToken))
