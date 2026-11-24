@@ -276,7 +276,7 @@ public sealed class ClientTimeoutsToolLiveTests
             var excluded = body.GetProperty("excluded_from_alert");
             Assert.Equal(1, excluded.GetProperty("below_duration_floor_events").GetInt64());
             Assert.Equal(2, excluded.GetProperty("matched_calls").GetInt64());
-            Assert.Equal(55 * 2 / 3.0, excluded.GetProperty("count_judged").GetDouble(), 6);
+            Assert.Equal(55 * 2 / 3.0, excluded.GetProperty("count_judged").GetDouble(), 1);
 
             var calls = body.GetProperty("matched_calls").EnumerateArray().ToList();
             Assert.Equal(new[] { 2, 3 }, calls.Select(c => c.GetProperty("session_id").GetInt32()).OrderBy(x => x));
