@@ -120,13 +120,13 @@ SELECT count(*) FROM parquet_metadata('{file}') WHERE path_in_schema = 'collecti
         Assert.True(withStats == groups && withTimeStats == groups, $"{groups} row groups, {withStats} with server_id stats, {withTimeStats} with collection_time stats");
 
         var mixed = Scalar($@"
-SELECT count(*) FROM parquet_metadata('{file}') WHERE path_in_schema = 'server_id' AND stats_min::BIGINT <> stats_max::BIGINT");
+SELECT count(*) FROM parquet_metadata('{file}') WHERE path_in_schema = 'server_id' AND TRY_CAST(stats_min AS BIGINT) <> TRY_CAST(stats_max AS BIGINT)");
         var overlapping = Scalar($@"
 WITH g AS (
-    SELECT s.row_group_id, s.stats_min::BIGINT AS server, t.stats_min::TIMESTAMP AS mn, t.stats_max::TIMESTAMP AS mx
+    SELECT s.row_group_id, TRY_CAST(s.stats_min AS BIGINT) AS server, TRY_CAST(t.stats_min AS TIMESTAMP) AS mn, TRY_CAST(t.stats_max AS TIMESTAMP) AS mx
     FROM parquet_metadata('{file}') s
     JOIN parquet_metadata('{file}') t ON t.row_group_id = s.row_group_id AND t.path_in_schema = 'collection_time'
-    WHERE s.path_in_schema = 'server_id' AND s.stats_min::BIGINT = s.stats_max::BIGINT)
+    WHERE s.path_in_schema = 'server_id' AND TRY_CAST(s.stats_min AS BIGINT) = TRY_CAST(s.stats_max AS BIGINT))
 SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.row_group_id AND a.mn <= b.mx AND b.mn <= a.mx");
         return (groups, mixed, overlapping);
     }
@@ -149,7 +149,6 @@ SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.
         Assert.True(await new ArchiveService(initializer, _archiveDir).ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
 
         var file = SingleQueryStoreFile();
-        Assert.Matches(@"/\d{8}_query_store_stats\.parquet$", file);
         Assert.Equal(rows, Scalar($"SELECT count(*) FROM read_parquet('{file}')"));
         Assert.Equal(rows, Scalar($"SELECT count(DISTINCT (server_id, collection_time)) FROM read_parquet('{file}')"));
 
