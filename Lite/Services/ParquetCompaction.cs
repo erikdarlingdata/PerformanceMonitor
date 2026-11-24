@@ -509,7 +509,7 @@ public static class ParquetCompaction
     internal static long MaxRowGroupUncompressedBytes(DuckDBConnection con, string path)
     {
         using var cmd = con.CreateCommand();
-        cmd.CommandText = $"SELECT coalesce(max(group_bytes), 0) FROM (SELECT sum(total_uncompressed_size) AS group_bytes FROM parquet_metadata('{EscapeSqlPath(path)}') GROUP BY row_group_id)";
+        cmd.CommandText = $"SELECT coalesce(max(group_bytes), 0) FROM (SELECT sum(total_uncompressed_size)::BIGINT AS group_bytes FROM parquet_metadata('{EscapeSqlPath(path)}') GROUP BY row_group_id)";
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
