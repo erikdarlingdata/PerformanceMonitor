@@ -1944,7 +1944,7 @@ SELECT
            store that is current. */
         if (hasStatementHistoryWriteCounters)
         {
-            return 304;
+            return StoreStatementHistory.WriteCountersVersion;
         }
         if (hasClutterDayBuilt)
         {

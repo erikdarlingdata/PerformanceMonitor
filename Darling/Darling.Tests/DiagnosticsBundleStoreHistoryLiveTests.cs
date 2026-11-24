@@ -326,11 +326,11 @@ public sealed class DiagnosticsBundleStoreHistoryLiveTests
         }
 
         static string Values(long id, double totalMs, string text) =>
-            $"('owner'::text, {id}::bigint, 5::bigint, {totalMs.ToString(CultureInfo.InvariantCulture)}::double precision, 10::double precision, 20::double precision, 0::double precision, 1::bigint, 2::bigint, 3::bigint, 4::bigint, 0::bigint, 0::bigint, 0::bigint, 0::numeric, {PgSensitiveStatementFilter.SqlLiteral(text)}::text)";
+            $"('owner'::text, {id}::bigint, 5::bigint, {totalMs.ToString(CultureInfo.InvariantCulture)}::double precision, 10::double precision, 20::double precision, 0::double precision, 1::bigint, 2::bigint, 3::bigint, 4::bigint, {PgSensitiveStatementFilter.SqlLiteral(text)}::text)";
 
         await ExecAsync(source, $@"
 CREATE OR REPLACE FUNCTION config.{StoreStatementStats.FunctionName}()
-RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, mean_exec_ms double precision, max_exec_ms double precision, total_plan_ms double precision, rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint, shared_blks_dirtied bigint, shared_blks_written bigint, wal_fpi bigint, wal_bytes numeric, query text)
+RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, mean_exec_ms double precision, max_exec_ms double precision, total_plan_ms double precision, rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint, query text)
 LANGUAGE sql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp

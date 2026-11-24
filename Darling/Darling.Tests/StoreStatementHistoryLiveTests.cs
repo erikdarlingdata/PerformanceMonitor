@@ -37,14 +37,12 @@ CREATE TABLE public.fake_stats
 );
 CREATE TABLE public.fake_info (stats_reset timestamptz, dealloc bigint);
 INSERT INTO public.fake_info VALUES (NULL, 0);
-CREATE FUNCTION config.store_statement_stats()
-RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, mean_exec_ms double precision,
-               max_exec_ms double precision, total_plan_ms double precision, rows_returned bigint, shared_blks_hit bigint,
-               shared_blks_read bigint, temp_blks_written bigint, shared_blks_dirtied bigint, shared_blks_written bigint,
-               wal_fpi bigint, wal_bytes numeric, query text)
-LANGUAGE sql AS $$ SELECT f.role_name, f.queryid, f.calls, f.total_exec_ms, f.total_exec_ms / NULLIF(f.calls, 0), f.max_exec_ms,
-                          0::double precision, f.rows_returned, f.shared_blks_hit, f.shared_blks_read, f.temp_blks_written,
-                          f.shared_blks_dirtied, f.shared_blks_written, f.wal_fpi, f.wal_bytes, NULL::text
+CREATE FUNCTION config.store_statement_stats_v2()
+RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, max_exec_ms double precision,
+               rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint,
+               shared_blks_dirtied bigint, shared_blks_written bigint, wal_fpi bigint, wal_bytes numeric)
+LANGUAGE sql AS $$ SELECT f.role_name, f.queryid, f.calls, f.total_exec_ms, f.max_exec_ms, f.rows_returned, f.shared_blks_hit,
+                          f.shared_blks_read, f.temp_blks_written, f.shared_blks_dirtied, f.shared_blks_written, f.wal_fpi, f.wal_bytes
                    FROM public.fake_stats f $$;
 CREATE FUNCTION config.store_statement_stats_info()
 RETURNS TABLE (stats_reset timestamptz, dealloc bigint)
@@ -328,7 +326,7 @@ SET search_path = fakeset, pg_catalog, public;";
             await SetStats(c, "('owner', 1, 100, 1000, 20, 10, 5, 1, 0)", ct);
             await StoreStatementHistory.SnapshotAsync(c, T0, null, ct);
             await SetStats(c, "('owner', 1, 130, 1300, 20, 10, 5, 1, 0)", ct);
-            await ExecAsync(c, "DROP FUNCTION config.store_statement_stats(); CREATE FUNCTION config.store_statement_stats() RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, mean_exec_ms double precision, max_exec_ms double precision, total_plan_ms double precision, rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint, shared_blks_dirtied bigint, shared_blks_written bigint, wal_fpi bigint, wal_bytes numeric, query text) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'planted' USING ERRCODE = '55000'; END $$", ct);
+            await ExecAsync(c, "DROP FUNCTION config.store_statement_stats_v2(); CREATE FUNCTION config.store_statement_stats_v2() RETURNS TABLE (role_name text, queryid bigint, calls bigint, total_exec_ms double precision, max_exec_ms double precision, rows_returned bigint, shared_blks_hit bigint, shared_blks_read bigint, temp_blks_written bigint, shared_blks_dirtied bigint, shared_blks_written bigint, wal_fpi bigint, wal_bytes numeric) LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'planted' USING ERRCODE = '55000'; END $$", ct);
 
             var ex = await Assert.ThrowsAsync<PostgresException>(() => StoreStatementHistory.SnapshotAsync(c, T0.AddHours(1), null, ct));
             Assert.Equal("55000", ex.SqlState);

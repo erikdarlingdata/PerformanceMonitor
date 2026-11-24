@@ -4069,7 +4069,7 @@ END $$;";
         new Migration(QueryStoreClutterDayFold.Version, "query-store-clutter-day-built", QueryStoreClutterDayFold.CreateSql),
         /* V304 (#9410): the dirtied blocks, written blocks, WAL bytes and full-page images of each statement in the store's own statement history, on the history
            table and its baseline. Four nullable columns on each, no default, no rewrite. A row from before the rung reads NULL. An older build never names them. */
-        new Migration(304, "store-statement-history-write-counters", V304Sql),
+        new Migration(StoreStatementHistory.WriteCountersVersion, "store-statement-history-write-counters", V304Sql),
     };
 
     /// <summary>

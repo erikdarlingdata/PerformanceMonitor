@@ -42,7 +42,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// other roles' ids from a caller that may not read them) are counted in <c>hidden_statements</c> and never keyed.</para>
 ///
 /// <para><b>Reads through the reader function.</b> The snapshot calls the SECURITY DEFINER
-/// <c>config.store_statement_stats()</c> and its info companion, which already restrict the rows to this database and
+/// <c>config.store_statement_stats_v2()</c> (#9410, the rows of <c>config.store_statement_stats()</c> without the text, plus the write counters) and its info companion, which already restrict the rows to this database and
 /// map users to role names, and never touches <c>pg_stat_statements</c> directly. If the functions are missing or the
 /// caller may not execute them, the extension is not loaded, or the role may not create temporary tables, the pass
 /// writes one capture with outcome <c>precondition</c> and no history.</para>
@@ -58,6 +58,12 @@ public static class StoreStatementHistory
 {
     /// <summary>The snapshot's own slice of the hourly tick's budget, so a slow pass cannot cost the flushes after it.</summary>
     public static readonly TimeSpan SliceBudget = TimeSpan.FromSeconds(120);
+
+    /// <summary>
+    /// The store schema version that adds the write counters (#9410). The one place the number is written: the migration, the schema version
+    /// constant and the viewer's version map read it, so renumbering the rung is a change to this line.
+    /// </summary>
+    public const int WriteCountersVersion = 304;
 
     /// <summary>Per-command timeout, in seconds. The pass shares the hourly tick's budget with other self-telemetry.</summary>
     public const int SnapshotTimeoutSeconds = 60;
@@ -86,7 +92,7 @@ public static class StoreStatementHistory
 
     private const string Config = PgSchemaGenerator.ConfigSchema;
 
-    private const string Function = Config + "." + StoreStatementStats.FunctionName;
+    private const string Function = Config + "." + StoreStatementStats.WriteCounterFunctionName;
 
     private const string InfoFunction = Config + "." + StoreStatementStats.InfoFunctionName;
 
