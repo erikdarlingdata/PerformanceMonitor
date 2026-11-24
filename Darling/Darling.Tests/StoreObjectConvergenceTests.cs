@@ -224,7 +224,7 @@ public sealed class StoreObjectConvergenceTests
 
         /* Its own connection out of the worker's pool: the start path's three are scoped to their try blocks
            and disposed with them, which is why this method exists rather than a line beside those calls. */
-        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);", body, StringComparison.Ordinal);
+        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.StoreConverge, budget.Token);", body, StringComparison.Ordinal);
 
         Assert.Contains("using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);", body, StringComparison.Ordinal);
         Assert.Contains("budget.CancelAfter(s_storeObjectConvergenceBudget);", body, StringComparison.Ordinal);

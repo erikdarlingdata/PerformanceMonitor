@@ -1793,24 +1793,24 @@ WHERE s.relid = to_regclass($1);";
             All,
             async (table, token) =>
             {
-                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStorePartitions, token).ConfigureAwait(false);
                 return await RunPromotionAsync(connection, table, DateTime.UtcNow, logger, token).ConfigureAwait(false);
             },
             async (table, token) =>
             {
-                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStorePartitions, token).ConfigureAwait(false);
                 return await AnalyzeIfDueAsync(connection, table, DateTime.UtcNow, logger, token).ConfigureAwait(false);
             },
             token => QueryStoreBackgroundIndexes.RunDelayedAsync(postgres, logger, TimeSpan.Zero, specs, token),
             cancellationToken,
             async (table, token) =>
             {
-                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStorePartitions, token).ConfigureAwait(false);
                 return await QueryStoreIntervalBrin.SummarizeNewRangesAsync(connection, table, logger, token).ConfigureAwait(false);
             },
             async (table, token) =>
             {
-                await using var connection = await postgres.OpenConnectionAsync(token).ConfigureAwait(false);
+                await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStorePartitions, token).ConfigureAwait(false);
                 return await AnalyzeCurrentPartitionAsync(connection, table, DateTime.UtcNow, logger, token).ConfigureAwait(false);
             });
 

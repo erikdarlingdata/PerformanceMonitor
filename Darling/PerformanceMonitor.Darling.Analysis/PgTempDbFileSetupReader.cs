@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -52,7 +53,7 @@ FROM newest";
 
     internal static async Task<List<TempDbSetupFile>> ReadFilesAsync(NpgsqlDataSource postgres, AnalysisContext context, int commandTimeoutSeconds)
     {
-        await using var connection = await postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
         using var cmd = new NpgsqlCommand(FilesSql, connection) { CommandTimeout = commandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(DatabaseSizeStatsCollector.Instance.Name)));
@@ -81,7 +82,7 @@ FROM newest";
     internal static async Task<TempDbSchedulerCount?> ReadSchedulerCountAsync(NpgsqlDataSource postgres, AnalysisContext context, int commandTimeoutSeconds)
     {
         /* Its own collector's lookback, not the file read's: a slowed database size collector must not widen this read. */
-        await using var connection = await postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
         using var cmd = new NpgsqlCommand(SchedulerCountSql, connection) { CommandTimeout = commandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
         cmd.Parameters.AddWithValue(AsNaive(context.LatestValueStartFor(CpuSchedulerStatsCollector.Instance.Name)));

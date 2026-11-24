@@ -71,7 +71,7 @@ public sealed partial class DarlingCollectorRunner
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
 
             /* One statement over three parallel arrays. Npgsql's positional parameters cannot span a multi-statement
                batch (they bind to the FIRST statement and the rest fail silently), and a set-based insert needs none. */
@@ -125,7 +125,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
                save that followed put the serviced range back for the backfill to walk (and copy) again. With no row yet there is
                nothing to lock and nothing for a slice to have changed, so the upsert alone is right. */
             var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
             string? encoded;
@@ -191,7 +191,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
         {
             var upserts = changes.Where(change => change.Value is not null).ToList();
             var deletes = changes.Where(change => change.Value is null).Select(change => change.Key).ToArray();
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
             if (upserts.Count > 0)
@@ -242,7 +242,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             using var command = new NpgsqlCommand(
                 "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3", connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
@@ -391,7 +391,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var pruned = new List<string>();
 
             /* #8013: the snapshot is resolved once, for every prefix, before any delete: a windowed probe (two days,
@@ -543,7 +543,7 @@ RETURNING s.state_key";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var live = enumeratedDatabases.ToArray();
 
             foreach (var (owner, prefix) in owned)
@@ -604,7 +604,7 @@ RETURNING s.state_key";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var pruned = new List<string>();
 
             foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
@@ -652,7 +652,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var pgConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var written = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
 
             /* #6254: backfill reads the primary and ships rows with their own old times; the ship guard learns them so a look-back
@@ -712,7 +712,7 @@ RETURNING s.state_key";
         var failed = false;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var primary = await ReadDatabaseWatermarkAsync(
                 connection, serverId, tableName, columnName, databaseColumnName, databaseName, collectedSince, cancellationToken);
             if (!string.Equals(tableName, AttentionLegacyTableWatermark.TargetTable, StringComparison.Ordinal))
@@ -828,7 +828,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var rawSql = BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName);
             if (IsQueryStoreWatermarkShape(tableName, columnName, databaseColumnName))
             {
@@ -882,7 +882,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var bound = DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
             using (var command = new NpgsqlCommand(
                 BuildServerWatermarkInstanceIdSql(tableName, columnName, bounded: true), connection))
@@ -950,7 +950,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT EXISTS(SELECT 1 FROM collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS')", connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
