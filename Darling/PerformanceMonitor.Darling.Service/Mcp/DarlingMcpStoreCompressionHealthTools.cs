@@ -93,10 +93,10 @@ public sealed class DarlingMcpStoreCompressionHealthTools
 
             /* #9527: the full row of every hypertable was ~400 B, so the answer grew with each hypertable the store added and
                passed the default reply budget. A hypertable that needs nothing is a name in one list instead. */
-            var shown = full_detail ? read.Hypertables : read.Hypertables.Where(h => NeedsAttention(h, read)).ToList();
+            var shown = full_detail ? read.Hypertables : read.Hypertables.Where(h => NeedsALook(h, read)).ToList();
             var healthy = full_detail
                 ? new List<string?>()
-                : read.Hypertables.Where(h => !NeedsAttention(h, read)).Select(h => h.HypertableName).ToList();
+                : read.Hypertables.Where(h => !NeedsALook(h, read)).Select(h => h.HypertableName).ToList();
 
             return JsonSerializer.Serialize(new
             {
@@ -149,7 +149,7 @@ public sealed class DarlingMcpStoreCompressionHealthTools
     /// (no last run status) with no backlog is keeping up. Nothing a reader needs to act on is dropped: a Failed run whose error the
     /// role cannot read is still a last run that is not Success.
     /// </summary>
-    internal static bool NeedsAttention(CompressionActivity h, DarlingStoreCompressionHealthReader.CompressionHealth read) =>
+    internal static bool NeedsALook(CompressionActivity h, DarlingStoreCompressionHealthReader.CompressionHealth read) =>
         h.EligibleUncompressedChunks > 0
         || (h.LastRunStatus is not null && !string.Equals(h.LastRunStatus, "Success", StringComparison.OrdinalIgnoreCase))
         || !(string.Equals(h.JobStatus, "Scheduled", StringComparison.OrdinalIgnoreCase)
