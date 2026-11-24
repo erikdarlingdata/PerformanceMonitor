@@ -307,10 +307,6 @@ public sealed class PgAlertFailedSendRetryTests
         "private async Task EvaluatePgDeadlocksAsync(",
         "AfterPgFire(metricName, _lastPgCpuAlert, key, now, cooldown, delivery)")]
     [InlineData(
-        "private async Task EvaluatePgCapacityCeilingAsync(",
-        "internal static string BuildPgCapacityCeilingDetail(",
-        "AfterPgFire(metricName, _lastPgCapacityAlert, key, now, cooldown, delivery)")]
-    [InlineData(
         "private async Task EvaluatePgDeadlocksAsync(",
         "private async Task EvaluatePgBlockingAsync(",
         "AfterPgFire(metricName, _lastPgDeadlockAlert, key, now, cooldown, delivery)")]

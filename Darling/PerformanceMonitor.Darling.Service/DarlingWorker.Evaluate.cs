@@ -2779,22 +2779,30 @@ public sealed partial class DarlingWorker
                 var capacityPercent = FleetCpuProvenance.CpuBandInputPercent(
                     sample.CpuPercent, sample.AcuUtilizationPercent, FleetCpuSource.PerformanceInsights);
 
-                /* No capacity figure: not held, not a clear. `continue`, not `break`, because this is not an edge. */
+                /* No capacity figure: not held, not a clear, and the gate state stays as it is. `continue`, not `break`, because this
+                   is not an edge. The watermark still moves past the sample, in memory only, so a target that never reports a capacity
+                   figure (a provisioned one has no ACU) does not read the same batch again on every sweep. */
                 if (!capacityPercent.HasValue)
                 {
+                    record = new AlertPersistenceRecord(record.State, sample.SampleTimeUtc);
                     continue;
                 }
 
                 var held = PgCapacityCeilingBreaches(capacityPercent, sample.CpuPercent, alertSettings.CpuThresholdPercent);
+                var evaluation = AlertPersistenceGate.Evaluate(
+                    record.State, held, AlertEngine.PgCapacityCeilingSamples, AlertEngine.CpuClearSamples);
+
+                /* The run follows the gate. A held sample starts or continues it. A sample that is not held ends it only while the
+                   gate is not firing: a one-sample dip under an open alert leaves the alert open (it takes CpuClearSamples to
+                   resolve), so the run keeps its start and its memory figures, and the next held sample continues it. */
                 run = held
                     ? new PgCapacityRun(
                         run?.Start ?? sample, sample,
-                        /* A run found in memory keeps its flag. A new one is exact only when the gate held no count before this sample. */
-                        run?.StartedInThisProcess ?? record.State.ConsecutiveBreaches == 0)
-                    : null;
+                        /* A run found in memory keeps its flag. A new one is exact only when the gate held no count before this sample
+                           and is not already open (an open alert with no run in memory began before this process saw it). */
+                        run?.StartedInThisProcess ?? (!record.State.Firing && record.State.ConsecutiveBreaches == 0))
+                    : evaluation.State.Firing ? run : null;
 
-                var evaluation = AlertPersistenceGate.Evaluate(
-                    record.State, held, AlertEngine.PgCapacityCeilingSamples, AlertEngine.CpuClearSamples);
                 record = new AlertPersistenceRecord(evaluation.State, sample.SampleTimeUtc);
                 lastCounted = sample;
                 lastCapacityPercent = capacityPercent;
@@ -2818,8 +2826,14 @@ public sealed partial class DarlingWorker
             if (!record.Equals(priorRecord))
             {
                 _pgCapacityPersistence[key] = record;
-                await stateStore.SaveAlertPersistenceAsync(key, metricName, record);
-                readClock.Restart();
+
+                /* A pass that only moved the watermark past samples with no capacity figure leaves the saved record alone: nothing in
+                   the state changed, and a restart that reads those samples again counts none of them. */
+                if (lastCounted is not null)
+                {
+                    await stateStore.SaveAlertPersistenceAsync(key, metricName, record);
+                    readClock.Restart();
+                }
             }
 
             var cooldown = TimeSpan.FromMinutes(Math.Max(1, _alertCooldownMinutes));

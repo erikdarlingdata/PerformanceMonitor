@@ -72,10 +72,10 @@ public sealed class PgCapacityCeilingWorkerLiveTests
         public required CancellationToken Ct { get; init; }
 
         /// <summary>One life of the service: a fresh worker, so nothing is in memory.</summary>
-        public Life StartLife(Func<AlertMuteContext, bool>? isMuted = null)
+        public Life StartLife(Func<AlertMuteContext, bool>? isMuted = null, string? webhookUrl = null)
         {
             var config = new DarlingConfig();
-            config.Webhooks.GenericUrl = Endpoint.Url;
+            config.Webhooks.GenericUrl = webhookUrl ?? Endpoint.Url;
             config.Alerts.CpuEnabled = true;
             var settings = new DarlingAlertSettings(config);
             var history = new PgAlertHistoryStore(Source, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, NullLogger.Instance);
@@ -352,6 +352,120 @@ public sealed class PgCapacityCeilingWorkerLiveTests
             Assert.True(CapacityAlertIsOpen(life.Worker));
             await life.CapacityPass();
             Assert.False(CapacityAlertIsOpen(life.Worker));
+        });
+    }
+
+    [Fact]
+    public async Task AOneSampleDipUnderAnOpenAlert_KeepsTheRunsStartAndItsMemory_ForTheReminderThatFollows()
+    {
+        await RunAsync(async h =>
+        {
+            var now = DateTime.UtcNow;
+            /* The run starts at 8 GiB free plus cached. The alert opens on the fifth sample. */
+            await h.SeedAsync(new[]
+            {
+                Ceiling(10, freeGib: 3, cachedGib: 5), Ceiling(9), Ceiling(8), Ceiling(7), Ceiling(6),
+            }, now);
+            var life = h.StartLife();
+            await life.CapacityPass();
+            Assert.True(CapacityAlertIsOpen(life.Worker));
+            Assert.Single(await h.RowsAsync());
+
+            /* One sample under the ceiling, then the ceiling again with 2 GiB free plus cached. One clear is not the two that resolve
+               the alert, so it stays open, and the run it belongs to did not end. */
+            await h.SeedAsync(new[] { Below(5), Ceiling(4, freeGib: 1, cachedGib: 1) }, now);
+            Field<ConcurrentDictionary<string, DateTime>>(life.Worker, "_lastPgCapacityAlert")[Key] = DateTime.UtcNow.AddHours(-1);
+            await life.CapacityPass();
+
+            Assert.True(CapacityAlertIsOpen(life.Worker));
+            var rows = await h.RowsAsync();
+            Assert.Equal(2, rows.Count);
+            var reminder = rows[1].Detail;
+            Assert.Contains($"since {now.AddMinutes(-10):HH:mm} UTC", reminder, StringComparison.Ordinal);
+            Assert.DoesNotContain("since at least", reminder, StringComparison.Ordinal);
+            Assert.Contains("8.0 GiB at the start of the run, 2.0 GiB now", reminder, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task ADipThatResolvesTheAlert_EndsTheRun_SoALaterRunStartsAfresh()
+    {
+        await RunAsync(async h =>
+        {
+            var now = DateTime.UtcNow;
+            await h.SeedAsync(new[] { Ceiling(12), Ceiling(11), Ceiling(10), Ceiling(9), Ceiling(8) }, now);
+            var life = h.StartLife();
+            await life.CapacityPass();
+            Assert.True(CapacityAlertIsOpen(life.Worker));
+
+            /* Two samples under the ceiling resolve it, and the run ends with it. */
+            await h.SeedAsync(new[] { Below(7), Below(6) }, now);
+            await life.CapacityPass();
+            Assert.False(CapacityAlertIsOpen(life.Worker));
+            Assert.False(Field<ConcurrentDictionary<string, PgCapacityRun>>(life.Worker, "_pgCapacityRun").ContainsKey(Key));
+        });
+    }
+
+    [Fact]
+    public async Task ACapacityAlertWhoseSendFailedOnEveryChannel_IsSentAgainOnALaterEvaluation_NotAfterTheWholeCooldown()
+    {
+        await RunAsync(async h =>
+        {
+            var now = DateTime.UtcNow;
+            await h.SeedAsync(new[] { Ceiling(6), Ceiling(5), Ceiling(4), Ceiling(3), Ceiling(2) }, now);
+            /* The first post is refused, the second is accepted. */
+            using var flaky = new CapturingWebhookEndpoint(statusSequence: new[] { 500, 200 });
+            var life = h.StartLife(webhookUrl: flaky.Url);
+            var stamps = Field<ConcurrentDictionary<string, DateTime>>(life.Worker, "_lastPgCapacityAlert");
+            var cooldown = TimeSpan.FromMinutes(Field<int>(life.Worker, "_alertCooldownMinutes"));
+
+            await life.CapacityPass();
+            Assert.Single(flaky.Bodies);
+            Assert.True(CapacityAlertIsOpen(life.Worker));
+            /* The stamp was put back so the retry opens in about a minute, not after the whole cooldown. */
+            Assert.True(stamps[Key] < DateTime.UtcNow - cooldown + TimeSpan.FromMinutes(2));
+
+            /* A sweep right away is still inside that delay and sends nothing. */
+            await life.CapacityPass();
+            Assert.Single(flaky.Bodies);
+
+            /* Once the delay has passed the same open alert is sent again, with no new sample, and this time it is accepted. */
+            stamps[Key] = stamps[Key].AddMinutes(-2);
+            await life.CapacityPass();
+            Assert.Equal(2, flaky.Bodies.Count);
+
+            /* Delivered now, it waits out the whole cooldown like any other. */
+            await life.CapacityPass();
+            Assert.Equal(2, flaky.Bodies.Count);
+        });
+    }
+
+    [Fact]
+    public async Task SamplesWithNoCapacityFigure_MoveTheWatermarkPastEachBatch_AndSaveNothingToTheStore()
+    {
+        await RunAsync(async h =>
+        {
+            var now = DateTime.UtcNow;
+            /* A provisioned target: instance CPU and no ACU at all. Forty samples, more than one batch of GateBatchLimit (32). */
+            var series = Enumerable.Range(0, 40).Select(i => new Seed(14 - i * 0.3, 5, null)).ToArray();
+            await h.SeedAsync(series, now);
+            var life = h.StartLife();
+            var persistence = Field<ConcurrentDictionary<string, AlertPersistenceRecord>>(life.Worker, "_pgCapacityPersistence");
+
+            await life.CapacityPass();
+            var afterFirst = persistence[Key].LastObservedSampleUtc!.Value;
+            /* The first batch is the 32 oldest samples: the watermark sits on the 32nd, not on the start. */
+            Assert.InRange(afterFirst, now.AddMinutes(-(14 - 31 * 0.3) - 0.05), now.AddMinutes(-(14 - 31 * 0.3) + 0.05));
+
+            await life.CapacityPass();
+            var afterSecond = persistence[Key].LastObservedSampleUtc!.Value;
+            /* The second read started after the first batch and took the last eight. */
+            Assert.InRange(afterSecond, now.AddMinutes(-(14 - 39 * 0.3) - 0.05), now.AddMinutes(-(14 - 39 * 0.3) + 0.05));
+
+            /* Nothing counted and nothing cleared, so the state never left its initial value and nothing was written. */
+            Assert.Equal(PersistenceState.Initial, persistence[Key].State);
+            Assert.Null(await new PgAlertStateStore(h.Source).LoadAlertPersistenceAsync(Key, CapacityMetric));
+            Assert.Empty(await h.RowsAsync());
         });
     }
 }
