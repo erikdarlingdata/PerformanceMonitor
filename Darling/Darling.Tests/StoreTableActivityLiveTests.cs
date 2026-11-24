@@ -297,6 +297,16 @@ ANALYZE;";
                 Assert.Equal(t1, json.RootElement.GetProperty("window_start").GetDateTime().ToUniversalTime());
             }
 
+            // The tool carries the same anchor: a past as_of through get_store_metrics reads that past window and not the current one.
+            using (var viaTool = JsonDocument.Parse(await DarlingMcpStoreMetricsTools.GetStoreMetrics(
+                store, table_activity: true, hours_back: 1, as_of: AsOf(t1.AddMinutes(30)), cancellationToken: ct)))
+            {
+                var names = viaTool.RootElement.GetProperty("tables").EnumerateArray().Select(t => t.GetProperty("table_name").GetString()).ToList();
+                Assert.Contains("first_hour", names);
+                Assert.DoesNotContain("second_hour", names);
+                Assert.Equal(t1.AddMinutes(30), viaTool.RootElement.GetProperty("window_end").GetDateTime().ToUniversalTime());
+            }
+
             // A value that is not a time is refused and not read as now.
             using (var refused = JsonDocument.Parse(await DarlingStoreTableActivityRead.GetAsync(store, 1, "not a time", null, null, 100, null, ct)))
             {
