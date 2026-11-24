@@ -23,7 +23,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// the job's owner role, and the <c>mcp</c> and <c>viewer</c> logins are neither, so read as themselves they see no run at all. The function
 /// runs as the store owner (SECURITY DEFINER), so the rows come back. A run row is not secret, so every reader gets it. The error text can
 /// name objects and statements, so it comes back only when the CALLER could have read it through the view: the same two tests the view applies,
-/// run for <c>session_user</c>. <c>error_readable</c> says which rows the text was withheld from. This is the rule #9428 uses for
+/// run for <c>session_user</c>, and for the role the login switched to (<c>SET ROLE</c>, or <c>-c role=</c> in the connection) when it did. <c>error_readable</c> says which rows the text was withheld from. This is the rule #9428 uses for
 /// <c>last_error_readable</c>.</para>
 ///
 /// <para><b>Created at service start, not in a versioned migration.</b> Like the statement statistics readers (#3899), it is created after
@@ -82,8 +82,16 @@ BEGIN
     CROSS JOIN LATERAL
     (
         SELECT
-            COALESCE(pg_catalog.pg_has_role(session_user, j.owner, 'MEMBER'), false)
-            OR COALESCE(pg_catalog.pg_has_role(session_user, v_db_owner, 'MEMBER'), false) AS readable
+            (
+                COALESCE(pg_catalog.pg_has_role(session_user, j.owner, 'MEMBER'), false)
+                OR COALESCE(pg_catalog.pg_has_role(session_user, v_db_owner, 'MEMBER'), false)
+            )
+            AND
+            (
+                pg_catalog.current_setting('role') = 'none'
+                OR COALESCE(pg_catalog.pg_has_role(pg_catalog.current_setting('role')::name, j.owner, 'MEMBER'), false)
+                OR COALESCE(pg_catalog.pg_has_role(pg_catalog.current_setting('role')::name, v_db_owner, 'MEMBER'), false)
+            ) AS readable
     ) AS r
     WHERE h.start_time >= p_from
     AND   h.start_time < p_to
@@ -128,8 +136,8 @@ REVOKE ALL ON FUNCTION {collect}.{FunctionName}({ArgumentTypes}) FROM PUBLIC;";
     }
 
     /// <summary>
-    /// <c>GRANT EXECUTE</c> to each of <paramref name="roles"/> that EXISTS. A bring-your-own store has no <c>mcp</c> role and may have renamed
-    /// the others, so a missing role is skipped rather than failing the grant for the rest.
+    /// <c>GRANT EXECUTE</c> to each of <paramref name="roles"/> that EXISTS and has USAGE on the schema. A bring-your-own store has no <c>mcp</c> role and may have renamed
+    /// the others, so a missing role is skipped rather than failing the grant for the rest. A role with the same name that cannot reach the schema is not Darling's, so it gets no grant.
     /// </summary>
     public static string BuildGrantSql(string collectSchema, IReadOnlyList<string> roles)
     {
@@ -145,7 +153,8 @@ DECLARE
 BEGIN
     FOREACH grantee IN ARRAY ARRAY[{array}]::text[]
     LOOP
-        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = grantee) THEN
+        IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = grantee)
+        AND pg_catalog.has_schema_privilege(grantee, {QuoteLiteral(collectSchema)}, 'USAGE') THEN
             EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.{FunctionName}({ArgumentTypes}) TO %I', {QuoteLiteral(collectSchema)}, grantee);
         END IF;
     END LOOP;

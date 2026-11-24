@@ -165,19 +165,25 @@ SELECT (SELECT j.config::text FROM timescaledb_information.jobs AS j WHERE j.pro
             access = new Access(reader.GetInt32(0), reader.GetInt32(1));
         }
 
-        var runs = (await ReadRunsAsync(
-            connection, hasFunction ? FunctionRunsSql : RunsSql, startUtc, endUtc, jobKind, hypertable, fetch, cancellationToken)).Runs;
+        var page = await ReadRunsAsync(
+            connection, hasFunction ? FunctionRunsSql : RunsSql, startUtc, endUtc, jobKind, hypertable, fetch, cancellationToken);
+        var runs = page.Runs;
 
         Horizon horizon;
         if (hasFunction)
         {
-            /* The oldest row is the whole history's, not the window's or the filters': ask the function for the newest row of all time and read the
-               oldest-row column it carries on every row. */
-            var all = await ReadRunsAsync(connection, FunctionRunsSql, HistoryFloor, HistoryCeiling, null, null, 1, cancellationToken);
+            /* The oldest row is the whole history's, not the window's or the filters': the function carries it on every row. A page with rows
+               already has it. Only an empty page asks the function for the newest row of all time. */
+            var oldestRowAt = page.OldestRowAt;
+            if (runs.Count == 0)
+            {
+                oldestRowAt = (await ReadRunsAsync(connection, FunctionRunsSql, HistoryFloor, HistoryCeiling, null, null, 1, cancellationToken)).OldestRowAt;
+            }
+
             await using var command = new NpgsqlCommand(RetentionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds };
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             await reader.ReadAsync(cancellationToken);
-            horizon = new Horizon(all.OldestRowAt, ParseRetention(reader.IsDBNull(0) ? null : reader.GetString(0)));
+            horizon = new Horizon(oldestRowAt, ParseRetention(reader.IsDBNull(0) ? null : reader.GetString(0)));
         }
         else
         {

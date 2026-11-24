@@ -9,6 +9,7 @@
 using System;
 using System.Globalization;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -73,13 +74,36 @@ public sealed class StoreJobRunsToolLiveTests
         }
     }
 
-    private static async Task SetLoggingAsync(NpgsqlConnection connection, bool on, CancellationToken ct)
+    /// <summary>The value postgresql.auto.conf holds for the logging setting, or null when it holds none. Read before the test changes it, so the test can put it back.</summary>
+    private static async Task<string?> PriorLoggingAsync(NpgsqlConnection connection, CancellationToken ct)
     {
-        await ExecAsync(connection, on ? $"ALTER SYSTEM SET {LoggingSetting} = on" : $"ALTER SYSTEM RESET {LoggingSetting}", ct);
+        await using var command = new NpgsqlCommand(
+            "SELECT f.setting FROM pg_catalog.pg_file_settings AS f WHERE f.name = @name AND f.sourcefile LIKE '%postgresql.auto.conf' ORDER BY f.seqno DESC LIMIT 1",
+            connection) { CommandTimeout = 120 };
+        command.Parameters.AddWithValue("name", LoggingSetting);
+        return await command.ExecuteScalarAsync(ct) as string;
+    }
+
+    /// <summary>Puts the logging setting back as <see cref="PriorLoggingAsync"/> found it: the same value, or no postgresql.auto.conf entry at all. It opens its own
+    /// connection and ignores the test's cancellation, so a test that timed out or failed still leaves the cluster as it found it.</summary>
+    private static async Task RestoreLoggingAsync(string connectionString, string? prior)
+    {
+        await using var fresh = new NpgsqlConnection(connectionString);
+        await fresh.OpenAsync(CancellationToken.None);
+        var sql = prior is null
+            ? $"ALTER SYSTEM RESET {LoggingSetting}"
+            : $"ALTER SYSTEM SET {LoggingSetting} = '{prior.Replace("'", "''", StringComparison.Ordinal)}'";
+        await ExecAsync(fresh, sql, CancellationToken.None);
+        await ExecAsync(fresh, "SELECT pg_reload_conf()", CancellationToken.None);
+    }
+
+    private static async Task SetLoggingOnAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await ExecAsync(connection, $"ALTER SYSTEM SET {LoggingSetting} = on", ct);
         await ExecAsync(connection, "SELECT pg_reload_conf()", ct);
 
         /* The reload reaches a session at its next idle point: poll a fresh session until it says what was asked. */
-        var wanted = on ? "on" : "off";
+        const string wanted = "on";
         for (var attempt = 0; attempt < 50; attempt++)
         {
             await using var probe = new NpgsqlConnection(connection.ConnectionString);
@@ -164,14 +188,15 @@ public sealed class StoreJobRunsToolLiveTests
             var job = await CompressionJobAsync(connection, "jr9440_a", ct);
             var before = DateTime.UtcNow.AddSeconds(-2);
             long finished;
+            var prior = await PriorLoggingAsync(connection, ct);
             try
             {
-                await SetLoggingAsync(connection, true, ct);
+                await SetLoggingOnAsync(connection, ct);
                 finished = await RunByTheSchedulerAsync(connection, job, 1, ct);
             }
             finally
             {
-                await SetLoggingAsync(connection, false, ct);
+                await RestoreLoggingAsync(cs, prior);
             }
 
             var answer = await ReadAsync(cs, ct, kind: "compression", hypertable: "jr9440_a");
@@ -247,16 +272,17 @@ public sealed class StoreJobRunsToolLiveTests
             var newer = await CompressionJobAsync(connection, "jr9440_newer", ct);
             var failing = await FailingJobAsync(connection, ct);
             long olderRuns;
+            var prior = await PriorLoggingAsync(connection, ct);
             try
             {
-                await SetLoggingAsync(connection, true, ct);
+                await SetLoggingOnAsync(connection, ct);
                 olderRuns = await RunByTheSchedulerAsync(connection, older, 1, ct);
                 await RunByTheSchedulerAsync(connection, newer, 1, ct);
                 await RunByTheSchedulerAsync(connection, failing, 1, ct);
             }
             finally
             {
-                await SetLoggingAsync(connection, false, ct);
+                await RestoreLoggingAsync(cs, prior);
             }
 
             var all = Runs(await ReadAsync(cs, ct, kind: "compression")).Select(r => r.GetProperty("job_id").GetInt32()).ToArray();
@@ -282,14 +308,15 @@ public sealed class StoreJobRunsToolLiveTests
         {
             var job = await CompressionJobAsync(connection, "jr9440_page", ct);
             long runs;
+            var prior = await PriorLoggingAsync(connection, ct);
             try
             {
-                await SetLoggingAsync(connection, true, ct);
+                await SetLoggingOnAsync(connection, ct);
                 runs = await RunByTheSchedulerAsync(connection, job, 3, ct);
             }
             finally
             {
-                await SetLoggingAsync(connection, false, ct);
+                await RestoreLoggingAsync(cs, prior);
             }
 
             var cut = await ReadAsync(cs, ct, hypertable: "jr9440_page", limit: (int)runs - 1);
@@ -331,7 +358,8 @@ public sealed class StoreJobRunsToolLiveTests
         });
     }
 
-    private const string ReaderPassword = "Jr9440-reader-pw";
+    /// <summary>A password made for this run, so no login the class makes has a password that is written in the source.</summary>
+    private static readonly string ReaderPassword = "Jr9440-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
 
     /// <summary>A login that has the reach the store's mcp login has: USAGE on collect and the TimescaleDB information schema, and no
     /// membership of the database owner's role or the job's owner. It is its own login, so <c>session_user</c> is the reader and not the test's owner.</summary>
@@ -425,6 +453,75 @@ public sealed class StoreJobRunsToolLiveTests
             finally
             {
                 await DropReaderAsync(connection, reader, ct);
+            }
+        });
+    }
+
+    /// <summary>A login that is a member of the database owner's role reads the error text as itself, and not when it connects as a plain role
+    /// with <c>role=</c> in its connection: the text follows the role it acts as, not only the login it started as. <c>session_user</c> stays the
+    /// login after the switch, so a gate that looked at it alone would hand the text over.</summary>
+    [Fact]
+    public async Task ALoginThatIsAMemberOfTheOwner_GetsNoErrorText_WhenItActsAsAPlainRole()
+    {
+        await WithStoreAsync(async (connection, cs, ct) =>
+        {
+            var job = await FailingJobAsync(connection, ct);
+            await RunByTheSchedulerAsync(connection, job, 1, ct);
+            var plain = await ReaderLoginAsync(connection, ct);
+            var member = "jr9440_" + Guid.NewGuid().ToString("N")[..8];
+            try
+            {
+                var owner = await ScalarAsync<string>(connection, "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_catalog.pg_database WHERE datname = current_database()", ct);
+                await ExecAsync(connection, $"CREATE ROLE {member} LOGIN NOSUPERUSER PASSWORD '{ReaderPassword}'", ct);
+                await ExecAsync(connection, $"GRANT USAGE ON SCHEMA collect, timescaledb_information TO {member}", ct);
+                await ExecAsync(connection, $"GRANT \"{owner}\" TO {member}", ct);
+                await ExecAsync(connection, $"GRANT {plain} TO {member}", ct);
+                Assert.True(await StoreJobRunsFunction.CreateAndGrantAsync(connection, "collect", [plain, member], null, ct));
+
+                var asMember = await ReadAsync(ConnectionFor(cs, member), ct, kind: "jr9440_boom");
+                Assert.NotEmpty(Runs(asMember));
+                Assert.All(Runs(asMember), run => Assert.True(run.GetProperty("error_readable").GetBoolean()));
+
+                var switched = new NpgsqlConnectionStringBuilder(ConnectionFor(cs, member)) { Options = $"-c role={plain}" }.ConnectionString;
+                var asPlain = await ReadAsync(switched, ct, kind: "jr9440_boom");
+                var seen = Runs(asPlain);
+                Assert.NotEmpty(seen);
+                Assert.All(seen, run =>
+                {
+                    Assert.False(run.GetProperty("error_readable").GetBoolean());
+                    Assert.Equal(JsonValueKind.Null, run.GetProperty("error").ValueKind);
+                });
+                Assert.False(asPlain.ToString().Contains("jr9440 deliberate failure", StringComparison.Ordinal), "the error text reached a login acting as a role that may not read it");
+            }
+            finally
+            {
+                await DropReaderAsync(connection, member, ct);
+                await DropReaderAsync(connection, plain, ct);
+            }
+        });
+    }
+
+    /// <summary>A role that exists but cannot reach the schema is not one of Darling's roles, so the grant skips it. A role with USAGE on the schema gets EXECUTE.</summary>
+    [Fact]
+    public async Task TheGrant_SkipsARoleWithNoUsageOnTheSchema()
+    {
+        await WithStoreAsync(async (connection, cs, ct) =>
+        {
+            var inside = await ReaderLoginAsync(connection, ct);
+            var outside = "jr9440_" + Guid.NewGuid().ToString("N")[..8];
+            try
+            {
+                await ExecAsync(connection, $"CREATE ROLE {outside} NOLOGIN", ct);
+                Assert.True(await StoreJobRunsFunction.CreateAndGrantAsync(connection, "collect", [inside, outside], null, ct));
+
+                var function = $"collect.{StoreJobRunsFunction.FunctionName}({StoreJobRunsFunction.ArgumentTypes})";
+                Assert.True(await ScalarAsync<bool>(connection, $"SELECT has_function_privilege('{inside}', '{function}', 'EXECUTE')", ct));
+                Assert.False(await ScalarAsync<bool>(connection, $"SELECT has_function_privilege('{outside}', '{function}', 'EXECUTE')", ct));
+            }
+            finally
+            {
+                await DropReaderAsync(connection, outside, ct);
+                await DropReaderAsync(connection, inside, ct);
             }
         });
     }
