@@ -503,6 +503,17 @@ internal static class StoreHealthRows
         return $"sized {CountText.Plural(relations, "relation")}, from the store's last measurement taken {age} ago";
     }
 
+    /// <summary>#9364: how long before <paramref name="nowUtc"/> the store answered the rows the Viewer saved: "under 1 min", "12 min", "3 h 5 min"
+    /// or "2 d 4 h". A time in the future (the store's clock ahead of this machine's) reads as no time.</summary>
+    internal static string SnapshotAge(DateTime readAtUtc, DateTime nowUtc)
+    {
+        var seconds = (long)Math.Max(0, (nowUtc - readAtUtc).TotalSeconds);
+        return seconds < 60 ? "under 1 min"
+            : seconds < 3600 ? $"{seconds / 60} min"
+            : seconds < 86400 ? $"{seconds / 3600} h {seconds % 3600 / 60} min"
+            : $"{seconds / 86400} d {seconds % 86400 / 3600} h";
+    }
+
     /// <summary>The measured result in plain words: the verdict, then the page counts, with the time the read took.</summary>
     internal static string MeasureText(string table, StoreTableMeasureResult result, TimeSpan elapsed)
     {

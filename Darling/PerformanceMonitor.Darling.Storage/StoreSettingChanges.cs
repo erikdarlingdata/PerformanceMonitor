@@ -74,7 +74,7 @@ public sealed record StoreSettingChange(
 /// <c>primary_conninfo</c> password never lands here. A change to the secret part alone reads as no change.</para>
 ///
 /// <para><b>Writes.</b> The state is written only for a setting whose reading differs from it, so a minute with no change writes nothing: a full
-/// rewrite of about 350 rows a minute would leave that many dead row versions each time.</para>
+/// rewrite of the whole setting list (over 500 rows on PostgreSQL 18) every minute would leave that many dead row versions each time.</para>
 ///
 /// <para><b>Retention.</b> <see cref="StoreSelfMetrics.RetentionDays"/>, the self-metrics' own. The delete runs in the capture that wrote a change:
 /// rows only arrive with a change, so the table cannot grow without one.</para>
