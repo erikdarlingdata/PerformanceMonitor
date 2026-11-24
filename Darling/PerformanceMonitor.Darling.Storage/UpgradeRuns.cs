@@ -316,6 +316,9 @@ public sealed class UpgradeRunPickup
 
     private static async Task RecordAsync(NpgsqlConnection connection, UpgradeRunFile run, DateTime nowUtc, CancellationToken cancellationToken)
     {
+        /* The columns are timestamp without time zone, and Npgsql refuses a Kind=Utc value for one. The file's times are already Unspecified,
+           so the caller's UtcNow gets the same Kind here. Without this the first pickup throws and the file never reaches the store (#9432). */
+        var now = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified);
         await using (var upsert = new NpgsqlCommand(UpgradeRuns.UpsertSql, connection) { CommandTimeout = 30 })
         {
             upsert.Parameters.Add(new NpgsqlParameter { Value = run.RunId, NpgsqlDbType = NpgsqlDbType.Uuid });
@@ -329,12 +332,12 @@ public sealed class UpgradeRunPickup
             upsert.Parameters.Add(new NpgsqlParameter { Value = (object?)run.RollbackFolder ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
             upsert.Parameters.Add(new NpgsqlParameter { Value = (object?)run.FirstError ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Text });
             upsert.Parameters.Add(new NpgsqlParameter { Value = (object?)run.VerifiedUtc ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Timestamp });
-            upsert.Parameters.Add(new NpgsqlParameter { Value = nowUtc, NpgsqlDbType = NpgsqlDbType.Timestamp });
+            upsert.Parameters.Add(new NpgsqlParameter { Value = now, NpgsqlDbType = NpgsqlDbType.Timestamp });
             await upsert.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using var retention = new NpgsqlCommand(UpgradeRuns.RetentionDeleteSql, connection) { CommandTimeout = 30 };
-        retention.Parameters.Add(new NpgsqlParameter { Value = nowUtc.AddDays(-UpgradeRuns.RetentionDays), NpgsqlDbType = NpgsqlDbType.Timestamp });
+        retention.Parameters.Add(new NpgsqlParameter { Value = now.AddDays(-UpgradeRuns.RetentionDays), NpgsqlDbType = NpgsqlDbType.Timestamp });
         await retention.ExecuteNonQueryAsync(cancellationToken);
     }
 
