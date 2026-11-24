@@ -109,10 +109,14 @@ WHERE s.name = 'log_lock_waits'";
             return validation;
         }
 
-        validation = ValidateFilter(role, "role") ?? ValidateFilter(relation, "relation");
-        if (validation != null)
+        if (role is not null && (role.Length == 0 || role.Length > MaxFilterLength))
         {
-            return validation;
+            return McpHelpers.Refusal("role", $"Invalid role value. Must be 1-{MaxFilterLength} characters, or left out.");
+        }
+
+        if (relation is not null && (relation.Length == 0 || relation.Length > MaxFilterLength))
+        {
+            return McpHelpers.Refusal("relation", $"Invalid relation value. Must be 1-{MaxFilterLength} characters, or left out.");
         }
 
         try
@@ -173,21 +177,6 @@ WHERE s.name = 'log_lock_waits'";
         {
             return McpHelpers.FormatError("get_store_lock_waits", ex);
         }
-    }
-
-    private static string? ValidateFilter(string? value, string name)
-    {
-        if (value is null)
-        {
-            return null;
-        }
-
-        if (value.Length == 0 || value.Length > MaxFilterLength)
-        {
-            return McpHelpers.Refusal(name, $"Invalid {name} value. Must be 1-{MaxFilterLength} characters, or left out.");
-        }
-
-        return null;
     }
 
     /// <summary>One stored wait.</summary>
