@@ -79,9 +79,10 @@ public sealed class SortedMonthlyMergeThreadsTests : IDisposable
             $"SELECT count(*) FROM (SELECT row_group_id FROM parquet_metadata('{output}') WHERE path_in_schema = 'server_id' " +
             "GROUP BY row_group_id HAVING min(stats_min) <> max(stats_max))");
         var groups = Scalar(con, $"SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{output}')");
-        Assert.True(groups > 100, $"{groups} row groups");
+        /* The sorted size (#9407): about ten groups of 122,880 rows. */
+        Assert.True(groups >= rows / ParquetCompaction.SortedArchiveRowGroupSize, $"{groups} row groups");
         /* Sorted by server then time, a group holds one server except where one server's run ends. */
-        Assert.True(mixed <= 10, $"{mixed} of {groups} row groups mix servers");
+        Assert.True(mixed <= 6, $"{mixed} of {groups} row groups mix servers");
     }
 
     [Theory]

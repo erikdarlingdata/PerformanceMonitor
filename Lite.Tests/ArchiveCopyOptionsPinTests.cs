@@ -220,7 +220,9 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (i) 
             await seed.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
-        await new ArchiveService(initializer, _archiveDir).ArchiveOldDataAsync(hotDataDays: 7);
+        /* The export is compacted before this returns, and a sorted table's merge writes large groups (#9407): ask for the small size so
+           the file still has several groups to read. */
+        await new ArchiveService(initializer, _archiveDir) { SortedRowGroupSizeOverride = ParquetCompaction.ArchiveRowGroupSize }.ArchiveOldDataAsync(hotDataDays: 7);
 
         var file = Directory.GetFiles(_archiveDir, "*_collection_log.parquet").Single().Replace('\\', '/');
         Assert.Equal(SeededRows, await ScalarAsync($"SELECT count(*) FROM read_parquet('{file}')"));
