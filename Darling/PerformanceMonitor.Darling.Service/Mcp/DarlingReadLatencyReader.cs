@@ -92,9 +92,15 @@ internal static class DarlingReadLatencyReader
     /// that left mid-read: neither finished, so neither measures what the route costs.</summary>
     internal static readonly string[] NonRunOutcomes = ["queue_wait", "busy", "cache_hit", "cancelled"];
 
-    public static async Task<List<ReadLatencyRow>> GetSummaryAsync(
+    public static Task<List<ReadLatencyRow>> GetSummaryAsync(
         NpgsqlDataSource postgres, DateTime sinceUtc, string? surface, string? route,
-        CancellationToken cancellationToken = default, DateTime? splitAtUtc = null)
+        CancellationToken cancellationToken = default)
+        => GetSummaryAsync(postgres, sinceUtc, surface, route, null, cancellationToken);
+
+    /// <summary>The same read with a split instant (#9434): each row also carries its before and after figures. Null splits nothing.</summary>
+    public static async Task<List<ReadLatencyRow>> GetSummaryAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, string? surface, string? route, DateTime? splitAtUtc,
+        CancellationToken cancellationToken = default)
     {
         var normalizedSurface = string.IsNullOrWhiteSpace(surface) ? null : surface.Trim().ToLowerInvariant();
         var normalizedRoute = string.IsNullOrWhiteSpace(route) ? null : route.Trim();

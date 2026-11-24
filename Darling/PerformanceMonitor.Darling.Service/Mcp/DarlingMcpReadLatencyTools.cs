@@ -110,9 +110,9 @@ public sealed class DarlingMcpReadLatencyTools
         [Description("Optional: scope to one surface (web, compose, or mcp).")] string? surface = null,
         [Description("Optional: scope to one route (read/panel name).")] string? route = null,
         [Description("Maximum rows to return. Default 25; max 1000.")] int limit = DefaultLimit,
+        [Description("Optional: an ISO-8601 UTC instant (a service start) to split each row's count, median and max into before and after. Inside the window, not in the future.")] string? split_at = null,
         ReadAdmission? admission = null,
-        CancellationToken cancellationToken = default,
-        [Description("Optional: an ISO-8601 UTC instant (a service start) to split each row's count, median and max into before and after. Inside the window, not in the future.")] string? split_at = null)
+        CancellationToken cancellationToken = default)
     {
         var hoursError = DarlingReadWindow.ValidateHoursBack(hours);
         if (hoursError != null)
@@ -136,7 +136,7 @@ public sealed class DarlingMcpReadLatencyTools
 
         try
         {
-            var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, since, surface, route, cancellationToken, splitAtUtc);
+            var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, since, surface, route, splitAtUtc, cancellationToken);
             if (rows.Count == 0)
             {
                 var emptyMessage = $"No read recorded {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}" +
