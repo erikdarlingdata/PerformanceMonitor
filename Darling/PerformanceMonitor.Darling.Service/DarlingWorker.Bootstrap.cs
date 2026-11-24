@@ -45,6 +45,7 @@ public sealed partial class DarlingWorker
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        _stoppingToken = stoppingToken;
         /* A file: secret whose target ordinary users can read is reported through the service log; the resolver
            itself has no logger. Set before the first config read, which is the first resolve. */
         DarlingSecretSource.ReportFileAccessTo(message => _logger.LogWarning("{Warning}", message));

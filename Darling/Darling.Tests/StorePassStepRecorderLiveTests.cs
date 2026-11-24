@@ -109,12 +109,41 @@ public sealed class StorePassStepRecorderLiveTests
     }
 
     [Fact]
-    public async Task ACancelledStep_RecordsNothing_AndRethrows()
+    public async Task AStepCancelledByItsOwnTimeSlice_RecordsFailedAsCutShort_AndRethrows()
     {
         await RunAsync(emptyStore: false, async (recorder, source, ct) =>
         {
+            /* The service is running (the recorder's shutdown token is live), so the step's own slice expiring is a failed step. */
+            using var slice = new CancellationTokenSource();
+            await Assert.ThrowsAsync<TaskCanceledException>(() => recorder.StepAsync(
+                StorePassSteps.StoreSelfMetricsPass, "slice_expired_step", async () =>
+                {
+                    await slice.CancelAsync();
+                    await Task.Delay(Timeout.Infinite, slice.Token);
+                    return default;
+                }));
+
+            var row = Assert.Single((await StorePassSteps.ReadAsync(source, Now.AddDays(-1), Now.AddDays(1), null, null, 10, ct)).Rows);
+            Assert.Equal("slice_expired_step", row.Step);
+            Assert.Equal(StorePassSteps.OutcomeFailed, row.Outcome);
+            Assert.Equal("cut short by its time budget", row.Detail);
+        });
+    }
+
+    [Fact]
+    public async Task AStepThatThrowsAfterTheShutdownToken_RecordsNothing_AndRethrows()
+    {
+        await RunAsync(emptyStore: false, async (_, source, ct) =>
+        {
+            using var shutdown = new CancellationTokenSource();
+            var recorder = new StorePassSteps.Recorder(source, NullLogger.Instance, () => Now, shutdown.Token);
+
             await Assert.ThrowsAsync<OperationCanceledException>(() => recorder.StepAsync(
-                StorePassSteps.StoreMaintenancePass, "cancelled_step", () => throw new OperationCanceledException()));
+                StorePassSteps.StoreMaintenancePass, "shutdown_step", async () =>
+                {
+                    await shutdown.CancelAsync();
+                    throw new OperationCanceledException(shutdown.Token);
+                }));
 
             Assert.Empty((await StorePassSteps.ReadAsync(source, Now.AddDays(-1), Now.AddDays(1), null, null, 10, ct)).Rows);
         });

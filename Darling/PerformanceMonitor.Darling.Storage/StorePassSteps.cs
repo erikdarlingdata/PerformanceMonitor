@@ -170,26 +170,35 @@ LIMIT $5";
         /// <summary>How long one write, and the retention DELETE that follows it, may take before the recorder gives up on it.</summary>
         public static readonly TimeSpan WriteBudget = TimeSpan.FromSeconds(10);
 
+        /// <summary>The detail of a step that ran out its time budget, in the words the retention and convergence rows use.</summary>
+        public const string CutShortDetail = "cut short by its time budget";
+
         private static readonly TimeSpan s_pruneEvery = TimeSpan.FromHours(1);
 
         private readonly NpgsqlDataSource _dataSource;
         private readonly ILogger _logger;
         private readonly Func<DateTime> _utcNow;
+        private readonly CancellationToken _shutdown;
         private DateTime _lastPrune = DateTime.MinValue;
         private int _warned;
 
-        /// <summary>Creates a recorder that writes to <paramref name="dataSource"/>. <paramref name="utcNow"/> is the clock, for tests.</summary>
-        public Recorder(NpgsqlDataSource dataSource, ILogger logger, Func<DateTime>? utcNow = null)
+        /// <summary>
+        /// Creates a recorder that writes to <paramref name="dataSource"/>. <paramref name="utcNow"/> is the clock, for tests.
+        /// <paramref name="shutdown"/> is the service's stopping token: a step cancelled while it is live ran out its own time slice.
+        /// </summary>
+        public Recorder(NpgsqlDataSource dataSource, ILogger logger, Func<DateTime>? utcNow = null, CancellationToken shutdown = default)
         {
             _dataSource = dataSource;
             _logger = logger;
             _utcNow = utcNow ?? (() => DateTime.UtcNow);
+            _shutdown = shutdown;
         }
 
         /// <summary>
         /// Runs <paramref name="body"/> as one step of <paramref name="pass"/> and records the row. A body that throws records outcome failed with
-        /// the message and the exception goes on to the caller, whose own catch logs it as before. Cancellation of the service is not a step
-        /// failure, so a cancelled body records nothing and rethrows.
+        /// the message and the exception goes on to the caller, whose own catch logs it as before. A body cancelled while the service is still
+        /// running ran out its own time budget, so it records outcome failed ("cut short by its time budget") and rethrows. Cancellation of the
+        /// service itself is not a step failure, so a body cancelled by the shutdown records nothing and rethrows.
         /// </summary>
         public async Task StepAsync(string pass, string step, Func<Task<StepCounts>> body)
         {
@@ -202,6 +211,12 @@ LIMIT $5";
             }
             catch (OperationCanceledException)
             {
+                /* #9411: the write uses its own WriteBudget token, so the cancelled step token does not cancel it. */
+                if (!_shutdown.IsCancellationRequested)
+                {
+                    await WriteAsync(pass, step, started, clock.Elapsed, OutcomeFailed, null, null, CutShortDetail);
+                }
+
                 throw;
             }
             catch (Exception ex)

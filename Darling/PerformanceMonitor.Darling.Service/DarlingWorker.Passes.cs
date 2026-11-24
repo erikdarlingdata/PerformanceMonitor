@@ -1110,9 +1110,12 @@ public sealed partial class DarlingWorker
     /// #9411: the recorder the passes write each step's row through (<see cref="StorePassSteps"/>). Made on first use, after the store is open, and
     /// never fails or slows a step: a write that fails is logged and the pass goes on.
     /// </summary>
-    private StorePassSteps.Recorder PassSteps => _passSteps ??= new StorePassSteps.Recorder(_postgres!, _logger);
+    private StorePassSteps.Recorder PassSteps => _passSteps ??= new StorePassSteps.Recorder(_postgres!, _logger, shutdown: _stoppingToken);
 
     private StorePassSteps.Recorder? _passSteps;
+
+    /// <summary>#9411: the host's stopping token, kept so the step recorder can tell a shutdown from a step that ran out its own time slice.</summary>
+    private CancellationToken _stoppingToken;
 
     /// <summary>#9411: the step row's note for builds a tick left to the next one, or null when it left none.</summary>
     private static string? DeferredText(int deferred) => deferred > 0 ? $"{deferred} left for the next tick" : null;
@@ -1377,7 +1380,7 @@ public sealed partial class DarlingWorker
                     DarlingRetention.QueryStoreStatsPurgeRetentionDays(_scheduleOverrides),
                     _logger, stoppingToken);
                 return new StorePassSteps.StepCounts(
-                    Built: tick.Built + tick.HoursBuilt, Removed: tick.DaysRemoved + tick.HoursRemoved,
+                    Built: tick.Built + tick.HoursBuilt + tick.ClutterDaysFolded, Removed: tick.DaysRemoved + tick.HoursRemoved,
                     Failed: tick.Failed + tick.HoursFailed, Detail: DeferredText(tick.Deferred + tick.HoursDeferred));
             });
         }
