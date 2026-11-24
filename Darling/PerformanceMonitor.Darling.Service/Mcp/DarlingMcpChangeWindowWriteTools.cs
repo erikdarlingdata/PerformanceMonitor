@@ -19,6 +19,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
@@ -51,6 +52,21 @@ public sealed class DarlingMcpChangeWindowWriteTools
 
     internal const string InvalidStatus = "invalid";
 
+    /// <summary>
+    /// How far ahead of now an agent's window may start, in days. With the 7 day window length, nothing an agent writes holds past 14 days, and
+    /// a token cannot chain windows that outlive it. An operator is not bounded.
+    /// </summary>
+    internal const int MaxAgentLeadDays = 7;
+
+    /// <summary>The refusal code for an agent whose <c>starts_at</c> is more than <see cref="MaxAgentLeadDays"/> days ahead.</summary>
+    internal const string StartTooFarCode = "change_window_start_too_far";
+
+    /// <summary>The most server names one declare may carry, after the duplicates are dropped; each name costs a registry read.</summary>
+    internal const int MaxServerNames = 200;
+
+    /// <summary>The refusal code for a declare that names more than <see cref="MaxServerNames"/> servers.</summary>
+    internal const string TooManyNamesCode = "too_many_server_names";
+
     /// <summary>The refusal code for an agent that clears a window another caller declared.</summary>
     internal const string NotYoursCode = "change_window_not_yours";
 
@@ -69,8 +85,8 @@ public sealed class DarlingMcpChangeWindowWriteTools
         "Declares a CHANGE WINDOW: investigation requests that open for the named servers between starts_at and ends_at plus 30 minutes are created held, not handed to the request runner. Pages and alert history do not change. Changes shared investigation configuration. " +
         "<<GUIDE>>" +
         "Use it ahead of planned work that touches servers (a maintenance script, a resize, a baseline reset, a restart that re-captures configuration), so the requests that work causes do not each open as a separate incident. " +
-        "server_names is one name, a list of names, or the single word all (every server). Each name is resolved against the registry and an unknown name is refused. " +
-        "starts_at and ends_at are ISO-8601 UTC instants (a start in the future is fine: declare ahead of the work). ends_at must be after starts_at and in the future, and a window lasts at most 7 days. reason is required. " +
+        "server_names is one name, a list of names, or the single word all (every server). Each name is resolved against the registry and an unknown name is refused. A name given twice counts once, and a list of more than 200 different names is refused. " +
+        "starts_at and ends_at are ISO-8601 UTC instants (a start in the future is fine: declare ahead of the work; an agent's start may be at most 7 days from now, an operator's is not bounded). ends_at must be after starts_at and in the future, and a window lasts at most 7 days. reason is required. " +
         "A request is held when it opens after starts_at and up to 30 minutes after ends_at (the tail; fixed, so a real problem that follows the work is never hidden for longer). A held request is still listed " +
         "(list_investigation_requests) and can still be claimed, but it does not wake wait_for_investigation_requests and it counts against no route limit. " +
         "Alert-triggered and change-watch requests are held. A chat request, a force check and a practice request are asked for on purpose and are never held. " +
@@ -81,17 +97,17 @@ public sealed class DarlingMcpChangeWindowWriteTools
     public static Task<string> DeclareChangeWindow(
         NpgsqlDataSource postgres,
         [Description("The servers the planned change touches: one server name, several, or the single word all. Each name is the server's display name or the start of it.")] string[] server_names,
-        [Description("ISO-8601 UTC start of the planned work (e.g. 2027-08-01T02:00:00Z). May be in the future.")] string starts_at,
+        [Description("ISO-8601 UTC start of the planned work (e.g. 2027-08-01T02:00:00Z). May be in the future: at most 7 days ahead for an agent token, any distance for an operator.")] string starts_at,
         [Description("ISO-8601 UTC end of the planned work. After starts_at, in the future, and at most 7 days after starts_at.")] string ends_at,
-        [Description("Why the window is declared (1 to 2000 characters, for example 'patch night, change 4471').")] string reason,
+        [Description("Why the window is declared (1 to 2000 characters, at most 256 for an agent token, for example 'patch night, change 4471').")] string reason,
         DarlingAgentActionSeat? agentSeat = null,
         CancellationToken cancellationToken = default) =>
         DeclareAsync(postgres, agentSeat, server_names, starts_at, ends_at, reason, DateTime.UtcNow, cancellationToken);
 
     [McpServerTool(Name = "clear_change_window"), Description(
-        "Clears a CHANGE WINDOW now: it holds nothing that opens after this moment. A request already held stays held. Changes shared investigation configuration. " +
+        "Clears a CHANGE WINDOW now: it holds nothing that opens after this moment. Every request the window still holds is released at once and reaches the request runner and wait_for_investigation_requests as a hold_released event. Changes shared investigation configuration. " +
         "<<GUIDE>>" +
-        "window_id is the id declare_change_window answered. Clearing sets the window's cleared_at to now; a request that opens later is not held, and the close summary still covers what the window held before. " +
+        "window_id is the id declare_change_window answered. Clearing sets the window's cleared_at to now and releases the requests the window held; a request that opens later is not held, and the close summary still covers what the window held before. " +
         "A window that is already cleared, or whose tail has ended, answers already_cleared or already_closed and writes nothing (not an error). An unknown id answers not_found. reason is required. " +
         "An agent token can clear only a window it declared; an operator can clear any. " +
         "Answer: {status:\"cleared\", window_id, cleared_at_utc, previous:{cleared_at_utc:null}, undo:null, undo_note}. A cleared window is brought back by declaring a new one. " +
@@ -99,10 +115,11 @@ public sealed class DarlingMcpChangeWindowWriteTools
     public static Task<string> ClearChangeWindow(
         NpgsqlDataSource postgres,
         [Description("The window id declare_change_window answered.")] long window_id,
-        [Description("Why the window is cleared (1 to 2000 characters, for example 'the work was cancelled').")] string reason,
+        [Description("Why the window is cleared (1 to 2000 characters, at most 256 for an agent token, for example 'the work was cancelled').")] string reason,
         DarlingAgentActionSeat? agentSeat = null,
-        CancellationToken cancellationToken = default) =>
-        ClearAsync(postgres, agentSeat, window_id, reason, DateTime.UtcNow, cancellationToken);
+        CancellationToken cancellationToken = default,
+        InvestigationOpenSignal? signal = null) =>
+        ClearAsync(postgres, agentSeat, window_id, reason, DateTime.UtcNow, cancellationToken, signal);
 
     private static bool IsAgent(DarlingAgentActionSeat? seat) => seat is { Policy: { Writes: false, Investigations: true } };
 
@@ -153,14 +170,20 @@ public sealed class DarlingMcpChangeWindowWriteTools
         string? endsAt, string? reason, DateTime now, CancellationToken ct)
     {
         var agent = IsAgent(seat);
-        var names = (serverNames ?? []).Select(n => (n ?? "").Trim()).Where(n => n.Length > 0).ToList();
+        /* A name given twice is one name, and a long list is refused before any name is resolved: each one is a registry read, and a refused call
+           is not counted against the hourly cap. */
+        var names = (serverNames ?? []).Select(n => (n ?? "").Trim()).Where(n => n.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (agent)
         {
             if (DarlingMcpAgentMuteDirect.SeatRefusal(seat!, OffMessage, NoOwnerMessage) is { } seatRefusal)
                 return DarlingAgentActionGate.RefusalAnswer(seatRefusal);
-            if (FieldProblem([.. names.Select((n, i) => ($"server_names[{i}]", (string?)n)), ("starts_at", startsAt), ("ends_at", endsAt)]) is { } tooLong)
+            if (FieldProblem([.. names.Select((n, i) => ($"server_names[{i}]", (string?)n)), ("starts_at", startsAt), ("ends_at", endsAt), ("reason", reason?.Trim())]) is { } tooLong)
                 return tooLong;
         }
+
+        if (names.Count > MaxServerNames)
+            return Refusal(TooManyNamesCode,
+                $"server_names holds {names.Count} different names, and one change window may name at most {MaxServerNames}. Use the single word all for every server, or declare more than one window. Nothing was written.");
 
         if (ReasonProblem(reason) is { } noReason)
             return noReason;
@@ -172,6 +195,9 @@ public sealed class DarlingMcpChangeWindowWriteTools
             return DarlingMcpAlertTools.Outcome(InvalidStatus, $"starts_at '{startsAt}' is not a valid ISO-8601 timestamp (e.g. 2027-08-01T02:00:00Z).");
         if (!TryParseInstant(endsAt, out var end))
             return DarlingMcpAlertTools.Outcome(InvalidStatus, $"ends_at '{endsAt}' is not a valid ISO-8601 timestamp (e.g. 2027-08-01T06:00:00Z).");
+        if (agent && start - now > TimeSpan.FromDays(MaxAgentLeadDays))
+            return Refusal(StartTooFarCode,
+                $"An agent may declare a window that starts at most {MaxAgentLeadDays} days from now, and starts_at ({Iso(start)}) is later than that. Declare it closer to the work, or ask an operator. Nothing was written.");
         if (end <= start)
             return DarlingMcpAlertTools.Outcome(InvalidStatus, "ends_at must be after starts_at. Nothing was written.");
         if (end <= now)
@@ -296,15 +322,36 @@ ORDER BY window_id LIMIT 1";
 SELECT server_ids, starts_at, ends_at, declared_by, cleared_at
 FROM config.investigation_change_windows WHERE window_id = $1 FOR UPDATE";
 
+    /* Releases every request the window holds, and journals one hold_released event for each (the once key keeps it to one), the event that
+       brings a request into wait_for_investigation_requests and the route's delivery. $1 window, $2 now. Answers the route of each request released. */
+    private static readonly string ReleaseOnClearSql = @"
+WITH released AS (
+    UPDATE config.investigation_requests
+    SET hold_released_at = $2
+    WHERE held_window_id = $1 AND hold_released_at IS NULL
+    RETURNING request_id, route_id, server_id, first_metric
+),
+journaled AS (
+    INSERT INTO config.investigation_journal (event_time, request_id, route_id, server_id, event, actor, reason, detail, once_key)
+    SELECT $2, r.request_id, r.route_id, r.server_id, '" + InvestigationEvents.HoldReleased + @"', 'service', r.first_metric,
+           jsonb_build_object('window_id', $1::bigint, 'metric', r.first_metric),
+           'hold_released:' || r.request_id::text
+    FROM released AS r
+    ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING
+)
+SELECT route_id FROM released";
+
     private const string ClearSql = "UPDATE config.investigation_change_windows SET cleared_at = $2 WHERE window_id = $1";
 
     /// <summary>The tool body, so a test drives either arm.</summary>
     internal static async Task<string> ClearAsync(NpgsqlDataSource postgres, DarlingAgentActionSeat? seat, long windowId, string? reason, DateTime now,
-        CancellationToken ct)
+        CancellationToken ct, InvestigationOpenSignal? signal = null)
     {
         var agent = IsAgent(seat);
         if (agent && DarlingMcpAgentMuteDirect.SeatRefusal(seat!, OffMessage, NoOwnerMessage) is { } seatRefusal)
             return DarlingAgentActionGate.RefusalAnswer(seatRefusal);
+        if (agent && FieldProblem(("reason", reason?.Trim())) is { } tooLong)
+            return tooLong;
         if (ReasonProblem(reason) is { } noReason)
             return noReason;
 
@@ -346,6 +393,18 @@ FROM config.investigation_change_windows WHERE window_id = $1 FOR UPDATE";
                 await update.ExecuteNonQueryAsync(ct);
             }
 
+            /* The window now holds nothing, so what it still holds goes to the runner at once (the same release a late join makes). The routes
+               woken are collected here and woken after the commit, so a waiter never reads a row that is not yet visible. */
+            var releasedRoutes = new List<int>();
+            await using (var release = new NpgsqlCommand(ReleaseOnClearSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                release.Parameters.Add(new NpgsqlParameter<long> { TypedValue = windowId, NpgsqlDbType = NpgsqlDbType.Bigint });
+                release.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = now, NpgsqlDbType = NpgsqlDbType.TimestampTz });
+                await using var released = await release.ExecuteReaderAsync(ct);
+                while (await released.ReadAsync(ct))
+                    releasedRoutes.Add(released.GetInt32(0));
+            }
+
             var answer = new JsonObject
             {
                 ["status"] = "cleared",
@@ -360,6 +419,8 @@ FROM config.investigation_change_windows WHERE window_id = $1 FOR UPDATE";
             await InvestigationRequestStore.JournalDirectChangeAsync(connection, transaction, now, serverIds is { Length: 1 } one ? one[0] : null, actor, reason!.Trim(),
                 ClearToolName, AgentChangeKinds.ChangeWindow, windowId.ToString(CultureInfo.InvariantCulture), before, json, ct);
             await transaction.CommitAsync(ct);
+            foreach (var route in releasedRoutes.Distinct())
+                signal?.Opened(route);
             return json;
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
@@ -239,6 +240,60 @@ public sealed class InvestigationChangeWindowHoldLiveTests
 
             var use = await store.RouteUseAsync(ct);
             Assert.Equal((1, 1), use[1]);
+        });
+    }
+
+    [Fact]
+    public async Task AClaimedHeldRequest_CountsTowardTheRouteLimit_SoClaimingCannotGoPastIt()
+    {
+        await RunAsync(async (store, connection, _, ct) =>
+        {
+            await AddWindowAsync(connection, null, T0, T0.AddMinutes(10), "resize", ct);
+            var ids = new List<Guid>();
+            for (var i = 0; i < 5; i++)
+            {
+                _now = T0.AddMinutes(1 + i);
+                var held = await store.OpenOrJoinAsync(Alert(_now, 11 + i, maxPerHour: 3, maxPerDay: 3), ct);
+                Assert.True(held.Held);
+                ids.Add(held.RequestId!.Value);
+            }
+
+            /* Five held requests against a limit of 3 count for nothing. */
+            Assert.False((await store.RouteUseAsync(ct)).ContainsKey(1));
+
+            /* Each claim ignores the hold, so each one counts. */
+            for (var i = 0; i < 3; i++)
+            {
+                Assert.Equal(InvestigationClaimOutcome.Claimed, (await store.ClaimAsync(ids[i], "agent-a", ct)).Outcome);
+            }
+
+            Assert.Equal((3, 3), (await store.RouteUseAsync(ct))[1]);
+            _now = T0.AddMinutes(41);
+            Assert.Equal(InvestigationOpenOutcome.LimitReached, (await store.OpenOrJoinAsync(Alert(_now, 20, maxPerHour: 3, maxPerDay: 3), ct)).Outcome);
+        });
+    }
+
+    [Fact]
+    public async Task ALateJoinAfterAClear_ReleasesTheHold_EvenInsideTheOriginalWindow()
+    {
+        await RunAsync(async (store, connection, _, ct) =>
+        {
+            var window = await AddWindowAsync(connection, null, T0, T0.AddMinutes(60), "resize", ct);
+            _now = T0.AddMinutes(5);
+            var id = (await store.OpenOrJoinAsync(Alert(_now, 7), ct)).RequestId!.Value;
+
+            /* Inside the window and not cleared: a join does not release. */
+            _now = T0.AddMinutes(8);
+            Assert.Equal(InvestigationOpenOutcome.Joined, (await store.OpenOrJoinAsync(Alert(_now, 7), ct)).Outcome);
+            Assert.Empty(await store.OpenedSinceAsync(T0.AddHours(-1), null, 10, ct));
+
+            /* Cleared at +10 minutes: a join after that is outside the window, whatever the original end and tail said. */
+            await ExecAsync(connection, $"UPDATE config.investigation_change_windows SET cleared_at = '{T0.AddMinutes(10):O}' WHERE window_id = {window}", ct);
+            _now = T0.AddMinutes(15);
+            Assert.Equal(InvestigationOpenOutcome.Joined, (await store.OpenOrJoinAsync(Alert(_now, 7), ct)).Outcome);
+
+            Assert.Contains(id, (await store.OpenedSinceAsync(T0.AddHours(-1), null, 10, ct)).Select(r => r.RequestId));
+            Assert.Single(await store.ListAsync(null, null, null, 10, InvestigationChangeWindows.HeldExclude, ct));
         });
     }
 

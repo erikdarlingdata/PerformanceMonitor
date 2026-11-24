@@ -23,13 +23,13 @@ At Level 1 an agent reads and reports. At Level 2 it can change alert settings o
 
 A planned change that touches many servers can open one investigation request on each server it touches. A change window tells Darling that the work is planned, so those requests are held for one review instead of being worked as separate incidents.
 
-A person or an agent declares a window with `declare_change_window`. The call names the servers (one name, a list of names, or `all`), a start, an end and a reason. A start in the future is allowed, so declare the window before the work. A window lasts at most 7 days, and its end must not be in the past.
+A person or an agent declares a window with `declare_change_window`. The call names the servers (one name, a list of names, or `all`), a start, an end and a reason. A start in the future is allowed, so declare the window before the work. A window lasts at most 7 days, and its end must not be in the past. A name that you give twice counts once. One window can name at most 200 different servers: for more, use `all`.
 
 What a window holds:
 
 - A request that opens after the start, and up to 30 minutes after the end, is created held. The 30 minutes after the end are the tail. The tail covers a re-capture or a settle period that runs past the end of the work.
 - Alert requests and Change Watch requests are held.
-- A held request stays in `list_investigation_requests`, and an agent can still claim it. It does not wake `wait_for_investigation_requests`, and it does not count toward the route's hourly and daily limits.
+- A held request stays in `list_investigation_requests`, and an agent can still claim it. It does not wake `wait_for_investigation_requests`, and it does not count toward the route's hourly and daily limits. Once an agent claims a held request, the request counts toward those limits, because a claim ignores the hold.
 - The held request carries the window id and the reason.
 
 What a window never holds:
@@ -38,9 +38,9 @@ What a window never holds:
 - A chat request, a force check and a practice request. A person asks for these on purpose.
 - Pages and alert history. Alerts page and are logged as usual.
 
-`clear_change_window` ends a window early. A request that opens after the clear is not held. A request that was already held stays held. Clearing a window that is already cleared, or whose tail has ended, answers that fact and is not an error. When the tail ends, Darling records one journal event that counts the held requests by family and by server. Read it with `get_change_windows`, which also lists the held requests of one window.
+`clear_change_window` ends a window early. A request that opens after the clear is not held. Clearing also releases, at once, every request that the window still holds. Each released request gets a `hold_released` event, so the request runner and `wait_for_investigation_requests` see it. Clearing a window that is already cleared, or whose tail has ended, answers that fact and is not an error. When the tail ends, Darling records one journal event that counts the held requests by family and by server. Read it with `get_change_windows`, which also lists the held requests of one window.
 
-An agent token can declare and clear windows when `mcp.allowAgentMuteRules` is on. The limits are the same as for an agent's mute rules. Each text field is at most 256 characters. An agent can make 20 direct writes an hour, and the change window tools share that count with the mute rule tools. An agent can clear only a window that it declared. An operator can clear any window. Both tools write a row to the Agent changes list. That row has no Undo button, because `clear_change_window` is the undo of a declare, and a new declare brings back a cleared window.
+An agent token can declare and clear windows when `mcp.allowAgentMuteRules` is on. The limits are the same as for an agent's mute rules. Each text field, the reason included, is at most 256 characters. An agent's `starts_at` can be at most 7 days from now, so nothing an agent declares holds requests for more than 14 days. An operator's start is not limited. An agent can make 20 direct writes an hour, and the change window tools share that count with the mute rule tools. An agent can clear only a window that it declared. An operator can clear any window. Both tools write a row to the Agent changes list. That row has no Undo button, because `clear_change_window` is the undo of a declare, and a new declare brings back a cleared window.
 
 A change window is not a quiet window. `set_quiet_window` is a mute rule: it holds pages as well. A change window holds only the investigation hand-off, and it records what it held.
 

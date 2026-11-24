@@ -36,6 +36,8 @@ public sealed class InvestigationChangeWindowCloseLiveTests
 
     private DateTime _now = T0;
 
+    private NpgsqlDataSource? _source;
+
     private static InvestigationAlert Alert(DateTime at, string family = "blocking", int serverId = 7) =>
         new(1, serverId, "srv-" + serverId.ToString(CultureInfo.InvariantCulture), family, "Blocking", at, Array.Empty<string>(), null,
             20, 100, LeaseMinutes: 15, ExpiryMinutes: 240);
@@ -211,6 +213,40 @@ VALUES ({servers}, {Stamp(starts)}, {Stamp(ends)}, '{reason}', 'test', {(cleared
         });
     }
 
+    [Fact]
+    public async Task AScopedReader_SeesAWindowThatNamesItsServer_ButNotTheOtherServersItNames()
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            foreach (var id in new[] { 7, 8 })
+            {
+                await ScalarAsync(connection, $@"INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
+VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now()) RETURNING server_id", ct);
+            }
+
+            var window = await InsertWindowAsync(connection, "ARRAY[7,8]", T0, T0.AddMinutes(60), "resize", null, ct);
+            await InsertWindowAsync(connection, "ARRAY[8]", T0, T0.AddMinutes(60), "other", null, ct);
+            _now = T0.AddMinutes(1);
+            Assert.True((await store.OpenOrJoinAsync(Alert(_now, "blocking", 7), ct)).Held);
+            Assert.True((await store.OpenOrJoinAsync(Alert(_now, "blocking", 8), ct)).Held);
+
+            var scoped = new InvestigationRequestStore(_source!, 30, () => _now) { ReadServerIds = [7] };
+
+            var all = await store.ReadChangeWindowsAsync(null, 168, 20, 0, ct);
+            Assert.Equal(new[] { "srv-7", "srv-8" }, all.Windows.Single(w => w.Window.WindowId == window).Servers!.Order().ToArray());
+
+            var read = await scoped.ReadChangeWindowsAsync(null, 168, 20, 0, ct);
+            var seen = Assert.Single(read.Windows);
+            Assert.Equal(window, seen.Window.WindowId);
+            Assert.Equal(new[] { "srv-7" }, seen.Servers!.ToArray());
+            Assert.Equal(new[] { 7 }, seen.Window.ServerIds!.ToArray());
+            Assert.Equal(1, seen.Held);
+
+            var one = await scoped.ReadChangeWindowsAsync(window, 168, 20, 0, ct);
+            Assert.Equal(new[] { "srv-7" }, one.HeldRequests!.Select(r => r.ServerName).ToArray());
+        });
+    }
+
     private async Task RunAsync(Func<InvestigationRequestStore, NpgsqlConnection, CancellationToken, Task> body)
     {
         var baseConnectionString = ConnectionString;
@@ -224,6 +260,7 @@ VALUES ({servers}, {Stamp(starts)}, {Stamp(ends)}, '{reason}', 'test', {(cleared
         await PgMigrations.MigrateAsync(connection, ct);
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        _source = dataSource;
         var store = new InvestigationRequestStore(dataSource, 30, () => _now);
         await body(store, connection, ct);
     }

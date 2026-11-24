@@ -7,11 +7,15 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -166,6 +170,112 @@ VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now())", ct);
 
             /* The cap is one per agent: another agent still has room. */
             Assert.Equal("declared", (string?)Parse(await Declare(c, AgentB, start: DateTime.UtcNow.AddHours(41)))["status"]);
+        });
+    }
+
+    [Fact]
+    public async Task AnAgentsStart_IsBoundedToSevenDaysAhead_AndAnOperatorsIsNot()
+    {
+        await RunAsync(async c =>
+        {
+            var now = DateTime.UtcNow;
+            Task<string> At(DarlingAgentActionSeat seat, DateTime start) =>
+                DarlingMcpChangeWindowWriteTools.DeclareAsync(c.Source, seat, ["srv-7"], Iso(start), Iso(start.AddHours(2)), "patch night", now, c.Ct);
+
+            Assert.Equal("declared", (string?)Parse(await At(AgentA, now.AddDays(7)))["status"]);
+
+            var tooFar = Parse(await At(AgentA, now.AddDays(7).AddMinutes(1)));
+            Assert.Equal("refused", (string?)tooFar["status"]);
+            Assert.Equal(DarlingMcpChangeWindowWriteTools.StartTooFarCode, (string?)tooFar["reason"]);
+            Assert.Equal("1", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_change_windows"));
+
+            Assert.Equal("declared", (string?)Parse(await At(Operator, now.AddDays(30)))["status"]);
+            Assert.Equal("2", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_change_windows"));
+        });
+    }
+
+    [Fact]
+    public async Task ADeclare_DropsRepeatedNames_AndRefusesMoreThanTwoHundredBeforeResolvingAny()
+    {
+        await RunAsync(async c =>
+        {
+            var repeated = Parse(await Declare(c, Operator, ["srv-7", "SRV-7", " srv-7 "]));
+            Assert.Equal("declared", (string?)repeated["status"]);
+            Assert.Single(repeated["servers"]!.AsArray());
+
+            /* 201 different names, none of them registered: a refusal that names the cap, not the first unknown name, so no name was looked up. */
+            var many = Enumerable.Range(0, DarlingMcpChangeWindowWriteTools.MaxServerNames + 1).Select(i => "no-such-" + i.ToString(CultureInfo.InvariantCulture)).ToArray();
+            foreach (var seat in new[] { Operator, AgentA })
+            {
+                var refused = Parse(await Declare(c, seat, many, DateTime.UtcNow.AddHours(3)));
+                Assert.Equal("refused", (string?)refused["status"]);
+                Assert.Equal(DarlingMcpChangeWindowWriteTools.TooManyNamesCode, (string?)refused["reason"]);
+            }
+
+            /* The same name repeated many times is one name: not over the cap. */
+            var padded = Enumerable.Repeat("srv-8", 500).ToArray();
+            Assert.Equal("declared", (string?)Parse(await Declare(c, Operator, padded, DateTime.UtcNow.AddHours(4)))["status"]);
+            Assert.Equal("2", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_change_windows"));
+        });
+    }
+
+    [Fact]
+    public async Task AnAgentsReason_IsCappedAtTwoFiftySix_OnDeclareAndClear_AndAnOperatorsIsNot()
+    {
+        await RunAsync(async c =>
+        {
+            var atCap = new string('r', DarlingMcpAgentMuteDirect.MaxFieldChars);
+            var over = new string('r', DarlingMcpAgentMuteDirect.MaxFieldChars + 1);
+
+            var refused = Parse(await Declare(c, AgentA, reason: over));
+            Assert.Equal(DarlingMcpAgentMuteDirect.SizeCode, (string?)refused["reason"]);
+            Assert.Equal("0", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_change_windows"));
+
+            var id = (long)Parse(await Declare(c, AgentA, reason: atCap))["window_id"]!;
+            Assert.Equal(DarlingMcpAgentMuteDirect.SizeCode, (string?)Parse(await Clear(c, AgentA, id, over))["reason"]);
+            Assert.Equal("False", await ScalarAsync(c, $"SELECT cleared_at IS NOT NULL FROM config.investigation_change_windows WHERE window_id = {id}"));
+            Assert.Equal("cleared", (string?)Parse(await Clear(c, AgentA, id, atCap))["status"]);
+
+            var operatorWindow = Parse(await Declare(c, Operator, start: DateTime.UtcNow.AddHours(9), reason: over + over));
+            Assert.Equal("declared", (string?)operatorWindow["status"]);
+        });
+    }
+
+    [Fact]
+    public async Task ClearingAWindow_ReleasesWhatItHeldAtOnce_WakesTheRunner_AndJournalsEachReleaseOnce()
+    {
+        await RunAsync(async c =>
+        {
+            var now = DateTime.UtcNow;
+            var id = (long)Parse(await DarlingMcpChangeWindowWriteTools.DeclareAsync(c.Source, Operator, ["srv-7"], Iso(now.AddMinutes(-10)), Iso(now.AddHours(1)),
+                "patch night", now, c.Ct))["window_id"]!;
+            var store = new InvestigationRequestStore(c.Source, 30, () => DateTime.UtcNow);
+            var held = new List<Guid>();
+            foreach (var family in new[] { "blocking", "resources" })
+            {
+                var opened = await store.OpenOrJoinAsync(
+                    new InvestigationAlert(1, 7, "srv-7", family, "Blocking", DateTime.UtcNow, [], null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240), c.Ct);
+                Assert.True(opened.Held);
+                held.Add(opened.RequestId!.Value);
+            }
+
+            Assert.Empty(await store.OpenedSinceAsync(now.AddHours(-1), null, 10, c.Ct));
+
+            var signal = new InvestigationOpenSignal();
+            using var waiter = signal.Register([1]);
+            waiter.Rearm();
+            var cleared = Parse(await DarlingMcpChangeWindowWriteTools.ClearAsync(c.Source, Operator, id, "work cancelled", DateTime.UtcNow, c.Ct, signal));
+            Assert.Equal("cleared", (string?)cleared["status"]);
+
+            Assert.True(await waiter.WaitAsync(TimeSpan.FromSeconds(5), c.Ct));
+            Assert.Equal("2", await ScalarAsync(c, $"SELECT count(*) FROM config.investigation_requests WHERE held_window_id = {id} AND hold_released_at IS NOT NULL"));
+            Assert.Equal("2", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_journal WHERE event = 'hold_released'"));
+            var comesBack = (await store.OpenedSinceAsync(now.AddHours(-1), null, 10, c.Ct)).Where(r => r.Event == "hold_released").Select(r => r.RequestId).Order().ToArray();
+            Assert.Equal(held.Order().ToArray(), comesBack);
+
+            /* A second clear writes nothing and releases nothing more. */
+            Assert.Equal("already_cleared", (string?)Parse(await Clear(c, Operator, id))["status"]);
+            Assert.Equal("2", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_journal WHERE event = 'hold_released'"));
         });
     }
 
