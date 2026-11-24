@@ -112,11 +112,11 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
 
     /// <summary>A query's cheap plan in the archive (two intervals, two snapshots each) and its costly newest plan in the hot store.</summary>
     private void Query(long q, string? coldText, string? hotText, double costlyCpu, string? role = null, string database = "Db1",
-        bool hotDigest = true, bool forced = false, long failures = 0, DateTime? latest = null)
+        bool hotDigest = true, bool forced = false, long failures = 0, DateTime? latest = null, long? planBase = null)
     {
         var newest = latest ?? Recent;
-        var cheap = q * 10 + 1;
-        var costly = q * 10 + 2;
+        var cheap = (planBase ?? q * 10) + 1;
+        var costly = (planBase ?? q * 10) + 2;
         for (var interval = 0; interval < 2; interval++)
         {
             var coldLast = Old.AddHours(interval);
@@ -300,6 +300,80 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         /* The cut is inside the tie: DbC keeps its first 25 queries and drops the other 11. */
         Assert.Contains(("DbC", 25L), expected);
         Assert.DoesNotContain(("DbC", 26L), expected);
+    }
+
+    /// <summary>
+    /// #9353: two databases, each with two queries that run on three replicas (a NULL role, PRIMARY and SECONDARY). Every row ties on the
+    /// CPU lost, the factor, the database and the query, so only the replica role orders them. A role's plans carry plan_ids of its own
+    /// (the latest plan is query * 100 + 12 for PRIMARY, + 22 for SECONDARY, + 32 for no role), which is how a candidate shows its role.
+    /// The rows are written SECONDARY first, then no role, then PRIMARY, and the databases in reverse, so no order is the insert order.
+    /// </summary>
+    private async Task SeedReplicaTiesAsync()
+    {
+        foreach (var database in new[] { "DbB", "DbA" })
+        {
+            for (var q = 1; q <= 2; q++)
+            {
+                Query(q, null, "SELECT " + q + " FROM dbo.roles", 300_000, role: "SECONDARY", database: database, hotDigest: false, planBase: q * 100 + 20);
+                Query(q, null, "SELECT " + q + " FROM dbo.roles", 300_000, role: null, database: database, hotDigest: false, planBase: q * 100 + 30);
+                Query(q, null, "SELECT " + q + " FROM dbo.roles", 300_000, role: "PRIMARY", database: database, hotDigest: false, planBase: q * 100 + 10);
+            }
+        }
+
+        await FlushAsync();
+    }
+
+    /* Per database, per query: PRIMARY, SECONDARY, then the NULL role last (the statement's ORDER BY on replica_role, NULL last). */
+    private static readonly (string Database, long QueryId, string Role, long LatestPlanId)[] ReplicaTieOrder =
+        new[] { "DbA", "DbB" }.SelectMany(d => new long[] { 1, 2 }.SelectMany(q => new[]
+        {
+            (d, q, "PRIMARY", q * 100 + 12), (d, q, "SECONDARY", q * 100 + 22), (d, q, "", q * 100 + 32),
+        })).ToArray();
+
+    [Fact]
+    public async Task ReadingTheDatabasesInTurn_GivesTheOneStatementsRowsInItsOrder_WhenRowsTieOnEverythingButTheReplicaRole()
+    {
+        await SeedReplicaTiesAsync();
+        var context = Context();
+        var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), TestContext.Current.CancellationToken);
+
+        var (inTurn, _) = await new DuckDbFactCollector(_duckDb).ReadPlanRegressionCostAsync(context, plan);
+        var oneStatement = await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql);
+
+        var expected = ReplicaTieOrder.Select(r => (r.Database, r.QueryId, r.LatestPlanId)).ToList();
+        Assert.Equal(expected, oneStatement.Select(c => (c.DatabaseName, c.QueryId, c.LatestPlanId!.Value)).ToList());
+        Assert.Equal(oneStatement, inTurn);
+    }
+
+    [Fact]
+    public async Task TheRegressedQueriesDrillDown_ReadingTheDatabasesInTurn_GivesTheOneStatementsRowsInItsOrder_WhenRowsTieOnEverythingButTheReplicaRole()
+    {
+        await SeedReplicaTiesAsync();
+        var context = Context();
+        var plan = await _duckDb.PlanArchiveReadAsync(
+            System.Threading.CancellationToken.None,
+            new ArchiveWindow("query_stats", "collection_time", context.TimeRangeStart),
+            new ArchiveWindow("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14)));
+
+        List<string> oneStatement;
+        using (var readLock = _duckDb.AcquireReadLock())
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            oneStatement = (await DrillDownCollector.ReadRegressedQueriesAsync(connection, context, plan, database: null))
+                .Select(r => System.Text.Json.JsonSerializer.Serialize(r.Item)).ToList();
+        }
+
+        var finding = new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", StoryPath = "PLAN_REGRESSION", PathKeys = ["PLAN_REGRESSION"], Severity = 1.0 };
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], Context());
+        var inTurn = ((IEnumerable<object>)finding.DrillDown!["regressed_queries"]).Select(i => System.Text.Json.JsonSerializer.Serialize(i)).ToList();
+
+        /* The drill-down keeps five of the twelve, and the cut falls inside the roles of DbA's second query (PRIMARY and SECONDARY stay). */
+        static List<(string, long, string)> Keys(List<string> rows) => rows
+            .Select(r => System.Text.Json.JsonDocument.Parse(r).RootElement)
+            .Select(e => (e.GetProperty("database").GetString()!, e.GetProperty("query_id").GetInt64(), e.GetProperty("replica_role").GetString()!)).ToList();
+        Assert.Equal(ReplicaTieOrder.Take(5).Select(r => (r.Database, r.QueryId, r.Role)).ToList(), Keys(oneStatement));
+        Assert.Equal(oneStatement, inTurn);
     }
 
     [Fact]
