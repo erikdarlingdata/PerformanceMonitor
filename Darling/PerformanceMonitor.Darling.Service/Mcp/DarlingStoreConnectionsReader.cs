@@ -67,23 +67,25 @@ SELECT EXISTS (SELECT 1 FROM collect.store_connection_slots AS s WHERE s.sample_
     private const string GroupsSqlTemplate = @"
 SELECT
     g.sample_time,
-    {0}
+    @@COLS@@
     sum(g.backends)::integer AS backends
 FROM collect.store_connection_samples AS g
 WHERE g.sample_time >= $1
 AND   g.sample_time <= $2
 AND   ($3::text IS NULL OR g.role_name = $3)
 AND   ($4::text IS NULL OR g.application_name = $4)
-GROUP BY g.sample_time{1}
-ORDER BY g.sample_time DESC, sum(g.backends) DESC{1}";
+GROUP BY g.sample_time@@GROUP@@
+ORDER BY g.sample_time DESC, sum(g.backends) DESC@@GROUP@@";
+
+    private static string Build(string columns, string grouping) => GroupsSqlTemplate.Replace("@@COLS@@", columns).Replace("@@GROUP@@", grouping);
 
     /// <summary>The group statement for one <c>group_by</c> choice.</summary>
     internal static string GroupSql(string groupBy) => groupBy switch
     {
-        "role" => string.Format(GroupsSqlTemplate, "g.role_name, NULL::text AS application_name, NULL::text AS state, NULL::text AS wait_event_type,", ", g.role_name"),
-        "application" => string.Format(GroupsSqlTemplate, "NULL::text AS role_name, g.application_name, NULL::text AS state, NULL::text AS wait_event_type,", ", g.application_name"),
-        "state" => string.Format(GroupsSqlTemplate, "NULL::text AS role_name, NULL::text AS application_name, g.state, NULL::text AS wait_event_type,", ", g.state"),
-        _ => string.Format(GroupsSqlTemplate, "g.role_name, g.application_name, g.state, g.wait_event_type,", ", g.role_name, g.application_name, g.state, g.wait_event_type"),
+        "role" => Build("g.role_name, NULL::text AS application_name, NULL::text AS state, NULL::text AS wait_event_type,", ", g.role_name"),
+        "application" => Build("NULL::text AS role_name, g.application_name, NULL::text AS state, NULL::text AS wait_event_type,", ", g.application_name"),
+        "state" => Build("NULL::text AS role_name, NULL::text AS application_name, g.state, NULL::text AS wait_event_type,", ", g.state"),
+        _ => Build("g.role_name, g.application_name, g.state, g.wait_event_type,", ", g.role_name, g.application_name, g.state, g.wait_event_type"),
     };
 
     /// <summary>One minute's slot row. The host figures are null when the host reader had none.</summary>

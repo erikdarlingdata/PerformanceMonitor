@@ -122,7 +122,7 @@ public sealed class DarlingMcpStoreConnectionsTools
             }
 
             var newest = minutes[0].SampleTime;
-            var oldest = minutes[^1].SampleTime;
+            var oldest = minutes[minutes.Count - 1].SampleTime;
             var groups = await DarlingStoreConnectionsReader.GetGroupsAsync(
                 postgres, oldest, newest, roleFilter, applicationFilter, groupBy, cancellationToken);
             var byMinute = groups.ToLookup(g => g.SampleTime);

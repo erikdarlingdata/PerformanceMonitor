@@ -139,7 +139,7 @@ public sealed class StoreConnectionSamplesLiveTests
             Assert.DoesNotContain(mineGroups, g => g.GetProperty("application").GetString() is null);
 
             /* An out-of-range limit is refused, never clamped. */
-            Assert.Equal("refused", (await ReadAsync(source, ct, limit: 100000)).GetProperty("status").GetString());
+            Assert.Equal("invalid", (await ReadAsync(source, ct, limit: 100000)).GetProperty("status").GetString());
 
             await using (var release = new NpgsqlCommand("ROLLBACK", holder))
             {
