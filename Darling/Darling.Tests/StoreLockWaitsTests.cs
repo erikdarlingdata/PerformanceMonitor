@@ -466,6 +466,30 @@ public sealed class StoreLockWaitsLiveTests
     }
 
     [Fact]
+    public async Task ANewWaitOfTheSameProcessOnTheSameLock_IsRecordedBesideTheOlderWaitAnEarlierSlabLeftOpen()
+    {
+        await WithScenarioAsync(holderEndsBeforeTheSweep: false, async (s, ct) =>
+        {
+            var first = await OpeningLinesAsync(s, ct);
+            await StoreLogSweep.SweepAsync(s.Owner, DateTime.UtcNow, null, new FixedLog(first), s.Map, ct);
+            Assert.Equal(StoreLockWaits.Waiting, Assert.Single(await RawRowsAsync(s, ct)).Outcome);
+
+            /* The next slab opens on the end of the older wait (its opening is in the earlier slab), and then holds a whole new wait of the same process on the same lock. */
+            var second = await WaiterLineAsync(s, 9000, Acquired(s, 9000), ct)
+                + await WaiterLineAsync(s, 10000, StillWaiting(s, 1000), ct)
+                + await WaiterLineAsync(s, 16000, Acquired(s, 7000), ct);
+            await StoreLogSweep.SweepAsync(s.Owner, DateTime.UtcNow, null, new FixedLog(first + second), s.Map, ct);
+
+            var rows = await RawRowsAsync(s, ct);
+            Assert.Equal(2, rows.Count);
+            Assert.All(rows, r => Assert.Equal(StoreLockWaits.Granted, r.Outcome));
+            Assert.Equal(9000, rows[0].DurationMs);
+            Assert.Equal(7000, rows[1].DurationMs);
+            Assert.InRange((rows[1].StartedUtc - rows[0].StartedUtc).TotalMilliseconds, 8990, 9010);
+        });
+    }
+
+    [Fact]
     public async Task AnOpenRowOlderThanADay_IsNotClosedByALaterEndOfTheSameProcessId()
     {
         await WithScenarioAsync(holderEndsBeforeTheSweep: false, async (s, ct) =>
@@ -481,8 +505,10 @@ public sealed class StoreLockWaitsLiveTests
         });
     }
 
+    private static string StatusOf(string json) => JsonDocument.Parse(json).RootElement.GetProperty("status").GetString()!;
+
     [Fact]
-    public async Task AStoreThatLogsInAnotherLanguage_AnswersPrecondition_AndAnEnglishOneAnswersEmpty()
+    public async Task AStoreThatLogsInAnotherLanguage_AnswersPrecondition_AndAnEnglishOneThatWasCapturedAnswersEmpty()
     {
         var cs = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #9439 lock wait tests.");
@@ -494,13 +520,34 @@ public sealed class StoreLockWaitsLiveTests
         await ExecAsync(owner, $"ALTER DATABASE \"{scratch.DatabaseName}\" SET log_lock_waits = on", ct);
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
-        string StatusOf(string json) => JsonDocument.Parse(json).RootElement.GetProperty("status").GetString()!;
-
         var german = await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, lcMessagesOverride: "de_DE.UTF-8", ct);
         Assert.Equal("precondition", StatusOf(german));
         Assert.Contains("de_DE.UTF-8", german);
 
         Assert.Equal("precondition", StatusOf(await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, lcMessagesOverride: string.Empty, ct)));
+
+        /* One sweep over a log that holds no lock wait: the store log was read in the window, so an empty answer is an observation. */
+        var quiet = Line("2026-01-01 00:00:00.000", 1, "app", "LOG", "connection received: host=[local]");
+        await StoreLogSweep.SweepAsync(owner, DateTime.UtcNow, null, new FixedLog(quiet), new StoreLockWaits.PidMap(), ct);
         Assert.Equal("empty", StatusOf(await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, lcMessagesOverride: "en_US.UTF-8", ct)));
+    }
+
+    [Fact]
+    public async Task AStoreWhoseLogWasNeverCaptured_AnswersUnavailable_NotEmpty_AndPointsToGetStoreLog()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #9439 lock wait tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+        await owner.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(owner, ct);
+        await ExecAsync(owner, $"ALTER DATABASE \"{scratch.DatabaseName}\" SET log_lock_waits = on", ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var answer = await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, lcMessagesOverride: "en_US.UTF-8", ct);
+
+        Assert.Equal("unavailable", StatusOf(answer));
+        Assert.Contains("get_store_log", answer);
     }
 }
