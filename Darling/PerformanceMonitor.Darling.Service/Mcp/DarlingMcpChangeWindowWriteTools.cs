@@ -285,8 +285,12 @@ ORDER BY window_id LIMIT 1";
     }, McpHelpers.JsonOptions);
 
     /// <summary>The owner's connection, which alone may write the table and the journal; a host with no owner source (a test host) uses the tool's own.</summary>
-    private static async Task<NpgsqlConnection> OpenAsync(NpgsqlDataSource postgres, DarlingAgentActionSeat? seat, CancellationToken ct) =>
-        await (seat?.Owner?.Read() ?? postgres).OpenConnectionAsync(ct);
+    private static async Task<NpgsqlConnection> OpenAsync(NpgsqlDataSource postgres, DarlingAgentActionSeat? seat, CancellationToken ct)
+    {
+        if (seat?.Owner?.Read() is { } owner)
+            return await owner.OpenConnectionAsync(ct);
+        return await postgres.OpenConnectionAsync(ct);
+    }
 
     private const string ReadWindowSql = @"
 SELECT server_ids, starts_at, ends_at, declared_by, cleared_at
