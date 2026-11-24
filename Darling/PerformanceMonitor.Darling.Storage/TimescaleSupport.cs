@@ -17645,20 +17645,39 @@ SELECT
         WHEN js.last_successful_finish > NULLIF(js.last_run_started_at, '-infinity'::timestamptz)
         THEN EXTRACT(EPOCH FROM (js.last_successful_finish - NULLIF(js.last_run_started_at, '-infinity'::timestamptz)))
     END AS last_run_seconds,
-    (
-        SELECT count(*)
-        FROM timescaledb_information.chunks AS c
-        WHERE c.hypertable_schema = COALESCE(ca.materialization_hypertable_schema, j.hypertable_schema)
-        AND   c.hypertable_name = COALESCE(ca.materialization_hypertable_name, j.hypertable_name)
-        AND   NOT c.is_compressed
-        AND   c.range_end < now() - COALESCE((j.config->>'compress_after')::interval, INTERVAL '{CompressAfterDays} days')
-    ) AS eligible_uncompressed,
-    EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint AS compress_after_seconds
+    ch.eligible_uncompressed,
+    EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint AS compress_after_seconds,
+    ch.oldest_eligible_range_end,
+    ch.newest_compressed_range_end,
+    CASE WHEN pg_catalog.isfinite(js.last_successful_finish) THEN js.last_successful_finish END AS last_successful_finish,
+    CASE WHEN pg_catalog.isfinite(js.next_start) THEN js.next_start END AS next_start,
+    js.last_run_status,
+    j.job_id,
+    (pg_catalog.pg_has_role(current_user, j.owner, 'MEMBER')
+     OR pg_catalog.pg_has_role(
+            current_user,
+            (SELECT d.datdba FROM pg_catalog.pg_database AS d WHERE d.datname = pg_catalog.current_database()),
+            'MEMBER')) AS errors_visible,
+    CASE
+        WHEN js.next_start = 'infinity'::timestamptz THEN 'infinity'
+        WHEN js.next_start = '-infinity'::timestamptz THEN '-infinity'
+    END AS next_start_sentinel
 FROM timescaledb_information.jobs      AS j
 JOIN timescaledb_information.job_stats AS js USING (job_id)
 LEFT JOIN timescaledb_information.continuous_aggregates AS ca
   ON  ca.view_schema = j.hypertable_schema
   AND ca.view_name = j.hypertable_name
+CROSS JOIN LATERAL (
+    SELECT
+        count(*) FILTER (WHERE NOT c.is_compressed
+                         AND   c.range_end < now() - COALESCE((j.config->>'compress_after')::interval, INTERVAL '{CompressAfterDays} days')) AS eligible_uncompressed,
+        min(c.range_end) FILTER (WHERE NOT c.is_compressed
+                                 AND   c.range_end < now() - COALESCE((j.config->>'compress_after')::interval, INTERVAL '{CompressAfterDays} days')) AS oldest_eligible_range_end,
+        max(c.range_end) FILTER (WHERE c.is_compressed) AS newest_compressed_range_end
+    FROM timescaledb_information.chunks AS c
+    WHERE c.hypertable_schema = COALESCE(ca.materialization_hypertable_schema, j.hypertable_schema)
+    AND   c.hypertable_name = COALESCE(ca.materialization_hypertable_name, j.hypertable_name)
+) AS ch
 WHERE j.proc_name LIKE '%compression%'
    OR j.proc_name LIKE '%columnstore%'";
 
@@ -17675,29 +17694,58 @@ WHERE j.proc_name LIKE '%compression%'
             throw new ArgumentNullException(nameof(connection));
         }
 
-        var activity = new List<CompressionActivity>();
         try
         {
-            using var command = new NpgsqlCommand(CompressionActivitySql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                activity.Add(new CompressionActivity(
-                    reader.IsDBNull(0) ? null : reader.GetString(0),
-                    reader.IsDBNull(1) ? null : reader.GetString(1),
-                    reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc),
-                    reader.IsDBNull(3)
-                        ? null
-                        : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(3), CultureInfo.InvariantCulture)),
-                    Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
-                    reader.IsDBNull(5)
-                        ? null
-                        : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(5), CultureInfo.InvariantCulture))));
-            }
+            return await QueryCompressionActivityAsync(connection, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger?.LogDebug("Compression-run activity: could not read job stats: {Message}", ex.Message);
+            /* Warning, not Debug (#9428): this statement is shared with get_store_compression_health, so a TimescaleDB that rejects
+               one of its columns or the lateral chunk scan would otherwise end the hourly backlog line with no sign of why. The
+               tick still carries on without it. */
+            logger?.LogWarning("Compression-run activity: could not read job stats, so the hourly compression backlog line is skipped: {Message}", ex.Message);
+            return new List<CompressionActivity>();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="CompressionActivitySql"/> read WITHOUT the failure isolation <see cref="ReadCompressionActivityAsync"/> adds (#9428).
+    /// The hourly tick wants a failed read to look like no policies, because observability must not break the sweep. The
+    /// <c>get_store_compression_health</c> read must not: an empty answer there means no policy, never "the read failed", so it
+    /// takes the exception.
+    /// </summary>
+    public static async Task<IReadOnlyList<CompressionActivity>> QueryCompressionActivityAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var activity = new List<CompressionActivity>();
+        using var command = new NpgsqlCommand(CompressionActivitySql, connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            activity.Add(new CompressionActivity(
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc),
+                reader.IsDBNull(3)
+                    ? null
+                    : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(3), CultureInfo.InvariantCulture)),
+                Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
+                reader.IsDBNull(5)
+                    ? null
+                    : TimeSpan.FromSeconds(Convert.ToDouble(reader.GetValue(5), CultureInfo.InvariantCulture)),
+                OldestEligibleRangeEndUtc: reader.IsDBNull(6) ? null : DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Utc),
+                NewestCompressedRangeEndUtc: reader.IsDBNull(7) ? null : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc),
+                LastSuccessfulFinishUtc: reader.IsDBNull(8) ? null : DateTime.SpecifyKind(reader.GetDateTime(8), DateTimeKind.Utc),
+                NextStartUtc: reader.IsDBNull(9) ? null : DateTime.SpecifyKind(reader.GetDateTime(9), DateTimeKind.Utc),
+                LastRunStatus: reader.IsDBNull(10) ? null : reader.GetString(10),
+                JobId: reader.IsDBNull(11) ? null : reader.GetInt32(11),
+                ErrorsVisible: !reader.IsDBNull(12) && reader.GetBoolean(12),
+                NextStartSentinel: reader.IsDBNull(13) ? null : reader.GetString(13)));
         }
 
         return activity;
@@ -18380,6 +18428,10 @@ public sealed record RawPurgeOverHorizonReading(
 /// a policy whose config carries no <c>compress_after</c>, which this product never creates; the log line then
 /// falls back to <see cref="TimescaleSupport.CompressAfterDays"/>. Optional and last so the five-argument
 /// shape every existing caller and test constructs is unchanged.</para>
+///
+/// <para><see cref="NextStartSentinel"/> is <c>infinity</c> or <c>-infinity</c> when the job's <c>next_start</c> holds that value,
+/// which <see cref="NextStartUtc"/> reads as null, and null for a finite one (#9428). <c>infinity</c> is a parked job and
+/// <c>-infinity</c> a crash backoff, two different states.</para>
 /// </summary>
 public sealed record CompressionActivity(
     string? HypertableName,
@@ -18387,7 +18439,15 @@ public sealed record CompressionActivity(
     DateTime? LastRunStartedAtUtc,
     TimeSpan? LastRunDuration,
     long EligibleUncompressedChunks,
-    TimeSpan? CompressAfter = null)
+    TimeSpan? CompressAfter = null,
+    DateTime? OldestEligibleRangeEndUtc = null,
+    DateTime? NewestCompressedRangeEndUtc = null,
+    DateTime? LastSuccessfulFinishUtc = null,
+    DateTime? NextStartUtc = null,
+    string? LastRunStatus = null,
+    int? JobId = null,
+    bool ErrorsVisible = false,
+    string? NextStartSentinel = null)
 {
     /// <summary>Is a compression run in progress right now?</summary>
     public bool IsRunning => string.Equals(JobStatus, "Running", StringComparison.OrdinalIgnoreCase);

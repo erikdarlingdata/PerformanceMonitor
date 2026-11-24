@@ -1831,6 +1831,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpStoreTableHealthTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreTableMeasureTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreMaintenanceReadinessTools>()
+            .WithGeminiCompatibleTools<DarlingMcpStoreCompressionHealthTools>()
+            /* #9440 get_store_job_runs: each TimescaleDB job run, from TimescaleDB's own history. Darling-only, like get_store_log: it reads the store, and Lite has no store. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreJobRunsTools>()
             .WithGeminiCompatibleTools<DarlingMcpReadLatencyTools>()
             .WithGeminiCompatibleTools<DarlingMcpSlowReadTools>()
             /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store

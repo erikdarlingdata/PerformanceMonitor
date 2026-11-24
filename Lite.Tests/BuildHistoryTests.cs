@@ -12,6 +12,8 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// #9425: the build history, one row per Lite start. Every test runs on a temp folder with a store the test seeds itself.
 /// </summary>
+// BuildHistory reads collection_log under TryAcquireReadLock(2 s), the store lock is process-wide, and another class holding it makes that read give null (#9465).
+[Collection("CollectionResetGate")]
 public sealed class BuildHistoryTests : IDisposable
 {
     private static readonly DateTime Start1 = new(2026, 5, 1, 10, 0, 0, DateTimeKind.Utc);
