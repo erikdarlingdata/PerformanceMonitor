@@ -100,7 +100,7 @@ public sealed class McpToolLatencyRecordingTests
         }
 
         [McpServerTool(Name = "latency_probe_wide"), Description("Test-only: answers text of two-byte characters, so its size in bytes is not its length.")]
-        public static string ProbeWide() => "{\"note\":\"" + new string('é', 300) + "\"}";
+        public static string ProbeWide() => "{\"note\":\"" + new string('\u00e9', 300) + "\"}";
 
         [McpServerTool(Name = "latency_probe_json"), Description("Test-only: answers a JSON object that names its run.")]
         public static async Task<string> ProbeJson([Description("Hours.")] int hours_back = 24)
@@ -374,8 +374,7 @@ public sealed class McpToolLatencyRecordingTests
 
         var answer = await ToolsCallAsync(server, "/", "latency_probe_wide", "{}");
 
-        var data = answer.Body.Split('
-').Select(l => l.TrimEnd('')).FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        var data = answer.Body.Split('\n').Select(l => l.TrimEnd('\r')).FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
         using var envelope = JsonDocument.Parse(data is null ? answer.Body : data["data:".Length..].Trim());
         var received = envelope.RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
         var bytes = Encoding.UTF8.GetByteCount(received);

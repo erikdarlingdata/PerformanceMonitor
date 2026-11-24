@@ -127,7 +127,7 @@ public sealed class ReadCacheWebEndToEndTests
         var readLatency = new ReadLatencyAccumulator();
         var slowReads = new SlowReadLog(0);
         using var entry = new ReadLatencyWebRecordingTests.ExtraDispatchEntryScope((route, (_, _, _) =>
-            Task.FromResult("{\"note\":\"" + new string('é', 300) + "\",\"rows\":[1,2,3]}")));
+            Task.FromResult("{\"note\":\"" + new string('\u00e9', 300) + "\",\"rows\":[1,2,3]}")));
         var (app, postgres) = await BuildServer(HeavyAdmission(2, ReadSurface.Web, "get_test_other", ReadWindowBand.None), readLatency, slowReads: slowReads);
         await using var _app = app;
         await using var _postgres = postgres;
