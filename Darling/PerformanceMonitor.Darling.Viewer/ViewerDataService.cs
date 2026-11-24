@@ -1683,7 +1683,7 @@ SELECT
     /* V315 (#9434) replaces the read_latency primary key with a unique index that names the process start, never dropped. Found by catalog, as the V314 line above is. */
     to_regclass('collect.uq_read_latency_key') IS NOT NULL,
     /* V316 (#9439) adds collect.store_lock_waits, a plain table never dropped. Found by catalog, as the V315 line above is. */
-    to_regclass('collect.store_lock_waits') IS NOT NULL",
+    to_regclass('collect.store_lock_waits') IS NOT NULL,
     /* V317 (#9433) adds the reply size to the slow read record and the read latency histogram, two columns that are never dropped. The slow read column is the mark that the rung ran. Found by catalog, as the V316 line above is. */
     EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('collect.slow_reads') AND attname = 'reply_bytes' AND NOT attisdropped)";
 
