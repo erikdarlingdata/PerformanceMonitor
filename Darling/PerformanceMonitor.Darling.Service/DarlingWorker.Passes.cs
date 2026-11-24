@@ -458,6 +458,10 @@ public sealed partial class DarlingWorker
             _nextStoreSettingsCheckUtc = DateTime.UtcNow.Add(s_storeSettingsCheckInterval);
             await EvaluateStoreSettingsAsync(config, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification, stoppingToken);
         }
+
+        /* #9432: the upgrade run file beside the install, recorded on the same five-minute store-side pass but on its own stamp, so it runs with
+           the alert engine off too. The upgrade restarts the service before its script ends, so the result and the verified state are read here. */
+        await RunUpgradeRunPassAsync(AppContext.BaseDirectory, stoppingToken);
     }
 
     /// <summary>

@@ -220,6 +220,7 @@ store_statement_history,internal,no,store own statement history
 system_health_events,collected,yes,
 tempdb_stats,collected,yes,
 trace_flags,collected,yes,
+upgrade_runs,internal,no,upgrade run record
 v_blocked_process_reports,derived,derived,read view over blocked_process_reports
 v_collection_log,derived,derived,read view over collection_log
 v_cpu_scheduler_stats,derived,derived,read view over cpu_scheduler_stats
