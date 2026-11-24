@@ -1322,7 +1322,7 @@ COPY (
         using var workingSet = new PeakWorkingSetSampler();
         try
         {
-            var complete = CompactParquetFilesCore(reportIdle, cancellationToken, stats);
+            var complete = CompactParquetFilesCore(reportIdle, stats, cancellationToken);
             RecordCompactionPass(stats, clock, workingSet, complete ? null : "incomplete", null);
             return complete;
         }
@@ -1360,7 +1360,7 @@ COPY (
         }
     }
 
-    private bool CompactParquetFilesCore(bool reportIdle, CancellationToken cancellationToken, CompactionPassStats stats)
+    private bool CompactParquetFilesCore(bool reportIdle, CompactionPassStats stats, CancellationToken cancellationToken)
     {
 
         var runClock = Stopwatch.StartNew();

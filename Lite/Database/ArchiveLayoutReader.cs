@@ -259,7 +259,7 @@ internal sealed class ArchiveLayoutReader
         return free is long f && 2 * bytes + reserve > f ? ReasonFreeDisk : null;
     }
 
-    private IEnumerable<string> EnumerateOrEmpty(string pattern)
+    private List<string> EnumerateOrEmpty(string pattern)
     {
         try
         {
