@@ -44,12 +44,15 @@ public sealed class DarlingMcpStoreJobRunsTools
         + "(cut to 500 characters). job_kind is the procedure with or without its policy_ prefix, for example compression or "
         + "policy_retention. A failed run is always recorded, but a successful one only while timescaledb.enable_job_execution_logging is on: "
         + "history.job_execution_logging gives the setting, and with it off a window of only failures is not a window where nothing else ran. "
-        + "history says how far back TimescaleDB's own history reaches: oldest_row_at is the oldest row this role can see, "
+        + "history says how far back TimescaleDB's own history reaches: oldest_row_at is the oldest row the read can see, "
         + "window_starts_before_oldest_row is true when part of the window is older than that, and retention is the trim job's own drop_after "
         + "and per-job caps. An empty older window is therefore not proof of no runs. TimescaleDB shows a job's runs only to a member of the "
-        + "database owner's role or of the job's owner, and the store's mcp and viewer roles are neither: access gives jobs_matching, "
-        + "jobs_readable and jobs_hidden for the filters, and when a job's runs are hidden the answer is precondition, never empty, and "
-        + "a page that has rows still names the hidden count. A hidden run is not a short row, it is no row. limit cuts the page "
+        + "database owner's role or of the job's owner, and the store's mcp and viewer roles are neither, so the read goes through the store's "
+        + "collect.store_job_runs function, which every read role may call: every run comes back, and error_readable is false, with the error "
+        + "withheld, on a run whose error text TimescaleDB would not show this login (not the job's owner and not in the database owner's role). "
+        + "On a store that has no such function yet (an older schema, or a login without EXECUTE on it) the read falls back to the view itself: "
+        + "access then gives jobs_matching, jobs_readable and jobs_hidden for the filters, and when a job's runs are hidden the answer is "
+        + "precondition, never empty. A hidden run is not a short row, it is no row. limit cuts the page "
         + "(truncated) and the 32,768-byte response budget can cut it further (budget_truncated), newest rows kept. Times are UTC. "
         + "A store without TimescaleDB, or on one older than 2.15, answers not_collected with the reason. Read-only and live.")]
     public static Task<string> GetStoreJobRuns(
@@ -109,7 +112,7 @@ public sealed class DarlingMcpStoreJobRunsTools
                 };
                 var span = $"{windowStart.ToString("u", CultureInfo.InvariantCulture)} to {windowEnd.ToString("u", CultureInfo.InvariantCulture)}";
 
-                if (access.JobsHidden > 0)
+                if (access is { JobsHidden: > 0 })
                 {
                     return McpHelpers.Status(
                         "precondition",
@@ -135,15 +138,17 @@ public sealed class DarlingMcpStoreJobRunsTools
                     ? McpResponseBudget.PageCutNote(page.Count, kept, "newest first", "runs",
                         "Filter with job_kind or hypertable, or narrow the window with hours_back or as_of, to read the rest.")
                     : null,
-                access = new
-                {
-                    jobs_matching = access.JobsMatching,
-                    jobs_readable = access.JobsReadable,
-                    jobs_hidden = access.JobsHidden,
-                    note = access.JobsHidden > 0
-                        ? $"This role cannot read the runs of {access.JobsHidden} of the {access.JobsMatching} matching jobs, so those runs are missing from this page, not absent from the store."
-                        : null,
-                },
+                access = access is null
+                    ? null
+                    : new
+                    {
+                        jobs_matching = access.JobsMatching,
+                        jobs_readable = access.JobsReadable,
+                        jobs_hidden = access.JobsHidden,
+                        note = access.JobsHidden > 0
+                            ? $"This role cannot read the runs of {access.JobsHidden} of the {access.JobsMatching} matching jobs, so those runs are missing from this page, not absent from the store."
+                            : null,
+                    },
                 history = new
                 {
                     oldest_row_at = Iso(horizon.OldestRowAt),
@@ -166,6 +171,7 @@ public sealed class DarlingMcpStoreJobRunsTools
                         : (double?)null,
                     outcome = Outcome(run),
                     sqlstate = run.SqlState,
+                    error_readable = run.ErrorReadable,
                     error = run.ErrorMessage,
                 }).ToList(),
             }, McpHelpers.JsonOptions);
@@ -186,11 +192,11 @@ public sealed class DarlingMcpStoreJobRunsTools
     private static string HorizonSentence(DarlingStoreJobRunsReader.Horizon horizon, bool windowStartsBeforeOldest)
     {
         var sentence = horizon.OldestRowAt is { } oldest
-            ? $"The oldest history row this role can see started {oldest.ToString("u", CultureInfo.InvariantCulture)}, "
+            ? $"The oldest history row this read can see started {oldest.ToString("u", CultureInfo.InvariantCulture)}, "
               + (windowStartsBeforeOldest
                   ? "so part of this window is older than anything TimescaleDB still holds."
                   : "so the whole window is inside what TimescaleDB still holds.")
-            : "TimescaleDB holds no history rows this role can see at all.";
+            : "TimescaleDB holds no history rows this read can see at all.";
         if (horizon.Retention is { } r)
         {
             sentence += $" Its trim job keeps rows for {r.DropAfter ?? "an unstated time"}"

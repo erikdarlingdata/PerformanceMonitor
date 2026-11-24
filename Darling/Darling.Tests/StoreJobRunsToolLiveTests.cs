@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -24,7 +25,7 @@ namespace Darling.Tests;
 /// <summary>
 /// get_store_job_runs against a store that has really run TimescaleDB jobs (#9440): the compression run the issue asks for, a failed run, the
 /// job kind and hypertable filters cutting before the cap, the cap's own truncation flag, an empty window that names how far back history
-/// reaches, a role that cannot read the history, and a store with no TimescaleDB.
+/// reaches, a role that cannot read the history, the function that lets the store's read roles see it, and a store with no TimescaleDB.
 ///
 /// <para>TimescaleDB records a successful run only while <c>timescaledb.enable_job_execution_logging</c> is on (a failed run is always
 /// recorded), and the setting is a server-level one, so a fact that needs a success turns it on for the run and puts it back.</para>
@@ -161,9 +162,9 @@ public sealed class StoreJobRunsToolLiveTests
             var job = await CompressionJobAsync(connection, "jr9440_a", ct);
             var before = DateTime.UtcNow.AddSeconds(-2);
             long finished;
-            await SetLoggingAsync(connection, true, ct);
             try
             {
+                await SetLoggingAsync(connection, true, ct);
                 finished = await RunByTheSchedulerAsync(connection, job, 1, ct);
             }
             finally
@@ -244,9 +245,9 @@ public sealed class StoreJobRunsToolLiveTests
             var newer = await CompressionJobAsync(connection, "jr9440_newer", ct);
             var failing = await FailingJobAsync(connection, ct);
             long olderRuns;
-            await SetLoggingAsync(connection, true, ct);
             try
             {
+                await SetLoggingAsync(connection, true, ct);
                 olderRuns = await RunByTheSchedulerAsync(connection, older, 1, ct);
                 await RunByTheSchedulerAsync(connection, newer, 1, ct);
                 await RunByTheSchedulerAsync(connection, failing, 1, ct);
@@ -279,9 +280,9 @@ public sealed class StoreJobRunsToolLiveTests
         {
             var job = await CompressionJobAsync(connection, "jr9440_page", ct);
             long runs;
-            await SetLoggingAsync(connection, true, ct);
             try
             {
+                await SetLoggingAsync(connection, true, ct);
                 runs = await RunByTheSchedulerAsync(connection, job, 3, ct);
             }
             finally
@@ -325,6 +326,149 @@ public sealed class StoreJobRunsToolLiveTests
             var history = withRun.GetProperty("history");
             Assert.True(history.GetProperty("window_starts_before_oldest_row").GetBoolean());
             Assert.Equal(JsonValueKind.String, history.GetProperty("oldest_row_at").ValueKind);
+        });
+    }
+
+    private const string ReaderPassword = "Jr9440-reader-pw";
+
+    /// <summary>A login that has the reach the store's mcp login has: USAGE on collect and the TimescaleDB information schema, and no
+    /// membership of the database owner's role or the job's owner. It is its own login, so <c>session_user</c> is the reader and not the test's owner.</summary>
+    private static async Task<string> ReaderLoginAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var reader = "jr9440_" + Guid.NewGuid().ToString("N")[..8];
+        await ExecAsync(connection, $"CREATE ROLE {reader} LOGIN NOSUPERUSER PASSWORD '{ReaderPassword}'", ct);
+        await ExecAsync(connection, $"GRANT USAGE ON SCHEMA collect, timescaledb_information TO {reader}", ct);
+        return reader;
+    }
+
+    private static string ConnectionFor(string cs, string role) =>
+        new NpgsqlConnectionStringBuilder(cs) { Username = role, Password = ReaderPassword, Pooling = false }.ConnectionString;
+
+    private static async Task DropReaderAsync(NpgsqlConnection connection, string reader, CancellationToken ct)
+    {
+        await ExecAsync(connection, $"DROP OWNED BY {reader}", ct);
+        await ExecAsync(connection, $"DROP ROLE {reader}", ct);
+    }
+
+    /// <summary>
+    /// The point of #9440's second part: a login that is neither the database owner nor the job's owner sees the failed run through the store's
+    /// function, with the error text withheld and said to be withheld. The owner of the job reads the same run with its message. Without the
+    /// function the reader sees nothing at all (the view hides the whole row), so this fails there.
+    /// </summary>
+    [Fact]
+    public async Task AReadRole_SeesAFailedRun_WithoutItsErrorText_AndTheOwnerSeesTheText()
+    {
+        await WithStoreAsync(async (connection, cs, ct) =>
+        {
+            var job = await FailingJobAsync(connection, ct);
+            await RunByTheSchedulerAsync(connection, job, 1, ct);
+            var reader = await ReaderLoginAsync(connection, ct);
+            try
+            {
+                Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [reader], null, ct));
+
+                var asReader = await ReadAsync(ConnectionFor(cs, reader), ct, kind: "jr9440_boom");
+                var seen = Runs(asReader);
+                Assert.NotEmpty(seen);
+                Assert.All(seen, run =>
+                {
+                    Assert.Equal(job, run.GetProperty("job_id").GetInt32());
+                    Assert.Equal("failed", run.GetProperty("outcome").GetString());
+                    Assert.Equal("P0001", run.GetProperty("sqlstate").GetString());
+                    Assert.False(run.GetProperty("error_readable").GetBoolean());
+                    Assert.Equal(JsonValueKind.Null, run.GetProperty("error").ValueKind);
+                });
+                Assert.False(asReader.ToString().Contains("jr9440 deliberate failure", StringComparison.Ordinal), "the error text reached a login that may not read it");
+                Assert.NotEqual(JsonValueKind.Null, asReader.GetProperty("history").GetProperty("oldest_row_at").ValueKind);
+
+                var asOwner = await ReadAsync(cs, ct, kind: "jr9440_boom");
+                var ownerRun = Runs(asOwner)[0];
+                Assert.True(ownerRun.GetProperty("error_readable").GetBoolean());
+                Assert.Contains("jr9440 deliberate failure", ownerRun.GetProperty("error").GetString(), StringComparison.Ordinal);
+                Assert.Equal(seen.Length, Runs(asOwner).Length);
+            }
+            finally
+            {
+                await DropReaderAsync(connection, reader, ct);
+            }
+        });
+    }
+
+    /// <summary>A login with no grant gets permission denied from the function, so the function is not open to PUBLIC. The same login is let in
+    /// by one EXECUTE grant, so the denial is about the function and not about the schema.</summary>
+    [Fact]
+    public async Task TheFunction_IsNotOpenToPublic_AndAGrantLetsALoginIn()
+    {
+        await WithStoreAsync(async (connection, cs, ct) =>
+        {
+            var reader = await ReaderLoginAsync(connection, ct);
+            try
+            {
+                Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [], null, ct));
+                var call = $"SELECT count(*) FROM collect.store_job_runs(now() - interval '1 day', now(), NULL, NULL, 10)";
+
+                await using (var denied = new NpgsqlConnection(ConnectionFor(cs, reader)))
+                {
+                    await denied.OpenAsync(ct);
+                    var failure = await Assert.ThrowsAsync<PostgresException>(() => ScalarAsync<long>(denied, call, ct));
+                    Assert.Equal("42501", failure.SqlState);
+                }
+
+                Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [reader], null, ct));
+                await using var allowed = new NpgsqlConnection(ConnectionFor(cs, reader));
+                await allowed.OpenAsync(ct);
+                Assert.True(await ScalarAsync<long>(allowed, call, ct) >= 0);
+            }
+            finally
+            {
+                await DropReaderAsync(connection, reader, ct);
+            }
+        });
+    }
+
+    /// <summary>The function is created on a store with no TimescaleDB (its body is resolved only when it runs), and the tool still says
+    /// <c>not_collected</c> there.</summary>
+    [Fact]
+    public async Task TheFunction_CanBeCreatedWithoutTimescaleDb_AndTheToolStaysNotCollected()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #9440 job run tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct, plainPostgres: true);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [], null, ct));
+            Assert.Equal(0, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.store_job_runs(now() - interval '1 day', now(), NULL, NULL, 10)", ct));
+
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var json = await DarlingMcpStoreJobRunsTools.GetStoreJobRuns(postgres, 24, null, null, 50, null, null, ct);
+            Assert.Equal("not_collected", JsonDocument.Parse(json).RootElement.GetProperty("status").GetString());
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>The kind and hypertable filters apply inside the function: a kind or hypertable that does not match returns nothing, and the
+    /// matching kind with a limit of one returns the run.</summary>
+    [Fact]
+    public async Task TheFunction_AppliesTheFiltersInsideItself()
+    {
+        await WithStoreAsync(async (connection, cs, ct) =>
+        {
+            var boom = await FailingJobAsync(connection, ct);
+            await RunByTheSchedulerAsync(connection, boom, 1, ct);
+            Assert.True(await StoreJobRunsFunction.EnsureAsync(connection, "collect", [], null, ct));
+
+            const string window = "now() - interval '1 day', now() + interval '1 day'";
+            Assert.Equal(0, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.store_job_runs({window}, 'compression', NULL, 5)", ct));
+            Assert.Equal(0, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.store_job_runs({window}, NULL, 'no_such_table', 5)", ct));
+            Assert.Equal(1, await ScalarAsync<long>(connection, $"SELECT count(*) FROM collect.store_job_runs({window}, 'jr9440_boom', NULL, 1)", ct));
         });
     }
 

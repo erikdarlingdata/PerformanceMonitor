@@ -95,7 +95,7 @@ public sealed class StoreJobRunsToolTests
     public void AnOutcome_FollowsTheEndAndTheSuccessFlag(bool finished, bool? succeeded, string expected)
     {
         var started = System.DateTime.UtcNow;
-        var run = new DarlingStoreJobRunsReader.Run(1, 1000, "_timescaledb_functions", "policy_compression", "t", started, finished ? started.AddSeconds(1) : null, succeeded, null, null);
+        var run = new DarlingStoreJobRunsReader.Run(1, 1000, "_timescaledb_functions", "policy_compression", "t", started, finished ? started.AddSeconds(1) : null, succeeded, null, true, null);
 
         Assert.Equal(expected, DarlingMcpStoreJobRunsTools.Outcome(run));
     }
