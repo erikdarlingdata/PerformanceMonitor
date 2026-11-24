@@ -77,7 +77,16 @@ FROM (SELECT i, (i // 13) % 600 + 1 AS q, (i // 13) // 600 AS iv, i % 13 AS j,
             }
             await db.CreateArchiveViewsAsync();
 
-            string Sql(bool old) => (old ? QueryStoreTopRankOnePassTests.OldHead.Replace("{EXEC}", "") : LocalDataService.QueryStoreTopRankHeadSql("", ""))
+            string ArgMaxHead()
+            {
+                var h = LocalDataService.QueryStoreTopRankHeadSql("", "");
+                var a = h.IndexOf("max(", h.IndexOf("SELECT
+            database_name", StringComparison.Ordinal), StringComparison.Ordinal);
+                var b = h.IndexOf("}) AS w", a, StringComparison.Ordinal);
+                var body = h.Substring(a + 4, b - a - 4);
+                return h.Substring(0, a) + "arg_max(" + body + "}, {'ct': collection_time, 'er': COALESCE(execution_count, -1), 'ci': collection_id}) AS w" + h.Substring(b + 7);
+            }
+            string Sql(int v) => (v == 0 ? QueryStoreTopRankOnePassTests.OldHead.Replace("{EXEC}", "") : v == 1 ? LocalDataService.QueryStoreTopRankHeadSql("", "") : ArgMaxHead())
                 + LocalDataService.QueryStoreTopRankTailSql("", 1000);
 
             report.AppendLine($"=== {(archiveHeavy ? "archive-heavy (just after a reset)" : "hot-only (just before a reset)")}");
@@ -107,17 +116,23 @@ FROM (SELECT i, (i // 13) % 600 + 1 AS q, (i // 13) // 600 AS iv, i % 13 AS j,
                     }
                     return lines;
                 }
-                foreach (var old in new[] { true, false, true, false })
+                foreach (var threads in new[] { 8, 2 })
                 {
-                    var rowsLine = Run(Sql(old), 5, false, out var ms);
-                    report.AppendLine($"{(old ? "OLD" : "NEW")} {string.Join(" ", rowsLine)} ms: {string.Join(", ", ms.Select(m => m.ToString("0")))} median {ms.OrderBy(x => x).ElementAt(2):0}");
+                    using (var set = c.CreateCommand()) { set.CommandText = "SET threads = " + threads; set.ExecuteNonQuery(); }
+                    foreach (var v in new[] { 0, 1, 2, 0, 1, 2 })
+                    {
+                        var rowsLine = Run(Sql(v), 3, false, out var ms);
+                        report.AppendLine($"T{threads} {new[] { "OLD", "NEW-max", "NEW-argmax" }[v]} {string.Join(" ", rowsLine)} ms: {string.Join(", ", ms.Select(m => m.ToString("0")))}");
+                    }
                 }
-                foreach (var old in new[] { true, false })
+                using (var set = c.CreateCommand()) { set.CommandText = "SET threads = 8"; set.ExecuteNonQuery(); }
+                foreach (var v in new[] { 0, 1 })
                 {
-                    var plan = Run(Sql(old), 1, true, out _);
-                    report.AppendLine($"--- EXPLAIN ANALYZE {(old ? "OLD" : "NEW")}");
-                    foreach (var line in plan.SelectMany(p => p.Split('\n')))
-                        if (line.Contains("HASH_") || line.Contains("SCAN") || line.Contains("JOIN") || line.Contains("Total Time") || line.Contains("rows") || line.Contains("Cardinality") || line.Contains("~") || line.Contains("Table:") || line.Contains("Function"))
+                    var plan = Run(Sql(v), 1, true, out _);
+                    report.AppendLine($"--- EXPLAIN ANALYZE {(v == 0 ? "OLD" : "NEW")}");
+                    foreach (var line in plan.SelectMany(p => p.Split('
+')))
+                        if (line.Contains("HASH_") || line.Contains("SCAN") || line.Contains("JOIN") || line.Contains("Total Time") || line.Contains("rows") || line.Contains("~") || line.Contains("Table:") || line.Contains("Function"))
                             report.AppendLine(line.Trim());
                 }
             }
