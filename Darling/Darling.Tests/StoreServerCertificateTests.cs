@@ -212,15 +212,15 @@ public sealed class StoreServerCertificateTests
 
         try
         {
-            var started = DateTime.UtcNow;
+            /* The read's own deadline is 1 second, and Npgsql alone would hold it for its 5 second timeout, so a 3 second wait here is
+               what shows the deadline held. */
             var report = await StoreServerCertificate.ReadBoundedAsync(
                 token => StoreServerCertificate.FromHandshakeAsync($"Host=127.0.0.1;Port={port};Username=u;Database=d", token),
                 TimeSpan.FromSeconds(1),
-                ct);
+                ct).WaitAsync(TimeSpan.FromSeconds(3), ct);
 
             Assert.Equal("unavailable", report.Tls);
             Assert.False(string.IsNullOrEmpty(report.Message));
-            Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(4), "the read outlived its own deadline");
         }
         finally
         {
