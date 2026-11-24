@@ -114,6 +114,33 @@ public sealed class ReadLatencyAccumulator
         10_000, 15_000, 20_000, 30_000, 45_000, 60_000, 90_000, 120_000,
     };
 
+    /// <summary>When this service process started, in UTC, to the millisecond (#9434). Every bucket this process flushes carries it as
+    /// <c>process_started_at</c>, and it is part of the bucket's key, so a restart inside one hour writes a second row for that hour
+    /// instead of adding into the first, and <c>get_read_latency</c> can split a route's timings at a given start. Read once, from the
+    /// operating system's record of the process, so a second accumulator built in the same process carries the same instant.</summary>
+    internal static DateTime ProcessStartedAtUtc { get; } = ReadProcessStart();
+
+    private static DateTime ReadProcessStart()
+    {
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        var started = process.StartTime.ToUniversalTime();
+        return new DateTime(started.Ticks - (started.Ticks % TimeSpan.TicksPerMillisecond), DateTimeKind.Utc);
+    }
+
+    /// <summary>The start instant this accumulator stamps on its buckets: the process's own, unless a test builds one for another
+    /// process.</summary>
+    internal DateTime ProcessStartedAt { get; }
+
+    public ReadLatencyAccumulator()
+        : this(ProcessStartedAtUtc)
+    {
+    }
+
+    internal ReadLatencyAccumulator(DateTime processStartedAtUtc)
+    {
+        ProcessStartedAt = DateTime.SpecifyKind(processStartedAtUtc, DateTimeKind.Utc);
+    }
+
     /// <summary>One past the last finite bucket — the overflow bucket for anything above
     /// <see cref="BucketUpperBoundsMs"/>'s last entry.</summary>
     private static readonly int s_bucketCount = BucketUpperBoundsMs.Length + 1;
@@ -303,7 +330,7 @@ public sealed class ReadLatencyAccumulator
        prune. ON CONFLICT adds counts, totals and per-bucket counts element-wise and takes the greater of
        the two max_ms values — the shape a SECOND flush landing in the same hour needs (this accumulator
        flushes on the same worker tick as collector_cost, so ordinarily there is one flush per hour, but a
-       restart mid-hour can produce two partial ones for the same key and neither may be dropped). Draining
+       stop-time flush after a failed hourly one can produce two partial ones for the same key and neither may be dropped). Draining
        (TryRemove) resets the window, so an hour with no reads writes no row rather than a zero.
 
        One statement PER DRAINED KEY, not collector_cost's single unnest bulk insert: Npgsql's array binding
@@ -313,15 +340,18 @@ public sealed class ReadLatencyAccumulator
        never one per read — so a handful of round trips is the right shape for this table's real size.
 
        distinct_callers (#5793) takes the greater of the two counts: two partial flushes of one hour cannot union sets
-       that were never stored, so a mid-hour restart keeps the larger count, a floor of the hour's real number. */
+       that were never stored, so a mid-hour restart keeps the larger count, a floor of the hour's real number.
+
+       #9434: process_started_at is part of the key, so the two partial flushes of a restart inside an hour are two rows, not one
+       added-together row. Two flushes by the SAME process still land on one key and add, as before. */
     private const string InsertSql = @"
 INSERT INTO collect.read_latency
 (
     metric_time, surface, route, outcome, window_band,
-    run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers
+    run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers, process_started_at
 )
-VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8, $10, $11, $12)
-ON CONFLICT (metric_time, surface, route, outcome, window_band) DO UPDATE SET
+VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8, $10, $11, $12, $13)
+ON CONFLICT (metric_time, surface, route, outcome, window_band, process_started_at) DO UPDATE SET
     run_count = collect.read_latency.run_count + EXCLUDED.run_count,
     total_ms = collect.read_latency.total_ms + EXCLUDED.total_ms,
     max_ms = GREATEST(collect.read_latency.max_ms, EXCLUDED.max_ms),
@@ -364,6 +394,7 @@ WHERE metric_time < $1";
                 insert.Parameters.AddWithValue(row.MaxInFlight);
                 insert.Parameters.AddWithValue(row.WaitTotalMs);
                 insert.Parameters.AddWithValue(row.DistinctCallers);
+                insert.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.TimestampTz, ProcessStartedAt);
                 await insert.ExecuteNonQueryAsync(cancellationToken);
                 written++;
             }

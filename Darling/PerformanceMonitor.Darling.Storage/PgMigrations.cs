@@ -4073,6 +4073,11 @@ END $$;";
         /* V305 (#9419): the store's own WAL figures, eleven nullable columns on collect.store_metrics filled on the object_kind = 'wal' row only. No data moves
            and existing rows keep NULL. An older build ignores the columns and the row: its store reads list only the kinds it knows. */
         new Migration(StoreWalFigures.Version, "store-wal-figures", StoreWalFigures.AddColumnsSql),
+        /* V306 (#9434): the service process's start instant on each collect.read_latency bucket, and the bucket key now names it, so a restart within an hour
+           writes a second row for that hour instead of adding into the first. One nullable column, and the primary key becomes a unique index built with
+           NULLS NOT DISTINCT. The table is a plain table that holds at most 90 days of hourly rows, so the index build is a short, bounded step. An older
+           build ignores the column, and its flush writes NULL, which the new key treats as one more value. */
+        new Migration(ReadLatencyProcessStart.Version, "read-latency-process-start", ReadLatencyProcessStart.Sql),
     };
 
     /// <summary>

@@ -155,7 +155,7 @@ public static partial class CustomViewValidation
             ["get_collector_stall_probes"] = new ReadPanelParam[] { new("server", false), new("days_back", false), new("limit", false) },
             ["get_oversized_plan_backlog"] = new ReadPanelParam[] { new("server", false), new("include_rows", false), new("limit", false) },
             ["get_slow_reads"] = new ReadPanelParam[] { new("hours", false), new("server", false), new("surface", false), new("route", false), new("limit", false) },
-            ["get_read_latency"] = new ReadPanelParam[] { new("hours", false), new("surface", false), new("route", false), new("limit", false) },
+            ["get_read_latency"] = new ReadPanelParam[] { new("hours", false), new("surface", false), new("route", false), new("limit", false), new("split_at", false) },
             ["get_latch_stats"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("top", false), new("as_of", false) },
             ["get_spinlock_stats"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("top", false), new("as_of", false) },
             ["get_memory_grants"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("as_of", false), new("chart", false), new("bucket_minutes", false) },
