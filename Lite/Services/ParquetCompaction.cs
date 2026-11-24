@@ -647,7 +647,7 @@ public static class ParquetCompaction
     }
 
     /* The highest memory DuckDB reports for a merge's own database while the COPY runs (#9424). DuckDB keeps no peak for a
-       statement, so a second connection to the same in-memory database reads duckdb_memory() every SampleMilliseconds and hands
+       statement, so a second connection to the same in-memory database reads duckdb_memory() every SampleMilliseconds (every FastSampleMilliseconds for the first 100 ms, and once more when the merge has ended) and hands
        each total to the callback, which keeps the highest. It is a sample: a spike shorter than the interval can be missed, and
        allocations the parquet writer makes outside DuckDB's buffer manager are not in the figure (see the memory_limit note on
        MergeBatchToFile). The process working set sampled beside it is the figure that sees those. Best effort: a sampler that
@@ -655,6 +655,8 @@ public static class ParquetCompaction
     internal sealed class DuckDbMemorySampler : IDisposable
     {
         public const int SampleMilliseconds = 50;
+        private const int FastSampleMilliseconds = 2;
+        private const int FastSamples = 50;
 
         private readonly System.Threading.ManualResetEventSlim _stop = new(false);
         private readonly DuckDBConnection? _probe;
@@ -688,11 +690,20 @@ public static class ParquetCompaction
                 {
                     using var cmd = probe.CreateCommand();
                     cmd.CommandText = "SELECT coalesce(sum(memory_usage_bytes), 0)::BIGINT FROM duckdb_memory()";
-                    do
+                    void Sample() => onSample(Convert.ToInt64(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+
+                    /* A merge of a few thousand rows ends in a few milliseconds, before a 50 ms interval fires, and a read
+                       taken before the COPY allocates sees 0 (#9421: the cut of a 12,000-row file reported no peak under
+                       load). So the first reads come fast, and one more is taken once the merge has ended: DuckDB still
+                       holds its parquet caches then, so a merge that ran always reports a figure above 0. */
+                    var fast = 0;
+                    Sample();
+                    while (!_stop.Wait(fast++ < FastSamples ? FastSampleMilliseconds : SampleMilliseconds))
                     {
-                        onSample(Convert.ToInt64(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+                        Sample();
                     }
-                    while (!_stop.Wait(SampleMilliseconds));
+
+                    Sample();
                 }
                 catch (Exception)
                 {
