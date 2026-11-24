@@ -144,7 +144,8 @@ public sealed class PgBufferUsageCollector : PostgresCollectorDefinitionBase<PgB
        function scan's own store of the pool, which still spilled at 64 MB of work_mem; that is what the cap
        (#9508) is for.
 
-       #9508: the scan sits under a WHERE that reads only the pool size (cfg, from pg_settings). A qual with no
+       #9508: the scan sits under a WHERE that reads only the pool size (cfg, from pg_settings, where shared_buffers is
+       already a count of block_size buffers, so the setting IS the buffer count on any build). A qual with no
        column of the scanned relation is planned as a one-time filter above the scan, so over the cap the
        pg_buffercache function is never called. The cap is a literal in the text, decided on each run.
 
