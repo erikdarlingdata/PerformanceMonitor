@@ -985,6 +985,9 @@ DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
         // adds them again, empty. Safe on a store that never had them.
         new(304, "hasStatementHistoryWriteCounters", @"ALTER TABLE collect.store_statement_history DROP COLUMN IF EXISTS delta_shared_blks_dirtied, DROP COLUMN IF EXISTS delta_shared_blks_written, DROP COLUMN IF EXISTS delta_wal_bytes, DROP COLUMN IF EXISTS delta_wal_fpi;
 ALTER TABLE config.store_statement_baseline DROP COLUMN IF EXISTS shared_blks_dirtied, DROP COLUMN IF EXISTS shared_blks_written, DROP COLUMN IF EXISTS wal_bytes, DROP COLUMN IF EXISTS wal_fpi;"),
+        // V305 (#9452): the partial index of the oversized-plan backlog's pending rows. It is the probe's newest sentinel. The rewind drops it, so a re-run of V305 builds it again.
+        // Safe on a store that never had it.
+        new(305, "hasOversizedPlanBacklogPendingIndex", @"DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_pending;"),
     ];
 
     /// <summary>

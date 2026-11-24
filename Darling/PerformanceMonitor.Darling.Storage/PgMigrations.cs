@@ -4070,6 +4070,9 @@ END $$;";
         /* V304 (#9410): the dirtied blocks, written blocks, WAL bytes and full-page images of each statement in the store's own statement history, on the history
            table and its baseline. Four nullable columns on each, no default, no rewrite. A row from before the rung reads NULL. An older build never names them. */
         new Migration(StoreStatementHistory.WriteCountersVersion, "store-statement-history-write-counters", V304Sql),
+        /* V305 (#9452): the partial index of the oversized-plan backlog's pending rows, on (server_id), for the sightings statement's per-cycle pending count.
+           An older build never reads it, and keeps writing rows that the index follows. */
+        new Migration(OversizedPlanBacklog.PendingIndexVersion, "oversized-plan-backlog-pending-index", OversizedPlanBacklog.CreatePendingIndexSql),
     };
 
     /// <summary>
