@@ -53,7 +53,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "wait_total_ms is the summed wait for a store connection. "
         + "distinct_callers is the most different callers in one hour; no personal data. "
         + "Sorted p95 desc. Optional surface (web/compose/mcp) and route filter. Empty means no read in the window, not a failure. "
-        + "Optional split_at (ISO-8601 UTC) adds per-row before and after figures (count, median, max) around a service start. "
+        + "split_at: before/after start. "
         + "<<GUIDE>> "
         + "Gets the monitoring tool's OWN read-latency history: how long the web dashboard's `/api/read/*` "
         + "reads, the composed-panel runner and every MCP tool call take. This is the tool measuring itself, NOT a monitored SQL Server or PostgreSQL target. The service "
@@ -128,10 +128,10 @@ public sealed class DarlingMcpReadLatencyTools
 
         var since = DateTime.UtcNow.AddHours(-hours);
 
-        var splitError = ResolveSplitAt(split_at, since, out var splitAtUtc);
-        if (splitError != null)
+        var splitProblem = ResolveSplitAt(split_at, since, out var splitAtUtc);
+        if (splitProblem != null)
         {
-            return splitError;
+            return McpHelpers.Refusal("split_at", splitProblem);
         }
 
         try
@@ -226,8 +226,9 @@ public sealed class DarlingMcpReadLatencyTools
     };
 
     /// <summary>Resolves the optional <c>split_at</c> (#9434). Null in, null out. A value that does not parse, one before the window
-    /// starts (<paramref name="windowStartUtc"/>) and one past now plus the <c>as_of</c> clock allowance are all refused with the
-    /// reason: a split moved to the nearest edge would answer a question nobody asked.</summary>
+    /// starts (<paramref name="windowStartUtc"/>) and one past now plus the <c>as_of</c> clock allowance are all refused: the reason
+    /// comes back as the sentence (the tool wraps it in <see cref="McpHelpers.Refusal"/>), because a split moved to the nearest edge
+    /// would answer a question nobody asked.</summary>
     internal static string? ResolveSplitAt(string? splitAt, DateTime windowStartUtc, out DateTime? splitAtUtc)
     {
         splitAtUtc = null;
@@ -243,19 +244,19 @@ public sealed class DarlingMcpReadLatencyTools
                 System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
                 out var parsed))
         {
-            return McpHelpers.Refusal("split_at", $"Invalid split_at value '{splitAt}'. Expected an ISO-8601 UTC instant: '2026-11-24T14:30:00Z', " +
+            return ($"Invalid split_at value '{splitAt}'. Expected an ISO-8601 UTC instant: '2026-11-24T14:30:00Z', " +
                    "'2026-11-24T14:30:00' (read as UTC), '2026-11-24T16:30:00+02:00', or '2026-11-24' for midnight UTC.");
         }
 
         var utc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
         if (utc > DateTime.UtcNow + McpHelpers.AsOfFutureTolerance)
         {
-            return McpHelpers.Refusal("split_at", $"split_at value '{splitAt}' is in the future. A split needs reads on both sides, so name a service start that has already happened (UTC).");
+            return ($"split_at value '{splitAt}' is in the future. A split needs reads on both sides, so name a service start that has already happened (UTC).");
         }
 
         if (utc < windowStartUtc)
         {
-            return McpHelpers.Refusal("split_at", $"split_at value '{splitAt}' is before the start of the window ({windowStartUtc:yyyy-MM-dd HH:mm} UTC), so every read would fall after it. Raise hours (up to 168) to reach it, or name a later instant.");
+            return ($"split_at value '{splitAt}' is before the start of the window ({windowStartUtc:yyyy-MM-dd HH:mm} UTC), so every read would fall after it. Raise hours (up to 168) to reach it, or name a later instant.");
         }
 
         splitAtUtc = utc;
