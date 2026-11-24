@@ -293,7 +293,8 @@ public sealed class DarlingMcpQueryStoreClutterTools
                     var fleetToken = fleetBudget.Token;
                     var fleetIds = await DarlingQueryStoreClutterReader.GetEnabledSqlServerTargetsAsync(postgres, MonitoredEngineKind.SqlServer, fleetToken);
                     var fleetReadCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
-                    var fleetChurn = await DarlingQueryStoreClutterReader.GetPlanChurnAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
+                    /* #9478: the median reads only each database's p95, so the fleet arm reads the narrow churn statement. */
+                    var fleetChurn = await DarlingQueryStoreClutterReader.GetPlanChurnP95Async(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
                     var fleetConfig = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
                     var fleetWaits = await DarlingQueryStoreClutterReader.GetQdsWaitsAsync(postgres, fleetIds, requestedStart, now, fleetToken);
                     var median = QueryStoreClutter.ComputeFleetMedian(fleetIds, fleetReadCost, fleetChurn, fleetConfig, fleetWaits);
