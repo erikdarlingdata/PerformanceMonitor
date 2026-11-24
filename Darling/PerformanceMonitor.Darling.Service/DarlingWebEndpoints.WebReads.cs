@@ -410,7 +410,7 @@ public static partial class DarlingWebEndpoints
                static reference, not a new BuildReadDispatch parameter (round-1 review, Medium 2) — unlike
                postgresConfig, the cache instance never varies by caller, so no threading is needed. #4203:
                c.RequestAborted now reaches the gather via GetOrGatherAsync's linked token. */
-            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, StoreProcessOwnership.Shared, c.RequestAborted),
+            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, StoreProcessOwnership.Shared, QueryDouble(c, "free_floor_percent", DarlingMcpStoreHostTools.DefaultFreeFloorPercent), c.RequestAborted),
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), null, c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
