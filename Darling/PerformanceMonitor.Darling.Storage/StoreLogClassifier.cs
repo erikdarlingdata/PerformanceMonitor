@@ -398,6 +398,14 @@ public static class StoreLogClassifier
         new("shutdown_in_progress", Fatal, MatchKind.StartsWith, "the database system is shutting down", false,
             "a client reached the store while it was stopping - every service restart writes it, expected"),
 
+        /* EXCLUDING (#9515) - TimescaleDB's WARNING when a hypertable is created on a `timestamp without time zone`
+           column. The store keeps UTC in plain `timestamp` columns on purpose, so the HINT that follows (use TIMESTAMPTZ)
+           does not apply, and every migration that creates a hypertable writes the pair once per time column. The HINT
+           is a continuation line of this entry, so it is counted with it and never shows up alone. WARNING-scoped and
+           anchored at the start of the message, so an ERROR that mentions the type is not filed here. */
+        new("timescale_timestamp_column", ["WARNING"], MatchKind.StartsWith, "column type \"timestamp without time zone\" used for", false,
+            "TimescaleDB's note that a hypertable time column is a plain timestamp - the store keeps UTC without a zone on purpose, expected after every upgrade"),
+
         /* EXCLUDING - the Windows fork-emulation artifact, ~170-290/day, auto-retried by PostgreSQL itself
            and documented at length behind the 1 GB shared_buffers cap (#1559, pgsql-bugs BUG #14050 /
            #18954). NAMED and counted rather than deleted, so "we are ignoring this" is a number on the
