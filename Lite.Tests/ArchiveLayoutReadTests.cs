@@ -80,13 +80,14 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         return path;
     }
 
-    /* A file the sorted merge wrote: one server's rows per row group, in the large group size. */
-    private string WriteSorted(string fileName, int rows)
+    /* A file the sorted merge wrote: four servers of 24,576 rows, one server per row group of that size (above the size the
+       re-cut takes, so the file is not due for it). */
+    private string WriteSorted(string fileName)
     {
         var path = P(fileName);
         Exec($"COPY (SELECT i::BIGINT AS collection_id, TIMESTAMP '2026-09-01 00:00:00' + to_seconds(i) AS collection_time, " +
-             $"(1 + i % {Servers})::INTEGER AS server_id FROM range({rows}) t(i) ORDER BY server_id, collection_time) " +
-             $"TO '{path}' ({ParquetCompaction.BuildArchiveCopyOptions(ParquetCompaction.SortedArchiveRowGroupSize)})");
+             $"(1 + i % 4)::INTEGER AS server_id FROM range(98304) t(i) ORDER BY server_id, collection_time) " +
+             $"TO '{path}' ({ParquetCompaction.BuildArchiveCopyOptions(24_576)})");
         return path;
     }
 
@@ -103,7 +104,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
     [Fact]
     public void TheLayout_ReportsAMixedFileAndLeftoverSwapFiles()
     {
-        var sorted = WriteSorted("202609_wait_stats.parquet", 30_000);
+        var sorted = WriteSorted("202609_wait_stats.parquet");
         var mixed = WriteMixed("202608_wait_stats.parquet", 30_000);
         WriteMixed("202609_other_table.parquet", 5_000);
         File.WriteAllText(P("202608_wait_stats.swap"), "swapping");
@@ -124,12 +125,13 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         var wait = Assert.Single(layout.Tables, t => t.Table == "wait_stats");
         Assert.Equal(2, wait.Files);
         Assert.Equal(new FileInfo(sorted).Length + new FileInfo(mixed).Length, wait.Bytes);
+        Assert.Equal(0, MixedGroups(sorted));
         Assert.Equal(MixedGroups(mixed), wait.MixedServerGroups);
         Assert.True(wait.MixedServerGroups > 1);
         Assert.Equal(Scalar($"SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{sorted}')")
                      + Scalar($"SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{mixed}')"), wait.RowGroups);
         Assert.Equal(ParquetCompaction.ArchiveRowGroupSize, Scalar($"SELECT max(row_group_num_rows) FROM parquet_metadata('{mixed}')"));
-        Assert.True(wait.LargestGroupRows >= ParquetCompaction.ArchiveRowGroupSize);
+        Assert.Equal(24_576, wait.LargestGroupRows);
         Assert.Equal(1, wait.FilesNeedingRecut);
         var skip = Assert.Single(wait.RecutSkips);
         Assert.Equal(ArchiveLayoutReader.ReasonLiveJournal, skip.Reason);

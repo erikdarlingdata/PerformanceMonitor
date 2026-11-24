@@ -174,7 +174,7 @@ public sealed class StoreHealthTests : IDisposable
         /* The data reaches the limit: reset. */
         await RunAsync(usedMb.Value / 2);
 
-        var reset = Assert.Single(new StoreHousekeepingHistory(_historyPath).Read());
+        var reset = Assert.Single(new StoreHousekeepingHistory(_historyPath).Read().Where(e => e.Kind != StoreHousekeepingHistory.KindCompaction));
         Assert.Equal(StoreHousekeepingHistory.KindSizeReset, reset.Kind);
         Assert.Equal(0L, await CountDeadlocksAsync());
     }
@@ -216,7 +216,7 @@ public sealed class StoreHealthTests : IDisposable
 
         await run(limitMb);
 
-        var reset = Assert.Single(new StoreHousekeepingHistory(_historyPath).Read());
+        var reset = Assert.Single(new StoreHousekeepingHistory(_historyPath).Read().Where(e => e.Kind != StoreHousekeepingHistory.KindCompaction));
         Assert.Equal(StoreHousekeepingHistory.KindSizeReset, reset.Kind);
         Assert.Equal(0L, await CountDeadlocksAsync());
     }
@@ -468,7 +468,7 @@ public sealed class StoreHealthTests : IDisposable
             Assert.Equal(0L, Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken)));
         }
 
-        var read = new StoreHousekeepingHistory(_historyPath).Read();
+        var read = new StoreHousekeepingHistory(_historyPath).Read().Where(e => e.Kind != StoreHousekeepingHistory.KindCompaction).ToList();
         Assert.Equal(2, read.Count);
         var reset = read[0];
         Assert.Equal(StoreHousekeepingHistory.KindSizeReset, reset.Kind);
@@ -525,7 +525,7 @@ public sealed class StoreHealthTests : IDisposable
             Assert.Equal(0, deleted);
         }
 
-        var entry = Assert.Single(history.Read());
+        var entry = Assert.Single(history.Read().Where(e => e.Kind != StoreHousekeepingHistory.KindCompaction));
         Assert.Equal(StoreHousekeepingHistory.KindRetention, entry.Kind);
         Assert.Equal(StoreHousekeepingHistory.OutcomeFailed, entry.Outcome);
         Assert.Contains(stuck, entry.Message);
@@ -543,7 +543,7 @@ public sealed class StoreHealthTests : IDisposable
             .CleanupOldArchivesAndRefreshViewsAsync(_duckDb);
 
         Assert.Equal(2, deleted);
-        var entry = Assert.Single(history.Read());
+        var entry = Assert.Single(history.Read().Where(e => e.Kind != StoreHousekeepingHistory.KindCompaction));
         Assert.Equal(StoreHousekeepingHistory.KindRetention, entry.Kind);
         Assert.Equal(StoreHousekeepingHistory.OutcomeOk, entry.Outcome);
         Assert.Equal(2, entry.Files);
@@ -559,7 +559,7 @@ public sealed class StoreHealthTests : IDisposable
         var complete = await new ArchiveService(_duckDb, _archiveDir, NullLogger<ArchiveService>.Instance) { History = history }.ArchiveOldDataAsync();
 
         Assert.True(complete);
-        var entry = Assert.Single(history.Read());
+        var entry = Assert.Single(history.Read().Where(e => e.Kind != StoreHousekeepingHistory.KindCompaction));
         Assert.Equal(StoreHousekeepingHistory.KindArchive, entry.Kind);
         Assert.Equal(StoreHousekeepingHistory.OutcomeOk, entry.Outcome);
         Assert.True(entry.Rows >= 2);
@@ -578,7 +578,7 @@ public sealed class StoreHealthTests : IDisposable
             .ArchiveOldDataAsync(cancellationToken: cancelled.Token);
 
         Assert.False(complete);
-        var entry = Assert.Single(history.Read());
+        var entry = Assert.Single(history.Read().Where(e => e.Kind != StoreHousekeepingHistory.KindCompaction));
         Assert.Equal(StoreHousekeepingHistory.OutcomeIncomplete, entry.Outcome);
         Assert.Equal("Stopped: Lite was shutting down.", entry.Message);
     }
