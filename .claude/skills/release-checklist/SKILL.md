@@ -26,6 +26,8 @@ on a workflow or script that reads a version from any path but `Directory.Build.
 
 Verify no other files contain hardcoded version strings that need updating.
 
+Right after the release is tagged (step 11), open a PR to `dev` that bumps `<Version>` to the next minor. Nightlies then sort above the release just shipped, and `MigrationUpgradeLadderLiveTests.TheMostRecentRelease_HasALadderFixture` checks for that release's fixture instead of the one before it.
+
 ### 2. CHANGELOG
 
 Ensure `CHANGELOG.md` has an entry for the new version with:

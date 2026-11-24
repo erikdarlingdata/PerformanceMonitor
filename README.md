@@ -26,7 +26,7 @@ Both editions can hand an alert to an AI agent that you run, and Lite lets the a
 
 The Dashboard edition is deprecated. Existing installs keep working, but we recommend Lite or Darling for new deployments. [Choosing an edition](docs/editions.md) compares all three.
 
-Each release ships these downloads. For Lite, a `Setup.exe`, a portable ZIP and a Windows on ARM ZIP (`PerformanceMonitorLite-<version>-win-arm64.zip`). For Darling, the service ZIP (with the viewer inside), an MSI, a Viewer `Setup.exe` for a remote seat, and the Linux and Compose tarballs. The Full Dashboard and its CLI installer ship nothing. Their last builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0).
+Each release ships these downloads. For Lite, a `Setup.exe` and a portable ZIP. For Windows on ARM, the ZIP `PerformanceMonitorLite-<version>-win-arm64.zip`, `PerformanceMonitorLite-lite-arm64-Setup.exe` and `PerformanceMonitorLite-lite-arm64-Portable.zip`. For Darling, the service ZIP (with the viewer inside), an MSI, a Viewer `Setup.exe` for a remote seat, and the Linux and Compose tarballs. The Full Dashboard and its CLI installer ship nothing. Their last builds are in the [v3.2.0 release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/tag/v3.2.0).
 
 Not sure which one? Start with Lite. It is one download, nothing is installed on your server, and data starts to flow in under 5 minutes.
 
