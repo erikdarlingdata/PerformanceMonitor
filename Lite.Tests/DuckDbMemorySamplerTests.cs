@@ -35,11 +35,7 @@ public class DuckDbMemorySamplerTests
         Assert.False(sampler.ResourcesDisposedForTests, "Dispose disposed the connection while the sampler was still busy");
 
         release.Set();
-        var deadline = DateTime.UtcNow.AddSeconds(30);
-        while (!sampler.ResourcesDisposedForTests && DateTime.UtcNow < deadline)
-        {
-            Thread.Sleep(10);
-        }
+        SpinWait.SpinUntil(() => sampler.ResourcesDisposedForTests, TimeSpan.FromSeconds(30));
 
         Assert.True(sampler.ResourcesDisposedForTests, "the sampler thread never disposed its connection on its way out");
     }
