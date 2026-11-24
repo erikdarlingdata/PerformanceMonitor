@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// auth, as the other live SQL classes read them), so it skips where the runner has no SQL Server. It creates its own database, named
 /// <c>pm_9526_{8 hex}</c>, touches nothing else, and drops it in a finally.</para>
 /// </summary>
+[Collection("timing")]
 public sealed class CollectorSchemaLockLiveSqlTests
 {
     /// <summary>The longest a collector may take to give up on a blocked database. The lock timeout is 5 s.</summary>
