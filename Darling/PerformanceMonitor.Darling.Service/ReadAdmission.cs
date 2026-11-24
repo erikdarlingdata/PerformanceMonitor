@@ -89,7 +89,6 @@ public sealed class ReadAdmission
         ["get_collection_log"] = "health read: the collection log behind collection health",
         ["get_store_metrics"] = "health read: the store's own size and pressure",
         ["get_store_log"] = "health read: the store's own log",
-        ["get_store_checkpoints"] = "health read: the store's own checkpoints",
         ["list_servers"] = "health read: the registry every other read names a server from",
     };
 
