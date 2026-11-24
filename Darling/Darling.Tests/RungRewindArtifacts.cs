@@ -1002,6 +1002,9 @@ DROP TABLE IF EXISTS collect.store_table_activity_baseline;"),
         // V309 (#9414): the store checkpoint rows. It is the probe's newest sentinel. The rewind drops it, so a re-run of V309 creates it empty. Safe on a store
         // that never had it.
         new(309, "hasStoreCheckpoints", @"DROP TABLE IF EXISTS collect.store_checkpoints;"),
+        // V310 (#9452): the partial index of the oversized-plan backlog's pending rows. It is the probe's newest sentinel. The rewind drops it, so a re-run of V310 builds it again.
+        // Safe on a store that never had it.
+        new(310, "hasOversizedPlanBacklogPendingIndex", @"DROP INDEX IF EXISTS collect.idx_oversized_plan_backlog_pending;"),
     ];
 
     /// <summary>

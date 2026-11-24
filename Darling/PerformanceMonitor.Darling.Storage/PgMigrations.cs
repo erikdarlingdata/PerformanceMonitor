@@ -4088,6 +4088,9 @@ END $$;";
         /* V309 (#9414): one row per checkpoint of the store's own PostgreSQL server (collect.store_checkpoints), read from its log. One plain table created
            empty: no data moves. An older build never reads it. */
         new Migration(StoreCheckpoints.Version, "store-checkpoints", StoreCheckpoints.CreateSql),
+        /* V310 (#9452): the partial index of the oversized-plan backlog's pending rows, on (server_id), for the sightings statement's per-cycle pending count.
+           An older build never reads it, and keeps writing rows that the index follows. */
+        new Migration(OversizedPlanBacklog.PendingIndexVersion, "oversized-plan-backlog-pending-index", OversizedPlanBacklog.CreatePendingIndexSql),
     };
 
     /// <summary>

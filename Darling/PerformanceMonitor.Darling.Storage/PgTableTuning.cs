@@ -871,6 +871,14 @@ public static class PgTableTuning
         "ALTER TABLE collect.query_store_slicer_hourly SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
         "ALTER TABLE collect.query_store_closed_day_built SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.query_store_closed_day_tick SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
+        /* #9482: the clutter plan rollups are plain tables, so the hypertable insert sweep never reaches them. They are written an hour or a
+           day at a time (a rebuild deletes and re-inserts its hour or day, and retention prunes the old ones). The fleet median's narrow reads
+           (PlanChurnP95ClosedDaysSql, PlanChurnP95ClosedHoursSql) select key columns only, so they can walk ux_query_store_clutter_plan_hourly
+           and ux_query_store_clutter_plan_daily index-only, and every row the visibility map does not cover yet is a heap fetch. At the stock
+           0.2 insert scale factor that lag runs to many hours of builds. The insert tuning bounds it to about one trigger's worth. The
+           dead-tuple knobs stay at stock on purpose: each insert-triggered vacuum also clears the deleted rows. */
+        "ALTER TABLE collect.query_store_clutter_plan_hourly SET (" + InsertTuningOptions + ")",
+        "ALTER TABLE collect.query_store_clutter_plan_daily SET (" + InsertTuningOptions + ")",
         "ALTER TABLE collect.attention_events SET (autovacuum_vacuum_scale_factor = 0.05, autovacuum_vacuum_threshold = 10000)",
         "ALTER TABLE collect.pg_io_stats_hourly SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
         "ALTER TABLE collect.analysis_findings SET (autovacuum_vacuum_scale_factor = 0.02, autovacuum_vacuum_threshold = 1000)",
