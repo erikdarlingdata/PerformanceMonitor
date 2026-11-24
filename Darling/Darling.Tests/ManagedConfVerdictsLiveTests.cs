@@ -210,6 +210,98 @@ public sealed class ManagedConfVerdictsLiveTests
         }
     }
 
+    /// <summary>
+    /// #9418: <c>ALTER SYSTEM</c> over a managed line gives ONE start warning that names the winning file, line and
+    /// value and the managed line it hides, and the same facts read back through the provenance read. A role that
+    /// cannot read <c>pg_file_settings</c> is told the grant, not shown a blank.
+    /// </summary>
+    [Fact]
+    public async Task AlterSystemOverManagedLine_WarnsOnceNamingBothFilesLinesAndValues_Gated()
+    {
+        var runtimeRoot = SkipUnlessRuntimeAvailable();
+        var root = Directory.CreateTempSubdirectory("darling-managedconf-provenance-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var config = new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory };
+        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            var ct = timeout.Token;
+            var connectionString = await owner.EnsureRunningAsync(ct);
+
+            await using (var migrateConnection = await OpenAsync(connectionString, ct))
+            {
+                await PgMigrations.MigrateAsync(migrateConnection, ct);
+            }
+
+            await using (var dataSource = NpgsqlDataSource.Create(
+                new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString))
+            {
+                await DarlingManagedRoles.EnsureProvisionedAsync(dataSource, dataDirectory, NullLogger.Instance, ct);
+            }
+
+            var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+            var managedLine = File.ReadAllLines(managedConfPath)
+                .Select((text, index) => (text, line: index + 1))
+                .Single(l => Regex.IsMatch(l.text, @"^work_mem = "));
+            var managedValue = Regex.Match(managedLine.text, @"^work_mem = '?([^']*)'?").Groups[1].Value;
+
+            await using (var alterConnection = await OpenAsync(connectionString, ct))
+            await using (var alterCommand = new NpgsqlCommand("ALTER SYSTEM SET work_mem = '77MB'", alterConnection))
+            {
+                await alterCommand.ExecuteNonQueryAsync(ct);
+            }
+
+            await ReloadAsync(connectionString, ct);
+
+            var logger = new CapturingTestLogger();
+            await using (var ownerConnection = await OpenAsync(connectionString, ct))
+            {
+                var profile = await DarlingStoreHostProfile.GatherStartupProfileAsync(config, ownerConnection, ct);
+                await DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync(
+                    ownerConnection, dataDirectory, profile.Memory.EffectiveBytes, profile.DataVolume.FreeBytes,
+                    owner.LastManagedConfWriteResult, logger, ct);
+
+                var warning = Assert.Single(logger.Lines, l => l.Contains("overridden", StringComparison.Ordinal));
+                var autoLine = File.ReadAllLines(Path.Combine(dataDirectory, "postgresql.auto.conf"))
+                    .Select((text, index) => (text, line: index + 1))
+                    .Single(l => Regex.IsMatch(l.text, @"^work_mem\s*="));
+                Assert.Contains("postgresql.auto.conf line " + autoLine.line, warning, StringComparison.Ordinal);
+                Assert.Contains("77MB", warning, StringComparison.Ordinal);
+                Assert.Contains(ManagedConfFile.FileName + " line " + managedLine.line + " = " + managedValue, warning, StringComparison.Ordinal);
+
+                /* The stored verdict carries the same sentence, which is what every later reader shows. */
+                var stored = (await DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync(ownerConnection, ct))
+                    .Single(r => r.SettingName == "work_mem");
+                Assert.Contains("77MB", stored.Detail, StringComparison.Ordinal);
+
+                var profileRow = (await DarlingStoreHostProfile.GatherSettingProfilesAsync(
+                    ownerConnection, config, profile.Memory.EffectiveBytes, profile.DataVolume.FreeBytes, ct))
+                    .Single(r => r.Name == "work_mem");
+                Assert.Null(profileRow.ProvenanceUnreadable);
+                Assert.NotNull(profileRow.Provenance);
+                Assert.EndsWith("postgresql.auto.conf", profileRow.Provenance!.SourceFile, StringComparison.OrdinalIgnoreCase);
+                var hidden = Assert.Single(profileRow.Provenance.UnappliedFileRows);
+                Assert.EndsWith(ManagedConfFile.FileName, hidden.File, StringComparison.OrdinalIgnoreCase);
+                Assert.Equal(managedLine.line, hidden.Line);
+            }
+
+            /* The viewer role cannot read pg_file_settings: the read says so with the grant that fixes it. */
+            var viewerConnectionString = DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential(config);
+            Assert.NotNull(viewerConnectionString);
+            await using var viewerConnection = await OpenAsync(viewerConnectionString!, ct);
+            var viewerRead = await StoreSettingProvenance.ReadAsync(viewerConnection, ["work_mem"], 30, ct);
+            Assert.False(viewerRead.FileSettingsReadable);
+            Assert.Contains("GRANT SELECT ON pg_file_settings", StoreSettingProvenance.DescribeUnreadable(viewerRead), StringComparison.Ordinal);
+            Assert.Equal("configuration file", viewerRead.ByName["work_mem"].Source);
+        }
+        finally
+        {
+            await owner.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
     /// <summary>#4215: a hand edit of darling-managed.conf is stored with its changed keys as
     /// <see cref="HostSettingVerdict.OperatorOverride"/>, detail = "hand edit of darling-managed.conf" — the
     /// most specific evidence available wins over the plain managed-block classification.</summary>

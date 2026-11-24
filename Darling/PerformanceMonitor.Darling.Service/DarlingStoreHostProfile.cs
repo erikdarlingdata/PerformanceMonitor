@@ -155,7 +155,9 @@ internal readonly record struct HostSettingProfile(
     long DerivedValueNormalized,
     HostSettingVerdict Verdict,
     string? SourceFile = null,
-    int SourceLine = 0);
+    int SourceLine = 0,
+    SettingProvenance? Provenance = null,
+    string? ProvenanceUnreadable = null);
 
 /// <summary>One row of <c>collect.managed_conf_verdicts</c> (#4215 V146): a managed store's owner-computed
 /// verdict for one owned key, stored once per start and read back by every later caller —
@@ -1164,6 +1166,12 @@ WHERE NOT is_compressed";
             }
         }
 
+        /* #9418: the pg_settings source, file, line and pending-restart flag of each setting, and any pg_file_settings
+           line for it that is not applied. A role that cannot read them gets null fields and ProvenanceUnreadable. */
+        var provenance = await StoreSettingProvenance.ReadAsync(
+            connection, names, ServiceCommandDeadlines.CliStoreReadSeconds, cancellationToken);
+        var unreadable = StoreSettingProvenance.DescribeUnreadable(provenance);
+
         /* Round-1 review, Low 4: TryResolveProfileDataDirectory refuses a UNC-resolved data directory (null),
            which falls through to the dataDirectory-is-null branch below exactly like a bring-your-own store —
            every setting reports not-managed, and this method never reads a file off the share. */
@@ -1181,7 +1189,8 @@ WHERE NOT is_compressed";
                 results.Add(new HostSettingProfile(
                     name, "(not visible on this connection)", 0,
                     "unreadable. This connection's role, or this build of TimescaleDB, does not expose it",
-                    derivedDisplay, derivedValue, HostSettingVerdict.NotManaged));
+                    derivedDisplay, derivedValue, HostSettingVerdict.NotManaged,
+                    ProvenanceUnreadable: unreadable));
                 continue;
             }
 
@@ -1193,7 +1202,8 @@ WHERE NOT is_compressed";
                 results.Add(new HostSettingProfile(
                     name, currentDisplay, currentValue ?? 0,
                     FormattableString.Invariant($"not-managed (bring-your-own store; pg_settings.source = {pgValue.Source ?? "unknown"})"),
-                    derivedDisplay, derivedValue, HostSettingVerdict.NotManaged));
+                    derivedDisplay, derivedValue, HostSettingVerdict.NotManaged,
+                    Provenance: provenance.ByName.GetValueOrDefault(name), ProvenanceUnreadable: unreadable));
                 continue;
             }
 
@@ -1205,7 +1215,8 @@ WHERE NOT is_compressed";
             (sourceDescription, verdict) = ApplyHandEditOverride(sourceDescription, verdict, isHandEdited);
             results.Add(new HostSettingProfile(
                 name, currentDisplay, currentValue ?? 0, sourceDescription, derivedDisplay, derivedValue, verdict,
-                attribution.File, attribution.Line));
+                attribution.File, attribution.Line,
+                provenance.ByName.GetValueOrDefault(name), unreadable));
         }
 
         return results;
@@ -1741,11 +1752,17 @@ ORDER BY setting_name";
             postmasterStartTimeUtc = DateTime.SpecifyKind((DateTime)(await cmd.ExecuteScalarAsync(cancellationToken))!, DateTimeKind.Utc);
         }
 
+        /* #9418: where each owned setting's running value comes from, so an override names the winning file, line and
+           value and the managed line it hides, not just the key. Read on the owner connection, which sees every column. */
+        var provenance = await StoreSettingProvenance.ReadAsync(
+            connection, sizingNames, ServiceCommandDeadlines.CliStoreReadSeconds, cancellationToken);
+
         var computedAtUtc = DateTime.UtcNow;
         var rows = new Dictionary<string, ManagedConfVerdictRow>(StringComparer.Ordinal);
         var pendingRestartKeys = new List<string>();
         var rejectedValueKeys = new List<string>();
         var overriddenKeys = new List<string>();
+        var overrideDetails = new List<string>();
 
         foreach (var (name, rawDerivedValueMb, unit) in targets)
         {
@@ -1798,6 +1815,11 @@ ORDER BY setting_name";
             else if (verdict == HostSettingVerdict.OperatorOverride)
             {
                 overriddenKeys.Add(name);
+                detail = StoreSettingProvenance.Describe(provenance.ByName.GetValueOrDefault(name), file => file);
+                if (detail is not null)
+                {
+                    overrideDetails.Add(detail);
+                }
             }
 
             rows[name] = new ManagedConfVerdictRow(
@@ -1882,9 +1904,14 @@ ORDER BY setting_name";
 
         if (overriddenKeys.Count > 0)
         {
+            var unreadable = StoreSettingProvenance.DescribeUnreadable(provenance);
             logger?.LogWarning(
-                "{Count} owned setting(s) overridden (ALTER SYSTEM, or a line placed after the managed blocks): {Keys}.",
-                overriddenKeys.Count, string.Join(", ", overriddenKeys));
+                "{Count} owned setting(s) overridden (ALTER SYSTEM, or a line placed after the managed blocks): {Keys}.{Details}{Unreadable}",
+                overriddenKeys.Count, string.Join(", ", overriddenKeys),
+                string.Concat(overrideDetails.Select(d => "
+  " + d)),
+                unreadable is null ? string.Empty : "
+  " + unreadable);
         }
 
         await StoreManagedConfVerdictsAsync(connection, rows.Values.ToList(), cancellationToken);
