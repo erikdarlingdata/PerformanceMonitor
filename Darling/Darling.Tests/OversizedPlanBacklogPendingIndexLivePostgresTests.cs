@@ -78,7 +78,7 @@ FROM generate_series(1, $3) AS n;";
         new("captured and expired rows are not pending", 40, 0, 60, 60, 0, 0, 0, 10, false),
         new("captured and expired rows do not make the first test pass", 95, 0, 60, 60, 0, 0, 0, 6, false),
         new("all pending rows recent, both over", 10, 100, 0, 0, 0, 0, 0, 1, true),
-        new("noise rows beside a true decision", 50, 60, 30, 30, 20, 0, 0, 20, true),
+        new("noise rows beside a true decision", 50, 60, 30, 30, 20, 0, 0, 45, true),
     ];
 
     public static TheoryData<string> CaseNames()
