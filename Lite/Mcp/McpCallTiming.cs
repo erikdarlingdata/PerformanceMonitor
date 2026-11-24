@@ -313,7 +313,6 @@ public sealed class McpCallTimingRecorder
     {
         try
         {
-            return null;
             var text = string.Concat(result.Content.OfType<TextContentBlock>().Select(t => t.Text));
             if (string.IsNullOrWhiteSpace(text)) return null;
             using var document = JsonDocument.Parse(text);
