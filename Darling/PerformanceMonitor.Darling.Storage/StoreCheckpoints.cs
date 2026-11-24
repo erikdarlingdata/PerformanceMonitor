@@ -95,12 +95,13 @@ WHERE started_at < $1";
 
     /// <summary>A log stamp (naive, in the server's <c>log_timezone</c>) as a naive UTC timestamp. The one place the zone is resolved,
     /// and it is the server's own.</summary>
-    private const string StampToUtc = "((({0}::timestamp) AT TIME ZONE pg_catalog.current_setting('log_timezone')) AT TIME ZONE 'UTC')";
+    private static string StampToUtc(string parameter) =>
+        "(((" + parameter + "::timestamp) AT TIME ZONE pg_catalog.current_setting('log_timezone')) AT TIME ZONE 'UTC')";
 
     /// <summary>A start line opens a row. $1 kind, $2 log stamp, $3 reason, $4 flags, $5 capture_time.</summary>
     public static readonly string StartInsertSql = @"
 INSERT INTO collect.store_checkpoints (kind, started_at, reason, flags, capture_time)
-VALUES ($1, " + string.Format(CultureInfo.InvariantCulture, StampToUtc, "$2") + ", $3, $4, $5)";
+VALUES ($1, " + StampToUtc("$2") + ", $3, $4, $5)";
 
     /// <summary>
     /// The open row a complete line closes: the newest of that kind, still open, that started within a few seconds of the
@@ -108,7 +109,7 @@ VALUES ($1, " + string.Format(CultureInfo.InvariantCulture, StampToUtc, "$2") + 
     /// newest open one that started within a day before the end. $1 kind, $2 log stamp of the end, $3 total_ms or NULL.
     /// </summary>
     public static readonly string OpenRowSql = @"
-WITH e AS (SELECT " + string.Format(CultureInfo.InvariantCulture, StampToUtc, "$2") + @" AS ended)
+WITH e AS (SELECT " + StampToUtc("$2") + @" AS ended)
 SELECT c.id
 FROM collect.store_checkpoints AS c
 CROSS JOIN e
@@ -130,7 +131,7 @@ LIMIT 1";
     /// <summary>Closes an open row. $1 id, $2 log stamp of the end, then the figures as <see cref="Figures"/> lists them ($3 to $19), then $20 capture_time.</summary>
     public static readonly string CloseSql = @"
 UPDATE collect.store_checkpoints
-SET ended_at = " + string.Format(CultureInfo.InvariantCulture, StampToUtc, "$2") + @",
+SET ended_at = " + StampToUtc("$2") + @",
 " + FigureColumns + @"
 WHERE id = $1";
 
@@ -144,7 +145,7 @@ INSERT INTO collect.store_checkpoints
 SELECT $1,
        e.ended - COALESCE($11::bigint, 0) * interval '1 millisecond',
        e.ended, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
-FROM (SELECT " + string.Format(CultureInfo.InvariantCulture, StampToUtc, "$2") + @" AS ended) AS e";
+FROM (SELECT " + StampToUtc("$2") + @" AS ended) AS e";
 
     /// <summary>What a complete line says, as the store holds it. Every field is null on a line that could not be read.</summary>
     public sealed record Figures(
@@ -197,15 +198,15 @@ FROM (SELECT " + string.Format(CultureInfo.InvariantCulture, StampToUtc, "$2") +
         @"^(?<flags>(?:[a-z][a-z-]*)(?: [a-z][a-z-]*)*)?$",
         RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
-    private const string Secs = @"(?<{0}>\d+\.\d{{3}}) s";
+    private static string Secs(string name) => "(?<" + name + @">\d+\.\d{3}) s";
 
     private static readonly Regex s_complete = new(
         @"^wrote (?<buf>\d+) buffers \((?<pct>\d+(?:\.\d+)?)%\)(?:, wrote (?<slru>\d+) SLRU buffers)?; "
         + @"(?<added>\d+) WAL file\(s\) added, (?<removed>\d+) removed, (?<recycled>\d+) recycled; "
-        + @"write=" + string.Format(CultureInfo.InvariantCulture, Secs, "write") + @", sync=" + string.Format(CultureInfo.InvariantCulture, Secs, "sync")
-        + @", total=" + string.Format(CultureInfo.InvariantCulture, Secs, "total") + @"; "
-        + @"sync files=(?<files>\d+), longest=" + string.Format(CultureInfo.InvariantCulture, Secs, "longest")
-        + @", average=" + string.Format(CultureInfo.InvariantCulture, Secs, "average") + @"; "
+        + @"write=" + Secs("write") + @", sync=" + Secs("sync")
+        + @", total=" + Secs("total") + @"; "
+        + @"sync files=(?<files>\d+), longest=" + Secs("longest")
+        + @", average=" + Secs("average") + @"; "
         + @"distance=(?<dist>-?\d+) kB, estimate=(?<est>-?\d+) kB"
         + @"(?:; lsn=(?<lsn>[0-9A-Fa-f]+/[0-9A-Fa-f]+), redo lsn=(?<redo>[0-9A-Fa-f]+/[0-9A-Fa-f]+))?$",
         RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
