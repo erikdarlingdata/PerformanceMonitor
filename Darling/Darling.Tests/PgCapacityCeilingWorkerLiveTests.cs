@@ -402,7 +402,7 @@ public sealed class PgCapacityCeilingWorkerLiveTests
             await h.SeedAsync(new[] { Below(7), Below(6) }, now);
             await life.CapacityPass();
             Assert.False(CapacityAlertIsOpen(life.Worker));
-            Assert.False(Field<ConcurrentDictionary<string, PgCapacityRun>>(life.Worker, "_pgCapacityRun").ContainsKey(Key));
+            Assert.False(Field<ConcurrentDictionary<string, DarlingWorker.PgCapacityRun>>(life.Worker, "_pgCapacityRun").ContainsKey(Key));
         });
     }
 
