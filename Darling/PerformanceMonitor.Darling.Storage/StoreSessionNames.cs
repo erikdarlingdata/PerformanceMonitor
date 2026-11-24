@@ -41,6 +41,13 @@ public static class StoreSessionNames
 
     private const string Slash = ServicePrefix + "/";
 
+    /// <summary>
+    /// Deadline for the <c>set_config</c> that names a leased connection. It is one trivial statement on a connection that has just
+    /// been opened, so a few seconds is plenty, and a store too slow to answer it should fail the open and not hold the caller for
+    /// Npgsql's 30 second default.
+    /// </summary>
+    public const int SetNameTimeoutSeconds = 5;
+
     // Hourly store-maintenance tick steps (DarlingWorker.Passes.cs and DarlingWorker.Housekeeping.cs).
     public const string TimescaleReprobe = Slash + "timescale-reprobe";
     public const string CompressionHealth = Slash + "compression-health";
@@ -168,7 +175,7 @@ public static class StoreSessionNames
             if (connection.PostgresParameters.TryGetValue("application_name", out var current)
                 && current.StartsWith(ServicePrefix, StringComparison.Ordinal))
             {
-                await using var command = new NpgsqlCommand("SELECT pg_catalog.set_config('application_name', $1, false)", connection);
+                await using var command = new NpgsqlCommand("SELECT pg_catalog.set_config('application_name', $1, false)", connection) { CommandTimeout = SetNameTimeoutSeconds };
                 command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = applicationName });
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }

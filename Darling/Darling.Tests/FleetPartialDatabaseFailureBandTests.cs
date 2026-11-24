@@ -817,7 +817,8 @@ FROM generate_series(0, 29) AS g", connection))
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runs = Enumerable.Range(0, 30).Select(g => dayStart.AddDays(-g).AddHours(14)).ToList();
         var coveredAfterFloor = runs.Count(t => t >= floor.Value && t < dayStart);
-        Assert.InRange(coveredAfterFloor, 8, 10);
+        /* The floor is the store's real clock but dayStart is the pinned clock (#8752), up to a day ahead, so allow one more run. */
+        Assert.InRange(coveredAfterFloor, 8, 10 + (dayStart - DateTime.UtcNow.Date).Days);
 
         var (covered, events) = await BlockingBaselineTotalsAsync(postgres, now, ct);
         Assert.Equal(coveredAfterFloor, covered);
