@@ -531,7 +531,7 @@ public static class ParquetCompaction
         var (groups, maxRows) = RowGroupShape(con, path);
         return groups > 1
             && maxRows < Math.Min(RecutBelowRowGroupRows, targetRows)
-            && true;
+            && MaxRowGroupUncompressedBytes(con, path) < RecutAtByteTarget;
     }
 
     internal static long RowCount(string path)
@@ -598,7 +598,7 @@ public static class ParquetCompaction
            2,048-row groups with and without it (#9255), so the sorted merge dropped it. DuckDB 1.5.6.1 does honour it
            with preserve_insertion_order off, and the output stays sorted (see SortedRowGroupBytes). A caller that
            passes rowGroupBytes sets it, and 0 writes no bound. */
-        var groupBytes = orderBy is null ? rowGroupBytes ?? RowGroupBytesFor(table) : rowGroupBytes ?? 0;
+        var groupBytes = orderBy is null ? rowGroupBytes ?? RowGroupBytesFor(table) : rowGroupBytes ?? SortedRowGroupBytes;
         var selectClause = BuildSelectClause(table, sourcePaths);
         var pathList = string.Join(", ", sourcePaths.Select(p => $"'{EscapeSqlPath(p)}'"));
         using var cmd = con.CreateCommand();
