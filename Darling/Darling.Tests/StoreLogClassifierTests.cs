@@ -111,6 +111,10 @@ public class StoreLogClassifierTests
         /* shutdown_in_progress (#8814) - a client that reached the store while it was stopping. */
         "2026-09-05 14:05:30.639 UTC [5300] FATAL:  the database system is shutting down",
 
+        /* timescale_timestamp_column (#9515) - the hypertable-creation warning for a plain timestamp column, with its HINT. */
+        "2026-09-05 14:05:35.100 UTC [5301] WARNING:  column type \"timestamp without time zone\" used for \"collection_time\" does not follow best practices",
+        "2026-09-05 14:05:35.100 UTC [5301] HINT:  Use datatype TIMESTAMPTZ instead.",
+
         /* autovacuum_cancel (#8814) - an autovacuum cancelled by a conflicting lock, with the relation it names. */
         "2026-09-05 14:05:40.132 UTC [5302] ERROR:  canceling autovacuum task",
         "2026-09-05 14:05:40.132 UTC [5302] CONTEXT:  while scanning block 117439 of relation \"pg_toast.pg_toast_17428\"",
@@ -1173,7 +1177,7 @@ public class StoreLogClassifierTests
         Assert.True(census.EntriesRead > 0, "the fixture produced no entries at all");
         Assert.True(census.Groups.Count > 0, "the fixture produced no groups at all");
 
-        Assert.Equal(19, StoreLogClassifier.ClassNames.Count);
+        Assert.Equal(20, StoreLogClassifier.ClassNames.Count);
 
         var covered = census.Groups.Select(g => g.EventClass).ToHashSet(StringComparer.Ordinal);
         Assert.Equal(
@@ -1332,6 +1336,34 @@ public class StoreLogClassifierTests
         Assert.Null(group.MessageText);
 
         var error = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  the database system is shutting down\n");
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(error.Groups).EventClass);
+    }
+
+    /// <summary>
+    /// #9515: TimescaleDB's warning that a hypertable time column is a plain <c>timestamp</c> is expected, because the
+    /// store keeps UTC without a zone on purpose. It is counted under its own class and keeps no text, its HINT line is
+    /// part of the same entry and so is not a second unclassified entry, and any other WARNING is still unclassified.
+    /// </summary>
+    [Fact]
+    public void TheTimestampColumnWarning_IsCountedNotRetained_AndItsHintStaysWithIt()
+    {
+        var slab =
+            DefaultPrefix + "WARNING:  column type \"timestamp without time zone\" used for \"collection_time\" does not follow best practices\n"
+            + DefaultPrefix + "HINT:  Use datatype TIMESTAMPTZ instead.\n";
+
+        var census = StoreLogClassifier.Classify(slab);
+
+        Assert.Equal(1, census.EntriesRead);
+        Assert.Equal(1, census.ContinuationLines);
+        var group = Assert.Single(census.Groups);
+        Assert.Equal("timescale_timestamp_column", group.EventClass);
+        Assert.False(StoreLogClassifier.IsRetainedClass(group.EventClass));
+        Assert.Null(group.MessageText);
+
+        var other = StoreLogClassifier.Classify(DefaultPrefix + "WARNING:  column type \"money\" used for \"amount\" is something else\n");
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(other.Groups).EventClass);
+
+        var error = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  column type \"timestamp without time zone\" used for \"collection_time\" does not follow best practices\n");
         Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(error.Groups).EventClass);
     }
 

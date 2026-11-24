@@ -112,11 +112,11 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
 
     /// <summary>A query's cheap plan in the archive (two intervals, two snapshots each) and its costly newest plan in the hot store.</summary>
     private void Query(long q, string? coldText, string? hotText, double costlyCpu, string? role = null, string database = "Db1",
-        bool hotDigest = true, bool forced = false, long failures = 0, DateTime? latest = null)
+        bool hotDigest = true, bool forced = false, long failures = 0, DateTime? latest = null, long? planBase = null)
     {
         var newest = latest ?? Recent;
-        var cheap = q * 10 + 1;
-        var costly = q * 10 + 2;
+        var cheap = (planBase ?? q * 10) + 1;
+        var costly = (planBase ?? q * 10) + 2;
         for (var interval = 0; interval < 2; interval++)
         {
             var coldLast = Old.AddHours(interval);
@@ -174,6 +174,11 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
 
         var dims = new[] { "SELECT 1 FROM dbo.tie1", "SELECT 3 FROM dbo.replica", "SELECT 4 FROM dbo.forced", "SELECT 5 FROM dbo.samehash", "EXEC sp_flush_commit_table_on_demand 1000", "SELECT 9" };
         Execute(dims.Select(DimRow).ToArray());
+        await FlushAsync();
+    }
+
+    private async Task FlushAsync()
+    {
         Execute(_statements.ToArray());
         /* Everything older than a day moves to a Parquet file, which keeps the inline text. The hot store keeps the digests. */
         var path = Path.Combine(_tempDir, "archive", "20260101_000000_query_store_stats.parquet").Replace("\\", "/");
@@ -218,6 +223,226 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
 
         /* Ordered by key: two queries whose lost CPU and factor tie are in either order. */
         Assert.Equal(reference.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId), shipped.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId));
+    }
+
+    /// <summary>
+    /// #9353: the pass reads its databases one at a time, each under its own hold of the read lock, and puts their rows in the order the
+    /// one statement gives them. Same store, both ways: the offenders the pass reports are the one statement's rows in the one statement's order.
+    /// </summary>
+    [Fact]
+    public async Task ReadingTheDatabasesInTurn_RanksTheOffendersAsTheOneStatementDoes()
+    {
+        await SeedAsync();
+        var context = Context();
+
+        await new DuckDbFactCollector(_duckDb).CollectPlanRegressionFactsAsync(context, new List<Fact>());
+
+        var oneStatement = (await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql)).Select(c => (c.DatabaseName, c.QueryId)).ToList();
+        var offenders = context.PlanRegressionOffenders!.Select(o => (o.DatabaseName, o.QueryId)).ToList();
+        Assert.Contains(offenders, o => o.DatabaseName == "Db1");
+        Assert.Contains(offenders, o => o.DatabaseName == "Db2");
+        Assert.Equal(oneStatement.Where(offenders.Contains).ToList(), offenders);
+    }
+
+    [Fact]
+    public async Task AWriterThatAsksBetweenTwoDatabases_TakesTheLock()
+    {
+        await SeedAsync();
+        var collector = new DuckDbFactCollector(_duckDb);
+        var writes = 0;
+        collector.AfterPlanRegressionDatabaseReadForTests = () =>
+        {
+            /* The 5 s budget the housekeeping writers use. The store holds two databases with regressions, so there is one gap. */
+            using var write = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(5));
+            writes++;
+        };
+
+        await collector.CollectPlanRegressionFactsAsync(Context(), new List<Fact>());
+
+        Assert.Equal(1, writes);
+    }
+
+    /// <summary>
+    /// #9353: three databases whose queries all lose the same CPU at the same factor, so every row ties on both of the statement's ranking
+    /// keys. Three queries lose more (two of them tie at the top, in different databases), 108 tie below them, and the statement keeps 100.
+    /// The cut falls inside the tied rows, so which rows survive depends on the order the ties come out in.
+    /// </summary>
+    private async Task SeedTiesAsync()
+    {
+        foreach (var database in new[] { "DbC", "DbA", "DbB" })
+        {
+            for (var q = 1; q <= 36; q++)
+                Query(q, null, "SELECT " + q + " FROM dbo.tied", 300_000, database: database, hotDigest: false);
+        }
+
+        Query(101, null, "SELECT 101 FROM dbo.top", 500_000, database: "DbB", hotDigest: false);
+        Query(102, null, "SELECT 102 FROM dbo.top", 500_000, database: "DbC", hotDigest: false);
+        Query(103, null, "SELECT 103 FROM dbo.second", 400_000, database: "DbA", hotDigest: false);
+        await FlushAsync();
+    }
+
+    [Fact]
+    public async Task ReadingTheDatabasesInTurn_GivesTheOneStatementsRowsInItsOrder_WhenRowsTieOnCpuLostAndOnTheCut()
+    {
+        await SeedTiesAsync();
+        var context = Context();
+        var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), TestContext.Current.CancellationToken);
+
+        var (inTurn, _) = await new DuckDbFactCollector(_duckDb).ReadPlanRegressionCostAsync(context, plan);
+        var oneStatement = await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql);
+
+        var expected = new[] { ("DbB", 101L), ("DbC", 102L), ("DbA", 103L) }
+            .Concat(new[] { "DbA", "DbB", "DbC" }.SelectMany(d => Enumerable.Range(1, 36).Select(q => (d, (long)q))))
+            .Take(DuckDbFactCollector.PlanRegressionCandidateLimit)
+            .ToList();
+        Assert.Equal(expected, oneStatement.Select(c => (c.DatabaseName, c.QueryId)).ToList());
+        Assert.Equal(expected, inTurn.Select(c => (c.DatabaseName, c.QueryId)).ToList());
+        /* The cut is inside the tie: DbC keeps its first 25 queries and drops the other 11. */
+        Assert.Contains(("DbC", 25L), expected);
+        Assert.DoesNotContain(("DbC", 26L), expected);
+    }
+
+    /// <summary>
+    /// #9353: two databases, each with two queries that run on three replicas (a NULL role, PRIMARY and SECONDARY). Every row ties on the
+    /// CPU lost, the factor, the database and the query, so only the replica role orders them. A role's plans carry plan_ids of its own
+    /// (the latest plan is query * 100 + 12 for PRIMARY, + 22 for SECONDARY, + 32 for no role), which is how a candidate shows its role.
+    /// The rows are written SECONDARY first, then no role, then PRIMARY, and the databases in reverse, so no order is the insert order.
+    /// </summary>
+    private async Task SeedReplicaTiesAsync()
+    {
+        foreach (var database in new[] { "DbB", "DbA" })
+        {
+            for (var q = 1; q <= 2; q++)
+            {
+                Query(q, null, "SELECT " + q + " FROM dbo.roles", 300_000, role: "SECONDARY", database: database, hotDigest: false, planBase: q * 100 + 20);
+                Query(q, null, "SELECT " + q + " FROM dbo.roles", 300_000, role: null, database: database, hotDigest: false, planBase: q * 100 + 30);
+                Query(q, null, "SELECT " + q + " FROM dbo.roles", 300_000, role: "PRIMARY", database: database, hotDigest: false, planBase: q * 100 + 10);
+            }
+        }
+
+        await FlushAsync();
+    }
+
+    /* Per database, per query: PRIMARY, SECONDARY, then the NULL role last (the statement's ORDER BY on replica_role, NULL last). */
+    private static readonly (string Database, long QueryId, string Role, long LatestPlanId)[] ReplicaTieOrder =
+        new[] { "DbA", "DbB" }.SelectMany(d => new long[] { 1, 2 }.SelectMany(q => new[]
+        {
+            (d, q, "PRIMARY", q * 100 + 12), (d, q, "SECONDARY", q * 100 + 22), (d, q, "", q * 100 + 32),
+        })).ToArray();
+
+    [Fact]
+    public async Task ReadingTheDatabasesInTurn_GivesTheOneStatementsRowsInItsOrder_WhenRowsTieOnEverythingButTheReplicaRole()
+    {
+        await SeedReplicaTiesAsync();
+        var context = Context();
+        var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), TestContext.Current.CancellationToken);
+
+        var (inTurn, _) = await new DuckDbFactCollector(_duckDb).ReadPlanRegressionCostAsync(context, plan);
+        var oneStatement = await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql);
+
+        var expected = ReplicaTieOrder.Select(r => (r.Database, r.QueryId, r.LatestPlanId)).ToList();
+        Assert.Equal(expected, oneStatement.Select(c => (c.DatabaseName, c.QueryId, c.LatestPlanId!.Value)).ToList());
+        Assert.Equal(oneStatement, inTurn);
+    }
+
+    [Fact]
+    public async Task TheRegressedQueriesDrillDown_ReadingTheDatabasesInTurn_GivesTheOneStatementsRowsInItsOrder_WhenRowsTieOnEverythingButTheReplicaRole()
+    {
+        await SeedReplicaTiesAsync();
+        var context = Context();
+        var plan = await _duckDb.PlanArchiveReadAsync(
+            System.Threading.CancellationToken.None,
+            new ArchiveWindow("query_stats", "collection_time", context.TimeRangeStart),
+            new ArchiveWindow("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14)));
+
+        List<string> oneStatement;
+        using (var readLock = _duckDb.AcquireReadLock())
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            oneStatement = (await DrillDownCollector.ReadRegressedQueriesAsync(connection, context, plan, databases: null))
+                .Select(r => System.Text.Json.JsonSerializer.Serialize(r.Item)).ToList();
+        }
+
+        var finding = new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", StoryPath = "PLAN_REGRESSION", PathKeys = ["PLAN_REGRESSION"], Severity = 1.0 };
+        await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], Context());
+        var inTurn = ((IEnumerable<object>)finding.DrillDown!["regressed_queries"]).Select(i => System.Text.Json.JsonSerializer.Serialize(i)).ToList();
+
+        /* The drill-down keeps five of the twelve, and the cut falls inside the roles of DbA's second query (PRIMARY and SECONDARY stay). */
+        static List<(string, long, string)> Keys(List<string> rows) => rows
+            .Select(r => System.Text.Json.JsonDocument.Parse(r).RootElement)
+            .Select(e => (e.GetProperty("database").GetString()!, e.GetProperty("query_id").GetInt64(), e.GetProperty("replica_role").GetString()!)).ToList();
+        Assert.Equal(ReplicaTieOrder.Take(5).Select(r => (r.Database, r.QueryId, r.Role)).ToList(), Keys(oneStatement));
+        Assert.Equal(oneStatement, inTurn);
+    }
+
+    [Fact]
+    public async Task TheRegressedQueriesDrillDown_ReadingTheDatabasesInTurn_GivesTheOneStatementsFive()
+    {
+        await SeedTiesAsync();
+        var context = Context();
+        var plan = await _duckDb.PlanArchiveReadAsync(
+            System.Threading.CancellationToken.None,
+            new ArchiveWindow("query_stats", "collection_time", context.TimeRangeStart),
+            new ArchiveWindow("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14)));
+
+        async Task<List<string>> OneStatementAsync(AnalysisContext c)
+        {
+            using var readLock = _duckDb.AcquireReadLock();
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync();
+            return (await DrillDownCollector.ReadRegressedQueriesAsync(connection, c, plan, databases: null))
+                .Select(r => System.Text.Json.JsonSerializer.Serialize(r.Item)).ToList();
+        }
+
+        async Task<List<string>> InTurnAsync(AnalysisContext c)
+        {
+            var finding = new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", StoryPath = "PLAN_REGRESSION", PathKeys = ["PLAN_REGRESSION"], Severity = 1.0 };
+            await new DrillDownCollector(_duckDb).EnrichFindingsAsync([finding], c);
+            return ((IEnumerable<object>)finding.DrillDown!["regressed_queries"]).Select(i => System.Text.Json.JsonSerializer.Serialize(i)).ToList();
+        }
+
+        static List<(string, long)> Keys(List<string> rows) => rows
+            .Select(r => System.Text.Json.JsonDocument.Parse(r).RootElement)
+            .Select(e => (e.GetProperty("database").GetString()!, e.GetProperty("query_id").GetInt64())).ToList();
+
+        /* Every query: the two that tie at the top (two databases), the one below, then the first two of the tied rows. */
+        var oneStatement = await OneStatementAsync(context);
+        Assert.Equal(
+            new[] { ("DbB", 101L), ("DbC", 102L), ("DbA", 103L), ("DbA", 1L), ("DbA", 2L) },
+            Keys(oneStatement));
+        Assert.Equal(oneStatement, await InTurnAsync(Context()));
+
+        /* The fact named some of its offenders: only those rows, and the databases they are not in are left unread. */
+        var named = Context();
+        named.PlanRegressionOffenders = [new("DbC", 5), new("DbA", 7), new("DbC", 102)];
+        var namedOne = await OneStatementAsync(named);
+        /* The lists match independently, so the pairs are every database listed with every query id listed: five rows exist in DbC and DbA. */
+        Assert.Equal(new[] { ("DbC", 102L), ("DbA", 5L), ("DbA", 7L), ("DbC", 5L), ("DbC", 7L) }, Keys(namedOne));
+        Assert.Equal(namedOne, await InTurnAsync(named));
+    }
+
+    [Fact]
+    public async Task AWriterThatAsksBetweenTwoDatabasesOfTheDrillDown_TakesTheLock()
+    {
+        await SeedTiesAsync();
+        var writes = 0;
+        var collector = new DrillDownCollector(_duckDb)
+        {
+            /* A target of nothing makes every database a batch of its own (#9353), so the three of them give two gaps. */
+            RegressedQueriesHoldTargetForTests = TimeSpan.Zero,
+            AfterRegressedQueriesDatabaseReadForTests = () =>
+            {
+                using var write = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(5));
+                writes++;
+            },
+        };
+        var finding = new AnalysisFinding { RootFactKey = "PLAN_REGRESSION", StoryPath = "PLAN_REGRESSION", PathKeys = ["PLAN_REGRESSION"], Severity = 1.0 };
+
+        await collector.EnrichFindingsAsync([finding], Context());
+
+        /* Three databases, so two gaps. */
+        Assert.Equal(2, writes);
     }
 
     [Fact]

@@ -66,10 +66,22 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     public const string XeSessionName = "PerformanceMonitor_Attention";
 
     /// <summary>A run's counter row, written only when the delta is above zero: collection_time is the run's time, attention_count the counter delta, event_time NULL.</summary>
-    public const string KindCount = "count";
+    public const string KindCount = AttentionWindowSql.KindCount;
 
     /// <summary>One kept ring-buffer event: the detail of an attention, attention_count 0, never summed into a count.</summary>
-    public const string KindSample = "sample";
+    public const string KindSample = AttentionWindowSql.KindSample;
+
+    /// <summary>
+    /// #9507: one sampled captured call, from an <c>rpc_completed</c> or <c>sql_batch_completed</c> event the session kept because
+    /// it ended Abort, or Error after at least 0.9 s. A call the client cancelled while it ran has that shape (SQL Server 2016 to
+    /// 2022 report Abort for it, 2025 reports Error), but so does a batch-aborting error after 0.9 s or more (a conversion error,
+    /// a deadlock victim that waited), which ends with result Error on 2022 as well. Such a row has no attention partner, so every
+    /// read leaves it out. <c>interrupt_duration_us</c> is the call's elapsed time (not the attention's). <c>statement_text</c> is
+    /// the <c>sql_text</c> action, which carries no parameter values: the object name, a colon and that text for an RPC, the
+    /// object name alone for a stored-procedure RPC with no text, or the text for a batch. The judge matches it to an attention
+    /// sample by session and time. No count row: the attention count stays the exact total.
+    /// </summary>
+    public const string KindAborted = AttentionWindowSql.KindAborted;
 
     /// <summary>The stored statement text is cut here (after the statement filter).</summary>
     public const int MaxStatementTextLength = 4000;
@@ -268,12 +280,37 @@ SELECT
     session_id = evt.value('(action[@name=""session_id""]/value)[1]', 'integer'),
     request_id = evt.value('(data[@name=""request_id""]/value)[1]', 'integer'),
     interrupt_duration_us = evt.value('(data[@name=""duration""]/value)[1]', 'bigint'),
-    statement_text = evt.value('(action[@name=""sql_text""]/value)[1]', 'nvarchar(max)')
+    statement_text = evt.value('(action[@name=""sql_text""]/value)[1]', 'nvarchar(max)'),
+    event_kind = CONVERT(varchar(20), '{6}'),
+    object_name = CONVERT(nvarchar(512), NULL)
 FROM @PerformanceMonitor_Attention AS pma
 CROSS APPLY pma.ring_buffer.nodes('RingBufferTarget/event[@name=""attention""]') AS e(evt)
 WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
+
+UNION ALL
+
+SELECT
+    event_time = evt.value('(@timestamp)[1]', 'datetime2'),
+    database_name = evt.value('(action[@name=""database_name""]/value)[1]', 'nvarchar(128)'),
+    client_app_name = evt.value('(action[@name=""client_app_name""]/value)[1]', 'nvarchar(256)'),
+    client_hostname = evt.value('(action[@name=""client_hostname""]/value)[1]', 'nvarchar(256)'),
+    session_id = evt.value('(action[@name=""session_id""]/value)[1]', 'integer'),
+    request_id = evt.value('(data[@name=""request_id""]/value)[1]', 'integer'),
+    interrupt_duration_us = evt.value('(data[@name=""duration""]/value)[1]', 'bigint'),
+    statement_text =
+        COALESCE
+        (
+            NULLIF(evt.value('(action[@name=""sql_text""]/value)[1]', 'nvarchar(max)'), N''),
+            NULLIF(evt.value('(data[@name=""statement""]/value)[1]', 'nvarchar(max)'), N''),
+            NULLIF(evt.value('(data[@name=""batch_text""]/value)[1]', 'nvarchar(max)'), N'')
+        ),
+    event_kind = CONVERT(varchar(20), '{7}'),
+    object_name = evt.value('(data[@name=""object_name""]/value)[1]', 'nvarchar(512)')
+FROM @PerformanceMonitor_Attention AS pma
+CROSS APPLY pma.ring_buffer.nodes('RingBufferTarget/event[@name=""rpc_completed"" or @name=""sql_batch_completed""]') AS e(evt)
+WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
 ORDER BY
-    evt.value('(@timestamp)[1]', 'datetime2')
+    event_time
 OPTION(RECOMPILE);
 
 SELECT
@@ -307,7 +344,9 @@ SELECT
             .Replace("{2}", isAzureSqlDb ? "sys.dm_xe_database_session_targets" : "sys.dm_xe_session_targets", StringComparison.Ordinal)
             .Replace("{3}", EventCountExpression, StringComparison.Ordinal)
             .Replace("{4}", RingBufferXml.DeclareSql, StringComparison.Ordinal)
-            .Replace("{5}", RingBufferXml.ParseSql, StringComparison.Ordinal);
+            .Replace("{5}", RingBufferXml.ParseSql, StringComparison.Ordinal)
+            .Replace("{6}", KindSample, StringComparison.Ordinal)
+            .Replace("{7}", KindAborted, StringComparison.Ordinal);
 
     /// <summary>The stored prior event_counter count, or null on a first run, a restarted host or an unreadable value.</summary>
     public static long? ReadLastCount(IReadOnlyDictionary<string, string> state, string? databaseName) =>
@@ -340,11 +379,25 @@ SELECT
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            var filtered = scrub.Text(reader.IsDBNull(7) ? null : reader.GetString(7));
+            /* An empty string is no text: the completed events still send their statement and batch_text nodes, empty, because the
+               session turns those fields off (#9507), so the batch reads the sql_text action first and the C# side never sees them. */
+            var rawText = reader.IsDBNull(7) ? null : reader.GetString(7);
+            var filtered = scrub.Text(string.IsNullOrEmpty(rawText) ? null : rawText);
+            var aborted = !reader.IsDBNull(8) && string.Equals(reader.GetString(8), KindAborted, StringComparison.Ordinal);
+            var objectName = aborted && !reader.IsDBNull(9) ? reader.GetString(9) : null;
+            if (!string.IsNullOrEmpty(objectName)
+                && !string.Equals(filtered, SensitiveStatements.PlaceholderText, StringComparison.Ordinal))
+            {
+                /* An RPC names its object: "dbo.proc: <statement>", or the object name alone when the call has no sql_text. A batch has
+                   no object name. A withheld statement stays the bare marker: prefixed, it would get a fingerprint and group every
+                   withheld call of one object together (#4348). */
+                filtered = filtered is null ? objectName : objectName + ": " + filtered;
+            }
+
             rows.Add(new Row
             {
                 EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
-                EventKind = KindSample,
+                EventKind = aborted ? KindAborted : KindSample,
                 AttentionCount = 0,
                 /* A database-scoped session captures its own database, which the action may also name. */
                 DatabaseName = context.CurrentDatabaseName ?? (reader.IsDBNull(1) ? null : reader.GetString(1)),

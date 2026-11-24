@@ -350,7 +350,7 @@ public static class StoreLogClassifier
         /* Counted (#9439) - log_lock_waits' own lines: `process 123 still waiting for ShareLock on ... after 1000.1 ms`, and the
            `acquired`, `avoided deadlock` and `detected deadlock` lines that end or continue the same wait. They are the only LOG
            messages PostgreSQL begins with `process `. One wait leaves two or more of them, so the count is lines, not waits. The waits
-           themselves (who waited, behind whom, on what, how long) are kept as rows by StoreLockWaitParser, which get_store_lock_waits
+           themselves (who waited, behind whom, on what, how long) are kept as rows by StoreLockWaits.Parse, which get_store_lock_waits
            reads, so this class is only the rate. */
         new("lock_wait", Log, MatchKind.StartsWith, "process ", false,
             "log_lock_waits wrote a line for a session that waited on a lock past deadlock_timeout, one line when it was still waiting and one when it got the lock - get_store_lock_waits lists the waits with who held the lock"),
@@ -397,6 +397,14 @@ public static class StoreLogClassifier
            PostgreSQL's English wording, which the managed store pins with lc_messages = 'C'. */
         new("shutdown_in_progress", Fatal, MatchKind.StartsWith, "the database system is shutting down", false,
             "a client reached the store while it was stopping - every service restart writes it, expected"),
+
+        /* EXCLUDING (#9515) - TimescaleDB's WARNING when a hypertable is created on a `timestamp without time zone`
+           column. The store keeps UTC in plain `timestamp` columns on purpose, so the HINT that follows (use TIMESTAMPTZ)
+           does not apply, and every migration that creates a hypertable writes the pair once per time column. The HINT
+           is a continuation line of this entry, so it is counted with it and never shows up alone. WARNING-scoped and
+           anchored at the start of the message, so an ERROR that mentions the type is not filed here. */
+        new("timescale_timestamp_column", ["WARNING"], MatchKind.StartsWith, "column type \"timestamp without time zone\" used for", false,
+            "TimescaleDB's note that a hypertable time column is a plain timestamp - the store keeps UTC without a zone on purpose, expected after every upgrade"),
 
         /* EXCLUDING - the Windows fork-emulation artifact, ~170-290/day, auto-retried by PostgreSQL itself
            and documented at length behind the 1 GB shared_buffers cap (#1559, pgsql-bugs BUG #14050 /
@@ -910,6 +918,21 @@ public static class StoreLogClassifier
     private readonly record struct Field(FieldKind Kind, string Name, int MessageStart);
 
     /// <summary>
+    /// The field <see cref="FindField"/> reads on a line, for a reader that walks entries itself (#9439): whether it is a primary
+    /// severity (the line opens an entry), its name, where its label starts (the text before it is the log prefix) and where its
+    /// message starts. False when the line opens no field this reader knows.
+    /// </summary>
+    internal static bool TryReadField(ReadOnlySpan<char> line, out bool primary, out string name, out int labelStart, out int messageStart)
+    {
+        var field = FindField(line);
+        primary = field.Kind == FieldKind.Primary;
+        name = field.Name ?? string.Empty;
+        messageStart = field.MessageStart;
+        labelStart = field.Kind == FieldKind.None ? 0 : field.MessageStart - 3 - name.Length;
+        return field.Kind != FieldKind.None;
+    }
+
+    /// <summary>
     /// The line's field: the label the line's FIRST label-shaped colon ends, when that label is a severity or a
     /// continuation field this reader knows, and where its message starts.
     ///
@@ -933,21 +956,6 @@ public static class StoreLogClassifier
     /// prefix rendering <c>%u@%d</c> for a role literally named <c>ERROR</c> puts <c>ERROR@</c> in the line
     /// and cannot match.</para>
     /// </summary>
-    /// <summary>
-    /// The field <see cref="FindField"/> reads on a line, for a reader that walks entries itself (#9439): whether it is a primary
-    /// severity (the line opens an entry), its name, where its label starts (the text before it is the log prefix) and where its
-    /// message starts. False when the line opens no field this reader knows.
-    /// </summary>
-    internal static bool TryReadField(ReadOnlySpan<char> line, out bool primary, out string name, out int labelStart, out int messageStart)
-    {
-        var field = FindField(line);
-        primary = field.Kind == FieldKind.Primary;
-        name = field.Name ?? string.Empty;
-        messageStart = field.MessageStart;
-        labelStart = field.Kind == FieldKind.None ? 0 : field.MessageStart - 3 - name.Length;
-        return field.Kind != FieldKind.None;
-    }
-
     private static Field FindField(ReadOnlySpan<char> line)
     {
         var colon = line.IndexOf(':');

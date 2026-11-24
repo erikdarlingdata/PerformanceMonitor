@@ -382,6 +382,7 @@ public sealed class McpToolLatencyRecordingTests
         Assert.True(bytes > received.Length, "the answer holds two-byte characters");
         var sample = Assert.Single(readLatency.Drain(), d => d.Route == "latency_probe_wide" && d.Outcome == ReadOutcome.Ok);
         Assert.Equal(bytes, sample.ReplyBytesTotal);
+        Assert.Equal(1L, sample.ReplyBytesCount);
         Assert.True(slowReads.TryRead(out var record));
         Assert.Equal("latency_probe_wide", record!.Route);
         Assert.Equal(bytes, record.ReplyBytes);

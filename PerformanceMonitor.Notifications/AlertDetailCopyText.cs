@@ -191,7 +191,7 @@ public static class AlertChainLink
         {
             return metricName switch
             {
-                "High CPU" or "Server Unreachable" or "Server Restored" => AlertServerTab.PgOverview,
+                "High CPU" or "Capacity at ceiling" or "Server Unreachable" or "Server Restored" => AlertServerTab.PgOverview,
                 "Blocking Detected" or "Blocking Wait Time" or "Long-Running Query" => AlertServerTab.PgActivity,
                 "Poison Wait" => AlertServerTab.PgWaits,
                 "PostgreSQL Wraparound Risk" or "PostgreSQL Vacuum Horizon Blocked" => AlertServerTab.PgVacuum,

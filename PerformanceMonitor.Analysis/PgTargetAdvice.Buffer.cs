@@ -148,9 +148,18 @@ public static partial class PgTargetAdvice
         var text = new StringBuilder(720);
         text.Append(CompositionSentenceMarker);
         text.Append("the pool is ");
-        text.Append(summary.PoolFill is { } poolFill ? KnobPct(poolFill) : "an unknown share");
-        text.Append(" full (").Append(KnobNum(summary.PoolBuffersUsed)).Append(" of ").Append(KnobNum(summary.PoolBuffersTotal))
-            .Append(" buffers, ").Append(KnobBytes(summary.PoolBytes)).Append(')');
+        if (summary.PoolBuffersUsed is { } usedBuffers)
+        {
+            text.Append(summary.PoolFill is { } poolFill ? KnobPct(poolFill) : "an unknown share");
+            text.Append(" full (").Append(KnobNum(usedBuffers)).Append(" of ").Append(KnobNum(summary.PoolBuffersTotal))
+                .Append(" buffers, ").Append(KnobBytes(summary.PoolBytes)).Append(')');
+        }
+        else
+        {
+            /* #9508: the capture is a totals-only row from a target with no pg_buffercache_summary(): the size is known, the used count is not, and a 0 here would read as an empty pool. */
+            text.Append(KnobNum(summary.PoolBuffersTotal)).Append(" buffers (").Append(KnobBytes(summary.PoolBytes))
+                .Append("), and how much of it is in use is unknown (the per-relation scan was skipped over the cap and this target has no pg_buffercache_summary())");
+        }
 
         var largest = summary.TopRelations.Count > 0 ? summary.TopRelations[0] : null;
         if (largest is not null)
@@ -454,7 +463,7 @@ public sealed record PgTargetBufferCompositionSummary(
     DateTime? LastCaptureAt,
     double? LastCaptureHoursBeforeWindow,
     long PoolBuffersTotal,
-    long PoolBuffersUsed,
+    long? PoolBuffersUsed,
     long PoolBytes,
     double? PoolFill,
     long BuffersListed,

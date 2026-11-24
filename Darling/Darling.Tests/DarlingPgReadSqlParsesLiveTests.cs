@@ -118,6 +118,11 @@ public sealed class DarlingPgReadSqlParsesLiveTests
         "DarlingPgIndexBloatReader.EvidenceStatusList",
         "DarlingPgServerConfigReader.SessionScopedSources",
         /* #7455: the two words a buffer row without a name shows. Display text, not a statement. */
+        /* #9508: the words and the statement the read names for a snapshot with no relation rows. Not queries. */
+        "DarlingPgBufferUsageReader.RelationsListed",
+        "DarlingPgBufferUsageReader.SkippedOverCap",
+        "DarlingPgBufferUsageReader.Precondition",
+        "DarlingPgBufferUsageReader.PreconditionStatement",
         "DarlingPgBufferUsageReader.NotResolvedLabel",
         "DarlingPgBufferUsageReader.SharedOrDroppedLabel",
         /* #7409: two expression fragments spliced into CurrentConfigSql (in the parse-checked population): the default

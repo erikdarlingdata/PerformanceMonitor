@@ -191,6 +191,7 @@ An optional table is exported the same way wherever it is named: `--also`, `opti
 | `query_snapshots` | window | event | `collection_time` | none |
 | `pg_autovacuum_stats` | window | daily | `collection_time` | none |
 | `pg_blocking_edges` | window | event | `collection_time` | none |
+| `pg_buffer_usage` | window | event | `collection_time` | none |
 | `pg_column_stats` | window | daily | `collection_time` | none |
 | `pg_cpu_utilization` | window | hourly | `hour` | none |
 | `pg_database_size_stats` | window | daily | `collection_time` | none |
