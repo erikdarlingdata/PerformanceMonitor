@@ -210,7 +210,7 @@ internal static class DarlingMcpInstructions
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
                $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
-               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, and the store's own reads: `get_store_*`, `measure_store_table`). " +
+               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_service_starts`, and the store's own reads: `get_store_*`, `measure_store_table`). " +
                "`get_blocking` = Lite's `get_blocked_process_reports`.";
     }
 

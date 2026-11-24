@@ -251,7 +251,8 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         await _data.RecordMcpSlowCallAsync(Row("tool_a", now.AddHours(-5)));
         await _data.RecordMcpSlowCallAsync(Row("tool_b", now.AddHours(-1)));
         await _data.RecordMcpSlowCallAsync(Row("tool_a", now.AddHours(-3)));
-        var recorder = new McpCallTimingRecorder(_data);
+        // #9453: a threshold of one hour keeps the test's own calls out of the slow-call rows, even on a loaded machine.
+        var recorder = new McpCallTimingRecorder(_data) { SlowThreshold = TimeSpan.FromHours(1) };
 
         using var all = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_mcp_calls", ("hours_back", 24))).Text);
         var tools = all.RootElement.GetProperty("slow_calls").EnumerateArray().Select(r => r.GetProperty("tool").GetString()).ToArray();
@@ -271,7 +272,8 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         var now = DateTime.UtcNow;
         for (var i = 1; i <= 4; i++)
             await _data.RecordMcpSlowCallAsync(Row("tool_a", now.AddMinutes(-i)));
-        var recorder = new McpCallTimingRecorder(_data);
+        // #9453: a threshold of one hour keeps the test's own calls out of the slow-call rows, even on a loaded machine.
+        var recorder = new McpCallTimingRecorder(_data) { SlowThreshold = TimeSpan.FromHours(1) };
 
         using var cut = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_mcp_calls", ("hours_back", 24), ("limit", 3))).Text);
         Assert.True(cut.RootElement.GetProperty("truncated").GetBoolean());
