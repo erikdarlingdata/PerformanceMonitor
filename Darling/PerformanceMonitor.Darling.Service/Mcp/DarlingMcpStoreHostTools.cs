@@ -107,7 +107,7 @@ public sealed class DarlingMcpStoreHostTools
     {
         if (!(free_floor_percent > 0d && free_floor_percent < 100d))
         {
-            return McpHelpers.Status("invalid", "free_floor_percent must be above 0 and below 100 (default 25).");
+            return McpHelpers.Refusal("free_floor_percent", "free_floor_percent must be above 0 and below 100 (default 25).");
         }
 
         if (postgresConfig is null)
