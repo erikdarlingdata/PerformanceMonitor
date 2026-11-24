@@ -777,6 +777,15 @@ SET last_attempt_at = $7,
     /// could count it. A held row never kept a plan from coming back: a re-sighting cleared the stamp and the row waited again, so
     /// a deleted row's re-sighting inserts it again as a new pending row and the backlog ends the same, except that the row's first
     /// sighting is the new one.
+    ///
+    /// <para><b>The rows are joined by <c>ctid</c>, not by key (#9452).</b> The statement used to join the table to the limited
+    /// subquery on the six key columns. On a table the planner has no statistics for, or none that match its pending rows, it
+    /// estimates one pending row, and with that estimate the new <see cref="PendingIndexName"/> made the cheapest join the one that
+    /// reads every pending row of the server and re-runs the whole window subquery for each of them. A 68,000-row backlog ran past
+    /// <see cref="CommandTimeoutSeconds"/> where the key join without that index took 0.3 seconds. Joined on <c>ctid</c> the cheapest
+    /// plan under any estimate is the subquery first and one TID fetch per row it names, and with real statistics a hash join.
+    /// A row a collector re-sighted between the subquery and the delete has a new ctid and is left alone, which is what the
+    /// still-waiting conditions of <see cref="DeleteAndCountDroppedRows"/> already ask for.</para>
     /// </summary>
     private const string DeleteDroppedRowsHead = @"
 WITH gone AS
@@ -795,12 +804,8 @@ USING
     /// rows it dropped.
     /// </summary>
     private const string DeleteAndCountDroppedRows = @") AS dropped
-WHERE b.server_id = $1
-AND   b.collector_name = dropped.collector_name
-AND   b.plan_handle = dropped.plan_handle
-AND   b.sql_handle = dropped.sql_handle
-AND   b.statement_start_offset = dropped.statement_start_offset
-AND   b.statement_end_offset = dropped.statement_end_offset
+WHERE b.ctid = dropped.row_id
+AND   b.server_id = $1
 AND   b.captured_at IS NULL
 AND   b.expired_at IS NULL
 AND   b.last_attempt_at IS NULL
@@ -873,10 +878,11 @@ FROM gone;";
     /// </summary>
     public const string SupersedeSql = DeleteDroppedRowsHead + @"
     SELECT
-        " + RowKeyColumns + @"
+        row_id
     FROM
     (
         SELECT
+            ctid AS row_id,
             " + RowKeyColumns + @",
             last_seen_at,
             max(last_seen_at) OVER
@@ -908,10 +914,11 @@ FROM gone;";
     /// </summary>
     public const string DropOverCapSql = DeleteDroppedRowsHead + @"
     SELECT
-        " + RowKeyColumns + @"
+        row_id
     FROM
     (
         SELECT
+            ctid AS row_id,
             " + RowKeyColumns + @",
             row_number() OVER
             (

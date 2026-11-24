@@ -190,10 +190,29 @@ FROM generate_series(1, $3) AS n;";
         var overCap = await ExplainAsync(connection, server, sightings, Cap, ct);
         TestContext.Current.SendDiagnosticMessage("#9452 plan with the index, first test over the cap, " + overCap.Buffers + " buffers:\n" + overCap.Text);
 
+        /* A live store is not freshly vacuumed: nearly every re-sighting is a heap-only update, and each one clears its page's
+           all-visible bit until the next autovacuum, so an index-only scan has to visit the heap for the rows on those pages. The
+           bound of fifty heap fetches above holds for the vacuumed table only. Here a third of the server's pending rows are
+           re-sighted through the service's own upsert, with no vacuum after, and the same count is read again. */
+        const int resightedAfterVacuum = 12000;
+        await using (var record = new NpgsqlCommand(OversizedPlanBacklog.RecordSightingsSql, connection))
+        {
+            BindSightings(record, server, Sightings("PENDING", resightedAfterVacuum).ToList(), 1_000_000, withDropLimit: true);
+            Assert.Equal(0, Convert.ToInt32(await record.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+        }
+
+        var dirty = await ExplainAsync(connection, server, sightings, 1_000_000, ct);
+        Walk(dirty.Plan, out _, out var dirtyIndexNames);
+        Assert.Contains(IndexName, dirtyIndexNames);
+        TestContext.Current.SendDiagnosticMessage(
+            "#9452 plan with the index after re-sighting a third of the pending rows and no vacuum, " + IndexOnlyHeapFetches(dirty.Plan) +
+            " heap fetches, " + dirty.Buffers + " buffers:\n" + dirty.Text);
+
         await ExecAsync(connection, "DROP INDEX collect." + IndexName + ";", ct);
         var without = await ExplainAsync(connection, server, sightings, 1_000_000, ct);
         TestContext.Current.SendDiagnosticMessage("#9452 plan without the index, " + without.Buffers + " buffers:\n" + without.Text);
         Assert.True(without.Buffers > withIndex.Buffers * 5, $"without the index {without.Buffers} buffers, with it {withIndex.Buffers}");
+        TestContext.Current.SendDiagnosticMessage("#9452 buffers: vacuumed with the index " + withIndex.Buffers + ", re-sighted with the index " + dirty.Buffers + ", without the index " + without.Buffers);
     }
 
     private sealed record Explained(JsonElement Plan, string Text, long Buffers);
