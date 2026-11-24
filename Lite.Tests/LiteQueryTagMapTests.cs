@@ -489,7 +489,7 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task AReSightingWithinTheHour_WritesNothing_SoTheCountAndLastSeenStay()
+    public async Task AReSightingWithinTheRefreshWidth_WritesNothing_SoTheCountAndLastSeenStay()
     {
         Sight(Snapshot(HashA));
         await SetLastSeenAsync(HashA, DateTime.UtcNow.AddMinutes(-10));
@@ -512,13 +512,13 @@ public sealed class LiteQueryTagMapTests : IClassFixture<SharedDuckDbFixture>
     }
 
     [Fact]
-    public async Task AReSightingOfARowOverAnHourPastTheBackdatedStamp_MovesLastSeenToTheBackdatedStamp_AndOneWithinTheHourDoesNot()
+    public async Task AReSightingOfARowOverTheRefreshWidthPastTheBackdatedStamp_MovesLastSeenToTheBackdatedStamp_AndOneWithinTheWidthDoesNot()
     {
         var backdate = QueryTagSightingBuffer.ReSightingBackdate;
         Sight(Snapshot(HashA), Snapshot(HashB));
-        var within = DateTime.UtcNow - backdate - TimeSpan.FromMinutes(59);
+        var within = DateTime.UtcNow - backdate - TimeSpan.FromMinutes(5 * 60 + 59);
         await SetLastSeenAsync(HashA, within);
-        await SetLastSeenAsync(HashB, DateTime.UtcNow - backdate - TimeSpan.FromMinutes(61));
+        await SetLastSeenAsync(HashB, DateTime.UtcNow - backdate - TimeSpan.FromMinutes(6 * 60 + 1));
         var withinStored = await LastSeenAsync(HashA);
         var beforeFlush = DateTime.UtcNow;
 

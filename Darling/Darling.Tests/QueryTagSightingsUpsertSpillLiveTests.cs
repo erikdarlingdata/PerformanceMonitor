@@ -49,7 +49,7 @@ WHERE NOT EXISTS (
       AND COALESCE(s.database_name, '') = COALESCE(u.database_name, '')
       AND NOT ((s.object_name IS NULL AND u.object_name IS NOT NULL)
             OR (s.text_sample IS NULL AND u.text_sample IS NOT NULL)
-            OR s.last_seen < now() - $11::interval - interval '1 hour'))
+            OR s.last_seen < now() - $11::interval - $12::interval))
 ORDER BY u.ord
 ON CONFLICT (server_id, key_kind, key, COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, ''), COALESCE(database_name, ''))
 DO UPDATE SET
@@ -57,7 +57,7 @@ DO UPDATE SET
         WHEN (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
           OR (t.text_sample IS NULL AND EXCLUDED.text_sample IS NOT NULL)
         THEN EXCLUDED.last_seen
-        WHEN t.last_seen < EXCLUDED.last_seen - $11::interval - interval '1 hour'
+        WHEN t.last_seen < EXCLUDED.last_seen - $11::interval - $12::interval
         THEN EXCLUDED.last_seen - $11::interval
         ELSE t.last_seen END,
     seen_count = t.seen_count + EXCLUDED.seen_count,
@@ -65,7 +65,7 @@ DO UPDATE SET
     text_sample = COALESCE(t.text_sample, EXCLUDED.text_sample)
 WHERE (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
    OR (t.text_sample IS NULL AND EXCLUDED.text_sample IS NOT NULL)
-   OR t.last_seen < EXCLUDED.last_seen - $11::interval - interval '1 hour'
+   OR t.last_seen < EXCLUDED.last_seen - $11::interval - $12::interval
 """;
 
     private static string KeyOf(int i) => "0x" + i.ToString("X8", CultureInfo.InvariantCulture);
@@ -132,6 +132,7 @@ WHERE (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
         command.Parameters.Add(TextArray(rows.Select(r => r.TextSample)));
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = rows.Select(r => r.Count).ToArray() });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = QueryTagSightingWriter.ReSightingBackdate });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = QueryTagSightingWriter.ReSightingRefreshWidth });
         return command;
     }
 

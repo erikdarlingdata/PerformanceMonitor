@@ -22,8 +22,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #8979: the sightings upsert rewrote every re-sighted row to add to <c>seen_count</c>, tens of millions of heap row versions
-/// a day on a busy store. A conflict now writes only when it fills an object name or text sample or the hourly
-/// <c>last_seen</c> move is due. Driven through the real writer (<see cref="QueryTagSightingWriter.RecordAsync"/>) and read back
+/// a day on a busy store. A conflict now writes only when it fills an object name or text sample or the
+/// <c>last_seen</c> move is due. #9456 widened that move from an hour to <see cref="QueryTagSightingWriter.ReSightingRefreshWidth"/>. Driven through the real writer (<see cref="QueryTagSightingWriter.RecordAsync"/>) and read back
 /// from the table and from <c>pg_stat_user_tables</c>.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. It reaches DARLING_TEST_PG only to create and drop its own database. */
@@ -76,7 +76,7 @@ public sealed class QueryTagSightingsRefreshGuardLiveTests
     }
 
     [Fact]
-    public async Task AnUnchangedReSighting_InsideTheHour_WritesNoRow_AndTheCountersShowNoUpdate()
+    public async Task AnUnchangedReSighting_InsideTheRefreshWidth_WritesNoRow_AndTheCountersShowNoUpdate()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -140,7 +140,7 @@ public sealed class QueryTagSightingsRefreshGuardLiveTests
     }
 
     [Fact]
-    public async Task ARowPastTheHourlyMove_GetsItsLastSeenAdvanced_ARowInsideItDoesNot_AndLastSeenNeverMovesBack()
+    public async Task ARowPastTheRefreshWidth_GetsItsLastSeenAdvancedOnce_ARowInsideItIsNotWritten_AndLastSeenNeverMovesBack()
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipText);
         var ct = TestContext.Current.CancellationToken;
@@ -150,22 +150,35 @@ public sealed class QueryTagSightingsRefreshGuardLiveTests
         var batch = Batch(6, i => "select " + i);
         await WriteAsync(postgres, batch, ct);
 
-        /* Row 1 is 59 minutes inside the move, row 2 is 61 minutes past it, row 3 is a day ahead of the clock. */
-        await ExecAsync(store, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {BackdateSql} - interval '59 minutes' WHERE key = '{KeyOf(1)}'", ct);
-        await ExecAsync(store, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {BackdateSql} - interval '61 minutes' WHERE key = '{KeyOf(2)}'", ct);
+        /* Row 1 is 5 hours 59 minutes inside the 6-hour width, row 2 is 6 hours 1 minute past it, row 3 is a day ahead of the clock,
+           row 4 is 3 hours back (the hourly width rewrote it, #9456), row 5 is 61 minutes back (due at the old hourly width). */
+        await ExecAsync(store, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {BackdateSql} - interval '5 hours 59 minutes' WHERE key = '{KeyOf(1)}'", ct);
+        await ExecAsync(store, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {BackdateSql} - interval '6 hours 1 minute' WHERE key = '{KeyOf(2)}'", ct);
         await ExecAsync(store, $"UPDATE collect.query_tag_sightings SET last_seen = now() + interval '1 day' WHERE key = '{KeyOf(3)}'", ct);
+        await ExecAsync(store, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {BackdateSql} - interval '3 hours' WHERE key = '{KeyOf(4)}'", ct);
+        await ExecAsync(store, $"UPDATE collect.query_tag_sightings SET last_seen = now() - {BackdateSql} - interval '61 minutes' WHERE key = '{KeyOf(5)}'", ct);
         var inside = await RowAsync(store, 1, ct);
         var ahead = await RowAsync(store, 3, ct);
+        var threeHours = await RowAsync(store, 4, ct);
+        var oldWidth = await RowAsync(store, 5, ct);
 
         await WriteAsync(postgres, batch, ct);
 
+        /* A re-sighting inside the width writes nothing: the row keeps its xmin, last_seen and count. */
         Assert.Equal(inside, await RowAsync(store, 1, ct));
         Assert.Equal(ahead, await RowAsync(store, 3, ct));
+        Assert.Equal(threeHours, await RowAsync(store, 4, ct));
+        Assert.Equal(oldWidth, await RowAsync(store, 5, ct));
         var moved = await RowAsync(store, 2, ct);
         Assert.Equal(2, moved.Count);
         Assert.Equal(1, await CountAsync(
             store,
             $"SELECT count(*) FROM collect.query_tag_sightings WHERE key = '{KeyOf(2)}' AND last_seen <= now() - {BackdateSql} AND last_seen > now() - {BackdateSql} - interval '1 minute'",
             ct));
+
+        /* Moved once: the stamp is fresh now, so the same flush again writes nothing more for the row. */
+        var movedAgain = await RowAsync(store, 2, ct);
+        await WriteAsync(postgres, batch, ct);
+        Assert.Equal(movedAgain, await RowAsync(store, 2, ct));
     }
 }
