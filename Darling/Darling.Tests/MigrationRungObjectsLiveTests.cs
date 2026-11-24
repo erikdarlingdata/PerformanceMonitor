@@ -39,9 +39,9 @@ public sealed class MigrationRungObjectsLiveTests
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement.Clone();
 
-    /// <summary>Rung 1: the history tables, and a table, an index and a function for later rungs to change.</summary>
+    /// <summary>Rung 1: the history tables, and a table, an index and a function for later rungs to change. It moves the version table into collect, as V8 does, so a later start reads its stamps there.</summary>
     private static PgMigrations.Migration Setup() => new(1, "setup",
-        "CREATE SCHEMA IF NOT EXISTS collect; " + ServiceStartHistory.CreateSql + ServiceStartRungObjects.CreateSql +
+        "CREATE SCHEMA IF NOT EXISTS collect; ALTER TABLE darling_schema_version SET SCHEMA collect; " + ServiceStartHistory.CreateSql + ServiceStartRungObjects.CreateSql +
         @" CREATE TABLE collect.probe_existing (id integer NOT NULL, old_note text, keep_me integer);
            CREATE INDEX ix_probe ON collect.probe_existing(id);
            CREATE FUNCTION collect.probe_fn() RETURNS integer LANGUAGE sql AS 'SELECT 1';");
