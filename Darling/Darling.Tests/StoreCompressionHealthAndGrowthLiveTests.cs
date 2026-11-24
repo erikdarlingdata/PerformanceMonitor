@@ -157,7 +157,9 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
         var ct = TestContext.Current.CancellationToken;
 
         const long DailyGrowth = 1_000_000_000L;
-        var config = new PostgresConfig { Managed = true };
+        /* The data volume is read off the managed data directory's disk, so the directory must exist. */
+        var dataDirectory = System.IO.Directory.CreateTempSubdirectory("darling-9429-");
+        var config = new PostgresConfig { Managed = true, DataDirectory = dataDirectory.FullName };
 
         /* A floor of 0.001 percent keeps the headroom positive on any disk that is not completely full, so the days figure is the
            rate's own answer and never the "already at the floor" zero. */
@@ -206,6 +208,8 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
             Assert.Equal(JsonValueKind.Null, forecast.GetProperty("days_until_free_floor").ValueKind);
             Assert.Equal(JsonValueKind.String, forecast.GetProperty("growth_note").ValueKind);
         }
+
+        dataDirectory.Delete(true);
     }
 
     [Fact]
@@ -261,7 +265,7 @@ public sealed class StoreCompressionHealthAndGrowthLiveTests
         Assert.Null(DarlingMcpStoreHostTools.ForecastDaysUntilFloor(sevenDays.Where(p => p.Day != now.Date.AddDays(-3)).ToList(), now, Tb, 400 * Gb, true, true, 25d).DaysUntilFloor);
 
         /* A store that shrank or stayed flat is not heading for the floor. */
-        var flat = Enumerable.Range(1, 7).Select(d => Day(d, d % 2 == 0 ? -5 * Gb : 5 * Gb)).ToList();
+        var flat = Enumerable.Range(1, 7).Select(d => Day(d, d == 7 ? 0 : d % 2 == 0 ? -5 * Gb : 5 * Gb)).ToList();
         var flatForecast = DarlingMcpStoreHostTools.ForecastDaysUntilFloor(flat, now, Tb, 400 * Gb, true, true, 25d);
         Assert.Null(flatForecast.DaysUntilFloor);
         Assert.NotNull(flatForecast.Note);
