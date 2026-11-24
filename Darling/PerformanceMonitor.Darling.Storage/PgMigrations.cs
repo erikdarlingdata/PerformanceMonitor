@@ -11729,7 +11729,12 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// below this build's version in that situation throws <see cref="TimeoutException"/> instead.</para>
     /// </summary>
     public static Task<int> MigrateAsync(NpgsqlConnection connection, CancellationToken cancellationToken = default)
-        => MigrateAsync(connection, logger: null, cancellationToken);
+        => MigrateAsync(connection, logger: null, observer: null, cancellationToken);
+
+    /// <summary>The logger-aware overload without a rung observer.</summary>
+    public static Task<int> MigrateAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+        => MigrateAsync(connection, logger, observer: null, cancellationToken);
 
     /// <summary>
     /// The logger-aware overload: after applying migrations it best-effort sets the database-default
@@ -11741,8 +11746,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// Path anyway (see <see cref="TrySetDatabaseSearchPathAsync"/>).
     /// </summary>
     public static async Task<int> MigrateAsync(
-        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default,
-        IMigrationRungObserver? observer = null)
+        NpgsqlConnection connection, ILogger? logger, IMigrationRungObserver? observer, CancellationToken cancellationToken = default)
     {
         if (connection is null)
         {
@@ -11762,7 +11766,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         int applied;
         try
         {
-            applied = await MigrateLockedAsync(connection, logger, Scripts, MigrationCommandTimeoutSeconds, cancellationToken, observer);
+            applied = await MigrateLockedAsync(connection, logger, Scripts, MigrationCommandTimeoutSeconds, observer, cancellationToken);
         }
         finally
         {
@@ -11975,8 +11979,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// </summary>
     internal static Task<int> ApplyLadderForTestsAsync(
         NpgsqlConnection connection, ILogger? logger, IReadOnlyList<Migration> ladder, int defaultCommandTimeoutSeconds,
-        CancellationToken cancellationToken, IMigrationRungObserver? observer = null)
-        => MigrateLockedAsync(connection, logger, ladder, defaultCommandTimeoutSeconds, cancellationToken, observer);
+        CancellationToken cancellationToken)
+        => MigrateLockedAsync(connection, logger, ladder, defaultCommandTimeoutSeconds, observer: null, cancellationToken);
 
     /// <summary>
     /// Applies every rung of <paramref name="ladder"/> above the store's stamped version, each in its own transaction
@@ -11986,7 +11990,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// </summary>
     private static async Task<int> MigrateLockedAsync(
         NpgsqlConnection connection, ILogger? logger, IReadOnlyList<Migration> ladder, int defaultCommandTimeoutSeconds,
-        CancellationToken cancellationToken, IMigrationRungObserver? observer = null)
+        IMigrationRungObserver? observer, CancellationToken cancellationToken)
     {
         /* Resolve bare names through collect/config for this migrate session. Load-bearing from V8
            on: V8 moves darling_schema_version into collect, and the version stamp below writes it by

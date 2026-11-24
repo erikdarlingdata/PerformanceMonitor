@@ -139,7 +139,7 @@ public sealed partial class DarlingWorker
                    collect/config for every future connection (V8 security split); a least-privilege BYO
                    login that cannot ALTER DATABASE is warned, not failed — the managed connection strings
                    carry Search Path regardless. */
-                var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken, startRecorder);
+                var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, startRecorder, stoppingToken);
                 _logger.LogInformation("Postgres store ready (schema v{Version}, {Applied} migration(s) applied)",
                     StorageVersion.SchemaVersion, applied);
                 startRecorder.StoreReady();
