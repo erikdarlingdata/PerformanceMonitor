@@ -266,6 +266,27 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
     }
 
     [Fact]
+    public async Task GetSlowReads_ReportsTruncated_WhenTheWindowHoldsMoreSlowCallsThanLimit_AndNotWhenTheyFit()
+    {
+        var now = DateTime.UtcNow;
+        for (var i = 1; i <= 4; i++)
+            await _data.RecordMcpSlowCallAsync(Row("tool_a", now.AddMinutes(-i)));
+        var recorder = new McpCallTimingRecorder(_data);
+
+        using var cut = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_mcp_calls", ("hours_back", 24), ("limit", 3))).Text);
+        Assert.True(cut.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(3, cut.RootElement.GetProperty("slow_calls").GetArrayLength());
+
+        using var exact = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_mcp_calls", ("hours_back", 24), ("limit", 4))).Text);
+        Assert.False(exact.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(4, exact.RootElement.GetProperty("slow_calls").GetArrayLength());
+
+        using var roomy = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_mcp_calls", ("hours_back", 24), ("limit", 10))).Text);
+        Assert.False(roomy.RootElement.GetProperty("truncated").GetBoolean());
+        Assert.Equal(4, roomy.RootElement.GetProperty("slow_calls").GetArrayLength());
+    }
+
+    [Fact]
     public async Task GetSlowReads_ShowsThePerToolFiguresOfTheCallsMadeSoFar()
     {
         var recorder = new McpCallTimingRecorder(_data) { SlowThreshold = TimeSpan.FromHours(1) };

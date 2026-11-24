@@ -37,7 +37,8 @@ public sealed class McpSlowCallTools
         "peak_working_set_bytes (highest process working set polled every 75 ms during the call) and duckdb_memory_bytes (DuckDB's memory total when the call ended, " +
         "null when the store lock was busy then); memory_source says where the two memory figures came from. No argument value is stored. " +
         "per_tool: for each tool called since Lite started, count, total_ms, mean_ms, max_ms, p50_ms, p95_ms and p99_ms (bucket upper bounds, never interpolated, capped at max_ms), " +
-        "slow_calls and errors. Rows are kept 7 days, at most 1000. Optional tool filter on slow_calls. Empty slow_calls means no call was slow, not a failure.";
+        "slow_calls and errors. Rows are kept 7 days, at most 1000. Optional tool filter on slow_calls. Empty slow_calls means no call was slow, not a failure. " +
+        "truncated is true when the window held more slow calls than limit, so slow_calls is the newest limit of them. per_tool is never cut by limit.";
 
     [McpServerTool(Name = "get_slow_mcp_calls"), Description(Description)]
     public static async Task<string> GetSlowReads(
@@ -45,7 +46,7 @@ public sealed class McpSlowCallTools
         McpCallTimingRecorder recorder,
         [Description("Hours of history for slow_calls. Default 24; max 168.")] int hours_back = DefaultHours,
         [Description("Optional: only slow_calls for this tool name.")] string? tool = null,
-        [Description("Maximum slow_calls rows to return. Default 20.")] int limit = DefaultLimit)
+        [Description("Maximum slow_calls rows to return, newest first. Default 20. This is what bounds the page: read truncated to know whether the window held more.")] int limit = DefaultLimit)
     {
         var windowError = McpHelpers.ValidateWindow(hours_back, null, out _) ?? McpHelpers.ValidateTop(limit);
         if (windowError != null) return windowError;
@@ -54,7 +55,9 @@ public sealed class McpSlowCallTools
         {
             var since = DateTime.UtcNow.AddHours(-hours_back);
             var wanted = string.IsNullOrWhiteSpace(tool) ? null : tool.Trim();
-            var rows = await dataService.GetMcpSlowCallsAsync(since, limit, wanted);
+            /* Fetch one past the limit so truncation is observed, not inferred from a full page (#3699). */
+            var fetched = await dataService.GetMcpSlowCallsAsync(since, limit + 1, wanted);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
             var perTool = recorder.Snapshot()
                 .Where(f => wanted is null || f.Tool == wanted)
                 .Select(f => new
@@ -75,6 +78,7 @@ public sealed class McpSlowCallTools
             {
                 hours_back,
                 slow_threshold_ms = (long)recorder.SlowThreshold.TotalMilliseconds,
+                truncated,
                 slow_calls = rows.Select(r => new
                 {
                     tool = r.Tool,
