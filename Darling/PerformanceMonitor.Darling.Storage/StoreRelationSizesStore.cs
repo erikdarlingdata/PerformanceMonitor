@@ -125,7 +125,7 @@ FROM collect.store_relation_sizes_latest AS l";
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(measured);
         var pass = measured.Pass;
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RelationSizes, cancellationToken).ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
         int deleted;
@@ -181,7 +181,7 @@ FROM collect.store_relation_sizes_latest AS l";
         ArgumentNullException.ThrowIfNull(postgres);
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RelationSizes, cancellationToken).ConfigureAwait(false);
             await using var transaction = await connection.BeginTransactionAsync(IsolationLevel.RepeatableRead, cancellationToken).ConfigureAwait(false);
 
             DateTime measuredAt;

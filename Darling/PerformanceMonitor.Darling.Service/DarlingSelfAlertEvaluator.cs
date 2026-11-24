@@ -10614,7 +10614,7 @@ WHERE c.is_enabled";
     private static async Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsCoreAsync(
         NpgsqlDataSource postgres, int serverId, int recentWindow, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         using var command = new NpgsqlCommand($@"
 SELECT
     (SELECT MAX(collection_time)
@@ -10725,7 +10725,7 @@ ORDER BY x.collector_name";
     {
         var missing = new List<string>();
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         using var command = new NpgsqlCommand(MissingCaptureSessionsSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
@@ -10767,7 +10767,7 @@ ORDER BY x.collector_name";
     private static async Task<bool> HasAgentEverBeenSeenRunningCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         using var command = new NpgsqlCommand(@"
 SELECT EXISTS
 (
@@ -10797,7 +10797,7 @@ SELECT EXISTS
     private static async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusCoreAsync(
         NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         (DateTime? CollectionTimeUtc, bool? AgentRunning) result = (null, null);
         /* #7017: the shared newest-row floor loop (#6968). collection_time is NOT NULL, so a found row has one. */
         await floor.ReadAsync(serverId, async since =>
@@ -10895,7 +10895,7 @@ LIMIT 1";
         var replicas = new List<AgReplicaReading>();
         DateTime? newest = null;
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         /* #7017: the shared newest-row floor loop (#6968). The floor is the snapshot's time, so a bounded read that finds no row
            means the snapshot is gone and the loop reads again without a bound. A server with no Availability Group has no rows
            either way and gets the loop's empty-read floor. */
@@ -10972,7 +10972,7 @@ ORDER BY ag_name, replica_server_name";
         var databases = new List<AgDatabaseReading>();
         DateTime? newest = null;
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         /* #7017: the shared newest-row floor loop (#6968), as in the replica read above. */
         await floor.ReadAsync(serverId, async since =>
         {

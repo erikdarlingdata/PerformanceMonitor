@@ -250,7 +250,7 @@ WHERE id = 1 AND install_id = $4
     {
         ArgumentNullException.ThrowIfNull(dataSource);
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.InstallId, cancellationToken);
         return await TryReadAsync(connection, cancellationToken);
     }
 

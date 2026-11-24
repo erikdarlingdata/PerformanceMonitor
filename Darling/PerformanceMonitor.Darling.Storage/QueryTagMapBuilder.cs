@@ -142,7 +142,7 @@ public sealed class QueryTagMapBuilder
         QueryTagMapSnapshot snapshot;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
             snapshot = await QueryTagMapStore.ReadSnapshotAsync(connection, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -171,7 +171,7 @@ public sealed class QueryTagMapBuilder
 
                 try
                 {
-                    await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                    await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
                     if (!await TryAdoptStoredCursorAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false))
                     {
                         rebuilds.Add(serverId);
@@ -217,7 +217,7 @@ public sealed class QueryTagMapBuilder
             bool agePicked = rebuild && !rebuildAll && ageRebuild == serverId;
             try
             {
-                await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
                 if (rebuild)
                 {
                     await RebuildServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
@@ -241,7 +241,7 @@ public sealed class QueryTagMapBuilder
                     _ageBackoffUntil[serverId] = ageClock + _ageRebuildBackoff;
                     try
                     {
-                        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
                         await ExtendServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
                     }
                     catch (Exception extendEx) when (extendEx is not OperationCanceledException)
@@ -272,7 +272,7 @@ public sealed class QueryTagMapBuilder
                     _cursors.Remove(cursorServer);
                 }
 
-                await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
                 await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
                 await QueryTagMapStore.StampBuiltVersionAsync(connection, snapshot.RulesVersion, cancellationToken, transaction).ConfigureAwait(false);
                 await QueryTagMapStore.DropCursorsOutsideAsync(connection, serverIds, cancellationToken, transaction).ConfigureAwait(false);
@@ -301,7 +301,7 @@ public sealed class QueryTagMapBuilder
             return null;
         }
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
         DateTime clock = await QueryTagMapStore.ClockAsync(connection, cancellationToken).ConfigureAwait(false);
         int? oldest = null;
         DateTime oldestRebuiltAt = DateTime.MaxValue;
