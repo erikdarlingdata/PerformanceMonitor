@@ -4085,6 +4085,9 @@ END $$;";
            from (collect.store_table_activity_baseline). Two plain tables created empty: no data moves, and the service fills them from the hourly self-metrics sweep.
            An older build ignores them. */
         new Migration(StoreTableActivity.Version, "store-table-activity", StoreTableActivity.CreateSql),
+        /* V309 (#9414): one row per checkpoint of the store's own PostgreSQL server (collect.store_checkpoints), read from its log. One plain table created
+           empty: no data moves. An older build never reads it. */
+        new Migration(StoreCheckpoints.Version, "store-checkpoints", StoreCheckpoints.CreateSql),
     };
 
     /// <summary>

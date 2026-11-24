@@ -999,6 +999,9 @@ DROP TABLE IF EXISTS collect.service_starts;"),
         // Safe on a store that never had them.
         new(308, "hasStoreTableActivity", @"DROP TABLE IF EXISTS collect.store_table_activity;
 DROP TABLE IF EXISTS collect.store_table_activity_baseline;"),
+        // V309 (#9414): the store checkpoint rows. It is the probe's newest sentinel. The rewind drops it, so a re-run of V309 creates it empty. Safe on a store
+        // that never had it.
+        new(309, "hasStoreCheckpoints", @"DROP TABLE IF EXISTS collect.store_checkpoints;"),
     ];
 
     /// <summary>

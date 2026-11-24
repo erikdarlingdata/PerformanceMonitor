@@ -227,6 +227,7 @@ internal static class WebReadReach
         ["get_sweep_reports"] = List(null),
         ["get_store_log"] = List(null),
         ["get_store_job_runs"] = List(null),
+        ["get_store_checkpoints"] = List(null),
         ["get_store_pass_steps"] = List(null),
         ["get_store_query_history"] = List(null),
         ["get_store_metrics"] = List(null),
