@@ -241,7 +241,7 @@ public sealed class ServiceStartsReadLiveTests
 
             await ExecAsync(source, "DROP TABLE collect.service_start_rungs; DROP TABLE collect.service_starts;", ct);
             var without = Parse(await DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(source, hours_back: 24, cancellationToken: ct));
-            Assert.False(without.TryGetProperty("build_changes", out _));
+            Assert.False(without.TryGetProperty("build_changes", out var absent));
             Assert.Equal(DarlingMcpServiceStartTools.BuildChangesUnavailableNote, without.GetProperty("build_changes_note").GetString());
             Assert.Equal(1, without.GetProperty("statements_returned").GetInt32());
             ok = true;
