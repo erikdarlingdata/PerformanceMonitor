@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -371,6 +372,11 @@ AND   a.backend_start IS NOT NULL";
         @"^(?<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?)(?: [^\s\[]+)? \[(?<pid>\d+)\] ?(?<app>.*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /// <summary>Text every slab needs at least one of to hold a wait or an end: the three lock lines, or an error entry (<see cref="Handle"/>).</summary>
+    private static readonly SearchValues<string> s_endOrWaitText = SearchValues.Create(
+        [" still waiting for ", " acquired ", " detected deadlock ", "ERROR:", "FATAL:", "PANIC:"],
+        StringComparison.Ordinal);
+
     private static readonly Regex s_waitingLine = new(
         @"^process (?<pid>\d+) still waiting for (?<mode>\w+) on (?<obj>.+?) after (?<ms>\d+(?:\.\d+)?) ms$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -432,8 +438,10 @@ AND   a.backend_start IS NOT NULL";
     /// </summary>
     public static ParseResult Parse(string? slab, bool detailInEnglish)
     {
-        if (!detailInEnglish || string.IsNullOrEmpty(slab))
+        if (!detailInEnglish || string.IsNullOrEmpty(slab) || !slab.AsSpan().ContainsAny(s_endOrWaitText))
         {
+            /* A wait or an end comes only from a lock line or an ERROR, FATAL or PANIC entry, and the text of each is in the slab if one is.
+               A slab with none (most of a busy store's log is checkpoints and autovacuum) holds nothing to write, so it is not read line by line. */
             return ParseResult.Empty;
         }
 

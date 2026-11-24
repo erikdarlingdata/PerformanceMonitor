@@ -51,6 +51,51 @@ public sealed class StoreLockWaitsParserTests
         Assert.Equal("app-b", parsed.ApplicationByPid[200]);
     }
 
+    private static string Checkpoints(int count)
+    {
+        var text = new System.Text.StringBuilder();
+        for (var i = 0; i < count; i++)
+        {
+            text.Append(Line(Open, 300 + i, string.Empty, "LOG", "checkpoint complete: wrote 12 buffers (0.0%); write=0.001 s, sync=0.001 s, total=0.003 s"));
+        }
+
+        return text.ToString();
+    }
+
+    [Fact]
+    public void ASlabOfOrdinaryLog_HoldsNothingToWrite()
+    {
+        Assert.True(StoreLockWaits.Parse(Checkpoints(200), detailInEnglish: true).IsEmpty);
+    }
+
+    [Theory]
+    [InlineData("LOG", "process 200 acquired ShareLock on transaction 777 after 6000.300 ms", StoreLockWaits.Granted)]
+    [InlineData("LOG", "process 200 detected deadlock while waiting for ShareLock on transaction 777 after 1000.100 ms", StoreLockWaits.Deadlock)]
+    [InlineData("ERROR", "canceling statement due to lock timeout", StoreLockWaits.TimedOut)]
+    [InlineData("FATAL", "terminating connection due to administrator command", StoreLockWaits.Cancelled)]
+    [InlineData("PANIC", "could not write to file", StoreLockWaits.Cancelled)]
+    public void AnEndAmongOrdinaryLog_IsStillRead_WhateverLineEndsTheWait(string severity, string message, string outcome)
+    {
+        var slab = Checkpoints(200) + Line(Close, 200, "app-b", severity, message) + Checkpoints(5);
+
+        var close = Assert.Single(StoreLockWaits.Parse(slab, detailInEnglish: true).Closes);
+
+        Assert.Equal(200, close.Pid);
+        Assert.Equal(outcome, close.Outcome);
+    }
+
+    [Fact]
+    public void AWaitStillOpenAmongOrdinaryLog_IsStillRead()
+    {
+        var slab = Checkpoints(200)
+            + Line(Open, 200, "app-b", "LOG", "process 200 still waiting for ShareLock on transaction 777 after 1000.100 ms")
+            + Checkpoints(5);
+
+        var wait = Assert.Single(StoreLockWaits.Parse(slab, detailInEnglish: true).Waits);
+
+        Assert.Equal(StoreLockWaits.Waiting, wait.Outcome);
+    }
+
     [Fact]
     public void ALockTimeoutError_EndsTheWait_AsTimedOut()
     {

@@ -341,18 +341,21 @@ FROM config.store_log_read_marker AS m";
         DateTime utcNow,
         ILogger? logger,
         IStoreLogFiles? files,
-        CancellationToken cancellationToken = default) =>
-        SweepAsync(connection, utcNow, logger, files, StoreLockWaits.Shared, cancellationToken);
+        CancellationToken cancellationToken = default,
+        TimeSpan? readOnBudget = null) =>
+        SweepAsync(connection, utcNow, logger, files, StoreLockWaits.Shared, cancellationToken, readOnBudget);
 
     /// <summary>The sweep over a given set of log files and a given map of sessions (#9439): the service's own map in
-    /// production, a test's in a test.</summary>
+    /// production, a test's in a test. <paramref name="readOnBudget"/> replaces <see cref="ReadOnBudget"/> for a test whose point is
+    /// the byte and slab bounds, so a slow machine cannot end its capture early.</summary>
     internal static async Task<List<FileCapture>> SweepAsync(
         NpgsqlConnection connection,
         DateTime utcNow,
         ILogger? logger,
         IStoreLogFiles? files,
         StoreLockWaits.PidMap pids,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TimeSpan? readOnBudget = null)
     {
         if (connection is null)
         {
@@ -377,7 +380,8 @@ FROM config.store_log_read_marker AS m";
            capture row's totals and the marker move together), so a budget that cancels mid-way keeps every slab it
            finished, and each slab's text is classified and released before the next is read. */
         var clock = Stopwatch.StartNew();
-        var byteBudget = new ByteBudget(MaxBytesPerCapture, clock);
+        var timeBudget = readOnBudget ?? ReadOnBudget;
+        var byteBudget = new ByteBudget(MaxBytesPerCapture, clock, timeBudget);
         var slabsRead = 0;
         /* #9439: ends of lock waits whose opening the store did not hold when their slab was written. The wait may open in a slab read later in
            this same capture (an older file's later slab), so they are retried once the capture has read on. */
@@ -436,7 +440,7 @@ FROM config.store_log_read_marker AS m";
         {
             var nextOffset = file.NextOffset;
             while (slabsRead < MaxSlabsPerCapture
-                   && clock.Elapsed < ReadOnBudget
+                   && clock.Elapsed < timeBudget
                    && byteBudget.Remaining > 0
                    && file.Candidate.SizeBytes > nextOffset)
             {
@@ -635,11 +639,11 @@ FROM config.store_log_read_marker AS m";
     /// chunk past a line longer than one slab draw on it, and a slab is read no longer than what is left, so the capture's
     /// total stays at <see cref="MaxBytesPerCapture"/>. A scan also stops once the capture's time budget
     /// (<see cref="ReadOnBudget"/>) is spent, as it does when the bytes are.</summary>
-    private sealed class ByteBudget(long remaining, Stopwatch clock)
+    private sealed class ByteBudget(long remaining, Stopwatch clock, TimeSpan timeBudget)
     {
         public long Remaining { get; set; } = remaining;
 
-        public bool ScanMayContinue => Remaining > 0 && clock.Elapsed < ReadOnBudget;
+        public bool ScanMayContinue => Remaining > 0 && clock.Elapsed < timeBudget;
     }
 
     /// <summary>How much of a long line one scan read holds (#9314).</summary>
