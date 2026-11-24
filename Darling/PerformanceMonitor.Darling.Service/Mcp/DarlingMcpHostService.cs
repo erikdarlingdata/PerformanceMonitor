@@ -2091,6 +2091,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpCollectorRunTools>()
             /* #6231: set_quiet_window / clear_quiet_window - a mute rule with only a server scope (or none) and an end, optionally a start. */
             .WithGeminiCompatibleTools<DarlingMcpQuietWindowTools>()
+            /* #9485: declare_change_window / clear_change_window - a planned change window that holds the investigation requests opened inside it. */
+            .WithGeminiCompatibleTools<DarlingMcpChangeWindowWriteTools>()
             /* #6397: get_database_state_expectations (read) and set_database_state_expected (write): the Database State alert's per-database
                expected state, through the store code the Viewer's override editor runs. The mcp role holds INSERT/UPDATE/DELETE on only that table. */
             .WithGeminiCompatibleTools<DarlingMcpDatabaseStateTools>()

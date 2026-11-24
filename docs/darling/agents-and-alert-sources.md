@@ -19,6 +19,31 @@ At Level 1 an agent reads and reports. At Level 2 it can change alert settings o
 
    **Tell Darling whether a report was right (#5913).** Open a reported request and say whether its report was right, partly right or wrong, what it should have said (`real`, `false_positive` or `needs_person`), the step the agent missed, and a comment. Do it in the viewer's Investigations window, on the **Report Feedback** tab, or on the web Admin page's **Report Feedback** tab. Each person has one feedback per report; saving again replaces it, and the author is the login you are signed in as. Feedback is recorded only under the admin login: the viewer needs `postgres.connectAs` set to `"admin"`, and on a store where the web connects as the `web` role, which cannot write feedback (managed and compose stores) the web tab lists feedback with no form, says so, and feedback is given in the viewer instead (the web asks the store whether its login may write, so an admin sign-in on such a store gets no form either). Feedback feeds two things. `get_investigation_reports` returns each report's feedback next to it, and, for a time window, a count per alert family of how many investigations ended as false positives, once as the agent reported them and once after people's corrections (a correction can raise or lower the count). The settled verdict of a request is the corrected verdict of the newest feedback that gave one; a later feedback that gives no corrected verdict does not displace an earlier one that did. The same counts are at the top of both Report Feedback tabs, each stating its window: the viewer's tab defaults to the requests opened in the last 30 days (a 7, 30 or 90 day picker), the web tab to the last 7 days; both list the newest 200 reports, and the counts cover every reported request in the window, not only the listed ones.
 
+## Planned change windows (#9485)
+
+A planned change that touches many servers can open one investigation request on each server it touches. A change window tells Darling that the work is planned, so those requests are held for one review instead of being worked as separate incidents.
+
+A person or an agent declares a window with `declare_change_window`. The call names the servers (one name, a list of names, or `all`), a start, an end and a reason. A start in the future is allowed, so declare the window before the work. A window lasts at most 7 days, and its end must not be in the past.
+
+What a window holds:
+
+- A request that opens after the start, and up to 30 minutes after the end, is created held. The 30 minutes after the end are the tail. The tail covers a re-capture or a settle period that runs past the end of the work.
+- Alert requests and Change Watch requests are held.
+- A held request stays in `list_investigation_requests`, and an agent can still claim it. It does not wake `wait_for_investigation_requests`, and it does not count toward the route's hourly and daily limits.
+- The held request carries the window id and the reason.
+
+What a window never holds:
+
+- A request that opens after the tail. The tail is fixed at 30 minutes and is not longer, because a change can cause a real problem well after the work ends. A longer tail would hide that problem.
+- A chat request, a force check and a practice request. A person asks for these on purpose.
+- Pages and alert history. Alerts page and are logged as usual.
+
+`clear_change_window` ends a window early. A request that opens after the clear is not held. A request that was already held stays held. Clearing a window that is already cleared, or whose tail has ended, answers that fact and is not an error. When the tail ends, Darling records one journal event that counts the held requests by family and by server. Read it with `get_change_windows`, which also lists the held requests of one window.
+
+An agent token can declare and clear windows when `mcp.allowAgentMuteRules` is on. The limits are the same as for an agent's mute rules. Each text field is at most 256 characters. An agent can make 20 direct writes an hour, and the change window tools share that count with the mute rule tools. An agent can clear only a window that it declared. An operator can clear any window. Both tools write a row to the Agent changes list. That row has no Undo button, because `clear_change_window` is the undo of a declare, and a new declare brings back a cleared window.
+
+A change window is not a quiet window. `set_quiet_window` is a mute rule: it holds pages as well. A change window holds only the investigation hand-off, and it records what it held.
+
 ## Practice requests: how an agent does on cases you already judged (#5918)
 
 Before you trust an agent with Level 2, watch it work cases you have already judged. A practice request replays a reported case that has feedback (see "Tell Darling whether a report was right" above) and scores the agent's report against that feedback.

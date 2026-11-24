@@ -160,6 +160,20 @@ internal static class DarlingMcpWritePolicy
         "set_collector_databases",
         "reset_collector_schedules",
         "update_service_flags",
+        "declare_change_window",
+        "clear_change_window",
+    };
+
+    /// <summary>
+    /// The change window tools (#9485), served under the investigations arm as well as the writes arm: an agent token declares a window
+    /// ahead of planned work and clears one it declared, under the same switch as agent mute rules
+    /// (<see cref="DarlingMcpAgentMuteDirect.SettingName"/>, checked per call like the mute rule verbs). They are not Level 2 action tools: no
+    /// <c>agent_action</c> and no claim is behind them, so they are not in <see cref="AgentActionTools"/> and not in <see cref="NeverAgentTools"/>.
+    /// </summary>
+    internal static readonly IReadOnlySet<string> ChangeWindowTools = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "declare_change_window",
+        "clear_change_window",
     };
 
     /// <summary>The darling.json key that offers the investigation tools (#5632 Phase A, ruling R2) and, under the same arm, the agent
@@ -311,6 +325,8 @@ internal static class DarlingMcpWritePolicy
             if (IsInvestigation(toolName))
                 return Investigations;
             if (Investigations && IsAgentAction(toolName, agentActionTools))
+                return true;
+            if (Investigations && ChangeWindowTools.Contains(toolName))
                 return true;
             if (IsServerAdmin(toolName))
                 return ServerAdmin;
@@ -499,7 +515,7 @@ internal static class DarlingMcpWritePolicy
     /// tools also write mute and digest rules with no <c>agent_action</c> (<see cref="DarlingMcpAgentMuteDirect"/>). Empty while the
     /// setting is off, when every such call is refused.</summary>
     private static string DirectMuteSentence(bool agentMuteRules) => agentMuteRules
-        ? " The mute rule tools among them also write mute and digest rules without an agent_action, because " + DarlingMcpAgentMuteDirect.SettingName + " is on."
+        ? " The mute rule tools among them also write mute and digest rules without an agent_action, and " + string.Join(" and ", ChangeWindowTools.Order(StringComparer.Ordinal)) + " write change windows, because " + DarlingMcpAgentMuteDirect.SettingName + " is on."
         : string.Empty;
 
     /// <summary>The clause that closes the settings paragraph's investigations sentence (<see cref="InstructionsLine"/>), in place of
@@ -508,7 +524,7 @@ internal static class DarlingMcpWritePolicy
     /// arm, so the claim is part of the sentence that begins with the investigations setting and not a sentence of its own. Empty
     /// while the setting is off.</summary>
     private static string DirectMuteClause(bool agentMuteRules) => agentMuteRules
-        ? ", and, while " + DarlingMcpAgentMuteDirect.SettingName + " is on, the mute rule tools among them also write mute and digest rules without an agent_action"
+        ? ", and, while " + DarlingMcpAgentMuteDirect.SettingName + " is on, the mute rule tools among them also write mute and digest rules without an agent_action, and " + string.Join(" and ", ChangeWindowTools.Order(StringComparer.Ordinal)) + " write change windows"
         : string.Empty;
 
     /// <summary>What the investigations arm serves, as a client that holds the arm reads it: the reads and the three groups that
