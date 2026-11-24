@@ -221,11 +221,11 @@ ANALYZE;", ct);
     /// <summary>What a store with TOAST values, an unlogged table (an index with an init fork), a vacuumed index (a free space map
     /// fork) and a hypertable with chunks adds to the #9224 seed (#9364).</summary>
     private const string ForksSeedSql = @"
-CREATE TABLE zz9224.big (id integer PRIMARY KEY, body text);
+CREATE TABLE zz9224.big (id integer PRIMARY KEY, body text) WITH (autovacuum_enabled = off, toast.autovacuum_enabled = off);
 INSERT INTO zz9224.big SELECT g, (SELECT string_agg(md5(g::text || i::text), '') FROM generate_series(1, 400) AS i) FROM generate_series(1, 200) AS g;
 CREATE INDEX big_body_len ON zz9224.big (length(body));
 DELETE FROM zz9224.big WHERE id % 2 = 0;
-CREATE UNLOGGED TABLE zz9224.ul (id integer PRIMARY KEY, v text);
+CREATE UNLOGGED TABLE zz9224.ul (id integer PRIMARY KEY, v text) WITH (autovacuum_enabled = off);
 CREATE INDEX ul_v ON zz9224.ul (v);
 INSERT INTO zz9224.ul SELECT g, md5(g::text) FROM generate_series(1, 500) AS g;";
 
