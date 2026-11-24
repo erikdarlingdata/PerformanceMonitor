@@ -16,5 +16,5 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class StorageVersion
 {
-    public const int SchemaVersion = ReadLatencyProcessStart.Version;
+    public const int SchemaVersion = StoreLockWaits.Version;
 }

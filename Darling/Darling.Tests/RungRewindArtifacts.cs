@@ -1021,6 +1021,8 @@ DROP TABLE IF EXISTS collect.store_setting_state;"),
         // which drops the index with it, then puts the primary key back, so a re-run of V315 moves the key again. Safe on a store that never had them.
         new(315, "hasReadLatencyProcessStart", @"ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS process_started_at;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'collect.read_latency'::regclass AND contype = 'p') THEN ALTER TABLE collect.read_latency ADD CONSTRAINT read_latency_pkey PRIMARY KEY (metric_time, surface, route, outcome, window_band); END IF; END $$;"),
+        // V316 (#9439): collect.store_lock_waits, the probe's newest sentinel. The rewind drops the table, so a re-run of V316 creates it again, empty. Safe on a store that never had it.
+        new(316, "hasStoreLockWaits", @"DROP TABLE IF EXISTS collect.store_lock_waits;"),
     ];
 
     /// <summary>

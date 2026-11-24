@@ -4109,6 +4109,9 @@ END $$;";
            build ignores the column, but its flush still names the old five-column conflict key, which no unique index matches any more, so it fails
            (42P10) until the rollback statement in docs/darling/admin.md restores the primary key. */
         new Migration(ReadLatencyProcessStart.Version, "read-latency-process-start", ReadLatencyProcessStart.Sql),
+        /* V316 (#9439): collect.store_lock_waits, one empty plain table and two indexes, filled by the hourly store log sweep from the lock waits the log records. No data
+           moves. An older build never reads or names it. */
+        new Migration(StoreLockWaits.Version, "store-lock-waits", StoreLockWaits.CreateSql),
     };
 
     /// <summary>

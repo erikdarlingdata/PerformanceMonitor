@@ -117,6 +117,7 @@ internal static class DarlingFrontDoorRouting
         "get_service_starts",
         "get_store_host",
         "get_store_log",
+        "get_store_lock_waits",
         "get_store_connections",
         "get_store_checkpoints",
         "get_store_metrics",

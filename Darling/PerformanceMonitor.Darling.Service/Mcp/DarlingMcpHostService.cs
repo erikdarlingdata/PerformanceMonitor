@@ -1831,6 +1831,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpStoreConnectionsTools>()
             /* #9411 get_store_pass_steps - what the service's own background passes did, step by step. Darling-only, like get_store_log. */
             .WithGeminiCompatibleTools<DarlingMcpStorePassStepsTools>()
+            /* #9439 get_store_lock_waits - the lock waits the store's own sessions suffered, from the store log. Darling-only, on the
+               central store host: Lite has no PostgreSQL store. */
+            .WithGeminiCompatibleTools<DarlingMcpStoreLockWaitTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreTableHealthTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreTableMeasureTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreMaintenanceReadinessTools>()

@@ -347,6 +347,14 @@ public static class StoreLogClassifier
         new("lock_timeout", Error, MatchKind.StartsWith, "canceling statement due to lock timeout", true,
             "a statement hit the store's own lock_timeout waiting for a lock"),
 
+        /* Counted (#9439) - log_lock_waits' own lines: `process 123 still waiting for ShareLock on ... after 1000.1 ms`, and the
+           `acquired`, `avoided deadlock` and `detected deadlock` lines that end or continue the same wait. They are the only LOG
+           messages PostgreSQL begins with `process `. One wait leaves two or more of them, so the count is lines, not waits. The waits
+           themselves (who waited, behind whom, on what, how long) are kept as rows by StoreLockWaits.Parse, which get_store_lock_waits
+           reads, so this class is only the rate. */
+        new("lock_wait", Log, MatchKind.StartsWith, "process ", false,
+            "log_lock_waits wrote a line for a session that waited on a lock past deadlock_timeout, one line when it was still waiting and one when it got the lock - get_store_lock_waits lists the waits with who held the lock"),
+
         /* Retained (#8814) - PostgreSQL cancels a plain autovacuum when another session asks for a lock that conflicts
            with it, which a schema upgrade or a manual VACUUM does. One is routine after a restart, so it is not a
            shape nobody anticipated. It is retained and not counted alone because the relation its CONTEXT names is the
@@ -900,6 +908,21 @@ public static class StoreLogClassifier
     }
 
     private readonly record struct Field(FieldKind Kind, string Name, int MessageStart);
+
+    /// <summary>
+    /// The field <see cref="FindField"/> reads on a line, for a reader that walks entries itself (#9439): whether it is a primary
+    /// severity (the line opens an entry), its name, where its label starts (the text before it is the log prefix) and where its
+    /// message starts. False when the line opens no field this reader knows.
+    /// </summary>
+    internal static bool TryReadField(ReadOnlySpan<char> line, out bool primary, out string name, out int labelStart, out int messageStart)
+    {
+        var field = FindField(line);
+        primary = field.Kind == FieldKind.Primary;
+        name = field.Name ?? string.Empty;
+        messageStart = field.MessageStart;
+        labelStart = field.Kind == FieldKind.None ? 0 : field.MessageStart - 3 - name.Length;
+        return field.Kind != FieldKind.None;
+    }
 
     /// <summary>
     /// The line's field: the label the line's FIRST label-shaped colon ends, when that label is a severity or a
