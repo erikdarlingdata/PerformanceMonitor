@@ -149,7 +149,7 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
             for (var i = 0; i < changes.Count; i++)
             {
                 var c = changes[i];
-                _pendingObjects.Add(new ServiceStartRungObject(StartId, version, attempt, i, c.Schema, c.Object, c.Column, c.Kind, c.Action));
+                _pendingObjects.Add(new ServiceStartRungObject(StartId, version, attempt, i, c.Schema, c.ObjectName, c.Column, c.Kind, c.Action));
             }
         }
     }

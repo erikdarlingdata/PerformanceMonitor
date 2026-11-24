@@ -22,12 +22,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <param name="Attempt">The start's try at the ladder that applied the rung, as the rung row's attempt.</param>
 /// <param name="Ordinal">The row's place in the rung's list, from 0.</param>
 /// <param name="Schema">The object's schema.</param>
-/// <param name="Object">The object's name.</param>
+/// <param name="ObjectName">The object's name.</param>
 /// <param name="Column">The column, for a column row.</param>
 /// <param name="Kind">A <see cref="MigrationObjectKind"/> word.</param>
 /// <param name="Action">A <see cref="MigrationObjectAction"/> word.</param>
 public sealed record ServiceStartRungObject(
-    Guid StartId, int RungVersion, int Attempt, int Ordinal, string Schema, string Object, string? Column, string Kind, string Action);
+    Guid StartId, int RungVersion, int Attempt, int Ordinal, string Schema, string ObjectName, string? Column, string Kind, string Action);
 
 /// <summary>One start's objects for one rung, as <see cref="ServiceStartRungObjects.ReadRungAsync"/> returns them.</summary>
 public sealed record ServiceStartRungObjectList(
@@ -116,7 +116,7 @@ ORDER BY p.process_started_at DESC, p.start_id, o.attempt, o.ordinal;";
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = row.Attempt });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = row.Ordinal });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = row.Schema });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = row.Object });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = row.ObjectName });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)row.Column ?? DBNull.Value });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = row.Kind });
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = row.Action });

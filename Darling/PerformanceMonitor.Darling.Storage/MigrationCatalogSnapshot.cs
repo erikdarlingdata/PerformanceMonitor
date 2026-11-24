@@ -18,11 +18,11 @@ namespace PerformanceMonitor.Darling.Storage;
 
 /// <summary>One object a migration rung created, changed or dropped (#9438). <paramref name="Column"/> is set for a column row only.</summary>
 /// <param name="Schema">The schema the object lives in.</param>
-/// <param name="Object">The table, view, index, function or hypertable name. A function carries its identity arguments, and a policy names its hypertable and the policy.</param>
+/// <param name="ObjectName">The table, view, index, function or hypertable name. A function carries its identity arguments, and a policy names its hypertable and the policy.</param>
 /// <param name="Column">The column, for a column row. Null for every other kind.</param>
 /// <param name="Kind">One of the <see cref="MigrationObjectKind"/> words.</param>
 /// <param name="Action">One of the <see cref="MigrationObjectAction"/> words.</param>
-public sealed record MigrationObjectChange(string Schema, string Object, string? Column, string Kind, string Action);
+public sealed record MigrationObjectChange(string Schema, string ObjectName, string? Column, string Kind, string Action);
 
 /// <summary>The kind words an object row carries (#9438).</summary>
 public static class MigrationObjectKind
@@ -125,7 +125,7 @@ WHERE j.hypertable_schema IN (" + SchemaList + @") AND j.proc_name IN ('policy_c
     /// <summary>How many objects the snapshot holds.</summary>
     public int Count => _entries.Count;
 
-    private readonly record struct Key(string Kind, string Schema, string Object, string Column);
+    private readonly record struct Key(string Kind, string Schema, string ObjectName, string Column);
 
     private readonly record struct Entry(string? Parent, string? Signature);
 
@@ -215,7 +215,7 @@ WHERE j.hypertable_schema IN (" + SchemaList + @") AND j.proc_name IN ('policy_c
 
         var wholeRelations = changes
             .Where(c => c.Action != MigrationObjectAction.Alter && (c.Key.Kind == MigrationObjectKind.Table || c.Key.Kind == MigrationObjectKind.View))
-            .Select(c => (c.Key.Schema, c.Key.Object))
+            .Select(c => (c.Key.Schema, c.Key.ObjectName))
             .ToHashSet();
 
         return changes
@@ -223,10 +223,10 @@ WHERE j.hypertable_schema IN (" + SchemaList + @") AND j.proc_name IN ('policy_c
                           && c.Parent is not null && wholeRelations.Contains((c.Key.Schema, c.Parent))))
             .OrderBy(c => KindRank(c.Key.Kind))
             .ThenBy(c => c.Key.Schema, StringComparer.Ordinal)
-            .ThenBy(c => c.Key.Object, StringComparer.Ordinal)
+            .ThenBy(c => c.Key.ObjectName, StringComparer.Ordinal)
             .ThenBy(c => c.Key.Column, StringComparer.Ordinal)
             .Select(c => new MigrationObjectChange(
-                c.Key.Schema, c.Key.Object, c.Key.Column.Length == 0 ? null : c.Key.Column, c.Key.Kind, c.Action))
+                c.Key.Schema, c.Key.ObjectName, c.Key.Column.Length == 0 ? null : c.Key.Column, c.Key.Kind, c.Action))
             .ToList();
     }
 

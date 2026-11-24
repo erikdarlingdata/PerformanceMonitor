@@ -198,7 +198,7 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
                 objects = l.Objects.Take(MaxObjectsPerRung).Select(o => new
                 {
                     schema = o.Schema,
-                    @object = o.Object,
+                    @object = o.ObjectName,
                     column = o.Column,
                     kind = o.Kind,
                     action = o.Action,
