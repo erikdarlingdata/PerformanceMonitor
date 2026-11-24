@@ -119,6 +119,7 @@ public sealed class ViewerStoreHealthSnapshotTests : IDisposable
         try
         {
             await body(tab, reads, store);
+            await tab.SnapshotSaves;
         }
         finally
         {
@@ -293,6 +294,7 @@ public sealed class ViewerStoreHealthSnapshotTests : IDisposable
         RunTab(async (tab, reads, store) =>
         {
             /* A file where the folder should be: every write fails. */
+            Directory.CreateDirectory(_dir);
             File.WriteAllText(FilePath, "x");
             tab.Snapshots = new StoreHealthSnapshotStore(Path.Combine(FilePath, "inner", "store-health.json"));
             var status = new List<string>();
