@@ -430,6 +430,8 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         /* #7010: not a data window by design. The window selects captures of the store's own PostgreSQL log, and every answer carries the capture
            denominator (captures against expected, bytes read and unread), which is how a window the store did not capture is told apart from a quiet one. */
         ["get_store_log"] = "store-log window: the answer's capture denominator says how much of the window was captured (#7010)",
+        /* #9411: a log of events, not a series: a window with no row is the answer (the pass recorded nothing then), and the table holds nothing before the store was migrated to it, so there is no data floor to notice. */
+        ["get_store_pass_steps"] = "pass step log: an hour with no row means the pass recorded nothing, so there is no data floor to name (#9411)",
         /* #7010: not a data window by design. The window picks the fleet sweeper's own run records for the timeline, the latest sweep is read outside
            it on purpose, and no collector table backs it for a coverage probe. */
         ["get_sweep_reports"] = "sweep timeline of the store's own run records; the latest sweep is read outside the window (#7010)",
