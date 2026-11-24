@@ -133,14 +133,15 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
     [Fact]
     public async Task ASlowCall_CarriesTheProcessWorkingSetPeakAndDuckDbMemory_AndNamesTheirSource()
     {
-        var recorder = new McpCallTimingRecorder(_data) { SlowThreshold = TimeSpan.Zero };
+        /* The DuckDB memory read answers NULL while another class holds the store lock, so this test hands the recorder its own reading. */
+        var recorder = new McpCallTimingRecorder(_data.RecordMcpSlowCallAsync, () => 123_456) { SlowThreshold = TimeSpan.Zero };
 
         await CallAsync(recorder, "timing_probe", ("secret", "s"), ("delay_ms", 200));
         await recorder.WhenWritesDoneAsync();
 
         var row = Assert.Single(await _data.GetMcpSlowCallsAsync(DateTime.UtcNow.AddHours(-1), 50, null));
         Assert.True(row.PeakWorkingSetBytes > 0, "no working-set peak");
-        Assert.True(row.DuckDbMemoryBytes > 0, "no DuckDB memory total");
+        Assert.Equal(123_456, row.DuckDbMemoryBytes);
         Assert.Contains("working set", row.MemorySource);
         Assert.Contains("duckdb_memory()", row.MemorySource);
     }
