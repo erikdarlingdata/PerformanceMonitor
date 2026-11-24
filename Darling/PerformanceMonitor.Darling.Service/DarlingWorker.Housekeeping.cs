@@ -1442,7 +1442,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// The #9427 once-a-minute capture of the store's settings: compared with the last capture, each change is a row (old and new value, source, reload
     /// time), and the first capture on a store writes only the baseline. Awaited on the main loop, so it runs under one short budget. A failure (a store
     /// that is down, a store below the rung, the budget expiring) is a Debug line and a skipped minute, since the next capture compares against the same
-    /// state. Each change is also logged once, by name and by where its new value came from, with no value in the line, since a setting can hold a
+    /// state. A capture with changes logs only how many settings changed, never a name or a value, since a setting can hold a
     /// credential. Never throws except for the service stopping.
     /// </summary>
     private async Task CaptureStoreSettingChangesAsync(CancellationToken cancellationToken)
