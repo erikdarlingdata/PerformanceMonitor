@@ -1842,6 +1842,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                while one of OUR collectors was stalled mid-read. Darling-only: the arm is installed by
                DarlingCollectorRunner's server-scoped path, which Lite's runner does not have. */
             .WithGeminiCompatibleTools<DarlingMcpStallProbeTools>()
+            /* #9417 get_collector_readiness - the install check: which due collectors have no good cycle since this process started.
+               Darling-only: "due at the start" follows the worker's connect-time seeding (every collector's last run, floored at two days),
+               while Lite seeds only its daily-or-longer collectors from its log, with a floor of the interval plus a day, and has no service
+               start instant on its health read. Lite's log does hold run times, so a Lite read would need its own seeding rule and a start. */
+            .WithGeminiCompatibleTools<DarlingMcpCollectorReadinessTools>()
             /* #3398 get_oversized_plan_backlog - the V121 worklist of cached plans the capture cap
                declined, and what the out-of-band sweep has done about each one. Darling-only: the
                sweep is a fleet-level errand on the headless worker's own cadence, which Lite's

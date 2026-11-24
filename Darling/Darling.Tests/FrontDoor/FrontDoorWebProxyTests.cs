@@ -146,7 +146,8 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
 
     internal static Task<FrontDoorWebHarness> StartAsync(
         IReadOnlyList<(FakeWebPeer Peer, string[] Servers)> peers, TimeSpan? peerTimeout = null, TimeProvider? time = null,
-        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null, bool? oidcRoleMapping = null)
+        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null, bool? oidcRoleMapping = null,
+        IPAddress? remoteIp = null, string? allowFrom = null)
     {
         var secrets = new WebFakeSecrets();
         var directory = new WebFakeDirectory(peers.Select(p =>
@@ -154,12 +155,13 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
             secrets.SetWebToken(p.Peer.Name, p.Peer.Token);
             return (new FrontDoorStore(p.Peer.Name, new Uri("http://127.0.0.1:1/"), p.Peer.BaseUri, null), p.Servers);
         }));
-        return StartAsync(directory, secrets, peerTimeout, time, ct, logger, collector, oidcRoleMapping);
+        return StartAsync(directory, secrets, peerTimeout, time, ct, logger, collector, oidcRoleMapping, remoteIp, allowFrom);
     }
 
     internal static async Task<FrontDoorWebHarness> StartAsync(
         WebFakeDirectory directory, WebFakeSecrets secrets, TimeSpan? peerTimeout = null, TimeProvider? time = null,
-        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null, bool? oidcRoleMapping = null)
+        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null, bool? oidcRoleMapping = null,
+        IPAddress? remoteIp = null, string? allowFrom = null)
     {
         collector ??= new CollectorRuntimeState();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -177,14 +179,14 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
 
         app.Use(next => context =>
         {
-            context.Connection.RemoteIpAddress ??= IPAddress.Loopback;
+            context.Connection.RemoteIpAddress ??= remoteIp ?? IPAddress.Loopback;
             return next(context);
         });
 
         var host = new DarlingWebHostService(
             NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), collector, new WebTlsCertificateState());
         host.ConfigurePipeline(app, null, networkMode: false, networkListenIp: null,
-            allowedCidr: IPNetwork.Parse("127.0.0.1/32"), accessToken: FrontDoorToken, oidcClient: null,
+            allowedCidr: IPNetwork.Parse(allowFrom ?? "127.0.0.1/32"), accessToken: FrontDoorToken, oidcClient: null,
             requireTokenWhenLoopbackOnly: true, sessionSigningKeyForTests: SigningKey, frontDoorProxy: proxy);
         await app.StartAsync(ct == default ? TestContext.Current.CancellationToken : ct);
         return new FrontDoorWebHarness(app, app.GetTestServer().CreateClient(), directory, secrets, session);
