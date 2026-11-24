@@ -177,6 +177,9 @@ public static class AttentionWindowSql
     /// Azure Data Studio or dbatools metadata work, judged on the CALL's own statement (the attention row carries none, so the call is the
     /// only place the statement can be told apart). <paramref name="range"/> is the collection_time cut, written with the prefix passed in.
     /// A call is collected with its attention event or just after it, so it takes the same floor and ceiling as the samples.
+    /// A call that ran under the duration floor (<see cref="MinInterruptDurationUs"/>) is not a call here (#9538): an application cancel
+    /// a few milliseconds into a call, such as a data layer cancelling before it closes a reader, is no command timeout, and a driver's
+    /// command timeout is whole seconds. A call with no recorded duration is left out too, as the collector always writes one.
     /// <para>MATERIALIZED: the CTE is read once, however many samples look at it. Left to inline, the planner built the hash join of the 7-day baseline
     /// on the samples (about half a million rows spilled to disk) instead of on the few hundred calls, and the sample list ran the whole
     /// call scan again for every listed sample. A plan check on a week at 60 samples a minute (#9507) took the window read from 138 ms to 26 ms
@@ -195,6 +198,7 @@ calls AS MATERIALIZED (
     WHERE server_id = $1
     AND   {range}
     AND   event_kind = '{KindAborted}'
+    AND   interrupt_duration_us >= {MinInterruptDurationUs}
     AND   session_id IS NOT NULL
     AND   event_time IS NOT NULL
 )
