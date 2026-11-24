@@ -146,7 +146,9 @@ public static partial class ThresholdOverrideStore
                 reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetGuid(6), reader.GetDateTime(7)));
         }
 
-        await reader.DisposeAsync();
+        /* #9514: no hand-made DisposeAsync here. The reader object belongs to the pooled connection, and the one this method already holds
+           would be disposed again at the end of the method, after the first dispose released the connection and another request leased it.
+           That second dispose closed the other request's reader. Each reader is disposed once, by its own using. */
 
         await using var tagCommand = postgres.CreateCommand(TagListSql);
         tagCommand.CommandTimeout = CommandTimeoutSeconds;
