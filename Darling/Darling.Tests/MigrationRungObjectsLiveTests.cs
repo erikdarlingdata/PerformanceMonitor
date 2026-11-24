@@ -49,17 +49,17 @@ public sealed class MigrationRungObjectsLiveTests
     private static ServiceStartRecorder NewRecorder(string host, DateTime started, Func<DateTime> clock) =>
         new(new ServiceLogTally(), Guid.NewGuid(), host, "3.14.0-test.1", "0123abc", started, clock);
 
-    /// <summary>Applies the ladder as one start of the service would, then flushes the start. Returns the recorder.</summary>
-    private static async Task<ServiceStartRecorder> StartAsync(
+    /// <summary>Applies the ladder as one start of the service would, then flushes the start. Returns the start's id.</summary>
+    private static async Task<Guid> StartAsync(
         ScratchPostgres scratch, NpgsqlDataSource source, string host, DateTime started, IReadOnlyList<PgMigrations.Migration> ladder, CancellationToken ct)
     {
-        var recorder = NewRecorder(host, started, () => started.AddMinutes(1));
+        using var recorder = NewRecorder(host, started, () => started.AddMinutes(1));
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.ApplyLadderForTestsAsync(connection, null, ladder, 60, ct, recorder);
         recorder.StoreReady();
         Assert.True(await recorder.FlushAsync(source, NullLogger.Instance, ct));
-        return recorder;
+        return recorder.StartId;
     }
 
     private static async Task<long> CountAsync(NpgsqlDataSource source, string sql, CancellationToken ct)
@@ -99,7 +99,7 @@ public sealed class MigrationRungObjectsLiveTests
 
             var root = Parse(await DarlingMcpServiceStartTools.GetServiceStarts(source, rung: 2, cancellationToken: ct));
             var start = Assert.Single(root.GetProperty("starts").EnumerateArray());
-            Assert.Equal(second.StartId, start.GetProperty("start_id").GetGuid());
+            Assert.Equal(second, start.GetProperty("start_id").GetGuid());
             Assert.Equal(3, start.GetProperty("objects_total").GetInt32());
 
             var rows = Rows(start);
