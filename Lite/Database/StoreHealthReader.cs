@@ -95,7 +95,14 @@ public sealed class StoreHealthReader
     /* Tests only (#9421): the merge batch budget the layout read judges a file against, null for the production budgets. */
     internal Func<string, long>? LayoutBatchBudgetForTests { get; set; }
 
-    public StoreHealthSnapshot Read()
+    /// <summary>The store health without the archive layout. The Store Health window calls this on load and on every Refresh and never shows the
+    /// layout, so it does not pay for the layout read, which can run for seconds (#9421). <see cref="StoreHealthSnapshot.Layout"/> is null.</summary>
+    public StoreHealthSnapshot Read() => ReadSnapshot(includeLayout: false);
+
+    /// <summary>The store health with the archive layout (#9421), for <c>get_store_health</c>, which prints it.</summary>
+    public StoreHealthSnapshot ReadWithLayout() => ReadSnapshot(includeLayout: true);
+
+    private StoreHealthSnapshot ReadSnapshot(bool includeLayout)
     {
         var fileMb = FileMegabytes(_duckDb.DatabasePath);
         var walMb = FileMegabytes(_duckDb.DatabasePath + ".wal");
@@ -139,7 +146,7 @@ public sealed class StoreHealthReader
             _history.Read(),
             tables,
             note,
-            ReadLayout());
+            includeLayout ? ReadLayout() : null);
     }
 
     private ArchiveLayoutInfo? ReadLayout()

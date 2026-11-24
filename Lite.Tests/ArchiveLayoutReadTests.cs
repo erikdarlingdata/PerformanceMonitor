@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Services;
 using Xunit;
 
@@ -116,7 +117,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         File.WriteAllText(P("202607_wait_stats.parquet.replaced"), "x");
         File.WriteAllText(P("202606_wait_stats.parquet.replaced"), "x");
 
-        var layout = NewReader().Read().Layout;
+        var layout = NewReader().ReadWithLayout().Layout;
 
         Assert.NotNull(layout);
         Assert.False(layout.Partial);
@@ -152,7 +153,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
     {
         WriteMixed(DayFile, 30_000);
 
-        var layout = NewReader().Read().Layout;
+        var layout = NewReader().ReadWithLayout().Layout;
 
         var table = Assert.Single(layout!.Tables);
         Assert.Equal(1, table.FilesNeedingRecut);
@@ -187,7 +188,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
             Assert.True(ParquetCompaction.NeedsRecut(con, narrow));
         }
 
-        var layout = NewReader().Read().Layout;
+        var layout = NewReader().ReadWithLayout().Layout;
 
         var table = Assert.Single(layout!.Tables);
         Assert.Equal(1, table.FilesNeedingRecut);
@@ -225,7 +226,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
             Assert.False(ParquetCompaction.NeedsRecut(con, stamped));
         }
 
-        var layout = NewReader().Read().Layout;
+        var layout = NewReader().ReadWithLayout().Layout;
 
         Assert.Equal(0, Assert.Single(layout!.Tables).FilesNeedingRecut);
 
@@ -240,7 +241,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
             Assert.True(ParquetCompaction.NeedsRecut(con, unstamped));
         }
 
-        layout = NewReader().Read().Layout;
+        layout = NewReader().ReadWithLayout().Layout;
 
         Assert.Equal(1, Assert.Single(layout!.Tables).FilesNeedingRecut);
     }
@@ -253,7 +254,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         var reader = NewReader();
         reader.LayoutBatchBudgetForTests = _ => new FileInfo(file).Length - 1;
 
-        var table = Assert.Single(reader.Read().Layout!.Tables);
+        var table = Assert.Single(reader.ReadWithLayout().Layout!.Tables);
 
         Assert.Equal(1, table.FilesNeedingRecut);
         var skip = Assert.Single(table.RecutSkips);
@@ -273,7 +274,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         var listPath = P("recut-skipped.txt");
         File.WriteAllText(listPath, DayFile + "\t" + ArchiveService.CurrentBuildId() + "\n");
 
-        var table = Assert.Single(NewReader().Read().Layout!.Tables);
+        var table = Assert.Single(NewReader().ReadWithLayout().Layout!.Tables);
 
         Assert.Equal(1, table.FilesNeedingRecut);
         var skip = Assert.Single(table.RecutSkips);
@@ -282,7 +283,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
 
         File.WriteAllText(listPath, DayFile + "\t" + ArchiveService.CurrentBuildId() + "-older\n");
 
-        var later = Assert.Single(NewReader().Read().Layout!.Tables);
+        var later = Assert.Single(NewReader().ReadWithLayout().Layout!.Tables);
 
         Assert.Equal(1, later.FilesNeedingRecut);
         Assert.Empty(later.RecutSkips);
@@ -296,7 +297,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         var service = new ArchiveService(_duckDb, _archiveDir);
         service.NoteRecutSkip(ArchiveService.RecutSkipReason.RecutFailed, P(DayFile), new CompactionPassStats());
 
-        var table = Assert.Single(NewReader().Read().Layout!.Tables);
+        var table = Assert.Single(NewReader().ReadWithLayout().Layout!.Tables);
 
         var skip = Assert.Single(table.RecutSkips);
         Assert.Equal(ArchiveLayoutReader.ReasonSortFailed, skip.Reason);
@@ -309,7 +310,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         var cutoff = RetentionService.ArchiveCutoff(DateTime.UtcNow);
         WriteMixed($"{cutoff.Date.AddDays(1):yyyyMMdd}_query_store_stats.parquet", 30_000);
 
-        var table = Assert.Single(NewReader().Read().Layout!.Tables);
+        var table = Assert.Single(NewReader().ReadWithLayout().Layout!.Tables);
 
         Assert.Equal(1, table.FilesNeedingRecut);
         var skip = Assert.Single(table.RecutSkips);
@@ -328,10 +329,33 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         var reserve = DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath);
         _duckDb.AvailableFreeBytesProvider = _ => 3 * bytes + reserve;
 
-        var table = Assert.Single(NewReader().Read().Layout!.Tables);
+        var table = Assert.Single(NewReader().ReadWithLayout().Layout!.Tables);
 
         var skip = Assert.Single(table.RecutSkips);
         Assert.Equal(ArchiveLayoutReader.ReasonFreeDisk, skip.Reason);
+    }
+
+    /// <summary>
+    /// The Store Health window reads with <c>Read()</c> on load and on every Refresh and never shows the layout (#9421), so that read
+    /// must not open a single archive file. The MCP read asks for the layout and gets it.
+    /// </summary>
+    [Fact]
+    public async System.Threading.Tasks.Task TheWindowRead_SkipsTheLayoutRead_AndTheMcpReadKeepsIt()
+    {
+        WriteMixed("202609_wait_stats.parquet", 10_000);
+        var reader = NewReader();
+        var filesOpened = 0;
+        reader.BeforeLayoutFileReadForTests = _ => filesOpened++;
+
+        var windowRead = reader.Read();
+
+        Assert.Null(windowRead.Layout);
+        Assert.Equal(0, filesOpened);
+
+        var text = await McpStoreHealthTools.GetStoreHealth(reader);
+
+        Assert.Equal(1, filesOpened);
+        Assert.Contains("Layout, read from parquet footers only: 1 of 1 files", text);
     }
 
     /// <summary>A file removed while the layout is being read is skipped: the call succeeds and the file is not counted.</summary>
@@ -349,7 +373,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
             }
         };
 
-        var snapshot = reader.Read();
+        var snapshot = reader.ReadWithLayout();
 
         var layout = snapshot.Layout;
         Assert.NotNull(layout);
@@ -369,7 +393,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
         var reader = NewReader();
         reader.LayoutBudget = TimeSpan.Zero;
 
-        var snapshot = reader.Read();
+        var snapshot = reader.ReadWithLayout();
 
         var layout = snapshot.Layout!;
         Assert.True(layout.Partial);
@@ -392,7 +416,7 @@ public sealed class ArchiveLayoutReadTests : IDisposable
 
         File.WriteAllBytes(file, bytes);
 
-        var layout = NewReader().Read().Layout!;
+        var layout = NewReader().ReadWithLayout().Layout!;
 
         Assert.Equal(0, layout.FilesUnreadable);
         Assert.Equal(1, layout.FilesRead);

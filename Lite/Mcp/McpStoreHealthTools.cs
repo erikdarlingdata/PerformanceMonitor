@@ -32,7 +32,7 @@ public sealed class McpStoreHealthTools
     {
         try
         {
-            var snapshot = await Task.Run(reader.Read);
+            var snapshot = await Task.Run(reader.ReadWithLayout);
             return StoreHealthText.Render(snapshot) + Environment.NewLine + Environment.NewLine + BuildHistory.Render(reader.ReadBuildHistory());
         }
         catch (Exception ex)
