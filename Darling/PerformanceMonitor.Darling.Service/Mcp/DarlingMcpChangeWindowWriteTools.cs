@@ -117,8 +117,8 @@ public sealed class DarlingMcpChangeWindowWriteTools
         [Description("The window id declare_change_window answered.")] long window_id,
         [Description("Why the window is cleared (1 to 2000 characters, at most 256 for an agent token, for example 'the work was cancelled').")] string reason,
         DarlingAgentActionSeat? agentSeat = null,
-        CancellationToken cancellationToken = default,
-        InvestigationOpenSignal? signal = null) =>
+        InvestigationOpenSignal? signal = null,
+        CancellationToken cancellationToken = default) =>
         ClearAsync(postgres, agentSeat, window_id, reason, DateTime.UtcNow, cancellationToken, signal);
 
     private static bool IsAgent(DarlingAgentActionSeat? seat) => seat is { Policy: { Writes: false, Investigations: true } };
