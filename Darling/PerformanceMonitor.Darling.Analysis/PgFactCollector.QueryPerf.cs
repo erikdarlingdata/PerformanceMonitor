@@ -90,7 +90,7 @@ LIMIT " + FactRanked.MaxObjects + ";";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(QueryStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -269,7 +269,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ParameterSensitivitySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -1052,7 +1052,7 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
         NpgsqlTransaction? snapshot = null;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             /* #5812 (bound 2, M2): every PLAN_REGRESSION read runs read-only with PlanRegressionWorkMemSql, set here only,
                on whichever transaction holds it (the daily read's snapshot or the exact-bound read's own). */
@@ -1643,7 +1643,7 @@ AND   delta_execution_count > 0";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ProcedureStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -1830,7 +1830,7 @@ ORDER BY r.delta_worker_time DESC";
             /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
                before the CPU-only parse; the scoping is kept so the connection closes before
                the parse, even though PG holds no lock. */
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken))
             {
                 using var command = new NpgsqlCommand(PlanAdvisorySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
                 command.Parameters.AddWithValue(context.ServerId);

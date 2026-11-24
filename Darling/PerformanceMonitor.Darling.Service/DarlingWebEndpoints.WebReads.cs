@@ -64,6 +64,7 @@ public static partial class DarlingWebEndpoints
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
+            // New tools do NOT add entries here. A new tool adds one file in the Service (handler and catalog entry, an IReadToolRegistration) and one in Storage (its Custom Views parameters), #9477.
             /* ── analysis reads (take the DarlingAnalysisService) ── */
             ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c), c.RequestAborted),
             ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryNullableInt(c, "baseline_hours_back"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -392,13 +393,14 @@ public static partial class DarlingWebEndpoints
             ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), registryState, logger, responseByteBudget: null, c.RequestAborted),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), card_offset: 0, responseByteBudget: null, Str(c, "band"), registryState: registryState, logger: logger, cancellationToken: c.RequestAborted),
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c), Rows(c, "limit", DarlingMcpAgTools.DefaultGroupLimit), c.RequestAborted),
-            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), QueryInt(c, "wal_hours_back", null, DarlingStoreWalReader.DefaultHoursBack), c.RequestAborted),
+            /* #9446: as_of anchors the table_activity answer only, and the MCP read refuses it otherwise. The triage page adds as_of to every section of a store alert opened after the firing, and its two store sections (size and jobs) are not table_activity, so as_of is forwarded only with table_activity. The size and job answers ignore it, as they did before #9446. */
+            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), QueryInt(c, "wal_hours_back", null, DarlingStoreWalReader.DefaultHoursBack), QueryBool(c, "table_activity", false), Hours(c, DarlingStoreTableActivityRead.DefaultHours), Str(c, "rank_by"), QueryBool(c, "table_activity", false) ? AsOf(c) : null, c.RequestAborted),
             ["get_store_table_health"] = (c, pg, an) => DarlingMcpStoreTableHealthTools.GetStoreTableHealth(pg, Rows(c, "top", DarlingMcpStoreTableHealthTools.DefaultTop), QueryBool(c, "candidates_only", false), First(c, "section"), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["measure_store_table"] = (c, pg, an) => DarlingMcpStoreTableMeasureTools.MeasureStoreTable(pg, Str(c, "table"), c.RequestAborted),
-            ["get_store_maintenance_readiness"] = (c, pg, an) => DarlingMcpStoreMaintenanceReadinessTools.GetStoreMaintenanceReadiness(pg, c.RequestAborted),
-            ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, responseByteBudget: null, c.RequestAborted),
+            ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, query_id: Str(c, "query_id"), responseByteBudget: null, c.RequestAborted),
+            ["get_service_starts"] = (c, pg, an) => DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), c.RequestAborted),
+            ["get_store_pass_steps"] = (c, pg, an) => DarlingMcpStorePassStepsTools.GetStorePassSteps(pg, Hours(c, 24), Str(c, "pass"), Str(c, "step"), Rows(c, "limit", DarlingMcpStorePassStepsTools.DefaultLimit), AsOf(c), responseByteBudget: null, c.RequestAborted),
             ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), Str(c, "order_by"), logger: logger, cancellationToken: c.RequestAborted),
-            ["get_store_setting_changes"] = (c, pg, an) => DarlingMcpStoreSettingChangesTools.GetStoreSettingChanges(pg, QueryInt(c, "days_back", null, DarlingMcpStoreSettingChangesTools.DefaultDaysBack), Str(c, "setting_name"), Rows(c, "limit", DarlingMcpStoreSettingChangesTools.DefaultLimit), c.RequestAborted),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
             /* #4214 part 2: postgresConfig rides by closure (this method's own doc comment), the same way
                logger does for get_sweep_reports two screens up. StoreHostProfileCache.Shared as a direct
@@ -566,6 +568,9 @@ public static partial class DarlingWebEndpoints
             ["get_finops"] = (c, pg, an) => DarlingMcpFinOpsTools.GetFinOps(pg, First(c, "view") ?? "", Server(c), Hours(c, 24), QueryInt(c, "limit", null, 10), Str(c, "database_name"), QueryBool(c, "full_text", false), Str(c, "object_name"), logger, c.RequestAborted),
             // FinOps web parity (#4843), set B ends.
         };
+
+        // Every tool's own registration joins the shared list above (#9477). A name in both throws here, naming the tool.
+        ReadToolRegistrations.AddTo(dispatch, ReadToolRegistrations.All, r => r.Handler);
 
         /* #4442: the test-only extra entry, added ONLY when a test set it -- never in a production
            run, since TestOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. #4782: it is
@@ -797,7 +802,7 @@ public static partial class DarlingWebEndpoints
     private static string? AsOf(HttpContext context) => First(context, "as_of");
 
     /// <summary>An optional text parameter; null when absent or empty (so the tool sees its own default).</summary>
-    private static string? Str(HttpContext context, string key) => First(context, key);
+    internal static string? Str(HttpContext context, string key) => First(context, key);
 
     /* ── the database list (#5245): repeated ?database_name= keys, one per chosen database ── */
 
@@ -1179,7 +1184,7 @@ public static partial class DarlingWebEndpoints
     private static string? NonIntegerParamRefusal(HttpContext context) =>
         NonIntegerParamRefusal(key => First(context, key));
 
-    private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
+    internal static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);
 
     /// <summary>A knob whose omitted value is derived from another knob (#5633 item 12: compare_analysis's baseline follows
@@ -1192,7 +1197,7 @@ public static partial class DarlingWebEndpoints
     /// dispatch layer so an authenticated/loopback caller can't request an unbounded result set from a reader
     /// that binds the value straight into <c>LIMIT $N</c> (the /api/fleet window is refused out of range instead, #5644).
     /// </summary>
-    private static int Rows(HttpContext context, string key, int def) =>
+    internal static int Rows(HttpContext context, string key, int def) =>
         ClampRows(QueryInt(context, key, null, def));
 
     /// <summary>The dispatch-layer ceiling on any caller-supplied row count — generous for real use, bounded against abuse.</summary>

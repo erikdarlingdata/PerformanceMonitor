@@ -196,6 +196,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_collection_log` | `collect.collection_log`<br>`collect.servers`<br>`collect.v_collection_log` |
 | `get_collection_state` | `config.config_service`<br>`config.config_monitored_servers` |
 | `get_collector_cost` | `collect.collector_cost` |
+| `get_collector_readiness` | `collect.collection_log`<br>`collect.servers`<br>`collect.server_properties`<br>`collect.pg_extension_availability`<br>`config.config_collector_schedules`<br>`config.config_collector_run_times` |
 | `get_collector_schedules` | `config.config_collector_schedules`<br>`config.config_collector_run_times` |
 | `get_collector_stall_probes` | `collect.collector_stall_probes` |
 | `get_command_result` | `config.config_command`<br>`config.read_mcp_command_result` |
@@ -211,11 +212,13 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_read_latency` | `collect.read_latency` |
 | `get_server_actions` | `config.config_monitored_servers`<br>`config.config_server_actions`<br>`collect.servers` |
 | `get_server_settings` | `config.config_monitored_servers` |
+| `get_service_starts` | `collect.service_starts`<br>`collect.service_start_rungs` |
 | `get_slow_reads` | `collect.slow_reads` |
 | `get_store_host` | `collect.store_metrics` |
 | `get_store_log` | `collect.store_log_captures`<br>`collect.store_log_events` |
-| `get_store_metrics` | `collect.store_metrics`<br>`collect.query_store_compose_stamp_failures` |
-| `get_store_query_history` | `collect.store_statement_history`<br>`collect.store_statement_captures`<br>`config.store_statement_stats()` (function over pg_stat_statements) |
+| `get_store_metrics` | `collect.store_metrics`<br>`collect.query_store_compose_stamp_failures`<br>`collect.store_table_activity`<br>`collect.store_table_activity_baseline`<br>`collect.service_starts` (the build markers) |
+| `get_store_pass_steps` | `collect.store_pass_steps` |
+| `get_store_query_history` | `collect.store_statement_history`<br>`collect.store_statement_captures`<br>`collect.service_starts` (the build markers)<br>`config.store_statement_stats()` (function over pg_stat_statements) |
 | `get_store_query_stats` | `config.store_statement_stats()` (function over pg_stat_statements)<br>`config.store_statement_stats_info()` (function over pg_stat_statements_info) |
 | `get_store_setting_changes` | `collect.store_setting_changes`<br>`collect.store_setting_state` |
 | `get_tool_guide` | None. The guides are built into the service. |

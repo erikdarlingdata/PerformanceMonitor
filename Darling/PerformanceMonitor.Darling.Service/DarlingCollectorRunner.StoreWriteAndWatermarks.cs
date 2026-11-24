@@ -547,7 +547,7 @@ public sealed partial class DarlingCollectorRunner
         CollectorContext context,
         CancellationToken cancellationToken)
     {
-        await using var freshConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var freshConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(definition.Name), cancellationToken);
         return await CopyBatchOnceAsync(
             freshConnection, definition, rows, server, collectionTime, context, cancellationToken);
     }
@@ -1229,7 +1229,7 @@ public sealed partial class DarlingCollectorRunner
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var primary = await ReadServerWatermarkAsync(connection, serverId, tableName, columnName, collectedSince, cancellationToken);
             if (!string.Equals(tableName, AttentionLegacyTableWatermark.TargetTable, StringComparison.Ordinal))
             {
@@ -1361,7 +1361,7 @@ public sealed partial class DarlingCollectorRunner
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
 
             /* #4197: same probe-then-confirm as the sibling above — see its remarks. collectedSince
                non-null (query_store's clamped floor) is unchanged; null now means "bound to
@@ -1470,7 +1470,7 @@ public sealed partial class DarlingCollectorRunner
         var state = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.ForCollector(collectorName), cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT state_key, state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2", connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;

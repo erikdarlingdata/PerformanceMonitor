@@ -2400,8 +2400,9 @@ public sealed class PgLogEventsPipelineTests
         Assert.DoesNotContain("raw_line_hash", logTab, StringComparison.Ordinal);
 
         /* The instructions' census moved with the tool. */
-        var instructions = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpInstructions.cs");
-        Assert.Contains("thirty-five are the PostgreSQL reads", instructions, StringComparison.Ordinal);
+        Assert.Contains(
+            $"{DarlingMcpInstructions.RegisteredToolNames().Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal))} are the PostgreSQL reads",
+            DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
     /* ---- the RDS transport --------------------------------------------------------------------------- */

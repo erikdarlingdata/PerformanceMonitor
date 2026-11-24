@@ -836,7 +836,7 @@ public sealed class QueryStoreBackfill
         var databases = new List<string>();
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreBackfill, cancellationToken);
             var sql = await ChooseCandidateSqlAsync(connection, floorLimit, cancellationToken);
 
             /* #5518: only the cut-chunk read is cached. The floor-bound statement's window moves every tick, and the
@@ -974,7 +974,7 @@ public sealed class QueryStoreBackfill
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreBackfill, cancellationToken);
 
             var snapshotDatabases = new HashSet<string>(StringComparer.Ordinal);
             DateTime? newest = null;
@@ -1092,7 +1092,7 @@ public sealed class QueryStoreBackfill
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreBackfill, cancellationToken);
 
             using (var exists = new NpgsqlCommand(
                 "SELECT 1 FROM query_store_stats WHERE server_id = $1 AND database_name = $2 AND collection_time <= $3 LIMIT 1", connection))

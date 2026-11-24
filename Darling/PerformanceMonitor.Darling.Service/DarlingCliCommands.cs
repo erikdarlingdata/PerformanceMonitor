@@ -696,6 +696,9 @@ public static partial class DarlingCliCommands
     /// same build. The web dashboard's footer shows it, and the front door shows each store's next to the store's name.</summary>
     public static string BuildText() => ProductBuildText.ForAssembly(typeof(DarlingCliCommands).Assembly);
 
+    /// <summary>#9431: the commit this build was made from, in full, or null for a build made outside a git checkout.</summary>
+    public static string? CommitText() => ProductBuildText.CommitForAssembly(typeof(DarlingCliCommands).Assembly);
+
     /// <summary>The usage text for <c>--help</c> and the unknown-option error. Pure ASCII, one verb per line.</summary>
     public static string UsageText() =>
         "PerformanceMonitor Darling service." + Environment.NewLine +

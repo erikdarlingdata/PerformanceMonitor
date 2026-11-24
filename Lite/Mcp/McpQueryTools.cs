@@ -541,6 +541,8 @@ public sealed class McpQueryTools
         /* #9195: the profile files this call writes when DuckDbReadProfile is on, named on the slow-read line. */
         using var profiles = DuckDbProfileTrail.Begin();
         var phases = new ReadPhaseSplit();
+        /* #9423: this read keeps a phase split, so the slow-call row stores its hot against archive figures. */
+        lockWaits.MarkSplitKept();
         try
         {
             /* #5992: the query tag filter. A name no tag carries is an empty answer that says so. */

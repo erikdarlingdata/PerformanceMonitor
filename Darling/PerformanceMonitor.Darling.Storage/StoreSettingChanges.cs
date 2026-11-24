@@ -57,7 +57,7 @@ public sealed record StoreSettingChange(
 /// settings once at start, so an <c>ALTER SYSTEM</c> plus <c>pg_reload_conf()</c> for a settings trial, or a setting overridden by hand,
 /// left no record of when it changed, what it changed from, or where the new value came from.
 ///
-/// <para><b>Shape (V306).</b> <c>collect.store_setting_state</c> is the last captured reading, one row per setting. <c>collect.store_setting_changes</c>
+/// <para><b>Shape (V309).</b> <c>collect.store_setting_state</c> is the last captured reading, one row per setting. <c>collect.store_setting_changes</c>
 /// has one row per change: the setting, its unit, the old and the new value, source, source file and line, and <c>pending_restart</c>, when the
 /// capture saw it (<c>seen_at</c>) and the time the server last loaded its configuration (<c>conf_load_time</c>, from
 /// <c>pg_conf_load_time()</c>). Both are plain tables with naive UTC times.</para>
@@ -82,7 +82,7 @@ public sealed record StoreSettingChange(
 public static class StoreSettingChanges
 {
     /// <summary>The store schema version that adds the two tables. The one place the number is written.</summary>
-    public const int Version = 306;
+    public const int Version = 309;
 
     /// <summary>Per-command timeout, in seconds. The capture runs on the one-minute pass, so it is far short of the hourly sweep's.</summary>
     public const int CaptureTimeoutSeconds = 30;
@@ -91,7 +91,7 @@ public static class StoreSettingChanges
     public const int RetentionDays = StoreSelfMetrics.RetentionDays;
 
     /// <summary>
-    /// The rung (V306): two empty plain tables, no data moves. An older build never reads them.
+    /// The rung (V309): two empty plain tables, no data moves. An older build never reads them.
     /// </summary>
     public const string CreateSql = @"
 CREATE TABLE IF NOT EXISTS collect.store_setting_state

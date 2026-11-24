@@ -635,7 +635,7 @@ AND   day = $2::date;";
 
         int built = 0, failed = 0, skipped = 0, started = 0;
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.PlanRegression, cancellationToken);
         var removed = await GcAsync(connection, nowUtc, cancellationToken);
         var (advanced, stamped) = await StampWithoutBuildAsync(connection, nowUtc, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, cancellationToken);

@@ -29,6 +29,23 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpStoreSettingChangesTools
 {
+    /// <summary>This tool's entries on the web read surface and in Custom Views validation, kept here and not in the shared lists (#9477).</summary>
+    internal sealed class Registration : IReadToolRegistration
+    {
+        public ReadToolRegistration Read { get; } = new(
+            "get_store_setting_changes",
+            (c, pg, an) => GetStoreSettingChanges(pg, DarlingWebEndpoints.QueryInt(c, "days_back", null, DefaultDaysBack), DarlingWebEndpoints.Str(c, "setting_name"), DarlingWebEndpoints.Rows(c, "limit", DefaultLimit), c.RequestAborted),
+            new(
+                DarlingWebEndpoints.CatOverview,
+                "Changes to the monitoring store's OWN PostgreSQL settings between service starts, newest first: the setting, old and new value, where the new value came from (source, file and line), pending_restart, when it was seen and when the server reloaded its configuration. Compared once a minute; the first capture is a baseline with no rows. setting_name filters to one setting.",
+                new[]
+                {
+                    DarlingWebEndpoints.PInt("days_back", DefaultDaysBack),
+                    DarlingWebEndpoints.PText("setting_name"),
+                    DarlingWebEndpoints.PLimit(DefaultLimit),
+                }));
+    }
+
     /// <summary>The window ceiling, in days: the changes' retention.</summary>
     public const int MaxDaysBack = StoreSettingChanges.RetentionDays;
 
