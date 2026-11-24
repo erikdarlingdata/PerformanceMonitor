@@ -217,7 +217,7 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
     /// <summary>Whether listing these lines drops a line or shortens one.</summary>
     private static bool LinesCut(IReadOnlyList<string> lines) => lines.Count > MaxLinesShown || lines.Any(l => l.Length > MaxLineChars);
 
-    private static IReadOnlyList<string> ShownLines(IReadOnlyList<string> lines) =>
+    private static List<string> ShownLines(IReadOnlyList<string> lines) =>
         lines.Take(MaxLinesShown).Select(l => l.Length <= MaxLineChars ? l : l[..MaxLineChars]).ToList();
 
     private static string? Iso(DateTime? value) => value?.ToString("O", CultureInfo.InvariantCulture);
