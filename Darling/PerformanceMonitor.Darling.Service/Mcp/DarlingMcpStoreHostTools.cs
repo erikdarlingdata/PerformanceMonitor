@@ -88,13 +88,28 @@ public sealed class DarlingMcpStoreHostTools
         + "(the SQLSTATE for a refusal); a store without TimescaleDB reports 0 chunks. The rest of the profile still "
         + "returns (a slow fact fails alone). --check-settings reads the size live. postgres_owner says who owns the PostgreSQL "
         + "process: owner is started_by_this_service (stopping the service stops PostgreSQL), adopted_running (it leaves PostgreSQL running), "
-        + "not_managed or not_yet_known (still starting), with the sentence in on_service_stop. This "
+        + "not_managed or not_yet_known (still starting), with the sentence in on_service_stop. "
+        + "growth_forecast (#9429) says how long the data volume's free space lasts: growth_bytes_per_day_7d is the store's average "
+        + "daily growth over the last 7 full days (the same daily history get_store_metrics returns as daily_growth), free_floor_percent "
+        + "is the free-space floor, a parameter with a default of 25 and a range above 0 and below 100, floor_bytes is that share of the "
+        + "volume, headroom_bytes is the free space above it and days_until_free_floor is the headroom divided by the 7-day rate. "
+        + "days_until_free_floor is 0 when the volume is already at or below the floor. It is null, with growth_note saying why, when "
+        + "the history has fewer than 7 full days (growth_days_in_window says how many it has), when the store did not grow over them, "
+        + "when the volume could not be read, or when the store is not managed (data_volume is then the service's disk, not the "
+        + "store's). It is a straight-line estimate from the net size change, so a compression pass or a retention drop inside the "
+        + "window lowers it. This "
         + "tool never writes a setting or a conf file.")]
     public static async Task<string> GetStoreHost(
         NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache,
         StoreProcessOwnership? ownership = null,
+        double free_floor_percent = DefaultFreeFloorPercent,
         CancellationToken cancellationToken = default)
     {
+        if (!(free_floor_percent > 0d && free_floor_percent < 100d))
+        {
+            return McpHelpers.Status("invalid", "free_floor_percent must be above 0 and below 100 (default 25).");
+        }
+
         if (postgresConfig is null)
         {
             /* Only reachable off the direct-call web path when a caller builds the dispatch table without a
@@ -154,6 +169,17 @@ public sealed class DarlingMcpStoreHostTools
                GatherSettingProfilesAsync never used. */
             var mcpDataDirectory = postgresConfig.Managed ? DarlingStoreHostProfile.TryResolveProfileDataDirectory(postgresConfig) : null;
 
+            /* #9429: the days until the data volume falls to the free-space floor, from the daily history get_store_metrics
+               already returns. Read here, outside the profile cache, so the rate is as current as the sweep and a failure of
+               this read nulls the forecast without failing the profile. */
+            var forecastAt = DateTime.UtcNow;
+            var (growthPoints, growthFailure) = await ReadStoreGrowthAsync(postgres, forecastAt, cancellationToken);
+            var forecast = growthPoints is null
+                ? StoreGrowthForecast.Unavailable(free_floor_percent, growthFailure!)
+                : ForecastDaysUntilFloor(
+                    growthPoints, forecastAt, profile.DataVolume.TotalBytes, profile.DataVolume.FreeBytes,
+                    profile.DataVolume.IsReady, profile.IsManagedStore, free_floor_percent);
+
             return JsonSerializer.Serialize(new
             {
                 platform = profile.Platform,
@@ -186,6 +212,16 @@ public sealed class DarlingMcpStoreHostTools
                         : "This is the service's own disk, not necessarily the store's: a bring-your-own postgres.connectionString may point at a different host entirely.",
                 },
                 managed = profile.IsManagedStore,
+                growth_forecast = new
+                {
+                    free_floor_percent = forecast.FreeFloorPercent,
+                    floor_bytes = forecast.FloorBytes,
+                    headroom_bytes = forecast.HeadroomBytes,
+                    growth_bytes_per_day_7d = forecast.GrowthBytesPerDay,
+                    growth_days_in_window = forecast.DaysInWindow,
+                    days_until_free_floor = forecast.DaysUntilFloor,
+                    growth_note = forecast.Note,
+                },
                 /* #8787 part D2: who owns the postmaster, from the service's own state (not SQL, and outside the 5-minute profile
                    cache, so it is always current). The answer decides what a service stop does to the store. */
                 postgres_owner = new
@@ -249,6 +285,107 @@ public sealed class DarlingMcpStoreHostTools
         {
             return McpHelpers.FormatError("get_store_host", FailureFor(ex));
         }
+    }
+
+    /// <summary>The default free-space floor for <c>growth_forecast</c>: 25 percent of the data volume free (#9429).</summary>
+    public const double DefaultFreeFloorPercent = 25d;
+
+    /// <summary>The days of daily growth the forecast averages, and so the shortest history it answers on (#9429).</summary>
+    internal const int ForecastWindowDays = 7;
+
+    /// <summary>
+    /// What <c>growth_forecast</c> reports (#9429). Every figure but the floor percent is null when it cannot be stated, with
+    /// <see cref="Note"/> saying why.
+    /// </summary>
+    internal sealed record StoreGrowthForecast(
+        double FreeFloorPercent, long? FloorBytes, long? HeadroomBytes, double? GrowthBytesPerDay, int DaysInWindow,
+        double? DaysUntilFloor, string? Note)
+    {
+        internal static StoreGrowthForecast Unavailable(double floorPercent, string note) =>
+            new(floorPercent, null, null, null, 0, null, note);
+    }
+
+    /// <summary>
+    /// The store's daily growth points (<see cref="DarlingStoreMetricsReader.ComputeDailyGrowth"/>, the series
+    /// <c>get_store_metrics</c> returns as <c>daily_growth</c>) over the last days, or null with a sentence when the history could not
+    /// be read. The window starts nine days back so the 7 full days before today each have a predecessor.
+    /// </summary>
+    private static async Task<(System.Collections.Generic.List<DarlingStoreMetricsReader.DailyGrowthPoint>? Points, string? Failure)> ReadStoreGrowthAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var daily = await DarlingStoreMetricsReader.GetDailyAsync(postgres, nowUtc.AddDays(-(ForecastWindowDays + 2)), cancellationToken);
+            var storeDaily = daily
+                .Where(p => p.ObjectKind == PerformanceMonitor.Darling.Storage.StoreSelfMetrics.StoreObjectKind)
+                .OrderBy(p => p.Day)
+                .ToList();
+            return (DarlingStoreMetricsReader.ComputeDailyGrowth(storeDaily, nowUtc), null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return (null, ex is PostgresException pg
+                ? $"The store's size history could not be read (SQLSTATE {pg.SqlState}), so there is no growth forecast."
+                : "The store's size history could not be read, so there is no growth forecast.");
+        }
+    }
+
+    /// <summary>
+    /// The days until the data volume's free space falls to the floor at the 7-day growth rate (#9429). Pure, so the arithmetic is
+    /// tested without a store.
+    ///
+    /// <para>The rate is the mean of the net daily byte deltas of the <see cref="ForecastWindowDays"/> full days before today (today's
+    /// partial point is left out). A history with fewer such days has no 7-day rate, and the answer says how many days it has, never a
+    /// guess from fewer. A volume already at or below the floor answers 0 days whatever the history, because that needs no rate.
+    /// A store that did not grow over the window has no days figure: it is not on its way to the floor.</para>
+    /// </summary>
+    internal static StoreGrowthForecast ForecastDaysUntilFloor(
+        System.Collections.Generic.IReadOnlyList<DarlingStoreMetricsReader.DailyGrowthPoint> growth,
+        DateTime nowUtc, long volumeTotalBytes, long volumeFreeBytes, bool volumeReady, bool storeIsManaged, double floorPercent)
+    {
+        var today = nowUtc.Date;
+        var window = growth
+            .Where(g => !g.Partial && g.Day.Date >= today.AddDays(-ForecastWindowDays) && g.Day.Date < today)
+            .ToList();
+        var ratePerDay = window.Count >= ForecastWindowDays ? window.Sum(g => (double)g.DeltaBytes) / ForecastWindowDays : (double?)null;
+
+        if (!storeIsManaged)
+        {
+            return new StoreGrowthForecast(
+                floorPercent, null, null, ratePerDay, window.Count, null,
+                "This store is not managed by the service, so data_volume is the service's own disk and not the store's. No days figure is given for a disk the store may not be on.");
+        }
+
+        if (!volumeReady || volumeTotalBytes <= 0)
+        {
+            return new StoreGrowthForecast(
+                floorPercent, null, null, ratePerDay, window.Count, null, "The data volume's size could not be read, so there is no free-space floor to count to.");
+        }
+
+        var floorBytes = (long)Math.Round(volumeTotalBytes * floorPercent / 100d);
+        var headroom = volumeFreeBytes - floorBytes;
+        if (headroom <= 0)
+        {
+            return new StoreGrowthForecast(
+                floorPercent, floorBytes, headroom, ratePerDay, window.Count, 0d,
+                "Free space on the data volume is already at or below the floor.");
+        }
+
+        if (ratePerDay is not { } rate)
+        {
+            return new StoreGrowthForecast(
+                floorPercent, floorBytes, headroom, null, window.Count, null,
+                $"Only {window.Count} of the last {ForecastWindowDays} full days have a growth figure, so there is no 7-day rate yet.");
+        }
+
+        if (rate <= 0d)
+        {
+            return new StoreGrowthForecast(
+                floorPercent, floorBytes, headroom, rate, window.Count, null,
+                $"The store did not grow over the last {ForecastWindowDays} full days, so it is not on its way to the floor at that rate.");
+        }
+
+        return new StoreGrowthForecast(floorPercent, floorBytes, headroom, rate, window.Count, Math.Round(headroom / rate, 1), null);
     }
 
     /// <summary>

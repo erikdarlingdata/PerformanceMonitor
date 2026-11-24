@@ -120,6 +120,7 @@ internal static class DarlingFrontDoorRouting
         "get_store_table_health",
         "measure_store_table",
         "get_store_maintenance_readiness",
+        "get_store_compression_health",
         "get_store_query_history",
         "get_store_query_stats",
         "get_sweep_reports",
