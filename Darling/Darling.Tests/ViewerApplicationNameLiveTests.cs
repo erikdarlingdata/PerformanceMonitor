@@ -33,8 +33,7 @@ public sealed class ViewerApplicationNameLiveTests
 
     /// <summary>
     /// BRING-YOUR-OWN, no <c>Application Name</c> supplied: the Viewer names its own backend
-    /// <c>PerformanceMonitorDarling-Viewer</c> — a literal here so this pin compiles and reds against dev,
-    /// which has no <see cref="ViewerSettings.ApplicationName"/> naming path for a BYO string at all.
+    /// <see cref="ViewerSettings.BuiltApplicationName"/>, the Viewer name plus its build (#9436).
     /// </summary>
     [Fact]
     public async Task ViewerDataService_BringYourOwn_NamesItsBackendInPgStatActivity()
@@ -82,7 +81,7 @@ public sealed class ViewerApplicationNameLiveTests
                 probe);
             var applicationName = (string)(await check.ExecuteScalarAsync(ct))!;
 
-            Assert.Equal("PerformanceMonitorDarling-Viewer", applicationName);
+            Assert.Equal(ViewerSettings.BuiltApplicationName, applicationName);
 
             bodySucceeded = true;
         }
@@ -95,7 +94,7 @@ public sealed class ViewerApplicationNameLiveTests
     /// <summary>
     /// BRING-YOUR-OWN with the operator's own <c>Application Name</c>: the set-if-ABSENT contract means the
     /// operator's value wins, and the backend the Viewer opens shows it, not
-    /// <see cref="ViewerSettings.ApplicationName"/>.
+    /// <see cref="ViewerSettings.BuiltApplicationName"/>.
     /// </summary>
     [Fact]
     public async Task ViewerDataService_BringYourOwnWithAnOperatorSuppliedName_KeepsTheOperatorsValue()

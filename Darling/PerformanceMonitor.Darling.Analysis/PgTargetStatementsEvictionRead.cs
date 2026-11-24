@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -70,7 +71,7 @@ AND   c.role_name IS NULL";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             var hours = new EvictionFinding.Hour[EvictionFinding.WindowHours];
             using (var cmd = new NpgsqlCommand(StatementsEvictionSql, connection) { CommandTimeout = FactCommandTimeoutSeconds })

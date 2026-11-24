@@ -101,7 +101,7 @@ LIMIT 5";
     private async Task CollectQueriesAtSpike(AnalysisFinding finding, AnalysisContext context)
     {
         // Find the peak CPU time, then get queries active within 2 minutes of it
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         // Step 1: Find when the spike occurred
         using var peakCmd = new NpgsqlCommand(SpikePeakSql, connection);
@@ -195,7 +195,7 @@ LIMIT 5";
 
     private async Task CollectTopCpuQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(TopCpuQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -246,7 +246,7 @@ LIMIT 5";
 
     private async Task CollectTopSpillingQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(TopSpillingQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -488,7 +488,7 @@ WHERE digest = ANY($1)";
     /// </summary>
     private async Task CollectParameterSensitiveQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         var windowStart = AsNaive(context.TimeRangeStart);
         using var cmd = new NpgsqlCommand(ParameterSensitiveSql, connection);
@@ -1249,7 +1249,7 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         /* #3953: the source the fact read this pass, so the drill-down can reproduce it; when the fact did not
            decide, the same decision the fact makes, over the same bound. */
@@ -1431,7 +1431,7 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(BadActorDetailSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -1485,7 +1485,7 @@ LIMIT 5";
 
     private async Task CollectPendingGrants(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(PendingGrantsSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;

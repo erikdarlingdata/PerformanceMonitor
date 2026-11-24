@@ -88,7 +88,7 @@ ORDER BY opened_at DESC LIMIT 1";
             return fresh;
         }
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.DeadlockSignatures, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         var existing = new HashSet<string>(StringComparer.Ordinal);
         await using (var find = Command(connection, transaction, ExistingSql,
@@ -128,7 +128,7 @@ ORDER BY opened_at DESC LIMIT 1";
     public async Task<IReadOnlyDictionary<string, string>> CanonicalAsync(
         int serverId, IEnumerable<string> signatures, CancellationToken cancellationToken)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.DeadlockSignatures, cancellationToken);
         return await CanonicalAsync(connection, null, serverId, signatures, cancellationToken);
     }
 
@@ -151,7 +151,7 @@ ORDER BY opened_at DESC LIMIT 1";
     /// <summary>The day rows of every signature the server has counted in the 7 days up to <paramref name="today"/>.</summary>
     public async Task<IReadOnlyList<SignatureDayStats>> StatsAsync(int serverId, DateOnly today, CancellationToken cancellationToken)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.DeadlockSignatures, cancellationToken);
         await using var command = Command(connection, null, StatsSql,
             new NpgsqlParameter<int> { TypedValue = serverId },
             new NpgsqlParameter<DateOnly> { TypedValue = today, NpgsqlDbType = NpgsqlDbType.Date });
@@ -173,7 +173,7 @@ ORDER BY opened_at DESC LIMIT 1";
     public async Task<int> WriteDigestAsync(
         int serverId, DateTime nowUtc, string onceKey, string detailJson, CancellationToken cancellationToken)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.DeadlockSignatures, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         Guid requestId;
         int routeId;

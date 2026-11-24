@@ -62,7 +62,7 @@ public static class DarlingSchemaCapture
         }
 
         var pass = new Pass(runner, server, sessionName, DarlingSnapshotScope.IsActive, cancellationToken);
-        await using var store = await runner.Store.OpenConnectionAsync(cancellationToken);
+        await using var store = await runner.Store.OpenConnectionAsync(StoreSessionNames.SchemaCapture, cancellationToken);
         pass.Store = store;
         if (server.Target.IsAzureSqlDb)
         {
@@ -100,7 +100,7 @@ public static class DarlingSchemaCapture
 
         try
         {
-            await using var store = await runner.Store.OpenConnectionAsync(cancellationToken);
+            await using var store = await runner.Store.OpenConnectionAsync(StoreSessionNames.SchemaCapture, cancellationToken);
             if (!await SchemaCaptureStateStore.HasSessionAsync(store, server.ServerId, cancellationToken))
             {
                 runner.SettleSchemaSession(server.ServerId);

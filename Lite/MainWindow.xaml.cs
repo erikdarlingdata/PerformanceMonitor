@@ -471,6 +471,13 @@ public partial class MainWindow : Window
                 }
             }
 
+            /* #9425: one build history row for this start, now that the store is open and before collection starts. It never throws,
+               and a write that fails only logs at Debug. */
+            var (build, fullVersion) = BuildHistory.CurrentBuild();
+            await BuildHistory.RecordStartAsync(
+                _databaseInitializer, new BuildHistory(BuildHistory.PathFor(App.DatabasePath)),
+                new StoreHousekeepingHistory(StoreHousekeepingHistory.PathFor(App.DatabasePath)), build, fullVersion, DateTime.UtcNow);
+
             /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
                used an earlier Lite gets bound the servers whose current host has rows in this store; a new user, and a
                server with only a saved password, confirms each one. A record that cannot be written is shown, not passed over. */
