@@ -95,6 +95,8 @@ public sealed class UpgradeRunPickupTests
             Assert.Equal(UpgradeRunPickupOutcome.NoFile, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(15), ct)).Outcome);
             bodySucceeded = true;
         }
+        catch (Exception ex) { File.AppendAllText("C:/runner/logs/p9432-err.txt", ex.ToString() + "
+"); throw; }
         finally
         {
             try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
@@ -133,6 +135,8 @@ public sealed class UpgradeRunPickupTests
             Assert.False(File.Exists(file));
             bodySucceeded = true;
         }
+        catch (Exception ex) { File.AppendAllText("C:/runner/logs/p9432-err.txt", ex.ToString() + "
+"); throw; }
         finally
         {
             try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
@@ -176,6 +180,8 @@ public sealed class UpgradeRunPickupTests
             Assert.Equal((1L, "in_progress"), await RowAsync(connection, oldId));
             bodySucceeded = true;
         }
+        catch (Exception ex) { File.AppendAllText("C:/runner/logs/p9432-err.txt", ex.ToString() + "
+"); throw; }
         finally
         {
             try { Directory.Delete(folder, recursive: true); } catch (IOException) { }
