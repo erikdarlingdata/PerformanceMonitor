@@ -12063,6 +12063,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
         observer?.LadderStarted(currentVersion);
 
         var recordObjects = observer is not null && currentVersion > 0;
+        /* The catalog after one rung is the catalog before the next, because the advisory lock keeps every other migrator out, so each rung costs one read, not two. */
+        MigrationCatalogSnapshot? carried = null;
         var applied = 0;
         foreach (var migration in ladder)
         {
@@ -12089,6 +12091,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             var rungClock = System.Diagnostics.Stopwatch.StartNew();
             using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             IReadOnlyList<MigrationObjectChange>? objectChanges = null;
+            MigrationCatalogSnapshot? afterObjects = null;
 
             try
             {
@@ -12097,8 +12100,9 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                    savepoint, so a failed read costs the rung's object rows, never the rung. The rung's elapsed time in the start history includes
                    both reads. */
                 var before = recordObjects
-                    ? await MigrationCatalogSnapshot.TryTakeAsync(connection, transaction, logger, MigrationCommandTimeoutSeconds, cancellationToken)
+                    ? carried ?? await MigrationCatalogSnapshot.TryTakeAsync(connection, transaction, logger, MigrationCommandTimeoutSeconds, cancellationToken)
                     : null;
+                carried = null;
 
                 try
                 {
@@ -12119,6 +12123,7 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                 {
                     var after = await MigrationCatalogSnapshot.TryTakeAsync(connection, transaction, logger, MigrationCommandTimeoutSeconds, cancellationToken);
                     objectChanges = after is null ? null : MigrationCatalogSnapshot.Diff(before, after);
+                    afterObjects = after;
                 }
 
                 using (var stamp = new NpgsqlCommand(
@@ -12146,6 +12151,8 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             {
                 observer?.RungObjects(migration.Version, objectChanges);
             }
+
+            carried = afterObjects;
 
             applied++;
         }
