@@ -92,6 +92,31 @@ internal static class DarlingReadLatencyReader
     /// that left mid-read: neither finished, so neither measures what the route costs.</summary>
     internal static readonly string[] NonRunOutcomes = ["queue_wait", "busy", "cache_hit", "cancelled"];
 
+    /// <summary>How many process starts <see cref="GetProcessStartsAsync"/> returns at most.</summary>
+    public const int MaxProcessStarts = 20;
+
+    /// <summary>The distinct service process start instants that wrote a bucket in the window, newest first, at most
+    /// <see cref="MaxProcessStarts"/> (#9434). A caller cannot learn the instant to pass as <c>split_at</c> from a log line, because a
+    /// process start is taken a few seconds before or after any instant the caller can see, so the answer lists the exact stored values.
+    /// Buckets stored before V315 have no start and are left out. The window is the whole store window, not the surface or route
+    /// filter: a start is a fact about the service, and a build that never read one route is still a build to split on.</summary>
+    public static async Task<List<DateTime>> GetProcessStartsAsync(
+        NpgsqlDataSource postgres, DateTime sinceUtc, CancellationToken cancellationToken = default)
+    {
+        var starts = new List<DateTime>();
+        await using var command = postgres.CreateCommand(
+            $"SELECT DISTINCT process_started_at FROM collect.read_latency WHERE metric_time >= $1 AND process_started_at IS NOT NULL ORDER BY process_started_at DESC LIMIT {MaxProcessStarts}");
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(sinceUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            starts.Add(DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Utc));
+        }
+
+        return starts;
+    }
+
     public static Task<List<ReadLatencyRow>> GetSummaryAsync(
         NpgsqlDataSource postgres, DateTime sinceUtc, string? surface, string? route,
         CancellationToken cancellationToken = default)
@@ -113,7 +138,7 @@ internal static class DarlingReadLatencyReader
         /* #9434: the split instant is the last parameter. A bucket is on the AFTER side when the process that wrote it started at or
            after the instant. A bucket written before V315 has no start: it falls back to its hour, after when the hour starts at or
            after the instant, so the hour that holds the instant counts as before, and is_ambiguous marks those rows so the answer
-           can say how many reads that is. Every figure below is NULL-safe on is_after: no split leaves it NULL and the side figures 0. */
+           can say how many reads that is. An hour that STARTS at the instant is wholly after it, so it is not ambiguous (strict less-than). Every figure below is NULL-safe on is_after: no split leaves it NULL and the side figures 0. */
         var splitParam = 1 + (normalizedSurface is not null ? 1 : 0) + (normalizedRoute is not null ? 1 : 0) + 1;
         var splitUtc = $"(${splitParam}::timestamptz AT TIME ZONE 'UTC')";
         var nonRunList = string.Join(", ", NonRunOutcomes.Select(o => $"'{o}'"));
@@ -126,7 +151,7 @@ WITH windowed AS
                 WHEN process_started_at IS NOT NULL THEN process_started_at >= ${splitParam}::timestamptz
                 ELSE metric_time >= {splitUtc} END AS is_after,
            (process_started_at IS NULL AND ${splitParam}::timestamptz IS NOT NULL
-            AND metric_time <= {splitUtc} AND {splitUtc} < metric_time + interval '1 hour') AS is_ambiguous
+            AND metric_time < {splitUtc} AND {splitUtc} < metric_time + interval '1 hour') AS is_ambiguous
     FROM collect.read_latency
     WHERE metric_time >= $1{surfaceFilter}{routeFilter}
 ),
