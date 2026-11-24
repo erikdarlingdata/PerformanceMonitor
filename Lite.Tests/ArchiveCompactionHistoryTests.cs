@@ -255,7 +255,7 @@ public sealed class ArchiveCompactionHistoryTests : IDisposable
         }
 
         Assert.Equal(reasons.Length, detail.RecutSkips!.Count);
-        var text = StoreHealthReader.CompactionSummary(detail);
+        var text = StoreHealthText.CompactionSummary(detail);
         Assert.Contains($"skipped {Enumerable.Range(1, reasons.Length).Sum():N0} (", text);
     }
 
