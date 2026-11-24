@@ -213,6 +213,7 @@ spinlock_stats,collected,yes,
 store_log_captures,internal,no,store log capture progress
 store_log_events,internal,no,store log events
 store_metrics,internal,no,store size telemetry
+store_pass_steps,internal,no,background pass step history
 store_relation_sizes_latest,derived,derived,newest measured size of each relation
 store_relation_sizes_measured,internal,no,when the relation sizes were measured
 store_statement_captures,internal,no,store statement capture progress
