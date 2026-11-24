@@ -27,9 +27,9 @@ namespace PerformanceMonitorLite.Services;
 /// <param name="ArchiveFiles">Archive files those span reads opened. NULL when the tool keeps no phase split.</param>
 /// <param name="ResponseBytes">UTF-8 bytes of the text the call returned.</param>
 /// <param name="HoursBack">The hours_back (or hours) the call asked for, when it had one.</param>
-/// <param name="PeakWorkingSetBytes">Highest process working set sampled during the call (the way tools/CompactionRepro samples one: WorkingSet64 every 75 ms, plus the first and last reading).</param>
-/// <param name="DuckDbMemoryBytes">DuckDB's duckdb_memory() total when the call ended. NULL when the store lock was busy.</param>
-/// <param name="MemorySource">Names where the two memory figures came from.</param>
+/// <param name="ProcessPeakWorkingSetBytes">The highest working set of the whole Lite process while the call ran (the compaction history's figure, read the same way). Calls that overlap share it. Stored in the <c>peak_working_set_bytes</c> column.</param>
+/// <param name="DuckDbPeakMemoryBytes">The highest duckdb_memory() total read while the call ran. NULL when the store lock was busy at every read. Calls that overlap share it. Stored in the <c>duckdb_memory_bytes</c> column.</param>
+/// <param name="MemorySource">Where the two memory figures came from, in words, including what the sampling can miss.</param>
 /// <param name="ServerName">The server the reply names, else the server_name the call carried. NULL when the call named none.</param>
 /// <param name="RowsReturned">Rows the reply holds, read from its count or its one array. NULL when the reply carries neither.</param>
 public sealed record McpSlowCall(
@@ -43,8 +43,8 @@ public sealed record McpSlowCall(
     long? ArchiveFiles,
     long ResponseBytes,
     double? HoursBack,
-    long? PeakWorkingSetBytes,
-    long? DuckDbMemoryBytes,
+    long? ProcessPeakWorkingSetBytes,
+    long? DuckDbPeakMemoryBytes,
     string? MemorySource,
     string? ServerName = null,
     long? RowsReturned = null);
@@ -80,8 +80,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.ArchiveFiles ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = call.ResponseBytes });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.HoursBack ?? DBNull.Value });
-            insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.PeakWorkingSetBytes ?? DBNull.Value });
-            insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.DuckDbMemoryBytes ?? DBNull.Value });
+            insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.ProcessPeakWorkingSetBytes ?? DBNull.Value });
+            insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.DuckDbPeakMemoryBytes ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.MemorySource ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.ServerName ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.RowsReturned ?? DBNull.Value });
