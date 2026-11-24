@@ -78,6 +78,51 @@ public static class StoreSessionNames
     public const string AlertEngine = Slash + "alert-engine";
     public const string PerfmonRegroup = Slash + "perfmon-regroup";
 
+    // Analysis passes: the fact and drill-down collectors, the anomaly detectors and the findings store (#9416).
+    public const string AnalysisFacts = Slash + "analysis-facts";
+    public const string AnalysisDrillDown = Slash + "analysis-drilldown";
+    public const string AnalysisAnomaly = Slash + "analysis-anomaly";
+    public const string AnalysisFindings = Slash + "analysis-findings";
+
+    // Alerting.
+    public const string AlertDelivery = Slash + "alert-delivery";
+    public const string MuteRules = Slash + "mute-rules";
+    public const string CustomAlertRules = Slash + "custom-alert-rules";
+    public const string ChangeWatch = Slash + "change-watch";
+
+    // Command plane and on-demand work.
+    public const string CommandPlane = Slash + "command-plane";
+    public const string ActualPlanLookup = Slash + "actual-plan";
+    public const string PlanForceAction = Slash + "plan-force-action";
+
+    // Intake that receives the data source directly.
+    public const string RdsIntake = Slash + "rds-intake";
+    public const string OversizedPlanIntake = Slash + "oversized-plan-intake";
+
+    // Other background passes and store helpers.
+    public const string Observability = Slash + "observability";
+    public const string StoreConfig = Slash + "store-config";
+    public const string QueryStoreBackfill = Slash + "qs-backfill";
+    public const string QueryStoreIntervalWarmUp = Slash + "qs-interval-warmup";
+    public const string QueryStorePartitions = Slash + "qs-partitions";
+    public const string QueryStoreBackgroundIndexes = Slash + "qs-background-indexes";
+    public const string QueryStoreSelfKeys = Slash + "qs-self-keys";
+    public const string TrigramIndex = Slash + "trigram-index";
+    public const string LegacyLongQuery = Slash + "legacy-long-query";
+    public const string PasswordKey = Slash + "password-key";
+    public const string SchemaCapture = Slash + "schema-capture";
+    public const string StallProbe = Slash + "stall-probe";
+    public const string MetricsRefresh = Slash + "metrics-refresh";
+    public const string RetentionWalPacer = Slash + "retention-wal-pacer";
+    public const string DeadlockDedupe = Slash + "deadlock-dedupe";
+    public const string DeadlockSignatures = Slash + "deadlock-signatures";
+    public const string CollectionAudit = Slash + "collection-audit";
+    public const string RemovedServer = Slash + "removed-server";
+    public const string DeltaCalculator = Slash + "delta-calculator";
+    public const string RelationSizes = Slash + "relation-sizes";
+    public const string QueryTags = Slash + "query-tags";
+    public const string InstallId = Slash + "install-id";
+
     // Retention.
     public const string RetentionPurge = Slash + "retention-purge";
     public const string PurgeNow = Slash + "purge-now";

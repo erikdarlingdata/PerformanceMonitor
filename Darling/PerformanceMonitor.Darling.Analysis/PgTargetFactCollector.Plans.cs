@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -552,7 +553,7 @@ LIMIT $5";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             var (autoExplainLoaded, qualstatsState) = await ReadPlanTrackednessAsync(context, connection);
             var flips = await ReadPlanFlipsAsync(context, connection);

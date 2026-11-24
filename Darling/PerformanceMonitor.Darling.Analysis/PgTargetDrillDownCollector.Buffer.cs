@@ -13,6 +13,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -210,7 +211,7 @@ AND   e.extension_name = 'pg_buffercache'";
         long poolTotal = 0, poolUsed = 0, listed = 0, dirtyListed = 0, heap = 0, index = 0, toast = 0, cold = 0;
         var relationsInCapture = 0;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
         using (var cmd = new NpgsqlCommand(PgTargetBufferCompositionSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
         {
             cmd.Parameters.AddWithValue(context.ServerId);

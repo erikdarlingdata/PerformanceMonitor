@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -51,7 +52,7 @@ public sealed class PgAlertStateStore : IAlertStateStore
     /// </summary>
     public async Task<int?> LoadEdgeTriggerWatermarkAsync(string serverKey, string metricName)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
         using var command = new NpgsqlCommand(@"
 SELECT watermark
 FROM config_edge_trigger_watermarks
@@ -74,7 +75,7 @@ AND   watermark_time IS NULL", connection) { CommandTimeout = DarlingAlertReadAd
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             /* Full-row replace semantics, matching Lite's INSERT OR REPLACE: a count row always
                carries watermark_time NULL. */
             using var command = new NpgsqlCommand(@"
@@ -116,7 +117,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             using var command = new NpgsqlCommand(@"
 SELECT metric_name
 FROM config_edge_trigger_watermarks
@@ -152,7 +153,7 @@ AND   watermark_time IS NULL", connection) { CommandTimeout = DarlingAlertReadAd
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             var names = new List<string>(pairs.Count);
             foreach (var pair in pairs)
             {
@@ -190,7 +191,7 @@ AND   metric_name <> ALL($3)", connection) { CommandTimeout = DarlingAlertReadAd
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             using var command = new NpgsqlCommand(@"
 DELETE FROM config_edge_trigger_watermarks
 WHERE server_id = $1
@@ -211,7 +212,7 @@ AND   starts_with(metric_name, $2)", connection) { CommandTimeout = DarlingAlert
     /// </summary>
     public async Task<DateTime?> LoadFailedJobWatermarkAsync(string serverKey)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
         using var command = new NpgsqlCommand(@"
 SELECT watermark_time
 FROM config_edge_trigger_watermarks
@@ -236,7 +237,7 @@ AND   watermark_time IS NOT NULL", connection) { CommandTimeout = DarlingAlertRe
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             /* watermark (the INTEGER count column) is unused for the time-based failed-job row;
                it is non-nullable, so write 0 — Lite's exact shape. The value is server-local;
                only the Kind flag is normalized. The Kind matters, but not the way this comment
@@ -286,7 +287,7 @@ ON CONFLICT (server_id, metric_name) DO UPDATE SET
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             using var command = new NpgsqlCommand(@"
 UPDATE config.database_state_expected
 SET last_alerted_state = $3,
@@ -317,7 +318,7 @@ AND   database_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapte
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             using var command = new NpgsqlCommand(@"
 UPDATE config.database_state_expected
 SET last_alerted_state = NULL,
@@ -354,7 +355,7 @@ AND   database_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapte
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             using var command = new NpgsqlCommand(@"
 SELECT dedup_key, total_occurrences, observed_window_count, incident_started_at, last_observed_at
 FROM config.incident_occurrences
@@ -426,7 +427,7 @@ AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.
                 n++;
             }
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             await using var transaction = await connection.BeginTransactionAsync();
 
             /* `<> ALL` over an EMPTY array is true for every row, so the no-states case degenerates to
@@ -492,7 +493,7 @@ ON CONFLICT (server_id, metric_name, dedup_key) DO UPDATE SET
     /// </summary>
     public async Task<AlertPersistenceRecord?> LoadAlertPersistenceAsync(string serverKey, string metricName)
     {
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
         using var command = new NpgsqlCommand(@"
 SELECT consecutive_breaches, consecutive_clears, firing, last_observed_sample_at
 FROM config.alert_persistence_state
@@ -526,7 +527,7 @@ AND   metric_name = $2", connection) { CommandTimeout = DarlingAlertReadAdapter.
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertDelivery, CancellationToken.None);
             using var command = new NpgsqlCommand(@"
 INSERT INTO config.alert_persistence_state
     (server_id, metric_name, consecutive_breaches, consecutive_clears, firing, last_observed_sample_at, updated_at)
