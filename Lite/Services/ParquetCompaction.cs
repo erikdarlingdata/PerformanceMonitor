@@ -88,6 +88,10 @@ public static class ParquetCompaction
        identical replies, the same or lower peak memory and a fraction of the disk. */
     public const int SortedArchiveRowGroupSize = 122_880;
 
+    /* The temp spill of a sort, as a multiple of its input: #5410 measured about 4 and 11 times the input size. A re-cut
+       starts only when the volume has room for its output plus this many times its source (#9407). */
+    public const int RecutTempSpillMultiple = 11;
+
     /* A sorted table's file whose largest row group is under this many rows, and that has more than one group, was
        written at the old size and is cut again once (#9407). After the cut a file has one group or groups of
        SortedArchiveRowGroupSize, so it never matches again. */
@@ -125,9 +129,12 @@ public static class ParquetCompaction
        wanted) and a day file touches about 4% (1.05 rows decoded per row wanted). Measured with
        tools/CompactionRepro on a copy of one laptop's hourly files, repeated for size (directional: one laptop,
        DuckDB 1.5.5): the day merge with no sort peaked at 1.16 GB at most and used no temp space; ORDER BY
-       collection_time added nothing to the pruning and peaked at 4.2 GB, so the day merge has no sort, except
-       query_store_stats' (ServerOrderedTables, #9255) and query_stats' (#9407) by server then time: Lite never
-       collects a plan into query_stats, so no row that reaches either table holds plan text.
+       collection_time added nothing to the pruning and peaked at 4.2 GB (on Lite query_stats rows, which carry no
+       plan text either) and spilled temp files of about 4 and 11 times the input size, so the day merge had no sort.
+       It has one now for query_store_stats (ServerOrderedTables, #9255) and query_stats (#9407), by server then time.
+       What bounds that sort is the sorted-merge memory limit (SortedMergeMemoryLimit, 512MB) on one thread
+       (SortedMergeThreads), which makes it spill instead of growing, and the free disk a re-cut asks for covers
+       the larger of those spills (RecutTempSpillMultiple).
        A month file written before the switch, and an imported_ file, stay as they are: the per-cycle files that
        are waiting at the switch were never merged into the month file, so a day file and a month file never
        hold the same row (neither archive view dedups). */
@@ -246,9 +253,11 @@ public static class ParquetCompaction
 
        Which tables are sorted. At the daily level query_store_stats and query_stats. query_store_stats's merge reads
        no plan text (CompactionExcludeColumns drops query_plan_text). query_stats has a query_plan_xml column, but
-       Lite's collector never sets CapturePlanXml (Darling does), so the column is NULL on every row Lite writes
-       and the archive holds no plan text for the #5410 peak to apply to (#9407). Both keep their day budget,
-       DailyBatchInputBytes. query_snapshots carries plan XML, is merged per day and stays unsorted. At the monthly level every table listed below is sorted (#9258) and takes SortedBatchInputBytes
+       Lite's collector never sets CapturePlanXml (Darling does), so the column is NULL on every row Lite writes.
+       That is not why query_stats can be sorted: #5410's 4.2 GB peak was measured on query_stats rows, which carry
+       no plan text either. The sort is bounded by SortedMergeMemoryLimit (512MB) on one thread, as above (#9407).
+       Both keep their day budget, DailyBatchInputBytes. query_snapshots carries plan XML, is merged per day and stays
+       unsorted. At the monthly level every table listed below is sorted (#9258) and takes SortedBatchInputBytes
        (32 MiB) per batch, not the 200 MB default the unsorted monthly tables keep: a numeric month batch of
        100 MB peaked at 1.2 GB sorted against 290 MB unsorted, so a sorted batch needs its own smaller budget
        (see there for the measurements). A table not listed keeps its merge unsorted at the default budget. The
@@ -407,7 +416,9 @@ public static class ParquetCompaction
                 File.Delete(outputPath);
             }
 
-            if (sortedGroupRows > ArchiveRowGroupSize)
+            /* Only memory is cured by smaller groups. A temp-space failure would run the same sort and spill again at
+               2,048 rows, so it goes straight to the unsorted fallback, which spills nothing (#9407). */
+            if (RetriesAtSmallGroups(ex, sortedGroupRows))
             {
                 try
                 {
@@ -431,6 +442,10 @@ public static class ParquetCompaction
                 threads ?? ThreadsFor(table), rowGroupSize ?? ArchiveRowGroupSize, rowGroupBytes, orderBy: null);
         }
     }
+
+    /* Whether a failed sorted attempt is rerun sorted at 2,048 rows: only an out-of-memory failure at a larger size. */
+    internal static bool RetriesAtSmallGroups(Exception failure, int attemptedGroupRows) =>
+        attemptedGroupRows > ArchiveRowGroupSize && !IsOutOfTempSpace(failure);
 
     /* The one-file sorted merge of the re-cut (#9407): the file's rows, sorted by the table's server then time order,
        written at the sorted row-group size, with the same settings and sorted attempt as a compaction merge of the

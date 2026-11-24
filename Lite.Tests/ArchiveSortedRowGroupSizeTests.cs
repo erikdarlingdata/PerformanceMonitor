@@ -28,7 +28,12 @@ namespace PerformanceMonitorLite.Tests;
 public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
 {
     private const int Servers = 6;
-    private const string DayFile = "20260928_query_store_stats.parquet";
+    /* Names are dated a few days back, not fixed: the re-cut leaves a file alone that retention deletes within a day, which
+       a fixed date would become once it aged out. */
+    private static readonly string Day = DateTime.UtcNow.Date.AddDays(-3).ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+    private static readonly string PreviousDay = DateTime.UtcNow.Date.AddDays(-4).ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+    private static readonly string DayFile = $"{Day}_query_store_stats.parquet";
+    private const string SkipListFile = "recut-skipped.txt";
 
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "LiteTests_" + Guid.NewGuid().ToString("N")[..8]);
     private readonly string _archiveDir;
@@ -113,7 +118,7 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
        set-aside file. */
     private void AssertOnlyTheDayFile()
     {
-        Assert.Equal([DayFile], Directory.GetFiles(_archiveDir).Select(Path.GetFileName).OrderBy(n => n).ToArray());
+        Assert.Equal([DayFile], Directory.GetFiles(_archiveDir).Select(Path.GetFileName).Where(n => n != SkipListFile).OrderBy(n => n).ToArray());
     }
 
     /// <summary>
@@ -271,8 +276,8 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
     [Fact]
     public void AMergeThatLeavesItsJournal_KeepsItsGroupOutOfTheCut()
     {
-        var input = WriteUnsorted("20260928_1000_query_store_stats.parquet", 30_000);
-        var journal = P("20260928_query_store_stats.swap");
+        var input = WriteUnsorted($"{Day}_1000_query_store_stats.parquet", 30_000);
+        var journal = P($"{Day}_query_store_stats.swap");
         byte[]? journalAtSwap = null;
         byte[]? outputAtSwap = null;
         var service = NewService(sortedRowGroupSize: 4096);
@@ -304,10 +309,10 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
     [Fact]
     public void AJournalThatAppearsDuringThePass_KeepsItsFileOutOfTheCut()
     {
-        var candidate = WriteUnsorted("20260927_query_store_stats.parquet", 30_000);
-        WriteUnsorted("20260928_1000_query_store_stats.parquet", 30_000);
+        var candidate = WriteUnsorted($"{PreviousDay}_query_store_stats.parquet", 30_000);
+        WriteUnsorted($"{Day}_1000_query_store_stats.parquet", 30_000);
         var bytes = File.ReadAllBytes(candidate);
-        var journal = P("20260927_query_store_stats.swap");
+        var journal = P($"{PreviousDay}_query_store_stats.swap");
         string[] journalLines = ["state|swapped", "output|replacing|20260927_query_store_stats.parquet"];
         var service = NewService(sortedRowGroupSize: 4096);
         service.AfterCompactionSwapForTests = _ => File.WriteAllLines(journal, journalLines);
@@ -372,8 +377,9 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
     }
 
     /// <summary>
-    /// The sort spills about the size of its source on top of the file it writes. A volume with room for the source and the
-    /// reserve, but not for the spill, does not start the cut.
+    /// The sort spills to the archive volume: #5410 measured about 4 and 11 times its input. A volume with room for the
+    /// source (twice what the old rule asked for) and the reserve, but not for the output plus eleven times the source, does
+    /// not start the cut.
     /// </summary>
     [Fact]
     public void ACutNeedsRoomForTheSortsSpill_AsWellAsTheOutput()
@@ -383,13 +389,19 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
         var reserve = DataVolumeSpace.CompactionReserveBytes(Path.Combine(_tempDir, "test.duckdb"));
 
         var service = NewService(sortedRowGroupSize: 4096);
-        _initializers[^1].AvailableFreeBytesProvider = _ => reserve + bytes.Length + bytes.Length / 2;
+        _initializers[^1].AvailableFreeBytesProvider = _ => reserve + 2L * bytes.Length;
         service.CompactParquetFiles();
 
         Assert.True(bytes.AsSpan().SequenceEqual(File.ReadAllBytes(file)), "the file was cut without room for the spill");
 
         service = NewService(sortedRowGroupSize: 4096);
-        _initializers[^1].AvailableFreeBytesProvider = _ => reserve + 2L * bytes.Length;
+        _initializers[^1].AvailableFreeBytesProvider = _ => reserve + (1L + ParquetCompaction.RecutTempSpillMultiple) * bytes.Length - 1;
+        service.CompactParquetFiles();
+
+        Assert.True(bytes.AsSpan().SequenceEqual(File.ReadAllBytes(file)), "the file was cut one byte short of the room for the spill");
+
+        service = NewService(sortedRowGroupSize: 4096);
+        _initializers[^1].AvailableFreeBytesProvider = _ => reserve + (1L + ParquetCompaction.RecutTempSpillMultiple) * bytes.Length;
         service.CompactParquetFiles();
 
         Assert.Equal(4096, MaxGroupRows(file));
@@ -419,7 +431,7 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
     [Fact]
     public void AMergeThatFallsBackUnsorted_LeavesItsOutputOutOfTheCut()
     {
-        WriteUnsorted("20260928_1000_query_store_stats.parquet", 60_000, payloadCopies: 4);
+        WriteUnsorted($"{Day}_1000_query_store_stats.parquet", 60_000, payloadCopies: 4);
         var attempts = new List<bool>();
         var previous = ParquetCompaction.MergeAttemptObservedForTests;
         ParquetCompaction.MergeAttemptObservedForTests = (_, sorted, _) => { lock (attempts) { attempts.Add(sorted); } };
@@ -467,5 +479,123 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
         Assert.Equal(WideRows, Scalar($"SELECT count(*) FROM read_parquet('{output}')"));
         Assert.Equal(ParquetCompaction.ArchiveRowGroupSize, MaxGroupRows(output));
         Assert.True(MixedGroups(output) <= Servers - 1, $"{MixedGroups(output)} of {Groups(output)} row groups hold more than one server");
+    }
+
+    /// <summary>
+    /// A file whose sort ran out of memory is in the skip list on disk. A new service on the same archive folder and the same
+    /// build leaves it alone, a new build tries it once more, and an entry whose file is gone is removed.
+    /// </summary>
+    [Fact]
+    public void ASkippedFile_StaysSkippedAfterARestart_AtTheSameBuild_AndIsTriedAtAnotherBuild()
+    {
+        var file = WriteUnsorted(DayFile, 60_000, payloadCopies: 4);
+        var bytes = File.ReadAllBytes(file);
+
+        var first = NewService(sortedRowGroupSize: 4096);
+        first.RecutMemoryLimit = "2MB";
+        first.CompactParquetFiles();
+
+        var listed = File.ReadAllLines(P(SkipListFile));
+        Assert.Equal([DayFile + "\t" + first.RecutBuildId], listed);
+        Assert.True(bytes.AsSpan().SequenceEqual(File.ReadAllBytes(file)), "the original changed");
+
+        /* A restart: a new service on the same folder, with room to sort, at the same build. */
+        var sameBuild = NewService(sortedRowGroupSize: 4096);
+        sameBuild.CompactParquetFiles();
+        Assert.True(bytes.AsSpan().SequenceEqual(File.ReadAllBytes(file)), "a new service at the same build cut a skipped file");
+
+        var newBuild = NewService(sortedRowGroupSize: 4096);
+        newBuild.RecutBuildId = first.RecutBuildId + "-next";
+        newBuild.CompactParquetFiles();
+        Assert.Equal(4096, MaxGroupRows(file));
+
+        /* The file goes away: the next pass drops its entry, and the list with it. */
+        File.Delete(file);
+        NewService(sortedRowGroupSize: 4096).CompactParquetFiles();
+        Assert.False(File.Exists(P(SkipListFile)));
+    }
+
+    /// <summary>
+    /// A skip list that cannot be read as one (here a folder where the file should be, and a file of lines that are not entries)
+    /// is an empty list: the pass runs and cuts the file.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AnUnreadableSkipList_IsAnEmptyOne(bool listIsAFolder)
+    {
+        var file = WriteUnsorted(DayFile, 30_000);
+        if (listIsAFolder)
+        {
+            Directory.CreateDirectory(P(SkipListFile));
+        }
+        else
+        {
+            File.WriteAllText(P(SkipListFile), "not an entry\n\t\n" + DayFile + "\t\n");
+        }
+
+        NewService(sortedRowGroupSize: 4096).CompactParquetFiles();
+
+        Assert.Equal(4096, MaxGroupRows(file));
+    }
+
+    /// <summary>
+    /// A sort that runs out of temp space would run the same sort and spill again at 2,048 rows, so only an out-of-memory
+    /// failure of a larger size is retried there. A temp-space failure goes straight to the unsorted fallback.
+    /// </summary>
+    [Fact]
+    public void ATempSpaceFailure_DoesNotRunTheSortedRetryAt2048Rows()
+    {
+        var tempSpace = new IOException("failed to offload data block of size 256.0 KiB. This limit was set by the 'max_temp_directory_size' setting");
+        var diskFull = new IOException("IO Error: Could not write file: Out of Disk Space");
+        var memory = new IOException("Out of Memory Error: could not allocate block of size 256.0 KiB (400.0 MiB/400.0 MiB used)");
+
+        Assert.False(ParquetCompaction.RetriesAtSmallGroups(tempSpace, ParquetCompaction.SortedArchiveRowGroupSize));
+        Assert.False(ParquetCompaction.RetriesAtSmallGroups(diskFull, ParquetCompaction.SortedArchiveRowGroupSize));
+        Assert.True(ParquetCompaction.RetriesAtSmallGroups(memory, ParquetCompaction.SortedArchiveRowGroupSize));
+        Assert.False(ParquetCompaction.RetriesAtSmallGroups(memory, ParquetCompaction.ArchiveRowGroupSize));
+    }
+
+    /// <summary>
+    /// Retention deletes a file within a day of its cutoff, and a sort that has the file open makes that delete fail. A file
+    /// inside that window is not cut. A file past it is.
+    /// </summary>
+    [Fact]
+    public void AFileRetentionDeletesWithinADay_IsNotCut()
+    {
+        var cutoff = RetentionService.ArchiveCutoff(DateTime.UtcNow);
+        var soon = $"{cutoff.Date.AddDays(1):yyyyMMdd}_query_store_stats.parquet";
+        var later = $"{cutoff.Date.AddDays(5):yyyyMMdd}_query_store_stats.parquet";
+        var soonBytes = File.ReadAllBytes(WriteUnsorted(soon, 30_000));
+        WriteUnsorted(later, 30_000);
+
+        NewService(sortedRowGroupSize: 4096).CompactParquetFiles();
+
+        Assert.True(soonBytes.AsSpan().SequenceEqual(File.ReadAllBytes(P(soon))), "a file about to expire was cut");
+        Assert.Equal(4096, MaxGroupRows(P(later)));
+        Assert.False(File.Exists(P(soon) + ".tmp"));
+    }
+
+    /// <summary>
+    /// With a budget that is spent after the first file, a pass cuts one file, the newest, and leaves the rest for the next
+    /// pass.
+    /// </summary>
+    [Fact]
+    public void ARecutPassThatSpentItsBudget_CutsOneFile_AndLeavesTheRestForTheNextPass()
+    {
+        var newest = WriteUnsorted(DayFile, 30_000);
+        var older = WriteUnsorted($"{PreviousDay}_query_store_stats.parquet", 30_000);
+        var olderBytes = File.ReadAllBytes(older);
+
+        var service = NewService(sortedRowGroupSize: 4096);
+        service.DailyCompactionPassBudget = TimeSpan.Zero;
+        service.CompactParquetFiles();
+
+        Assert.Equal(4096, MaxGroupRows(newest));
+        Assert.True(olderBytes.AsSpan().SequenceEqual(File.ReadAllBytes(older)), "the second file was cut in the same pass");
+
+        service.CompactParquetFiles();
+
+        Assert.Equal(4096, MaxGroupRows(older));
     }
 }
