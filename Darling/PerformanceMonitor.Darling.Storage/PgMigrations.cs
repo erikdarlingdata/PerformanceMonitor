@@ -4103,6 +4103,12 @@ END $$;";
         /* V314 (#9437): the store's own connection pressure, once a minute. Two plain tables created empty: the backends by role, application, state and wait type,
            and the slot headroom with the host load. No data moves. An older build ignores both. */
         new Migration(StoreConnectionSamples.Version, "store-connection-samples", StoreConnectionSamples.CreateSql),
+        /* V315 (#9434): the service process's start instant on each collect.read_latency bucket, and the bucket key now names it, so a restart within an hour
+           writes a second row for that hour instead of adding into the first. One nullable column, and the primary key becomes a unique index built with
+           NULLS NOT DISTINCT. The table is a plain table that holds at most 90 days of hourly rows, so the index build is a short, bounded step. An older
+           build ignores the column, but its flush still names the old five-column conflict key, which no unique index matches any more, so it fails
+           (42P10) until the rollback statement in docs/darling/admin.md restores the primary key. */
+        new Migration(ReadLatencyProcessStart.Version, "read-latency-process-start", ReadLatencyProcessStart.Sql),
     };
 
     /// <summary>
