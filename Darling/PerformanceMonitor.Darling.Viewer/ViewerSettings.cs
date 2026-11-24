@@ -167,6 +167,55 @@ public sealed class ViewerSettings
     /// </summary>
     public const string ApplicationName = "PerformanceMonitorDarling-Viewer";
 
+    /// <summary>PostgreSQL keeps 63 bytes of <c>application_name</c> and silently cuts the rest (NAMEDATALEN - 1).</summary>
+    internal const int MaxApplicationNameBytes = 63;
+
+    /// <summary>
+    /// The name every Viewer store connection carries (#9436): <see cref="ApplicationName"/> plus <c>/</c> plus the
+    /// running build, so <c>pg_stat_activity</c> says which build holds a backend. The prefix is kept whole, so
+    /// <c>MonitorApplicationNames</c> still recognizes the session as the monitor's own.
+    /// </summary>
+    public static string BuiltApplicationName { get; } = ComposeApplicationName(
+        typeof(ViewerSettings).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion);
+
+    /// <summary>
+    /// <see cref="ApplicationName"/> + "/" + the build, with any "+source hash" removed from the build and the
+    /// whole name cut to <see cref="MaxApplicationNameBytes"/> UTF-8 bytes. Only the build part is ever cut. A
+    /// missing or empty build leaves the bare <see cref="ApplicationName"/>.
+    /// </summary>
+    internal static string ComposeApplicationName(string? informationalVersion)
+    {
+        var build = informationalVersion ?? "";
+        var plus = build.IndexOf('+');
+        if (plus >= 0)
+        {
+            build = build[..plus];
+        }
+
+        build = build.Trim();
+        if (build.Length == 0)
+        {
+            return ApplicationName;
+        }
+
+        var budget = MaxApplicationNameBytes - Encoding.UTF8.GetByteCount(ApplicationName + "/");
+        var kept = new StringBuilder();
+        foreach (var rune in build.EnumerateRunes())
+        {
+            budget -= rune.Utf8SequenceLength;
+            if (budget < 0)
+            {
+                break;
+            }
+
+            kept.Append(rune.ToString());
+        }
+
+        return kept.Length == 0 ? ApplicationName : ApplicationName + "/" + kept;
+    }
+
     /// <summary>
     /// The viewer seat's connection-pool ceiling (#1566), named rather than left a literal in the
     /// builder below because it is not only a resource bound: it is the DIVISOR in the interactive read
@@ -446,6 +495,12 @@ public sealed class ViewerSettings
         var password = Encoding.UTF8.GetString(
             ProtectedData.Unprotect(protectedBytes, s_dpapiEntropy, DataProtectionScope.LocalMachine));
 
+        return BuildManagedConnectionString(postgres.Port, role, password);
+    }
+
+    /// <summary>The managed store's connection string for one role, split from the credential read so a test can build it (#9436).</summary>
+    internal static string BuildManagedConnectionString(int port, string role, string password)
+    {
         var builder = new NpgsqlConnectionStringBuilder
         {
             /* 127.0.0.1, not "localhost", mirroring the service's DarlingManagedPostgres.BuildConnectionString
@@ -453,12 +508,12 @@ public sealed class ViewerSettings
                that would miss the managed cluster's IPv4-only listen_addresses (it binds 127.0.0.1, not ::1;
                initdb's pg_hba ships a ::1 rule but there is no ::1 listener). */
             Host = "127.0.0.1",
-            Port = postgres.Port,
+            Port = port,
             Username = role,
             Password = password,
             Database = "darling",
             SearchPath = ManagedSearchPath,
-            ApplicationName = ApplicationName,
+            ApplicationName = BuiltApplicationName,
             /* #1566: bound the viewer seat's backend count (the service's pools were capped at 24 in
                #1559, but this string was built independently and rode Npgsql's default of 100). Every
                pooled connection is a live postgres.exe on Windows; a read-only UI seat polling on 30/60s
