@@ -157,7 +157,7 @@ FROM
         await SeedAsync(store, ct);
         await QueryStoreClosedDayRollupLiveTests.TickAsync(store, DayRetention, ct, TickNow, RawRetention);
 
-        /* The newest snapshot of each server names dbA and dbMany only, so dbB and dbSingle are dropped databases. It is newer than every
+        /* The newest snapshot of each server names dbA and dbMany only, so dbB, dbC and dbSingle are dropped databases. It is newer than every
            row, so nothing keeps a dropped database by its last sighting. */
         foreach (var server in new[] { A, B })
         {
@@ -170,12 +170,12 @@ FROM
             }
         }
 
-        var asOf = TickNow.AddDays(1);
+        var asOf = TickNow.AddMinutes(5);
         var servers = new[] { A, B };
         var w = Windows[1];
         var (narrow, full) = await ReadBothAsync(store, servers, w, asOf, ct);
         Assert.Equal(Lines(full), Lines(narrow));
-        Assert.DoesNotContain(narrow, r => r.Database is "dbB" or "dbSingle");
+        Assert.DoesNotContain(narrow, r => r.Database is "dbB" or "dbC" or "dbSingle");
         Assert.Contains(narrow, r => r.Database == "dbMany");
 
         /* with no snapshot in reach nothing is dropped, and the two reads still agree */
