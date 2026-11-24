@@ -80,8 +80,7 @@ FROM (SELECT i, (i // 13) % 600 + 1 AS q, (i // 13) // 600 AS iv, i % 13 AS j,
             string ArgMaxHead()
             {
                 var h = LocalDataService.QueryStoreTopRankHeadSql("", "");
-                var a = h.IndexOf("max(", h.IndexOf("SELECT
-            database_name", StringComparison.Ordinal), StringComparison.Ordinal);
+                var a = h.IndexOf("max(", h.IndexOf("database_name, query_id, plan_id, runtime_stats_interval_id", StringComparison.Ordinal), StringComparison.Ordinal);
                 var b = h.IndexOf("}) AS w", a, StringComparison.Ordinal);
                 var body = h.Substring(a + 4, b - a - 4);
                 return h.Substring(0, a) + "arg_max(" + body + "}, {'ct': collection_time, 'er': COALESCE(execution_count, -1), 'ci': collection_id}) AS w" + h.Substring(b + 7);
