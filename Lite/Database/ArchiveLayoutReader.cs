@@ -241,7 +241,7 @@ internal sealed class ArchiveLayoutReader
             && ParquetCompaction.NeedsRecut(groups, maxRows);
     }
 
-    private string? RecutSkipReason(IReadOnlyDictionary<string, string> skipList, string path, string fileName, string table, long bytes, long? free, long reserve)
+    private string? RecutSkipReason(Dictionary<string, string> skipList, string path, string fileName, string table, long bytes, long? free, long reserve)
     {
         var m = ArchiveService.s_recutFileName.Match(fileName);
         var period = m.Groups["period"].Value;
