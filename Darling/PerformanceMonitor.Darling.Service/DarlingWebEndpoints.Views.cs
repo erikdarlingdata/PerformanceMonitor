@@ -407,7 +407,7 @@ public static partial class DarlingWebEndpoints
     /// name="name"/> is already a bounded-cardinality route label (the dispatch table's own tool name, never
     /// caller-supplied text). Never throws into the request: swallowed and logged at Debug, exactly like the
     /// compose path's own recording.</summary>
-    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, ReadScope scope, long replyBytes = 0)
+    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, ReadScope scope, long? replyBytes = null)
     {
         try
         {

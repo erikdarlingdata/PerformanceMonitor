@@ -651,7 +651,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         }
 
                         RecordWebReadLatency(readLatencyRecorder, name, joinedOutcome, joinedAt.ElapsedMilliseconds, context, readScope.Scope,
-                            shared.Text is { } sharedText ? WebReplyBytes(sharedText) ?? 0 : 0);
+                            shared.Text is { } sharedText ? WebReplyBytes(sharedText) : null);
                         return shared.Text is { } text
                             ? ToHttpResult(text, DarlingWebFailureLog.RouteOf(context.Request), logger, joinedAt.ElapsedMilliseconds, callerAborted, readSweepBudget)
                             : shared.Answer;
@@ -840,7 +840,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     /* #9433: the size of the reply, counted from the text the read holds. It is the tool's answer, before the statement
                        sweep: the sweep only ever shortens a body, and only when the statement filter withholds text. */
                     var webReplyBytes = WebReplyBytes(result);
-                    RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope, webReplyBytes ?? 0);
+                    RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope, webReplyBytes);
                     OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
                         resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome, webSentence), webReplyBytes);
 

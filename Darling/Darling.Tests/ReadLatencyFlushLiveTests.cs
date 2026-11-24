@@ -377,6 +377,77 @@ VALUES ($1, 'mcp', 'get_wait_stats', 'ok', 'none', 4, 400, 200, ARRAY[4,0,0,0,0,
         Assert.Equal(new long?[] { 4_321, null }, page.Reads.Select(r => r.ReplyBytes).ToArray());
     }
 
+    /// <summary>
+    /// #9433: a read whose reply size was never taken (a dedicated web route sample, a composed panel) stores NULL in
+    /// <c>reply_bytes_total</c>, not 0, so <c>mean_reply_bytes</c> reads null for the route instead of a false 0. A key that
+    /// later flushes a measured size keeps that size, and an empty reply that WAS measured stays a real 0.
+    /// </summary>
+    [Fact]
+    public async Task AnUnmeasuredReply_IsStoredAsNull_AndTheMeanIsNull_WhileAMeasuredEmptyReplyIsAZero()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the #9433 unmeasured reply pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        try
+        {
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var hour = DateTime.UtcNow.AddHours(-1);
+            var metricTime = new DateTime(hour.Year, hour.Month, hour.Day, hour.Hour, 0, 0, DateTimeKind.Utc);
+            var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+            var scope = ReadScope.Open(null).Scope;
+
+            /* Two dedicated-route samples take no reply size, and one MCP read measured an empty reply. */
+            var first = new ReadLatencyAccumulator();
+            var recorder = new ReadLatencyRecorder(first, logger: null);
+            DarlingWebEndpoints.RecordWebRouteSample(recorder, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, scope, context);
+            DarlingWebEndpoints.RecordWebRouteSample(recorder, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, scope, context);
+            first.Record(ReadSurface.Mcp, "get_plan_cache", ReadOutcome.Ok, 100, ReadWindowBand.None, 0, 0, null, replyBytes: 0);
+            await first.FlushAsync(connection, metricTime, logger: null, ct);
+
+            async Task<object?> StoredTotal(string route)
+            {
+                using var stored = new NpgsqlCommand("SELECT reply_bytes_total FROM collect.read_latency WHERE route = $1", connection);
+                stored.Parameters.AddWithValue(route);
+                var value = await stored.ExecuteScalarAsync(ct);
+                return value is DBNull ? null : value;
+            }
+
+            Assert.Null(await StoredTotal("get_wait_stats"));
+            Assert.Equal(0L, await StoredTotal("get_plan_cache"));
+
+            var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, metricTime.AddHours(-1), null, null, ct);
+            var unmeasured = Assert.Single(rows, r => r.Route == "get_wait_stats");
+            Assert.Equal(2, unmeasured.RunCount);
+            Assert.Null(unmeasured.MeanReplyBytes);
+            Assert.Equal(0L, Assert.Single(rows, r => r.Route == "get_plan_cache").MeanReplyBytes);
+
+            /* A second flush of the same unmeasured key leaves NULL. A flush that measured one read adds that size to it. */
+            var second = new ReadLatencyAccumulator();
+            DarlingWebEndpoints.RecordWebRouteSample(new ReadLatencyRecorder(second, logger: null), "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, scope, context);
+            await second.FlushAsync(connection, metricTime, logger: null, ct);
+            Assert.Null(await StoredTotal("get_wait_stats"));
+
+            var third = new ReadLatencyAccumulator();
+            third.Record(ReadSurface.Web, "get_wait_stats", ReadOutcome.Ok, 100, ReadWindowBand.None, 0, 0, null, replyBytes: 500);
+            await third.FlushAsync(connection, metricTime, logger: null, ct);
+            Assert.Equal(500L, await StoredTotal("get_wait_stats"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
     [Fact]
     public async Task AFlushWithNothingRecorded_WritesNoRows()
     {
