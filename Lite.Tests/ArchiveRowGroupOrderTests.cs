@@ -92,7 +92,12 @@ public sealed class ArchiveRowGroupOrderTests : IDisposable
         var initializer = new DuckDbInitializer(_dbPath);
         _initializers.Add(initializer);
         await initializer.InitializeFromTemplateAsync();
+        await InsertHotAsync(rows, idBase: 0);
+        return initializer;
+    }
 
+    private async Task InsertHotAsync(int rows, int idBase)
+    {
         using var connection = new DuckDBConnection($"Data Source={_dbPath}");
         await connection.OpenAsync(TestContext.Current.CancellationToken);
         using var cmd = connection.CreateCommand();
@@ -100,11 +105,10 @@ public sealed class ArchiveRowGroupOrderTests : IDisposable
 INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc,
      last_execution_time, query_hash, execution_count, avg_cpu_time_us, query_plan_hash)
-SELECT -i, TIMESTAMP '2026-09-01 00:00:00' + to_seconds((i * 7919) % {rows}), 1 + i % {Servers}, 'S' || (1 + i % {Servers}),
-       'SalesDb', i, i, 'Regular', TIMESTAMP '2026-09-01 00:00:00', '0x' || md5(i::VARCHAR), 1, 100, '0x' || md5((i + 1)::VARCHAR)
+SELECT -(i + {idBase}), TIMESTAMP '2026-09-01 00:00:00' + to_seconds((i * 7919) % {rows}), 1 + i % {Servers}, 'S' || (1 + i % {Servers}),
+       'SalesDb', i + {idBase}, i + {idBase}, 'Regular', TIMESTAMP '2026-09-01 00:00:00', '0x' || md5(i::VARCHAR), 1, 100, '0x' || md5((i + 1)::VARCHAR)
 FROM range({rows}) t(i)";
         await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
-        return initializer;
     }
 
     /* Row groups of the file whose server_id min and max differ, and the pairs of single-server groups of the same
@@ -181,6 +185,56 @@ SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.
         var file = SingleQueryStoreFile();
         Assert.Equal(filesPerDay * rowsPerFile, Scalar($"SELECT count(*) FROM read_parquet('{file}')"));
         var (groups, mixed, overlapping) = Order(file);
+        Assert.True(groups >= 8, $"{groups} row groups: too few to tell sorted from unsorted");
+        Assert.True(mixed <= Servers - 1, $"{mixed} of {groups} row groups hold more than one server");
+        Assert.True(overlapping == 0, $"{overlapping} pairs of one server's row groups overlap in collection_time");
+    }
+
+    /// <summary>
+    /// The field's shape after a size reset lands on a day that is already merged: the day's merged file sits beside a
+    /// per-cycle export of the same day, the two together are over the batch budget, so each is a batch of one. The export is
+    /// the unsorted one, so it is rewritten sorted into the day's next part file, and the merged file, already in its final
+    /// form, is left exactly as it is.
+    /// </summary>
+    [Fact]
+    public async Task AResetExportBesideTheDaysMergedFile_IsRewrittenSortedIntoAPartFile_AndTheMergedFileStays()
+    {
+        const int rows = 24_000;
+        var initializer = await SeedHotAsync(rows);
+        Assert.True(await new ArchiveService(initializer, _archiveDir).ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
+        new ArchiveService(initializer, _archiveDir).CompactParquetFiles();
+        var merged = SingleQueryStoreFile();
+        Assert.EndsWith("_query_store_stats.parquet", merged);
+        Assert.Equal(rows, Scalar($"SELECT count(*) FROM read_parquet('{merged}')"));
+
+        /* The second reset of the same day: its export is a per-cycle YYYYMMDD_HHMM file, unsorted again. */
+        await InsertHotAsync(rows, idBase: rows);
+        Assert.True(await new ArchiveService(initializer, _archiveDir).ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
+        var export = Directory.GetFiles(_archiveDir, "*_query_store_stats.parquet").Select(f => f.Replace('\\', '/')).Single(f => f != merged);
+        Assert.Matches(@"\d{8}_\d{4}_query_store_stats\.parquet$", export);
+
+        string RowSignature() => Scalar($@"
+SELECT count(*) FROM read_parquet('{P("*_query_store_stats*.parquet")}')") + "|" + Scalar($@"
+SELECT sum((hash(collection_id, server_id, collection_time) % 1000000007)::BIGINT) FROM read_parquet('{P("*_query_store_stats*.parquet")}')");
+        var rowsBefore = RowSignature();
+        var mergedBytesBefore = File.ReadAllBytes(merged);
+        var mergedWrittenBefore = File.GetLastWriteTimeUtc(merged);
+
+        var service = new ArchiveService(initializer, _archiveDir)
+        {
+            DailyCompactionBatchInputBytes = Math.Max(new FileInfo(merged).Length, new FileInfo(export).Length) + 1
+        };
+        service.CompactParquetFiles();
+
+        Assert.True(File.Exists(merged), "the day's merged file is gone");
+        Assert.Equal(mergedWrittenBefore, File.GetLastWriteTimeUtc(merged));
+        Assert.True(mergedBytesBefore.AsSpan().SequenceEqual(File.ReadAllBytes(merged)), "the day's merged file was rewritten");
+        Assert.False(File.Exists(export), "the reset export was left unsorted beside the merged file");
+        var part = Directory.GetFiles(_archiveDir, "*_query_store_stats_pt*.parquet").Single().Replace('\\', '/');
+        Assert.Equal(rows, Scalar($"SELECT count(*) FROM read_parquet('{part}')"));
+        Assert.Equal(rowsBefore, RowSignature());
+
+        var (groups, mixed, overlapping) = Order(part);
         Assert.True(groups >= 8, $"{groups} row groups: too few to tell sorted from unsorted");
         Assert.True(mixed <= Servers - 1, $"{mixed} of {groups} row groups hold more than one server");
         Assert.True(overlapping == 0, $"{overlapping} pairs of one server's row groups overlap in collection_time");
