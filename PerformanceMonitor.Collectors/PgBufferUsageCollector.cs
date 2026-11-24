@@ -272,7 +272,7 @@ ORDER BY buffers DESC NULLS LAST";
     public override int? CommandTimeoutSecondsOverride => 120;
 
     /// <summary>The cap this run applies, in buffers: the context's override when a caller set one, else <see cref="PoolCapBuffers"/>.</summary>
-    internal static long CapFor(CollectorContext context) => long.MaxValue;
+    internal static long CapFor(CollectorContext context) => context.PgBufferUsagePoolCapBuffers ?? PoolCapBuffers;
 
     /* #6143: the view named by the schema pg_buffercache was created in; the monitoring connection's search_path is
        pg_catalog, and the extension need not be in public.
