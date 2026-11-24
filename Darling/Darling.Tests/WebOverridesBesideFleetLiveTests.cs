@@ -28,7 +28,7 @@ using Xunit;
 
 namespace Darling.Tests;
 
-/* #1776 own-store: the fact mints its own scratch database through ScratchPostgres, so the class is deliberately NOT [Collection("live-postgres")]. */
+/* #1776 own-store: the fact mints its own scratch database through ScratchPostgres, so the class is deliberately NOT [Collection("live-postgres")]. It's in the timing collection (#5602) because it judges how long a read waited. */
 
 /// <summary>
 /// #9514: the Threshold Overrides read and the fleet read, served together by the web host on a small pooled connection source with a
@@ -37,6 +37,7 @@ namespace Darling.Tests;
 /// before the second dispose runs, which then closed that request's reader and released its connection while it was still reading. The
 /// fleet read failed with "a command is already in progress" or an index out of range, and the overrides read waited for a command timeout.
 /// </summary>
+[Collection("timing")]
 public sealed class WebOverridesBesideFleetLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
