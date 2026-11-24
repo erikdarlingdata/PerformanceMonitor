@@ -43,6 +43,7 @@ public sealed class McpCallTimingQueryStoreTests : IAsyncDisposable
         Directory.CreateDirectory(_archiveDir);
         _duckDb = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
         _duckDb.InitializeFromTemplateAsync().GetAwaiter().GetResult();
+        Directory.CreateDirectory(Path.Combine(_tempDir, "config"));
         _serverManager = new ServerManager(Path.Combine(_tempDir, "config"));
         _server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = ServerName, IsEnabled = true };
         _serverManager.AddServer(_server);
