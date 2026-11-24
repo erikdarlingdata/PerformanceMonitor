@@ -1289,7 +1289,8 @@ FROM unnest($1::text[], $2::text[]) AS s (object_kind, object_name)";
             SELECT 1 FROM pg_roles r WHERE r.rolname = s.object_name)
         WHEN '{StoreSelfMetrics.OtherObjectKind}' THEN true
         WHEN '{StoreSelfMetrics.SystemObjectKind}' THEN true
-        WHEN '{StoreSelfMetrics.CheckpointerObjectKind}' THEN true";
+        WHEN '{StoreSelfMetrics.CheckpointerObjectKind}' THEN true
+        WHEN '{StoreWalFigures.WalObjectKind}' THEN true";
 
     /// <summary>
     /// Reads <see cref="ObjectExistenceSql"/> (or its plain variant, by the same

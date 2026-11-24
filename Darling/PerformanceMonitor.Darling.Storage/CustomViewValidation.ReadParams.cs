@@ -143,7 +143,7 @@ public static partial class CustomViewValidation
             ["get_fleet_overview"] = new ReadPanelParam[] { new("hours", false), new("detail", false), new("worst_only", false), new("band", false) },
             ["get_sweep_reports"] = new ReadPanelParam[] { new("hours", false), new("as_of", false), new("sweep_id", false), new("watch_state", false) },
             ["get_ag_health"] = new ReadPanelParam[] { new("server", false), new("limit", false) },
-            ["get_store_metrics"] = new ReadPanelParam[] { new("days_back", false), new("object_kind", false), new("object_name", false), new("limit", false) },
+            ["get_store_metrics"] = new ReadPanelParam[] { new("days_back", false), new("object_kind", false), new("object_name", false), new("limit", false), new("wal_hours_back", false) },
             ["get_store_table_health"] = new ReadPanelParam[] { new("top", false), new("candidates_only", false), new("section", false) },
             ["measure_store_table"] = new ReadPanelParam[] { new("table", false) },
             ["get_store_maintenance_readiness"] = Array.Empty<ReadPanelParam>(),
