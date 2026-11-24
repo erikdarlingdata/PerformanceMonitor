@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /* #1776 own-store: every test here stands up its own throwaway cluster from the bundled runtime, same as
    ManagedConfFileLiveTests -- not a DARLING_TEST_PG store. */
 [SupportedOSPlatform("windows")]
+[Collection("timing")]
 public sealed class ManagedConfVerdictsLiveTests
 {
     private const string RuntimeGateMessage =
