@@ -290,7 +290,7 @@ public sealed class StoreSettingChangesLiveTests
             var json = await DarlingMcpStoreSettingChangesTools.GetStoreSettingChanges(source, daysBack, null, limit, ct);
             using var doc = JsonDocument.Parse(json);
             Assert.True(doc.RootElement.TryGetProperty("error", out _), json);
-            Assert.False(doc.RootElement.TryGetProperty("changes", out _));
+            Assert.False(doc.RootElement.TryGetProperty("changes", out var changes));
             ok = true;
         }
         finally
