@@ -28,6 +28,8 @@ export const PG_CONFIG_CHANGE_COLUMNS = [
   { key: "new_value", label: "To", display: (r) => configValueCell(r, "new_value", "old_value") },
   { key: "unit", label: "Unit", small: true },
   { key: "source", label: "Source", small: true },
+  /* #9500: a serverless target's platform resizes shared_buffers with capacity and no restart. The row stays, labelled. */
+  { key: "resized_by_platform", label: "Note", small: true, display: (r) => (r.resized_by_platform ? "resized by the platform" : "") },
 ];
 
 /* #7447: audit_config's PostgreSQL rows. The SQL Server grid (AUDIT_COLUMNS) carries a Suggested column, but a PostgreSQL row

@@ -70,6 +70,13 @@ WHERE rn > 1 AND collection_time > $4 AND installed_version IS DISTINCT FROM pre
                 continue;
             }
 
+            /* #9500: a serverless target's platform resizes shared_buffers with its capacity and no restart. The config read
+               keeps the row, labelled; a change nobody made is not something to open a request over. */
+            if (row.PlatformResized)
+            {
+                continue;
+            }
+
             if (!scoped)
             {
                 changes.Add(new ChangeWatchChange($"pg_config:{row.Name}:{Stamp(time)}", "pg_config", Utc(time),

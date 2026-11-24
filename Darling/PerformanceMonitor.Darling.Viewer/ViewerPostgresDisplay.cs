@@ -1915,6 +1915,8 @@ internal static class PgDisplay
         public string? Unit { get; init; }
         public string Scope { get; init; } = "";
         public string Kind { get; init; } = "";
+        /// <summary>"resized by the platform" for a serverless target's platform-managed move (#9500), otherwise empty.</summary>
+        public string Note { get; init; } = "";
         public string? Context { get; init; }
         public string? Source { get; init; }
         public string? ShortDescription { get; init; }
@@ -1931,6 +1933,7 @@ internal static class PgDisplay
         Unit = row.Unit,
         Scope = ConfigChangeScope(row),
         Kind = row.ChangeKind,
+        Note = row.PlatformResized ? "resized by the platform" : "",
         Context = row.Context,
         Source = row.Source,
         ShortDescription = row.ShortDescription,
