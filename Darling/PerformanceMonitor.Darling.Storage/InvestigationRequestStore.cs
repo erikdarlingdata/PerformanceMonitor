@@ -1211,7 +1211,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
         reader.IsDBNull(17) ? null : reader.GetGuid(17),
         reader.GetString(18),
         reader.IsDBNull(19) ? null : reader.GetString(19),
-        ReadHold(reader, 20));
+        HeldBy: ReadHold(reader, 20));
 
     /// <summary>#9485: the hold columns that follow the registry names (window id, its reason and end, the release time), or null when the request was never held.</summary>
     private static InvestigationRequestHold? ReadHold(NpgsqlDataReader reader, int firstOrdinal) =>
@@ -1403,7 +1403,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
                 reader.GetString(17),
                 reader.IsDBNull(18) ? null : reader.GetString(18),
                 reader.IsDBNull(19) ? null : reader.GetString(19),
-                ReadHold(reader, 20)));
+                HeldBy: ReadHold(reader, 20)));
         }
 
         return rows;
