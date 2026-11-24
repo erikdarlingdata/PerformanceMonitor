@@ -4039,6 +4039,10 @@ END $$;";
            after midnight and not wait for the grid's close. One plain table created empty: no data moves. An older build ignores it and serves a clutter day
            only from the grid's own stamp, so a day built from its hours is read from the hourly or raw rows there. */
         new Migration(QueryStoreClutterDayFold.Version, "query-store-clutter-day-built", QueryStoreClutterDayFold.CreateSql),
+        /* V304 (#9413): what each store table did every hour (collect.store_table_activity) and the last capture's per-relation counters those differences are taken
+           from (collect.store_table_activity_baseline). Two plain tables created empty: no data moves, and the service fills them from the hourly self-metrics sweep.
+           An older build ignores them. */
+        new Migration(StoreTableActivity.Version, "store-table-activity", StoreTableActivity.CreateSql),
     };
 
     /// <summary>
