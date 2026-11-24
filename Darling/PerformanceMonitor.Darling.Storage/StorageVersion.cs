@@ -16,5 +16,5 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class StorageVersion
 {
-    public const int SchemaVersion = StoreLockWaits.Version;
+    public const int SchemaVersion = ReadReplyBytes.Version;
 }

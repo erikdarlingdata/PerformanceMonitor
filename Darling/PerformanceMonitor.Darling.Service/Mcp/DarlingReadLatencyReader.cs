@@ -72,10 +72,17 @@ internal static class DarlingReadLatencyReader
         long Rejected = 0,
         long CacheHits = 0,
         long Cancelled = 0,
+        long? ReplyBytesTotal = null,
+        long ReplyBytesCount = 0,
         ReadLatencySplit? Split = null)
     {
         /// <summary>Zero when nothing ran, matching how <c>get_collector_cost</c> reports its average.</summary>
         public long MeanMs => RunCount > 0 ? TotalMs / RunCount : 0;
+
+        /// <summary>#9433: the average reply size in bytes over the reads whose size was measured (the summed total over the summed
+        /// measured count), null when none was. A read that took no size, on a key that also holds measured reads, is left out.
+        /// Truncates below one byte, as <see cref="MeanMs"/> does.</summary>
+        public long? MeanReplyBytes => ReplyBytesTotal is { } total && ReplyBytesCount > 0 ? total / ReplyBytesCount : null;
     }
 
     /// <summary>One side of a split (#9434): the reads of the buckets on that side, counted the way the row's own count, max and
@@ -145,7 +152,7 @@ internal static class DarlingReadLatencyReader
         var sql = $@"
 WITH windowed AS
 (
-    SELECT surface, route, window_band, outcome, run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers,
+    SELECT surface, route, window_band, outcome, run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers, reply_bytes_total, reply_bytes_count,
            outcome IN ({nonRunList}) AS is_admission,
            CASE WHEN ${splitParam}::timestamptz IS NULL THEN NULL
                 WHEN process_started_at IS NOT NULL THEN process_started_at >= ${splitParam}::timestamptz
@@ -176,6 +183,8 @@ totals AS
         coalesce(sum(run_count) FILTER (WHERE outcome = 'busy'), 0) AS rejected,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'cache_hit'), 0) AS cache_hits,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'cancelled'), 0) AS cancelled,
+        sum(reply_bytes_total) FILTER (WHERE NOT is_admission)::bigint AS reply_bytes_total,
+        coalesce(sum(reply_bytes_count) FILTER (WHERE NOT is_admission), 0)::bigint AS reply_bytes_count,
         coalesce(sum(run_count) FILTER (WHERE NOT is_admission AND is_after IS FALSE), 0) AS before_count,
         coalesce(max(max_ms) FILTER (WHERE NOT is_admission AND is_after IS FALSE), 0) AS before_max_ms,
         coalesce(sum(run_count) FILTER (WHERE NOT is_admission AND is_after IS TRUE), 0) AS after_count,
@@ -208,6 +217,7 @@ bucket_arrays AS
 SELECT t.surface, t.route, t.run_count, t.total_ms, t.max_ms, ba.bucket_counts, t.timeouts, t.fallbacks, t.gate_failures,
        t.window_band, t.max_in_flight, t.wait_total_ms::bigint, t.distinct_callers,
        t.queued, t.queue_wait_ms, t.queue_wait_max_ms, ba.queue_bucket_counts, t.rejected, t.cache_hits, t.cancelled,
+       t.reply_bytes_total, t.reply_bytes_count,
        t.before_count, t.before_max_ms, ba.before_bucket_counts, t.after_count, t.after_max_ms, ba.after_bucket_counts, t.ambiguous_count
 FROM totals AS t
 JOIN bucket_arrays AS ba ON ba.surface = t.surface AND ba.route = t.route AND ba.window_band = t.window_band
@@ -251,11 +261,13 @@ ORDER BY t.surface, t.route, t.window_band";
                 reader.GetInt64(17),
                 reader.GetInt64(18),
                 reader.GetInt64(19),
+                reader.IsDBNull(20) ? null : reader.GetInt64(20),
+                reader.GetInt64(21),
                 splitAtUtc.HasValue
                     ? new ReadLatencySplit(
-                        new ReadLatencySide(reader.GetInt64(20), reader.GetInt64(21), (long[])reader.GetValue(22)),
-                        new ReadLatencySide(reader.GetInt64(23), reader.GetInt64(24), (long[])reader.GetValue(25)),
-                        reader.GetInt64(26))
+                        new ReadLatencySide(reader.GetInt64(22), reader.GetInt64(23), (long[])reader.GetValue(24)),
+                        new ReadLatencySide(reader.GetInt64(25), reader.GetInt64(26), (long[])reader.GetValue(27)),
+                        reader.GetInt64(28))
                     : null));
         }
 
