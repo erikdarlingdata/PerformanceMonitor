@@ -94,6 +94,15 @@ FROM v, generate_series({3}, {4}) AS g";
     private static string Texts(int first, int last, int salt, int vocabulary = TextVocabulary, int words = WordsPerText) =>
         string.Format(CultureInfo.InvariantCulture, TextsSql, vocabulary, words, salt, first, last);
 
+    /// <summary>Seeds the session's random() from the first row number and the salt, so every run generates the same texts. Call it on the
+    /// connection that runs the generating statement, right before that statement: the peak sits close to the bound, and a different draw of
+    /// words moves it by a percent or two.</summary>
+    private static async Task SeedAsync(NpgsqlConnection connection, int first, int salt, CancellationToken ct)
+    {
+        var seed = (((long)first * 31 + (long)salt * 7919) % 10_000 + 1) / 10_001.0;
+        await ExecAsync(connection, string.Format(CultureInfo.InvariantCulture, "SELECT setseed({0:F6})", seed), ct);
+    }
+
     private static async Task PrepareVocabularyAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public", ct);
@@ -119,6 +128,7 @@ FROM v, generate_series({3}, {4}) AS g";
         for (var first = 1; first <= seedRows; first += 10_000)
         {
             var last = Math.Min(first + 9_999, seedRows);
+            await SeedAsync(connection, first, 0, ct);
             await ExecAsync(connection, InsertSql(queryStore, Texts(first, last, 0), 0), ct);
         }
 
@@ -160,6 +170,7 @@ FROM v, generate_series({3}, {4}) AS g";
         {
             for (var batch = 0; batch < BatchesPerMinute; batch++)
             {
+                await SeedAsync(connection, nextRow, minute, ct);
                 var started = System.Diagnostics.Stopwatch.StartNew();
                 await ExecAsync(connection, InsertSql(queryStore, Texts(nextRow, nextRow + rowsPerBatch - 1, minute), 0), ct);
                 started.Stop();
@@ -253,6 +264,14 @@ FROM v, generate_series({3}, {4}) AS g";
         var interval = (int)(queryStore ? QueryStoreTextTrigramIndex.CleanInterval : QueryTextTrigramIndex.CleanInterval).TotalMinutes;
 
         var result = await RunOnScratchAsync(queryStore, interval, virtualMinutes: 3 * interval, seedRows: 3000, ct);
+
+        var peakOut = Environment.GetEnvironmentVariable("DARLING_TRIGRAM_PEAK_OUT");
+        if (!string.IsNullOrEmpty(peakOut))
+        {
+            await File.AppendAllTextAsync(peakOut, string.Format(CultureInfo.InvariantCulture,
+                "classes: P|{0}|interval={1}min|peakPages={2}|peakTuples={3}|inlineMerges={4}{5}",
+                result.Index, interval, result.PeakPendingPages, result.PeakPendingTuples, result.InlineMerges, Environment.NewLine), ct);
+        }
 
         Assert.Equal(3, result.Cleans.Count);
         Assert.True(result.PeakPendingPages <= PendingPagesAtHalfLimit,
