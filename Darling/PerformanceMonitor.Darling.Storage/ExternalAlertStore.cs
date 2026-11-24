@@ -431,7 +431,7 @@ ORDER BY s.source_name, p.status";
         ArgumentException.ThrowIfNullOrEmpty(serviceInstance);
         ArgumentOutOfRangeException.ThrowIfLessThan(batch, 1);
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ExternalAlerts, cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         await using (var lockCommand = new NpgsqlCommand(ClaimLockSql, connection, transaction))
@@ -781,7 +781,7 @@ ORDER BY s.source_name, p.status";
     {
         try
         {
-            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ExternalAlerts, cancellationToken);
             await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
             await using (var timeout = new NpgsqlCommand(StateWriteLockTimeoutSql, connection, transaction))
             {

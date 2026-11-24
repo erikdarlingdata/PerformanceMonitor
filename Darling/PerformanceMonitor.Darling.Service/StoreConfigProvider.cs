@@ -88,7 +88,7 @@ public sealed class StoreConfigProvider
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
             using var command = new NpgsqlCommand("SELECT config_version FROM config_service WHERE id = 1", connection);
             command.CommandTimeout = ServiceCommandDeadlines.ConfigReloadBeaconSeconds;
             var result = await command.ExecuteScalarAsync(cancellationToken);
@@ -122,7 +122,7 @@ public sealed class StoreConfigProvider
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
             var now = Naive(DateTime.UtcNow);
 
             if (await CountAsync(connection, "config_alert_settings", cancellationToken) == 0)
@@ -1688,7 +1688,7 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         ArgumentNullException.ThrowIfNull(ring);
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
             var v = new string?[11];
             bool signingSaved;
             await using (var select = new NpgsqlCommand(
@@ -2013,7 +2013,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
 
             var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, queryStoreFetchTopN, queryTextTrigramIndexStoreValue, queryStoreTextTrigramIndexStoreValue, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);

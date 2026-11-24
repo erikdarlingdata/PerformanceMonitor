@@ -74,7 +74,7 @@ public sealed class CustomAlertRuleStore
     }
 
     private Task<PgStoreScope> OpenScopeAsync(CancellationToken cancellationToken) =>
-        PgStoreScope.OpenAsync(_dataSource, _connection, _transaction, transactional: true, cancellationToken);
+        PgStoreScope.OpenAsync(_dataSource, _connection, _transaction, transactional: true, applicationName: StoreSessionNames.CustomAlertRules, cancellationToken: cancellationToken);
 
     /// <summary>
     /// The lightweight list read: the (potentially large) <c>definition</c> body is never selected. LEFT JOINs

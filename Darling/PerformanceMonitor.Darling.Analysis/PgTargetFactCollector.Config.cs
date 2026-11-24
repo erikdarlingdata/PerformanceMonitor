@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -153,7 +154,7 @@ AND   c.name IN (
             var settings = new Dictionary<string, PgConfigSetting>(StringComparer.Ordinal);
             DateTime? snapshotTime = null;
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             /* #3928: the day first, and every retained snapshot only when that found nothing. */
             foreach (var lowerBound in ConfigSnapshotLowerBounds(context.TimeRangeEnd))

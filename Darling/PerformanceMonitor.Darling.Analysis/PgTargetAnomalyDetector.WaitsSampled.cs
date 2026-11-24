@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Analysis.Baselines.AnomalyThresholds;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -221,7 +222,7 @@ LIMIT 6";
             var map = await _baselineProvider.GetBucketMapAsync(
                 context.ServerId, MetricNames.PgSampledWaitMsPerSec, context.TimeRangeStart, context.TimeRangeEnd, context.CancellationToken);
 
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
 
             double wholePeak, wholeMean, wholeTotalWaitMs, observedSec, intervalSec;
             long wholeSampleCount, collectionCount, unknownSampled, exactCollections;
@@ -415,7 +416,7 @@ LIMIT 6";
         var tiles = new List<WindowTile>();
         var totalWaitMsByTile = new Dictionary<DateTime, double>();
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
         using var cmd = WindowCommand(SampledWaitRateTileWindowSql, connection, context);
         cmd.Parameters.AddWithValue(AsNaive(map.WindowClock.TransitionAtUtc));
         cmd.Parameters.AddWithValue(map.WindowClock.OffsetBeforeMinutes);

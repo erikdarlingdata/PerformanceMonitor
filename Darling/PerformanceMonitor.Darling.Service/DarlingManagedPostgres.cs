@@ -155,7 +155,7 @@ public sealed class DarlingManagedPostgres
     /// in the store's own <c>pg_stat_activity</c> — all four surfaces open store connections independently,
     /// and only the role name told them apart before this.
     /// </summary>
-    public const string ServiceApplicationName = "PerformanceMonitorDarling-Service";
+    public const string ServiceApplicationName = PerformanceMonitor.Darling.Storage.StoreSessionNames.ServicePrefix;
 
     /// <summary>The CLI verbs' store connections (#4479) — <c>darling.exe --add-server</c> and friends,
     /// each a one-shot process distinct from the running service.</summary>

@@ -14,6 +14,7 @@ using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -100,7 +101,7 @@ WHERE collection_time >= $2";
             return;
         }
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
         using var command = new NpgsqlCommand(CoverageSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         command.Parameters.AddWithValue(context.ServerId);
@@ -213,7 +214,7 @@ ORDER BY SUM(wait_time_ms) DESC";
     {
         if (context.ObservedDurationMs <= 0) return;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
         using var command = new NpgsqlCommand(WaitStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         command.Parameters.AddWithValue(context.ServerId);
@@ -344,7 +345,7 @@ FROM reports";
     {
         if (context.ObservedDurationMs <= 0) return;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
         var separate = SeparateDatabases(context);
         using var command = new NpgsqlCommand(separate is null ? BlockingSql : BlockingSqlSkippingSeparate, connection) { CommandTimeout = FactCommandTimeoutSeconds };
@@ -655,7 +656,7 @@ AND   (database_name IS NULL OR lower(database_name) = 'master' OR lower(databas
     {
         if (context.ObservedDurationMs <= 0) return;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
         long deadlockCount;
         long peakHourCount;
@@ -744,7 +745,7 @@ AND   collection_time >= $4
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             /* #9346: a master target leaves out the pairs of databases monitored as their own targets (the rule the BLOCKING_EVENTS fact applies), so one chain
                does not page from both targets. Both reads cut them inside the query, before their 5,000-row cap, like the monitor-only pairs. */

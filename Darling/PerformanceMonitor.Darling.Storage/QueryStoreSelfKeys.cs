@@ -269,7 +269,7 @@ AND   NOT EXISTS (
         try
         {
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreSelfKeys, cancellationToken).ConfigureAwait(false);
             var inserted = await BackfillAsync(connection, cancellationToken).ConfigureAwait(false);
             if (inserted is int n)
             {

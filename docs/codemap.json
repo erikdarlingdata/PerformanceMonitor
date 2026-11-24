@@ -574,7 +574,7 @@
       ]
     }
   ],
-  "generated_from": "d0c89f9aa",
+  "generated_from": "940c98ff8",
   "mcp_tools": [
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
@@ -919,6 +919,11 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorCostTools.cs",
       "name": "get_collector_cost",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpCollectorReadinessTools.cs",
+      "name": "get_collector_readiness",
       "product": "Darling"
     },
     {
@@ -1604,6 +1609,16 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreCompressionHealthTools.cs",
       "name": "get_store_compression_health",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs",
+      "name": "get_store_host",
+      "product": "Darling"
+    },
+    {
+      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs",
+      "name": "get_store_host",
       "product": "Darling"
     },
     {
@@ -2497,6 +2512,11 @@
       "product": "Lite"
     },
     {
+      "file": "Lite/Mcp/McpSlowCallTools.cs",
+      "name": "get_slow_mcp_calls",
+      "product": "Lite"
+    },
+    {
       "file": "Lite/Mcp/McpLatchSpinlockTools.cs",
       "name": "get_spinlock_stats",
       "product": "Lite"
@@ -2623,9 +2643,9 @@
     }
   ],
   "migrations": {
-    "count": 302,
+    "count": 304,
     "file": "Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs",
-    "newest_version": 303
+    "newest_version": 305
   },
   "overview": [
     "This repository holds two products you can build and run. Darling is a headless collector service that keeps its data in PostgreSQL with TimescaleDB, and it comes with a WPF viewer and a web dashboard. Lite is a portable WPF app that keeps its data in DuckDB.",
@@ -2851,7 +2871,7 @@
     {
       "name": "Darling.Tests",
       "project": "Darling/Darling.Tests/Darling.Tests.csproj",
-      "test_classes": 3561
+      "test_classes": 3569
     },
     {
       "name": "PerformanceMonitor.Exporter.TestChild",
@@ -2866,7 +2886,7 @@
     {
       "name": "Lite.Tests",
       "project": "Lite.Tests/Lite.Tests.csproj",
-      "test_classes": 1189
+      "test_classes": 1194
     }
   ]
 }
