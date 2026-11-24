@@ -183,8 +183,10 @@ public sealed class ManagedConfVerdictsLiveTests
                     provenanceConnection, ["shared_buffers", "work_mem"], 30, ct);
                 Assert.True(pendingProvenance.ByName["shared_buffers"].PendingRestart);
                 Assert.False(pendingProvenance.ByName["work_mem"].PendingRestart);
-                var pendingLine = Assert.Single(pendingProvenance.ByName["shared_buffers"].UnappliedFileRows);
-                Assert.Equal(StoreSettingProvenance.FileSettingNotAppliedError, pendingLine.Error);
+                var pendingLine = Assert.Single(
+                    pendingProvenance.ByName["shared_buffers"].UnappliedFileRows,
+                    r => r.Error == StoreSettingProvenance.FileSettingNotAppliedError);
+                Assert.Equal("256MB", pendingLine.Value);
             }
 
             /* Reload-context invalid value: never PendingRestart, always RejectedValue -- the same guc.c
