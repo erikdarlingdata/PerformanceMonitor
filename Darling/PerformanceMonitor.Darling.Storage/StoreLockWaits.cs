@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -153,8 +154,10 @@ OR    NOT EXISTS (SELECT 1 FROM collect.store_lock_waits AS w
 
     /// <summary>
     /// Closes the open waits of one process, for a wait whose opening line an earlier read saw. $1 pid, $2 outcome, $3 duration in
-    /// ms when the log gave it (<c>acquired</c> and <c>detected deadlock</c> do) else null, $4 the end time as naive UTC. Returns each
-    /// closed row's id and duration so the caller can drop the ones under the threshold.
+    /// ms when the log gave it (<c>acquired</c> and <c>detected deadlock</c> do) else null, $4 the end time as naive UTC, $5 the lock
+    /// the wait was on, or null for any. Only a row that opened within <see cref="OpenWaitMaxAge"/> before the end can be closed: after a
+    /// store crash an open row never gets its end line, and a process id reused much later must not close it with a duration of hours.
+    /// Returns each closed row's id and duration so the caller can drop the ones under the threshold.
     /// </summary>
     public const string CloseSql = @"
 UPDATE collect.store_lock_waits AS w
@@ -164,20 +167,29 @@ SET outcome = $2,
 WHERE w.waiter_pid = $1
 AND   w.outcome = 'waiting'
 AND   w.wait_started_at <= $4::timestamp
+AND   w.wait_started_at >= $4::timestamp - interval '1 day'
+AND   ($5::text IS NULL OR w.lock_object = $5)
 RETURNING w.wait_id, w.duration_ms";
 
-    /// <summary>The processes with an open wait.</summary>
+    /// <summary>The longest an open wait can stay open and still be closed by a later end line.</summary>
+    public static readonly TimeSpan OpenWaitMaxAge = TimeSpan.FromDays(1);
+
+    /// <summary>The processes with an open wait that an end at or after $1 (naive UTC) could still close.</summary>
     public const string OpenPidsSql = @"
 SELECT DISTINCT waiter_pid
 FROM collect.store_lock_waits
-WHERE outcome = 'waiting'";
+WHERE outcome = 'waiting'
+AND   wait_started_at >= $1::timestamp - interval '1 day'";
 
     /// <summary>Drops closed rows that proved shorter than the threshold. $1 ids.</summary>
     public const string DeleteShortSql = @"
 DELETE FROM collect.store_lock_waits
 WHERE wait_id = ANY($1::bigint[])";
 
-    /// <summary>The sessions of the store now. One row each.</summary>
+    /// <summary>
+    /// Every process of the store now, one row each, background processes included. An autovacuum worker holding SHARE UPDATE EXCLUSIVE
+    /// while a migration's ALTER TABLE waits is the likeliest holder on this store, and it has no role, so its backend type stands in.
+    /// </summary>
     public const string ActivitySql = @"
 SELECT a.pid,
        (a.backend_start AT TIME ZONE 'UTC'),
@@ -186,13 +198,12 @@ SELECT a.pid,
        (pg_catalog.clock_timestamp() AT TIME ZONE 'UTC')
 FROM pg_catalog.pg_stat_activity AS a
 WHERE a.pid IS NOT NULL
-AND   a.backend_start IS NOT NULL
-AND   a.backend_type = 'client backend'";
+AND   a.backend_start IS NOT NULL";
 
     /* ===================== the sessions map ===================== */
 
     /// <summary>
-    /// A rolling map of the store's sessions: a process id to the role and application it had, with when it started and when it was
+    /// A rolling map of the store's processes: a process id to the role and application it had, with when it started and when it was
     /// last seen alive. <see cref="Shared"/> is the service's, refreshed once a minute by the store pass.
     /// </summary>
     public sealed class PidMap
@@ -207,7 +218,7 @@ AND   a.backend_type = 'client backend'";
         /// <param name="Application">Its application name.</param>
         public readonly record struct Entry(DateTime BackendStartUtc, DateTime SeenAliveUtc, string Role, string Application);
 
-        /// <summary>Takes one reading of every client session, and drops readings older than <see cref="PidMapRetention"/>.</summary>
+        /// <summary>Takes one reading of every process, client or background, and drops readings older than <see cref="PidMapRetention"/>.</summary>
         public async Task RefreshAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
         {
             var read = new List<(int Pid, Entry Entry)>();
@@ -306,7 +317,7 @@ AND   a.backend_type = 'client backend'";
 
     /// <summary>A wait as the log tells it, before roles and times are resolved. Stamps are as the log wrote them (no zone).</summary>
     /// <param name="WaiterPid">The waiting process.</param>
-    /// <param name="WaiterApplication">The application in the waiter's log prefix, or null when the prefix has none.</param>
+    /// <param name="WaiterApplication">The application in the waiter's log prefix, or empty when the prefix has none (an empty <c>%a</c>, or the <c>[unknown]</c> PostgreSQL writes for a session with no application name).</param>
     /// <param name="LockMode">The mode named, such as <c>ShareLock</c>.</param>
     /// <param name="LockObject">What is locked, as PostgreSQL wrote it, such as <c>relation 16385 of database 16384</c>.</param>
     /// <param name="DatabaseOid">The database oid in <paramref name="LockObject"/>, or null.</param>
@@ -335,6 +346,9 @@ AND   a.backend_type = 'client backend'";
 
     /// <summary>The end of a wait whose opening line an earlier read saw.</summary>
     public readonly record struct ParsedClose(int Pid, string Outcome, DateTime Stamp, double? AfterMs);
+
+    /// <summary>An end the store held no open wait for when its slab was written, with its end time as naive UTC. The sweep retries it after it has read on, because the wait it ends may be opened by a slab it reads later.</summary>
+    internal readonly record struct UnmatchedClose(ParsedClose Close, DateTime EndUtc);
 
     /// <summary>What <see cref="Parse"/> found in one slab.</summary>
     /// <param name="Waits">Waits opened in the slab, ended or still open.</param>
@@ -476,7 +490,7 @@ AND   a.backend_type = 'client backend'";
                     if (m.Success && int.TryParse(m.Groups["pid"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var pid))
                     {
                         current.Pid = pid;
-                        current.App = m.Groups["app"].Value;
+                        current.App = NormalizeApplication(m.Groups["app"].Value);
                         current.Stamp = ParseStamp(m.Groups["ts"].Value);
                         apps[pid] = current.App;
                     }
@@ -504,6 +518,10 @@ AND   a.backend_type = 'client backend'";
 
         return waits.Count == 0 && closes.Count == 0 ? ParseResult.Empty : new ParseResult(waits, closes, apps);
     }
+
+    /// <summary>The application a prefix names. PostgreSQL writes <c>[unknown]</c> for a session with no application name and nothing at all for a process with none, so both read as empty.</summary>
+    private static string NormalizeApplication(string app) =>
+        app.Equals("[unknown]", StringComparison.Ordinal) ? string.Empty : app;
 
     private static DateTime ParseStamp(string text) =>
         DateTime.TryParseExact(text, s_stampFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var stamp)
@@ -615,7 +633,8 @@ AND   a.backend_type = 'client backend'";
 
     /// <summary>
     /// Writes what <paramref name="parsed"/> found, inside the slab's own transaction, so the rows and the marker that accounts for them
-    /// land together. Roles come from <paramref name="pids"/>. Returns the rows written, for the caller's log.
+    /// land together. Roles come from <paramref name="pids"/>. Returns the rows written, for the caller's log. An end with no open wait
+    /// in the store is added to <paramref name="unmatched"/> when given.
     /// </summary>
     internal static async Task<int> WriteAsync(
         NpgsqlConnection connection,
@@ -623,6 +642,7 @@ AND   a.backend_type = 'client backend'";
         ParseResult parsed,
         PidMap pids,
         DateTime captureTime,
+        List<UnmatchedClose>? unmatched,
         CancellationToken cancellationToken)
     {
         if (parsed.IsEmpty)
@@ -671,13 +691,26 @@ AND   a.backend_type = 'client backend'";
             double durationMs = w.Outcome == Waiting
                 ? w.OpenedAfterMs
                 : w.ClosedAfterMs ?? Math.Max(w.OpenedAfterMs, (closedUtc - startedUtc).TotalMilliseconds);
-            if (w.Outcome != Waiting && durationMs < ThresholdMilliseconds)
+            if (w.Outcome != Waiting)
             {
-                continue;
+                /* PostgreSQL 18 writes "still waiting" again each time a long wait wakes, so a slab can open on a repeat of a wait an
+                   earlier slab left open. That wait is complete here, and it ends the open row: closing it, and not inserting a second
+                   row, keeps one row per wait. */
+                var (closed, kept) = await CloseAsync(connection, transaction, w.WaiterPid, w.Outcome, (long)Math.Round(durationMs), closedUtc, w.LockObject, shortIds, cancellationToken);
+                if (closed > 0)
+                {
+                    written += kept;
+                    continue;
+                }
+
+                if (durationMs < ThresholdMilliseconds)
+                {
+                    continue;
+                }
             }
 
             var waiter = pids.Resolve(w.WaiterPid, startedUtc);
-            var waiterApplication = w.WaiterApplication is { } app ? app : waiter?.Application ?? Unresolved;
+            var waiterApplication = !string.IsNullOrEmpty(w.WaiterApplication) ? w.WaiterApplication : waiter?.Application ?? Unresolved;
             var holderPids = new List<int>();
             var holderRoles = new List<string>();
             var holderApps = new List<string>();
@@ -686,7 +719,11 @@ AND   a.backend_type = 'client backend'";
                 var found = pids.Resolve(holder, startedUtc);
                 holderPids.Add(holder);
                 holderRoles.Add(found?.Role ?? Unresolved);
-                holderApps.Add(found?.Application is { } a ? a : parsed.ApplicationByPid.TryGetValue(holder, out var seen) ? seen : Unresolved);
+                var seenApp = parsed.ApplicationByPid.TryGetValue(holder, out var seen) ? seen : null;
+                holderApps.Add(
+                    !string.IsNullOrEmpty(found?.Application) ? found!.Value.Application
+                    : !string.IsNullOrEmpty(seenApp) ? seenApp
+                    : found is not null || seenApp is not null ? string.Empty : Unresolved);
             }
 
             string? relation = w.ContextRelation;
@@ -712,42 +749,25 @@ AND   a.backend_type = 'client backend'";
             written += await insert.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        HashSet<int>? openPids = null;
         if (parsed.Closes.Count > 0)
         {
-            openPids = [];
-            await using var openCommand = new NpgsqlCommand(OpenPidsSql, connection, transaction) { CommandTimeout = StoreLogSweep.SweepTimeoutSeconds };
-            await using var openReader = await openCommand.ExecuteReaderAsync(cancellationToken);
-            while (await openReader.ReadAsync(cancellationToken))
+            var closeUtc = new List<DateTime>(parsed.Closes.Count);
+            for (var i = 0; i < parsed.Closes.Count; i++)
             {
-                openPids.Add(openReader.GetInt32(0));
-            }
-        }
-
-        foreach (var c in parsed.Closes)
-        {
-            var endUtc = utc[index++];
-            if (openPids is null || !openPids.Contains(c.Pid))
-            {
-                continue;
+                closeUtc.Add(utc[index++]);
             }
 
-            await using var close = new NpgsqlCommand(CloseSql, connection, transaction) { CommandTimeout = StoreLogSweep.SweepTimeoutSeconds };
-            close.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = c.Pid });
-            close.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = c.Outcome });
-            close.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = c.AfterMs is { } ms ? (long)Math.Round(ms) : DBNull.Value });
-            close.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = endUtc });
-            await using var reader = await close.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
+            var openPids = await ReadOpenPidsAsync(connection, transaction, closeUtc.Min(), cancellationToken);
+            for (var i = 0; i < parsed.Closes.Count; i++)
             {
-                if (reader.GetInt64(1) < ThresholdMilliseconds)
+                var c = parsed.Closes[i];
+                if (!openPids.Contains(c.Pid))
                 {
-                    shortIds.Add(reader.GetInt64(0));
+                    unmatched?.Add(new UnmatchedClose(c, closeUtc[i]));
+                    continue;
                 }
-                else
-                {
-                    written++;
-                }
+
+                written += (await CloseAsync(connection, transaction, c.Pid, c.Outcome, c.AfterMs is { } ms ? (long)Math.Round(ms) : null, closeUtc[i], null, shortIds, cancellationToken)).Kept;
             }
         }
 
@@ -758,6 +778,95 @@ AND   a.backend_type = 'client backend'";
             await delete.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        return written;
+    }
+
+    /// <summary>The processes with an open wait that an end at or after <paramref name="earliestEndUtc"/> could close.</summary>
+    private static async Task<HashSet<int>> ReadOpenPidsAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime earliestEndUtc, CancellationToken cancellationToken)
+    {
+        var openPids = new HashSet<int>();
+        await using var command = new NpgsqlCommand(OpenPidsSql, connection, transaction) { CommandTimeout = StoreLogSweep.SweepTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = earliestEndUtc });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            openPids.Add(reader.GetInt32(0));
+        }
+
+        return openPids;
+    }
+
+    /// <summary>
+    /// Closes the open rows of one process (see <see cref="CloseSql"/>). Returns how many it closed and how many of those it kept. A
+    /// closed row shorter than the threshold is added to <paramref name="shortIds"/> for the caller to delete.
+    /// </summary>
+    private static async Task<(int Closed, int Kept)> CloseAsync(
+        NpgsqlConnection connection, NpgsqlTransaction transaction, int pid, string outcome, long? durationMs, DateTime endUtc, string? lockObject,
+        List<long> shortIds, CancellationToken cancellationToken)
+    {
+        var closed = 0;
+        var kept = 0;
+        await using var close = new NpgsqlCommand(CloseSql, connection, transaction) { CommandTimeout = StoreLogSweep.SweepTimeoutSeconds };
+        close.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = pid });
+        close.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = outcome });
+        close.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = durationMs is { } ms ? ms : DBNull.Value });
+        close.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = endUtc });
+        close.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)lockObject ?? DBNull.Value });
+        await using var reader = await close.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            closed++;
+            if (reader.GetInt64(1) < ThresholdMilliseconds)
+            {
+                shortIds.Add(reader.GetInt64(0));
+            }
+            else
+            {
+                kept++;
+            }
+        }
+
+        return (closed, kept);
+    }
+
+    /// <summary>
+    /// Retries the ends <see cref="WriteAsync"/> found no open wait for, once the sweep has read every slab it will read, in its own
+    /// transaction. A wait that opened in a later slab of an older file and ended in a newer file's first slab is open only now.
+    /// Returns the rows closed and kept.
+    /// </summary>
+    internal static async Task<int> RetryClosesAsync(
+        NpgsqlConnection connection, IReadOnlyList<UnmatchedClose> unmatched, CancellationToken cancellationToken)
+    {
+        if (unmatched.Count == 0)
+        {
+            return 0;
+        }
+
+        var ordered = unmatched.OrderBy(u => u.EndUtc).ToList();
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var openPids = await ReadOpenPidsAsync(connection, transaction, ordered[0].EndUtc, cancellationToken);
+        var shortIds = new List<long>();
+        var written = 0;
+        foreach (var u in ordered)
+        {
+            if (!openPids.Contains(u.Close.Pid))
+            {
+                continue;
+            }
+
+            written += (await CloseAsync(connection, transaction, u.Close.Pid, u.Close.Outcome,
+                u.Close.AfterMs is { } ms ? (long)Math.Round(ms) : null, u.EndUtc, null, shortIds, cancellationToken)).Kept;
+        }
+
+        if (shortIds.Count > 0)
+        {
+            await using var delete = new NpgsqlCommand(DeleteShortSql, connection, transaction) { CommandTimeout = StoreLogSweep.SweepTimeoutSeconds };
+            delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = shortIds.ToArray() });
+            await delete.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
         return written;
     }
 

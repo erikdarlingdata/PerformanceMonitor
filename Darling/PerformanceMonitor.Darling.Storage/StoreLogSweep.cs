@@ -379,6 +379,9 @@ FROM config.store_log_read_marker AS m";
         var clock = Stopwatch.StartNew();
         var byteBudget = new ByteBudget(MaxBytesPerCapture, clock);
         var slabsRead = 0;
+        /* #9439: ends of lock waits whose opening the store did not hold when their slab was written. The wait may open in a slab read later in
+           this same capture (an older file's later slab), so they are retried once the capture has read on. */
+        var unmatchedCloses = new List<StoreLockWaits.UnmatchedClose>();
         var open = new List<(int Index, Candidate Candidate, long NextOffset, List<StoreLogClassifier.Group> Groups, StoreLogClassifier.CaptureBudget Budget)>();
 
         foreach (var candidate in candidates)
@@ -414,7 +417,7 @@ FROM config.store_log_read_marker AS m";
                 OffsetReset: resume.OffsetReset,
                 Census: census);
 
-            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, firstSlab: true, step.Value.Waits, pids, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
+            await WriteAsync(connection, captureTime, capture, newOffset, candidate.SizeBytes, firstSlab: true, step.Value.Waits, pids, unmatchedCloses, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
             captured.Add(capture);
             slabsRead++;
 
@@ -457,7 +460,7 @@ FROM config.store_log_read_marker AS m";
                     BytesPending: Math.Max(0, file.Candidate.SizeBytes - nextOffset),
                     OffsetReset: false,
                     Census: census);
-                await WriteAsync(connection, captureTime, slabCapture, nextOffset, file.Candidate.SizeBytes, firstSlab: false, step.Value.Waits, pids, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
+                await WriteAsync(connection, captureTime, slabCapture, nextOffset, file.Candidate.SizeBytes, firstSlab: false, step.Value.Waits, pids, unmatchedCloses, StoreCheckpoints.Parse(step.Value.Slab.Text), logger, cancellationToken);
 
                 file.Groups.AddRange(census.Groups);
                 captured[file.Index] = new FileCapture(
@@ -475,6 +478,8 @@ FROM config.store_log_read_marker AS m";
                 slabsRead++;
             }
         }
+
+        await StoreLockWaits.RetryClosesAsync(connection, unmatchedCloses, cancellationToken);
 
         if (ShouldWriteHeartbeat(captured.Count, candidates.Count))
         {
@@ -782,6 +787,7 @@ FROM config.store_log_read_marker AS m";
         bool firstSlab,
         StoreLockWaits.ParseResult waits,
         StoreLockWaits.PidMap pids,
+        List<StoreLockWaits.UnmatchedClose> unmatchedCloses,
         StoreCheckpoints.Parsed checkpoints,
         ILogger? logger,
         CancellationToken cancellationToken)
@@ -790,7 +796,7 @@ FROM config.store_log_read_marker AS m";
 
         /* #9439: the lock waits of this slab, in the slab's own transaction, so the rows and the marker that
            accounts for them land together or not at all. */
-        await StoreLockWaits.WriteAsync(connection, transaction, waits, pids, captureTime, cancellationToken);
+        await StoreLockWaits.WriteAsync(connection, transaction, waits, pids, captureTime, unmatchedCloses, cancellationToken);
 
         var groups = capture.Census.Groups;
         if (groups.Count > 0)

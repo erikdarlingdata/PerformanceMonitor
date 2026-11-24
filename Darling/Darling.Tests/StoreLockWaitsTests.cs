@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -84,6 +85,19 @@ public sealed class StoreLockWaitsParserTests
         Assert.True(StoreLockWaits.Parse(slab, detailInEnglish: false).IsEmpty);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("[unknown]")]
+    public void ATimeWithNoApplicationInThePrefix_ReadsAsAnEmptyApplication_InEitherForm(string app)
+    {
+        var slab = Line(Open, 200, app, "LOG", "process 200 still waiting for ShareLock on transaction 777 after 1000.100 ms");
+
+        var parsed = StoreLockWaits.Parse(slab, detailInEnglish: true);
+
+        Assert.Equal(string.Empty, Assert.Single(parsed.Waits).WaiterApplication);
+        Assert.Equal(string.Empty, parsed.ApplicationByPid[200]);
+    }
+
     [Fact]
     public void AReadingAnswersForAWaitThatBeganWhileTheSessionLived_AndForOneThatEndedWithinTheSlack_ButNotLater()
     {
@@ -135,6 +149,19 @@ public sealed class StoreLockWaitsLiveTests
 
         public Task<byte[]> ReadAsync(string name, long offset, int length, CancellationToken cancellationToken) =>
             Task.FromResult(_bytes.AsSpan((int)offset, (int)Math.Min(length, _bytes.Length - offset)).ToArray());
+    }
+
+    /// <summary>Several log files, oldest first, each a fixed set of bytes. The sweep's listing order is the order given here.</summary>
+    private sealed class FixedLogs(params (string Name, byte[] Bytes)[] files) : StoreLogSweep.IStoreLogFiles
+    {
+        public Task<IReadOnlyList<(string Name, long Size)>> ListAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<(string Name, long Size)>>(files.Select(f => (f.Name, (long)f.Bytes.Length)).ToList());
+
+        public Task<byte[]> ReadAsync(string name, long offset, int length, CancellationToken cancellationToken)
+        {
+            var bytes = files.First(f => f.Name == name).Bytes;
+            return Task.FromResult(bytes.AsSpan((int)offset, (int)Math.Min(length, bytes.Length - offset)).ToArray());
+        }
     }
 
     private sealed record Scenario(
@@ -235,18 +262,59 @@ public sealed class StoreLockWaitsLiveTests
         $"{stamp} UTC [{pid}] {app} {severity}:  {message}\n";
 
     /// <summary>The log of one wait that began a second before the map's reading, with the holder pid the log names.</summary>
-    private static async Task<string> WaitLogAsync(Scenario s, int holderPid, double durationMs, bool timedOut, CancellationToken ct)
+    private static async Task<string> WaitLogAsync(Scenario s, int holderPid, double durationMs, bool timedOut, CancellationToken ct, string waiterApp = "lw-waiter-app")
     {
         var started = s.SeenUtc.AddSeconds(-1);
         var opened = await LogStampAsync(s.Owner, started.AddMilliseconds(1000.5), ct);
         var closed = await LogStampAsync(s.Owner, started.AddMilliseconds(durationMs), ct);
         var obj = $"relation {s.RelationOid} of database {s.DatabaseOid}";
         var log =
-            Line(opened, s.WaiterPid, "lw-waiter-app", "LOG", $"process {s.WaiterPid} still waiting for AccessShareLock on {obj} after 1000.500 ms")
-            + Line(opened, s.WaiterPid, "lw-waiter-app", "DETAIL", $"Process holding the lock: {holderPid}. Wait queue: {s.WaiterPid}.");
+            Line(opened, s.WaiterPid, waiterApp, "LOG", $"process {s.WaiterPid} still waiting for AccessShareLock on {obj} after 1000.500 ms")
+            + Line(opened, s.WaiterPid, waiterApp, "DETAIL", $"Process holding the lock: {holderPid}. Wait queue: {s.WaiterPid}.");
         return log + (timedOut
-            ? Line(closed, s.WaiterPid, "lw-waiter-app", "ERROR", "canceling statement due to lock timeout")
-            : Line(closed, s.WaiterPid, "lw-waiter-app", "LOG", $"process {s.WaiterPid} acquired AccessShareLock on {obj} after {durationMs.ToString("0.000", CultureInfo.InvariantCulture)} ms"));
+            ? Line(closed, s.WaiterPid, waiterApp, "ERROR", "canceling statement due to lock timeout")
+            : Line(closed, s.WaiterPid, waiterApp, "LOG", $"process {s.WaiterPid} acquired AccessShareLock on {obj} after {durationMs.ToString("0.000", CultureInfo.InvariantCulture)} ms"));
+    }
+
+    /// <summary>The opening lines of the scenario's wait: a first <c>still waiting</c> at 1000.5 ms, one second after the wait began.</summary>
+    private static async Task<string> OpeningLinesAsync(Scenario s, CancellationToken ct)
+    {
+        var started = s.SeenUtc.AddSeconds(-1);
+        var stamp = await LogStampAsync(s.Owner, started.AddMilliseconds(1000.5), ct);
+        return Line(stamp, s.WaiterPid, "lw-waiter-app", "LOG", $"process {s.WaiterPid} still waiting for AccessShareLock on relation {s.RelationOid} of database {s.DatabaseOid} after 1000.500 ms")
+            + Line(stamp, s.WaiterPid, "lw-waiter-app", "DETAIL", $"Process holding the lock: {s.HolderPid}. Wait queue: {s.WaiterPid}.");
+    }
+
+    /// <summary>A line from the scenario's waiter at an offset from the wait's start.</summary>
+    private static async Task<string> WaiterLineAsync(Scenario s, double afterStartMs, string message, CancellationToken ct) =>
+        Line(await LogStampAsync(s.Owner, s.SeenUtc.AddSeconds(-1).AddMilliseconds(afterStartMs), ct), s.WaiterPid, "lw-waiter-app", "LOG", message);
+
+    private static string Acquired(Scenario s, double ms) =>
+        $"process {s.WaiterPid} acquired AccessShareLock on relation {s.RelationOid} of database {s.DatabaseOid} after {ms.ToString("0.000", CultureInfo.InvariantCulture)} ms";
+
+    private static string StillWaiting(Scenario s, double ms) =>
+        $"process {s.WaiterPid} still waiting for AccessShareLock on relation {s.RelationOid} of database {s.DatabaseOid} after {ms.ToString("0.000", CultureInfo.InvariantCulture)} ms";
+
+    /// <summary>Filler the classifier and the lock wait parser both skip: tab-led continuation lines with no entry before them. Past one 4 MiB slab.</summary>
+    private static string Padding()
+    {
+        var line = "\t" + new string('p', 98) + "\n";
+        return string.Concat(Enumerable.Repeat(line, (StoreLogSlab.MaxBytesPerRead / line.Length) + 2000));
+    }
+
+    private sealed record Raw(string Outcome, long DurationMs, DateTime StartedUtc);
+
+    private static async Task<List<Raw>> RawRowsAsync(Scenario s, CancellationToken ct)
+    {
+        var rows = new List<Raw>();
+        await using var command = new NpgsqlCommand("SELECT outcome, duration_ms, wait_started_at FROM collect.store_lock_waits ORDER BY wait_id", s.Owner);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new Raw(reader.GetString(0), reader.GetInt64(1), reader.GetDateTime(2)));
+        }
+
+        return rows;
     }
 
     private sealed record Row(string WaiterRole, string WaiterApplication, string[] HolderRoles, string[] HolderApplications, string LockMode, string? Relation, long DurationMs, string Outcome);
@@ -329,5 +397,110 @@ public sealed class StoreLockWaitsLiveTests
             Assert.Equal(new[] { HolderRole }, row.HolderRoles);
             Assert.Equal(new[] { "lw-holder-app" }, row.HolderApplications);
         });
+    }
+
+    [Fact]
+    public async Task ABackgroundProcessThatHoldsALock_ResolvesToItsBackendType_NotUnresolved()
+    {
+        await WithScenarioAsync(holderEndsBeforeTheSweep: false, async (s, ct) =>
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT pid, COALESCE(usename::text, backend_type) FROM pg_stat_activity WHERE backend_type <> 'client backend' AND pid IS NOT NULL AND backend_start IS NOT NULL ORDER BY pid LIMIT 1", s.Owner);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct), "the store has no background process to hold a lock");
+            var (backgroundPid, expectedRole) = (reader.GetInt32(0), reader.GetString(1));
+            await reader.CloseAsync();
+
+            var row = Assert.Single(await SweepAndReadAsync(s, await WaitLogAsync(s, backgroundPid, 6200, timedOut: false, ct), ct));
+
+            Assert.Equal(new[] { expectedRole }, row.HolderRoles);
+            Assert.NotEqual(StoreLockWaits.Unresolved, row.HolderRoles[0]);
+        });
+    }
+
+    [Fact]
+    public async Task AnEmptyApplicationInTheLogPrefix_TakesTheApplicationTheMapHas()
+    {
+        await WithScenarioAsync(holderEndsBeforeTheSweep: false, async (s, ct) =>
+        {
+            var row = Assert.Single(await SweepAndReadAsync(s, await WaitLogAsync(s, s.HolderPid, 6200, timedOut: false, ct, waiterApp: string.Empty), ct));
+
+            Assert.Equal("lw-waiter-app", row.WaiterApplication);
+        });
+    }
+
+    [Fact]
+    public async Task AWaitThatOpensInAnOlderFilesLaterSlab_AndEndsInTheNewerFile_IsClosedByTheSameSweep()
+    {
+        await WithScenarioAsync(holderEndsBeforeTheSweep: false, async (s, ct) =>
+        {
+            var older = Padding() + await OpeningLinesAsync(s, ct);
+            var newer = await WaiterLineAsync(s, 6200, Acquired(s, 6200), ct);
+            Assert.True(Encoding.UTF8.GetByteCount(older) > StoreLogSlab.MaxBytesPerRead, "the opening must sit past the older file's first slab");
+
+            await StoreLogSweep.SweepAsync(s.Owner, DateTime.UtcNow, null,
+                new FixedLogs(("postgresql-Mon.log", Encoding.UTF8.GetBytes(older)), ("postgresql-Tue.log", Encoding.UTF8.GetBytes(newer))), s.Map, ct);
+
+            var row = Assert.Single(await RawRowsAsync(s, ct));
+            Assert.Equal(StoreLockWaits.Granted, row.Outcome);
+            Assert.Equal(6200, row.DurationMs);
+        });
+    }
+
+    [Fact]
+    public async Task ARepeatedStillWaitingThatStartsASlab_ClosesTheRowAnEarlierSlabLeftOpen_InsteadOfAddingASecond()
+    {
+        await WithScenarioAsync(holderEndsBeforeTheSweep: false, async (s, ct) =>
+        {
+            var first = await OpeningLinesAsync(s, ct);
+            await StoreLogSweep.SweepAsync(s.Owner, DateTime.UtcNow, null, new FixedLog(first), s.Map, ct);
+            Assert.Equal(StoreLockWaits.Waiting, Assert.Single(await RawRowsAsync(s, ct)).Outcome);
+
+            var second = await WaiterLineAsync(s, 5600, StillWaiting(s, 5600), ct) + await WaiterLineAsync(s, 6200, Acquired(s, 6200), ct);
+            await StoreLogSweep.SweepAsync(s.Owner, DateTime.UtcNow, null, new FixedLog(first + second), s.Map, ct);
+
+            var row = Assert.Single(await RawRowsAsync(s, ct));
+            Assert.Equal(StoreLockWaits.Granted, row.Outcome);
+            Assert.Equal(6200, row.DurationMs);
+        });
+    }
+
+    [Fact]
+    public async Task AnOpenRowOlderThanADay_IsNotClosedByALaterEndOfTheSameProcessId()
+    {
+        await WithScenarioAsync(holderEndsBeforeTheSweep: false, async (s, ct) =>
+        {
+            await ExecAsync(s.Owner, string.Create(CultureInfo.InvariantCulture,
+                $"INSERT INTO collect.store_lock_waits (wait_started_at, captured_at, waiter_pid, waiter_role, waiter_application, holder_pids, holder_roles, holder_applications, lock_mode, lock_object, relation_name, duration_ms, outcome) VALUES ('{s.SeenUtc.AddDays(-3):yyyy-MM-dd HH:mm:ss}', '{s.SeenUtc.AddDays(-3):yyyy-MM-dd HH:mm:ss}', {s.WaiterPid}, 'r', 'a', '{{1}}', '{{r}}', '{{a}}', 'ShareLock', 'transaction 1', NULL, 1000, 'waiting')"), ct);
+
+            await StoreLogSweep.SweepAsync(s.Owner, DateTime.UtcNow, null, new FixedLog(await WaiterLineAsync(s, 6200, Acquired(s, 6200), ct)), s.Map, ct);
+
+            var row = Assert.Single(await RawRowsAsync(s, ct));
+            Assert.Equal(StoreLockWaits.Waiting, row.Outcome);
+            Assert.Equal(1000, row.DurationMs);
+        });
+    }
+
+    [Fact]
+    public async Task AStoreThatLogsInAnotherLanguage_AnswersPrecondition_AndAnEnglishOneAnswersEmpty()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live #9439 lock wait tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+        await owner.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(owner, ct);
+        await ExecAsync(owner, $"ALTER DATABASE \"{scratch.DatabaseName}\" SET log_lock_waits = on", ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        string StatusOf(string json) => JsonDocument.Parse(json).RootElement.GetProperty("status").GetString()!;
+
+        var german = await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, ct, lcMessagesOverride: "de_DE.UTF-8");
+        Assert.Equal("precondition", StatusOf(german));
+        Assert.Contains("de_DE.UTF-8", german);
+
+        Assert.Equal("precondition", StatusOf(await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, ct, lcMessagesOverride: string.Empty)));
+        Assert.Equal("empty", StatusOf(await DarlingMcpStoreLockWaitTools.GetStoreLockWaits(dataSource, 24, 50, null, null, null, ct, lcMessagesOverride: "en_US.UTF-8")));
     }
 }
