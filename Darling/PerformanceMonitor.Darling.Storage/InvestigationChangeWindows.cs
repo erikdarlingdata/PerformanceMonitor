@@ -37,10 +37,13 @@ public static class InvestigationChangeWindows
     /// <summary>
     /// How long after a window's end a request still opens held (#9485): a re-capture or a settle period runs past the end of the work.
     /// Fixed at 30 minutes on purpose. A change can cause a real problem well after the work ends (a write-latency step a day and a half
-    /// after a planned resize was real), and a longer tail would hide that. The same number is in <see cref="HeldWindowIdSql"/> as
-    /// an interval literal, so a change is made in both places.
+    /// after a planned resize was real), and a longer tail would hide that. Every SQL statement that needs the tail takes it from
+    /// <see cref="TailIntervalSql"/>, so a change is made here only.
     /// </summary>
     public const int TailMinutes = 30;
+
+    /// <summary>The tail as an interval literal, built from <see cref="TailMinutes"/> so the SQL never holds a second copy of the number.</summary>
+    public static readonly string TailIntervalSql = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"interval '{TailMinutes} minutes'");
 
     /// <summary>
     /// The window that holds a request opening at <c>{openedAt}</c> on server <c>{serverId}</c>: the newest-ending one not cleared
@@ -50,12 +53,53 @@ public static class InvestigationChangeWindows
     /// </summary>
     public static string HeldWindowIdSql(string openedAt, string serverId) => $@"(SELECT w.window_id
         FROM config.investigation_change_windows AS w
-        WHERE w.ends_at >= {openedAt} - interval '30 minutes'
+        WHERE w.ends_at >= {openedAt} - {TailIntervalSql}
           AND w.starts_at < {openedAt}
           AND (w.cleared_at IS NULL OR w.cleared_at >= {openedAt})
           AND (w.server_ids IS NULL OR {serverId} = ANY (w.server_ids))
         ORDER BY w.ends_at DESC, w.window_id DESC
         LIMIT 1)";
+
+    /// <summary>The window starts later than now.</summary>
+    public const string StateUpcoming = "upcoming";
+
+    /// <summary>Now is inside the window: it holds requests that open now.</summary>
+    public const string StateOpen = "open";
+
+    /// <summary>The window ended, and its tail still holds requests that open now.</summary>
+    public const string StateInTail = "in_tail";
+
+    /// <summary>The tail ended, or the window was cleared: it holds nothing that opens now.</summary>
+    public const string StateClosed = "closed";
+
+    /// <summary>When a window's tail ends: <c>ends_at</c> plus <see cref="TailMinutes"/>.</summary>
+    public static DateTime TailEnd(DateTime endsAt) => endsAt.AddMinutes(TailMinutes);
+
+    /// <summary>
+    /// A window's state at <paramref name="now"/>, on the same edges as <see cref="HeldWindowIdSql"/>: it holds an open time t when
+    /// <c>starts &lt; t &lt;= tail end</c> and t is not after <c>cleared_at</c>. So it is upcoming up to and including its start, open up to and
+    /// including its end, in its tail up to and including the tail end, and closed after that, or after <c>cleared_at</c> when that is earlier.
+    /// </summary>
+    public static string StateOf(DateTime startsAt, DateTime endsAt, DateTime? clearedAt, DateTime now)
+    {
+        var heldUntil = TailEnd(endsAt);
+        if (clearedAt is DateTime cleared && cleared < heldUntil)
+        {
+            heldUntil = cleared;
+        }
+
+        if (now > heldUntil)
+        {
+            return StateClosed;
+        }
+
+        if (now <= startsAt)
+        {
+            return StateUpcoming;
+        }
+
+        return now <= endsAt ? StateOpen : StateInTail;
+    }
 
     /// <summary>The rung (V310): one table and its index, two nullable columns on the requests and a partial index on the new link. All catalog-only, no data moves.</summary>
     public const string CreateSql = @"

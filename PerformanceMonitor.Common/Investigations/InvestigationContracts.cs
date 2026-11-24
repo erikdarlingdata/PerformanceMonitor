@@ -318,6 +318,9 @@ public sealed record InvestigationSweepResult(int LeasesLapsed, int Expired)
 
     /// <summary>#7109: how many action proposals this pass moved (voided, expired, or approved with no outcome to unknown).</summary>
     public int Proposals { get; init; }
+
+    /// <summary>#9485: how many change windows this pass wrote the one close summary for.</summary>
+    public int ChangeWindowsClosed { get; init; }
 }
 
 /// <summary>
