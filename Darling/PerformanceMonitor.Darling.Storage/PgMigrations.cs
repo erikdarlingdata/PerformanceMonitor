@@ -2539,7 +2539,7 @@ ALTER TABLE config.store_statement_baseline
     ADD COLUMN IF NOT EXISTS wal_fpi bigint;";
 
     /// <summary>
-    /// V309 (#9433): <c>collect.slow_reads</c> gains <c>reply_bytes</c>, the size in bytes of the reply the caller received, and
+    /// V317 (#9433): <c>collect.slow_reads</c> gains <c>reply_bytes</c>, the size in bytes of the reply the caller received, and
     /// <c>collect.read_latency</c> gains <c>reply_bytes_total</c>, the sum of those sizes over the reads the row counts. Both are nullable
     /// <c>bigint</c> with no default: a row written before this rung has no size, and a NULL says so where a 0 would claim an empty reply.
     /// A read that sent no reply (it threw, the caller left, the store refused it busy) adds 0 to the total, so the average over a
@@ -2549,7 +2549,7 @@ ALTER TABLE config.store_statement_baseline
     /// <para><b>An older build ignores the columns.</b> Its writer names its own column list and its reads name theirs, so it neither fills
     /// nor reads them.</para>
     /// </summary>
-    private const string V309Sql = @"
+    private const string V317Sql = @"
 ALTER TABLE collect.slow_reads
     ADD COLUMN IF NOT EXISTS reply_bytes bigint;
 
@@ -4103,8 +4103,34 @@ END $$;";
            from (collect.store_table_activity_baseline). Two plain tables created empty: no data moves, and the service fills them from the hourly self-metrics sweep.
            An older build ignores them. */
         new Migration(StoreTableActivity.Version, "store-table-activity", StoreTableActivity.CreateSql),
-        /* V309 (#9433): the reply size in bytes on the slow read record and the read latency histogram, two nullable columns. No data moves and old rows keep NULL. An older build ignores the columns. */
-        new Migration(ReadReplyBytes.Version, "read-reply-bytes", V309Sql),
+        /* V309 (#9414): one row per checkpoint of the store's own PostgreSQL server (collect.store_checkpoints), read from its log. One plain table created
+           empty: no data moves. An older build never reads it. */
+        new Migration(StoreCheckpoints.Version, "store-checkpoints", StoreCheckpoints.CreateSql),
+        /* V310 (#9452): the partial index of the oversized-plan backlog's pending rows, on (server_id), for the sightings statement's per-cycle pending count.
+           An older build never reads it, and keeps writing rows that the index follows. */
+        new Migration(OversizedPlanBacklog.PendingIndexVersion, "oversized-plan-backlog-pending-index", OversizedPlanBacklog.CreatePendingIndexSql),
+        /* V311 (#9438): what each migration rung created, changed or dropped (collect.service_start_rung_objects): one row per object, a child of the rung
+           row V307 made. One plain table and its by-rung index created empty: no data moves. An older build ignores it and records no object rows. */
+        new Migration(ServiceStartRungObjects.Version, "service-start-rung-objects", ServiceStartRungObjects.CreateSql),
+        /* V312 (#9432): the record of each upgrade run, one new table keyed on the run id. No existing table changes and no data moves. An older build never names it. */
+        new Migration(UpgradeRuns.Version, "upgrade-runs", UpgradeRuns.CreateSql),
+        /* V313 (#9427): the last captured state of the store's settings and a row for each change between starts (old and new value, source, source file and line,
+           pending_restart, when seen, and when the server last loaded its configuration). Two plain tables created empty: no data moves, and the first capture on a
+           store writes only the baseline. An older build ignores both. */
+        new Migration(StoreSettingChanges.Version, "store-setting-changes", StoreSettingChanges.CreateSql),
+        /* V314 (#9437): the store's own connection pressure, once a minute. Two plain tables created empty: the backends by role, application, state and wait type,
+           and the slot headroom with the host load. No data moves. An older build ignores both. */
+        new Migration(StoreConnectionSamples.Version, "store-connection-samples", StoreConnectionSamples.CreateSql),
+        /* V315 (#9434): the service process's start instant on each collect.read_latency bucket, and the bucket key now names it, so a restart within an hour
+           writes a second row for that hour instead of adding into the first. One nullable column, and the primary key becomes a unique index built with
+           NULLS NOT DISTINCT. The table is a plain table that holds at most 90 days of hourly rows, so the index build is a short, bounded step. An older
+           build ignores the column, and its flush writes NULL, which the new key treats as one more value. */
+        new Migration(ReadLatencyProcessStart.Version, "read-latency-process-start", ReadLatencyProcessStart.Sql),
+        /* V316 (#9439): collect.store_lock_waits, one empty plain table and two indexes, filled by the hourly store log sweep from the lock waits the log records. No data
+           moves. An older build never reads or names it. */
+        new Migration(StoreLockWaits.Version, "store-lock-waits", StoreLockWaits.CreateSql),
+        /* V317 (#9433): the reply size in bytes on the slow read record and the read latency histogram, two nullable columns. No data moves and old rows keep NULL. An older build ignores the columns. */
+        new Migration(ReadReplyBytes.Version, "read-reply-bytes", V317Sql),
     };
 
     /// <summary>
@@ -12083,6 +12109,9 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
 
         observer?.LadderStarted(currentVersion);
 
+        var recordObjects = observer is not null && currentVersion > 0;
+        /* The catalog after one rung is the catalog before the next, because the advisory lock keeps every other migrator out, so each rung costs one read, not two. */
+        MigrationCatalogSnapshot? carried = null;
         var applied = 0;
         foreach (var migration in ladder)
         {
@@ -12108,9 +12137,20 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
             var rungStartedUtc = DateTime.UtcNow;
             var rungClock = System.Diagnostics.Stopwatch.StartNew();
             using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            IReadOnlyList<MigrationObjectChange>? objectChanges = null;
+            MigrationCatalogSnapshot? afterObjects = null;
 
             try
             {
+                /* #9438: the catalog before and after the rung, in the rung's own transaction, so the diff is what this rung and nothing else did.
+                   Only for a store that already had a version: a ladder from an empty store would list every object as created. Each read is under a
+                   savepoint, so a failed read costs the rung's object rows, never the rung. The rung's elapsed time in the start history includes
+                   both reads. */
+                var before = recordObjects
+                    ? carried ?? await MigrationCatalogSnapshot.TryTakeAsync(connection, transaction, logger, MigrationCommandTimeoutSeconds, cancellationToken)
+                    : null;
+                carried = null;
+
                 try
                 {
                     using var apply = new NpgsqlCommand(migration.Sql, connection, transaction) { CommandTimeout = rungTimeoutSeconds };
@@ -12124,6 +12164,13 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
                     await TryRollbackAsync(transaction);
                     await LogLockHoldersAsync(connection, logger, migration.Version, migration.Name, ex.MessageText, cancellationToken);
                     throw;
+                }
+
+                if (before is not null)
+                {
+                    var after = await MigrationCatalogSnapshot.TryTakeAsync(connection, transaction, logger, MigrationCommandTimeoutSeconds, cancellationToken);
+                    objectChanges = after is null ? null : MigrationCatalogSnapshot.Diff(before, after);
+                    afterObjects = after;
                 }
 
                 using (var stamp = new NpgsqlCommand(
@@ -12147,6 +12194,13 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
 
             observer?.RungFinished(migration.Version, migration.Name, rungStartedUtc, rungClock.ElapsedMilliseconds,
                 MigrationRungOutcome.Applied, null);
+            if (objectChanges is not null)
+            {
+                observer?.RungObjects(migration.Version, objectChanges);
+            }
+
+            carried = afterObjects;
+
             applied++;
         }
 

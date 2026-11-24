@@ -315,7 +315,7 @@ public sealed class ReadLatencyFlushLiveTests
         Assert.Equal(new[] { ("24h", 3, 4, 42L, 2), ("7d", 1, 1, 0L, 0) }, rows);
     }
 
-    /// <summary>#9433 (V309): the reply bytes of two flushes of one hour add, and the read's mean covers only the hours that carry a size: an hour
+    /// <summary>#9433 (V317): the reply bytes of two flushes of one hour add, and the read's mean covers only the hours that carry a size: an hour
     /// an older build wrote (NULL, no size) is left out of the average and never counted as an empty reply. The slow-read row keeps its size, and
     /// a row without one reads back null.</summary>
     [Fact]
@@ -323,7 +323,7 @@ public sealed class ReadLatencyFlushLiveTests
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the V309 reply-bytes pin.");
+            "Set DARLING_TEST_PG to a Postgres connection string to run the V317 reply-bytes pin.");
 
         var ct = TestContext.Current.CancellationToken;
 

@@ -571,6 +571,7 @@ public sealed partial class DarlingWorker : BackgroundService
        budget bounds the whole sample, connection wait included, because it is awaited on the main loop. */
     private static readonly TimeSpan s_checkpointSyncSampleInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan s_checkpointSyncSampleBudget = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan s_storeSettingCaptureBudget = TimeSpan.FromSeconds(20);
 
     /* The Query Store backfill worker's tick (#2022): its OWN loop like the command plane, so a slow
        byte-budgeted slice can never delay or starve the collection sweep — the two share only the
@@ -1269,6 +1270,9 @@ public sealed partial class DarlingWorker : BackgroundService
     /* #4823: the once-a-minute checkpointer sync-time sample. MinValue = the first sample is taken on the first pass,
        which only sets the sampler's baseline. The sampler is in memory: a service restart starts a new baseline. */
     private DateTime _nextCheckpointSyncSampleUtc = DateTime.MinValue;
+
+    /// <summary>#9439: true while the minute read of the store's sessions is failing, so it warns once per failure run.</summary>
+    private bool _storeSessionMapFailing;
     private readonly CheckpointSyncSampler _checkpointSyncSampler = new();
 
     /* #2674: per-collector cost on the monitored servers, accumulated in memory and flushed hourly on the

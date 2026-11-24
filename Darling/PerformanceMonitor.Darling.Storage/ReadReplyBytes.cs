@@ -18,5 +18,5 @@ public static class ReadReplyBytes
     /// The store schema version that adds the two columns. The one place the number is written: the migration, the schema version
     /// constant and the viewer's version map read it, so renumbering the rung is a change to this line.
     /// </summary>
-    public const int Version = 309;
+    public const int Version = 317;
 }
