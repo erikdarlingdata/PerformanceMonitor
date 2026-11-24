@@ -237,7 +237,7 @@ CROSS JOIN LATERAL (
 ) l";
 
     private static async Task<Dictionary<(int ServerId, string Collector), DateTime>> ReadLastRunBeforeStartAsync(
-        NpgsqlDataSource postgres, IReadOnlyList<Pair> pairs, DateTime startUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, List<Pair> pairs, DateTime startUtc, CancellationToken cancellationToken)
     {
         var rows = new Dictionary<(int, string), DateTime>();
         if (pairs.Count == 0)
@@ -302,8 +302,8 @@ CROSS JOIN LATERAL (
     private static string Name(CollectorFleetLiveness.ServerFacts s) => string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName;
 
     private static string Compose(
-        IReadOnlyList<CollectorFleetLiveness.ServerFacts> servers,
-        IReadOnlyList<Pair> pairs,
+        List<CollectorFleetLiveness.ServerFacts> servers,
+        List<Pair> pairs,
         Dictionary<(int ServerId, string Collector), SinceStart> since,
         Dictionary<(int ServerId, string Collector), DateTime> before,
         DateTime startUtc, DateTime nowUtc, int notCollected, int disabled, bool singleServer)
