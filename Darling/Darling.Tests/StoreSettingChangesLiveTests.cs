@@ -25,7 +25,7 @@ namespace Darling.Tests;
 /// #9427: the store's setting changes between starts, against a real server. A capture is compared with the last one, so each test takes a baseline first, changes a
 /// setting with <c>ALTER SYSTEM</c> and <c>pg_reload_conf()</c>, and captures again.
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class StoreSettingChangesLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
