@@ -73,13 +73,10 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
 
     /// <summary>
     /// #9507: one sampled captured call, from an <c>rpc_completed</c> or <c>sql_batch_completed</c> event the session kept because
-    /// it ended Abort, or Error after at least 0.9 s. A call the client cancelled while it ran has that shape (SQL Server 2016 to
-    /// 2022 report Abort for it, 2025 reports Error), but so does a batch-aborting error after 0.9 s or more (a conversion error,
-    /// a deadlock victim that waited), which ends with result Error on 2022 as well. Such a row has no attention partner, so every
-    /// read leaves it out. <c>interrupt_duration_us</c> is the call's elapsed time (not the attention's). <c>statement_text</c> is
-    /// the <c>sql_text</c> action, which carries no parameter values: the object name, a colon and that text for an RPC, the
-    /// object name alone for a stored-procedure RPC with no text, or the text for a batch. The judge matches it to an attention
-    /// sample by session and time. No count row: the attention count stays the exact total.
+    /// it ended Abort, or Error after at least 0.9 s: the shape of a call the client cancelled while it ran (SQL Server 2016 to
+    /// 2022 report Abort for it, 2025 reports Error). <c>interrupt_duration_us</c> is the call's elapsed time (not the attention's),
+    /// and <c>statement_text</c> is the object name, a colon and the statement for an RPC, or the batch text for a batch. The
+    /// judge matches it to an attention sample by session and time. No count row: the attention count stays the exact total.
     /// </summary>
     public const string KindAborted = AttentionWindowSql.KindAborted;
 
@@ -300,9 +297,9 @@ SELECT
     statement_text =
         COALESCE
         (
-            NULLIF(evt.value('(action[@name=""sql_text""]/value)[1]', 'nvarchar(max)'), N''),
-            NULLIF(evt.value('(data[@name=""statement""]/value)[1]', 'nvarchar(max)'), N''),
-            NULLIF(evt.value('(data[@name=""batch_text""]/value)[1]', 'nvarchar(max)'), N'')
+            evt.value('(data[@name=""statement""]/value)[1]', 'nvarchar(max)'),
+            evt.value('(data[@name=""batch_text""]/value)[1]', 'nvarchar(max)'),
+            evt.value('(action[@name=""sql_text""]/value)[1]', 'nvarchar(max)')
         ),
     event_kind = CONVERT(varchar(20), '{7}'),
     object_name = evt.value('(data[@name=""object_name""]/value)[1]', 'nvarchar(512)')
@@ -379,19 +376,14 @@ SELECT
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* An empty string is no text: the completed events still send their statement and batch_text nodes, empty, because the
-               session turns those fields off (#9507), so the batch reads the sql_text action first and the C# side never sees them. */
-            var rawText = reader.IsDBNull(7) ? null : reader.GetString(7);
-            var filtered = scrub.Text(string.IsNullOrEmpty(rawText) ? null : rawText);
+            var filtered = scrub.Text(reader.IsDBNull(7) ? null : reader.GetString(7));
             var aborted = !reader.IsDBNull(8) && string.Equals(reader.GetString(8), KindAborted, StringComparison.Ordinal);
-            var objectName = aborted && !reader.IsDBNull(9) ? reader.GetString(9) : null;
-            if (!string.IsNullOrEmpty(objectName)
+            if (aborted && !reader.IsDBNull(9) && filtered is not null
                 && !string.Equals(filtered, SensitiveStatements.PlaceholderText, StringComparison.Ordinal))
             {
-                /* An RPC names its object: "dbo.proc: <statement>", or the object name alone when the call has no sql_text. A batch has
-                   no object name. A withheld statement stays the bare marker: prefixed, it would get a fingerprint and group every
-                   withheld call of one object together (#4348). */
-                filtered = filtered is null ? objectName : objectName + ": " + filtered;
+                /* An RPC names its object: "dbo.proc: <statement>". A batch has no object name. A withheld statement stays the bare
+                   marker: prefixed, it would get a fingerprint and group every withheld call of one object together (#4348). */
+                filtered = reader.GetString(9) + ": " + filtered;
             }
 
             rows.Add(new Row
