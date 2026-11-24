@@ -206,14 +206,7 @@ public sealed class McpToolsListBudgetTests
         Assert.Equal(registered.Count, types.Count);
 
         var services = new ServiceCollection();
-        foreach (var serviceType in types
-            .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
-            .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
-            .SelectMany(m => m.GetParameters())
-            .Select(p => p.ParameterType)
-            .Where(McpServedSchema.IsServiceParameter)
-            .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
-            .Distinct())
+        foreach (var serviceType in ToolServiceParameterTypes(types))
         {
             services.AddSingleton(serviceType, _ => null!);
         }
@@ -229,6 +222,19 @@ public sealed class McpToolsListBudgetTests
         var isService = provider.GetRequiredService<IServiceProviderIsService>();
         return (provider.GetServices<McpServerTool>().ToList(), types, isService);
     }
+
+    /// <summary>The DI service types the registered tools take as parameters, which a host registers so the served schemas leave them out.</summary>
+    internal static List<Type> ToolServiceParameterTypes() => ToolServiceParameterTypes(BuildServedTools().Types);
+
+    private static List<Type> ToolServiceParameterTypes(IEnumerable<Type> types) => types
+        .SelectMany(t => t.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+        .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null)
+        .SelectMany(m => m.GetParameters())
+        .Select(p => p.ParameterType)
+        .Where(McpServedSchema.IsServiceParameter)
+        .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
+        .Distinct()
+        .ToList();
 
     private static string RepoPath(params string[] segments) => Path.Combine(new[] { RepoRoot() }.Concat(segments).ToArray());
 
