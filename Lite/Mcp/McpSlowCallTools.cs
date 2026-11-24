@@ -34,8 +34,10 @@ public sealed class McpSlowCallTools
         "hot_ms and archive_ms (the part of total_ms spent outside and inside the archive span reads) and archive_files (archive files those reads opened), " +
         "which are null for a tool that keeps no phase split (only get_query_store_top does), so null means not measured, not zero; " +
         "response_bytes (size of the reply text the tool returned, before MCP's JSON-RPC encoding, so the body on the wire is larger); hours_back (the window the call asked for, null when it had none); " +
-        "peak_working_set_bytes (highest process working set polled every 75 ms during the call) and duckdb_memory_bytes (DuckDB's memory total when the call ended, " +
-        "null when the store lock was busy then); memory_source says where the two memory figures came from. No argument value is stored. " +
+        "process_peak_working_set_bytes (highest working set of the whole Lite process read while the call ran) and duckdb_peak_memory_bytes (highest duckdb_memory() total read while the call ran, " +
+        "null when the store lock was busy at every read), the same two figures the compaction history carries. Both are for the whole process, not the call alone: when calls overlap, " +
+        "each one's figure includes the others' memory. Sampling starts 250 ms into a call and runs every 75 ms, so a rise shorter than that can be missed " +
+        "and the first 250 ms has only the starting working-set reading. memory_source says in words where the two figures came from. No argument value is stored. " +
         "per_tool: for each tool called since Lite started, count, total_ms, mean_ms, max_ms, p50_ms, p95_ms and p99_ms (bucket upper bounds, never interpolated, capped at max_ms), " +
         "slow_calls and errors. Rows are kept 7 days, at most 1000. Optional tool filter: slow_calls and per_tool then hold only that tool. Empty slow_calls means no call was slow, not a failure. " +
         "truncated is true when the window held more slow calls than limit, so slow_calls is the newest limit of them. per_tool is never cut by limit.";
@@ -93,8 +95,8 @@ public sealed class McpSlowCallTools
                     archive_files = r.ArchiveFiles,
                     response_bytes = r.ResponseBytes,
                     hours_back = r.HoursBack,
-                    peak_working_set_bytes = r.PeakWorkingSetBytes,
-                    duckdb_memory_bytes = r.DuckDbMemoryBytes,
+                    process_peak_working_set_bytes = r.ProcessPeakWorkingSetBytes,
+                    duckdb_peak_memory_bytes = r.DuckDbPeakMemoryBytes,
                     memory_source = r.MemorySource,
                 }),
                 per_tool = perTool,

@@ -140,8 +140,8 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         await recorder.WhenWritesDoneAsync();
 
         var row = Assert.Single(await _data.GetMcpSlowCallsAsync(DateTime.UtcNow.AddHours(-1), 50, null));
-        Assert.True(row.PeakWorkingSetBytes > 0, "no working-set peak");
-        Assert.Equal(123_456, row.DuckDbMemoryBytes);
+        Assert.True(row.ProcessPeakWorkingSetBytes > 0, "no working-set peak");
+        Assert.Equal(123_456, row.DuckDbPeakMemoryBytes);
         Assert.Contains("working set", row.MemorySource);
         Assert.Contains("duckdb_memory()", row.MemorySource);
     }
@@ -150,7 +150,7 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
     public async Task TheWorkingSetPeak_IsTheHighestReadingPolledDuringTheCall()
     {
         long reading = 1_000;
-        var recorder = new McpCallTimingRecorder(_data) { SlowThreshold = TimeSpan.Zero, SampleInterval = TimeSpan.FromMilliseconds(10) };
+        var recorder = new McpCallTimingRecorder(_data) { SlowThreshold = TimeSpan.Zero, SampleInterval = TimeSpan.FromMilliseconds(10), SamplingStartDelay = TimeSpan.Zero };
         /* The readings climb to 5000 while the call runs, then fall back: the row keeps the top, not the last. */
         recorder.ReadWorkingSet = () => { var r = Interlocked.Add(ref reading, 1_000); return r <= 5_000 ? r : 2_000; };
 
@@ -158,7 +158,7 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         await recorder.WhenWritesDoneAsync();
 
         var row = Assert.Single(await _data.GetMcpSlowCallsAsync(DateTime.UtcNow.AddHours(-1), 50, null));
-        Assert.Equal(5_000, row.PeakWorkingSetBytes);
+        Assert.Equal(5_000, row.ProcessPeakWorkingSetBytes);
     }
 
     [Fact]
@@ -263,6 +263,8 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         Assert.Equal("tool_a", only.GetProperty("tool").GetString());
         Assert.Equal("SeedSrv", only.GetProperty("server_name").GetString());
         Assert.Equal(12, only.GetProperty("rows_returned").GetInt64());
+        Assert.Equal(1, only.GetProperty("process_peak_working_set_bytes").GetInt64());
+        Assert.Equal(1, only.GetProperty("duckdb_peak_memory_bytes").GetInt64());
         Assert.Equal(now.AddHours(-3), only.GetProperty("call_time_utc").GetDateTime().ToUniversalTime(), TimeSpan.FromSeconds(1));
     }
 
