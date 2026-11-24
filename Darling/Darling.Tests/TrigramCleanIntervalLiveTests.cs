@@ -87,19 +87,25 @@ SELECT g AS n,
        (SELECT string_agg(v.a[1 + floor(power(random(), 3) * {0} * (1 + x.i * 0))::int], ' ') FROM generate_series(1, {1}) AS x(i) WHERE x.i > 0 OR g > 0) || ' ' || g::text || '/' || {2}::text AS t
 FROM v, generate_series({3}, {4}) AS g";
 
-    private static string Texts(int first, int last, int salt) =>
-        string.Format(CultureInfo.InvariantCulture, TextsSql, VocabularySize, WordsPerText, salt, first, last);
+    private static string Texts(int first, int last, int salt, int vocabulary = VocabularySize, int words = WordsPerText) =>
+        string.Format(CultureInfo.InvariantCulture, TextsSql, vocabulary, words, salt, first, last);
 
-    private static async Task PrepareAsync(NpgsqlConnection connection, bool queryStore, int seedRows, CancellationToken ct)
+    private static async Task PrepareVocabularyAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public", ct);
-        await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public", ct);
         await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS pgstattuple WITH SCHEMA public", ct);
         await ExecAsync(connection,
             @"CREATE TABLE IF NOT EXISTS public.zz_vocab AS
               SELECT g AS id, (SELECT string_agg(chr(97 + get_byte(decode(md5(g::text), 'hex'), i) % 26), '' ORDER BY i)
                                FROM generate_series(0, 2 + g % 8) AS i) AS w
               FROM generate_series(1, " + VocabularySize + ") AS g", ct);
+    }
+
+    private static async Task PrepareAsync(NpgsqlConnection connection, bool queryStore, int seedRows, CancellationToken ct)
+    {
+        await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public", ct);
+        await ExecAsync(connection, "CREATE EXTENSION IF NOT EXISTS btree_gin WITH SCHEMA public", ct);
+        await PrepareVocabularyAsync(connection, ct);
 
         var table = queryStore ? QueryStoreTextTrigramIndex.TableName : QueryTextTrigramIndex.TableName;
 
@@ -253,6 +259,30 @@ FROM v, generate_series({3}, {4}) AS g";
     /// <summary>The measurement behind the interval, opt in: <c>DARLING_TRIGRAM_MEASURE_OUT</c> names the file the table is written to, and
     /// <c>DARLING_TRIGRAM_MEASURE_INTERVALS</c> the comma list of intervals in minutes. One virtual hour at the peak rate per interval and
     /// index, on a table seeded with an hour of rows.</summary>
+    [Fact]
+    public async Task Measure_TextShape_PerVocabularySize()
+    {
+        var output = Environment.GetEnvironmentVariable("DARLING_TRIGRAM_MEASURE_OUT");
+        Assert.SkipWhen(string.IsNullOrEmpty(output), "Set DARLING_TRIGRAM_MEASURE_OUT to run the clean interval measurement.");
+        var ct = TestContext.Current.CancellationToken;
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PrepareVocabularyAsync(connection, ct);
+        foreach (var (vocabulary, words) in new[] { (5000, 190), (1500, 190), (800, 190), (400, 190), (200, 190), (400, 120) })
+        {
+            await using var command = new NpgsqlCommand(
+                $"SELECT avg(length(t)), avg(cardinality(show_trgm(t))) FROM ({Texts(1, 200, 0, vocabulary, words)}) AS s", connection);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            await reader.ReadAsync(ct);
+            await File.AppendAllTextAsync(output!, string.Format(CultureInfo.InvariantCulture,
+                "classes: S|vocabulary={0}|words={1}|avgChars={2:F0}|avgDistinctTrigrams={3:F0}{4}", vocabulary, words, reader.GetDecimal(0), reader.GetDecimal(1), Environment.NewLine), ct);
+        }
+
+        await LiveStoreCleanup.RunAsync(scratch.ConnectionString, true, static (_, _) => Task.CompletedTask);
+    }
+
     [Fact]
     public async Task Measure_PendingListWalAndCleanTime_PerInterval()
     {
