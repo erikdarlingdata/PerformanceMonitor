@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -86,16 +86,20 @@ public sealed class DarlingMcpStoreHostTools
         + "call; if that read times out or the role is refused it (any error but TimescaleDB being absent) they are "
         + "null, uncompressed_chunk_percent_of_ram is null with them, and uncompressed_unavailable_reason says why "
         + "(the SQLSTATE for a refusal); a store without TimescaleDB reports 0 chunks. The rest of the profile still "
-        + "returns (a slow fact fails alone). --check-settings reads the size live. postgres_owner says who owns the PostgreSQL "
-        + "store_certificate is the server certificate the store presents to TLS clients (#9430): tls is on, off "
-        + "or unavailable. On, source says where it was read: managed_file (the server.crt the service wrote for a "
+        + "returns (a slow fact fails alone). --check-settings reads the size live. "
+        + "store_certificate is the server certificate the store presents to TLS clients (#9430): tls is on, off, "
+        + "socket or unavailable. On, source says where it was read: managed_file (the server.crt the service wrote for a "
         + "managed store, beside the data directory) or tls_handshake (the certificate the store presents when this "
-        + "service connects, for a store it does not manage; the handshake ends before any user name or password is sent), and server carries subject, issuer, "
+        + "service connects, for a store it does not manage; over TCP the handshake ends before any user name or "
+        + "password is sent), and server carries subject, issuer, "
         + "sha256 (64 upper-case hex characters, the fingerprint of the certificate's DER bytes), not_before and not_after "
         + "(UTC) and days_to_expiry (whole days, negative once expired, as of this response). root is the issuing "
         + "root's subject and sha256 when the chain carries one, else null. Off means the store's ssl setting is off and "
-        + "message says so. Unavailable means the setting or the certificate could not be read and message says why; "
-        + "the rest of the profile still returns. It is read on every call, not cached with the profile. "
+        + "message says so. Socket means the store is reached over a Unix socket, which has no TLS handshake to read, so "
+        + "the service reads nothing and sends nothing. Unavailable means the setting or the certificate could not be read "
+        + "(the read has its own short time limit) and message says why; the rest of the profile still returns. A managed "
+        + "store's file is read on every call. A handshake result is kept for 10 minutes per store connection, so the "
+        + "store's log does not record a failed TLS handshake on every call, and a changed certificate shows within that time. "
         + "postgres_owner says who owns the PostgreSQL "
         + "process: owner is started_by_this_service (stopping the service stops PostgreSQL), adopted_running (it leaves PostgreSQL running), "
         + "not_managed or not_yet_known (still starting), with the sentence in on_service_stop. This "
@@ -163,17 +167,15 @@ public sealed class DarlingMcpStoreHostTools
                GatherSettingProfilesAsync's own refusal (Low 4) instead of silently resolving a path
                GatherSettingProfilesAsync never used. */
             /* #9430: the certificate is read on every call, outside the profile cache, so days_to_expiry is as of this response and a
-               rotated certificate shows at once. A failure here answers unavailable and never fails the profile. */
-            StoreServerCertificate.Report certificate;
-            try
-            {
-                await using var certificateConnection = await postgres.OpenConnectionAsync(cts.Token);
-                certificate = await StoreServerCertificate.ReadAsync(postgresConfig, certificateConnection, cts.Token);
-            }
-            catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
-            {
-                certificate = StoreServerCertificate.Unavailable("The store could not be reached to read its certificate.");
-            }
+               rotated certificate shows at once. A failure or its own short deadline here answers unavailable and never fails the profile; only the caller cancelling does. */
+            var certificate = await StoreServerCertificate.ReadBoundedAsync(
+                async token =>
+                {
+                    await using var certificateConnection = await postgres.OpenConnectionAsync(token);
+                    return await StoreServerCertificate.ReadAsync(postgresConfig, certificateConnection, token);
+                },
+                StoreServerCertificate.ReadTimeout,
+                cancellationToken);
 
             var mcpDataDirectory = postgresConfig.Managed ? DarlingStoreHostProfile.TryResolveProfileDataDirectory(postgresConfig) : null;
 

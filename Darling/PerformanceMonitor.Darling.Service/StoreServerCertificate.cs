@@ -7,8 +7,10 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
@@ -36,22 +38,64 @@ internal static class StoreServerCertificate
     internal const string TlsOff = "off";
     internal const string TlsUnavailable = "unavailable";
 
+    /// <summary>The store is reached over a Unix socket: there is no TLS handshake to read.</summary>
+    internal const string TlsSocket = "socket";
+
     internal const string ManagedFileSource = "managed_file";
     internal const string HandshakeSource = "tls_handshake";
 
     /// <summary>The longest the handshake read may take.</summary>
     internal static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(5);
 
+    /// <summary>The longest the whole certificate read may take for <c>get_store_host</c>: opening the connection, the <c>ssl</c> setting and the
+    /// handshake. It is the read's own deadline, so a slow store costs the certificate block and not the rest of the profile.</summary>
+    internal static readonly TimeSpan ReadTimeout = TimeSpan.FromSeconds(8);
+
+    /// <summary>How long a successful handshake result is kept per store connection string. Each handshake makes the store log a failed TLS
+    /// handshake, and the web card asks on every first paint, hash change and span change. A changed certificate shows within this time.</summary>
+    internal static readonly TimeSpan HandshakeCacheTtl = TimeSpan.FromMinutes(10);
+
+    private static readonly ConcurrentDictionary<string, (DateTime AtUtc, Report Report)> HandshakeCache = new(StringComparer.Ordinal);
+
     /// <summary>One certificate's identity and validity. <see cref="Sha256"/> is 64 upper-case hex characters.</summary>
     internal sealed record Detail(string Subject, string Issuer, string Sha256, DateTime NotBeforeUtc, DateTime NotAfterUtc);
 
-    /// <summary>The answer. <see cref="Tls"/> is <c>on</c>, <c>off</c> or <c>unavailable</c>. <see cref="Server"/> and <see cref="Source"/> are
+    /// <summary>The answer. <see cref="Tls"/> is <c>on</c>, <c>off</c>, <c>socket</c> or <c>unavailable</c>. <see cref="Server"/> and <see cref="Source"/> are
     /// set only when <c>on</c>. <see cref="Message"/> says why for <c>off</c> and <c>unavailable</c>.</summary>
     internal sealed record Report(string Tls, string? Source, Detail? Server, Detail? Root, string? Message);
 
     internal static Report Off(string message) => new(TlsOff, null, null, null, message);
 
     internal static Report Unavailable(string message) => new(TlsUnavailable, null, null, null, message);
+
+    internal static Report Socket(string message) => new(TlsSocket, null, null, null, message);
+
+    /// <summary>
+    /// Runs <paramref name="read"/> under its own <paramref name="timeout"/>, linked to <paramref name="cancellationToken"/>. A failure to reach the
+    /// store, or the timeout elapsing while the caller is still waiting, answers <c>unavailable</c> so the rest of the profile returns. The caller
+    /// cancelling still throws.
+    /// </summary>
+    internal static async Task<Report> ReadBoundedAsync(Func<CancellationToken, Task<Report>> read, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bounded.CancelAfter(timeout);
+        try
+        {
+            return await read(bounded.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return Unavailable($"The certificate read did not finish within {(int)timeout.TotalSeconds} seconds.");
+        }
+        catch (Exception ex) when (ex is NpgsqlException or InvalidOperationException)
+        {
+            return Unavailable("The store could not be reached to read its certificate.");
+        }
+    }
+
+    /// <summary>True when any host in the connection string is a Unix socket path, which Npgsql marks with a leading slash.</summary>
+    private static bool UsesUnixSocket(NpgsqlConnectionStringBuilder builder) =>
+        (builder.Host ?? string.Empty).Split(',').Any(host => host.Trim().StartsWith('/'));
 
     /// <summary>The SHA-256 of a certificate's DER bytes as 64 upper-case hex characters, the form <c>openssl x509 -fingerprint -sha256</c> prints
     /// without the colons.</summary>
@@ -134,6 +178,12 @@ internal static class StoreServerCertificate
         var chain = new List<X509Certificate2>();
         try
         {
+            if (UsesUnixSocket(new NpgsqlConnectionStringBuilder(connectionString)))
+            {
+                /* A Unix socket has no SSL negotiation, so Npgsql would send the startup message straight away. Nothing is opened. */
+                return Socket("The store is reached over a Unix socket, which has no TLS handshake, so there is no certificate to read.");
+            }
+
             var builder = new NpgsqlConnectionStringBuilder(connectionString)
             {
                 SslMode = SslMode.Require,
@@ -221,7 +271,19 @@ internal static class StoreServerCertificate
             return FromManagedFiles(certPath, DarlingManagedPostgres.RootCertificatePathFor(certPath));
         }
 
-        return await FromHandshakeAsync(connectionString, cancellationToken).ConfigureAwait(false);
+        if (HandshakeCache.TryGetValue(connectionString, out var cached) && DateTime.UtcNow - cached.AtUtc < HandshakeCacheTtl)
+        {
+            return cached.Report;
+        }
+
+        /* Only a certificate is kept. A store that did not answer is asked again on the next call. */
+        var report = await FromHandshakeAsync(connectionString, cancellationToken).ConfigureAwait(false);
+        if (report.Tls == TlsOn)
+        {
+            HandshakeCache[connectionString] = (DateTime.UtcNow, report);
+        }
+
+        return report;
     }
 
     /// <summary>Reads the store's <c>ssl</c> setting over <paramref name="connection"/>, then answers as <see cref="ReadAsync(PostgresConfig, string?, string, CancellationToken)"/>.</summary>

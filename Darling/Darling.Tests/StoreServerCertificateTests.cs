@@ -9,6 +9,7 @@
 #nullable enable
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Security;
@@ -182,6 +183,135 @@ public sealed class StoreServerCertificateTests
             Assert.Equal(leaf.NotAfter.ToUniversalTime(), report.Server.NotAfterUtc);
             Assert.Equal(Hex(root), report.Root!.Sha256);
             Assert.False(await sawStartup.Task.WaitAsync(TimeSpan.FromSeconds(10), ct), "the client sent bytes after the handshake");
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            listener.Stop();
+            try { await server; } catch (Exception) { /* the loop ends on cancel or on the closed listener */ }
+        }
+    }
+
+    [Fact]
+    public async Task ReadBounded_AStoreThatNeverAnswersTheSslRequest_AnswersUnavailableInsideItsOwnDeadline()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var held = new List<TcpClient>();
+        var server = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                /* Accept and keep the socket open without reading or writing: the SSL request is never answered. */
+                held.Add(await listener.AcceptTcpClientAsync(stop.Token));
+            }
+        }, stop.Token);
+
+        try
+        {
+            var started = DateTime.UtcNow;
+            var report = await StoreServerCertificate.ReadBoundedAsync(
+                token => StoreServerCertificate.FromHandshakeAsync($"Host=127.0.0.1;Port={port};Username=u;Database=d", token),
+                TimeSpan.FromSeconds(1),
+                ct);
+
+            Assert.Equal("unavailable", report.Tls);
+            Assert.False(string.IsNullOrEmpty(report.Message));
+            Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(4), "the read outlived its own deadline");
+        }
+        finally
+        {
+            await stop.CancelAsync();
+            listener.Stop();
+            try { await server; } catch (Exception) { /* the loop ends on cancel or on the closed listener */ }
+            held.ForEach(c => c.Dispose());
+        }
+    }
+
+    [Fact]
+    public async Task ReadBounded_TheCallerCancelling_StillThrows()
+    {
+        using var caller = new CancellationTokenSource();
+        caller.CancelAfter(TimeSpan.FromMilliseconds(200));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => StoreServerCertificate.ReadBoundedAsync(
+            async token =>
+            {
+                await Task.Delay(Timeout.Infinite, token);
+                return StoreServerCertificate.Unavailable("never reached");
+            },
+            TimeSpan.FromSeconds(30),
+            caller.Token));
+    }
+
+    [Fact]
+    public async Task Handshake_AUnixSocketHost_ReportsSocketAndOpensNothing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var postgres = new PostgresConfig { Managed = false };
+
+        foreach (var connectionString in new[] { "Host=/var/run/postgresql;Username=u;Database=d", "Host=127.0.0.1,/var/run/postgresql;Username=u;Database=d" })
+        {
+            var direct = await StoreServerCertificate.FromHandshakeAsync(connectionString, ct);
+            Assert.Equal("socket", direct.Tls);
+            Assert.Null(direct.Server);
+
+            var read = await StoreServerCertificate.ReadAsync(postgres, "on", connectionString, ct);
+            Assert.Equal("socket", read.Tls);
+        }
+    }
+
+    [Fact]
+    public async Task Handshake_TwoReadsInsideTheCacheWindow_MakeOneHandshake()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var generated = StoreTlsCertificates.Create("cert-cache-host", IPAddress.Loopback, 10);
+        using var root = X509Certificate2.CreateFromPem(generated.RootCertPem);
+        using var withKey = X509Certificate2.CreateFromPem(generated.ServerCertChainPem, generated.ServerKeyPem);
+        using var usable = X509CertificateLoader.LoadPkcs12(withKey.Export(X509ContentType.Pfx), null);
+        var context = SslStreamCertificateContext.Create(usable, new X509Certificate2Collection(root), offline: true);
+
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var handshakes = 0;
+        var server = Task.Run(async () =>
+        {
+            while (!stop.IsCancellationRequested)
+            {
+                using var client = await listener.AcceptTcpClientAsync(stop.Token);
+                Interlocked.Increment(ref handshakes);
+                await using var stream = client.GetStream();
+                var request = new byte[8];
+                await stream.ReadExactlyAsync(request, stop.Token);
+                await stream.WriteAsync(new byte[] { (byte)'S' }, stop.Token);
+                await using var tls = new SslStream(stream);
+                try
+                {
+                    await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificateContext = context }, stop.Token);
+                    await tls.ReadAsync(new byte[1], stop.Token);
+                }
+                catch (Exception) when (!stop.IsCancellationRequested)
+                {
+                    /* the client ends the handshake on purpose */
+                }
+            }
+        }, stop.Token);
+
+        try
+        {
+            var postgres = new PostgresConfig { Managed = false };
+            var connectionString = $"Host=127.0.0.1;Port={port};Username=u;Database=d";
+            var first = await StoreServerCertificate.ReadAsync(postgres, "on", connectionString, ct);
+            var second = await StoreServerCertificate.ReadAsync(postgres, "on", connectionString, ct);
+
+            Assert.True(first.Tls == "on", $"tls={first.Tls}: {first.Message}");
+            Assert.Equal(first.Server!.Sha256, second.Server!.Sha256);
+            Assert.Equal(1, Volatile.Read(ref handshakes));
         }
         finally
         {
