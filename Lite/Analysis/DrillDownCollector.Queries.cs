@@ -486,10 +486,41 @@ QUALIFY ROW_NUMBER() OVER
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
         var plan = await _duckDb.PlanArchiveReadAsync(context.CancellationToken, new ArchiveWindow("query_stats", "collection_time", context.TimeRangeStart), new ArchiveWindow("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14)));
-        using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
-        using var connection = _duckDb.CreateConnection();
-        await connection.OpenAsync(context.CancellationToken);
 
+        /* #9353: read one database at a time, each under its own hold of the read lock, as the PLAN_REGRESSION fact's cost read is (the same
+           helper). Each database's top five are its rows of the whole read's top five, so the five best of them in the statement's order
+           are the whole read's five. A fact that named its offenders leaves the databases they are not in unread. */
+        var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
+        var (rows, _) = await DuckDbFactCollector.ReadPlanRegressionByDatabaseAsync(
+            _duckDb, context, plan,
+            (connection, database) => ReadRegressedQueriesAsync(connection, context, plan, database),
+            AfterRegressedQueriesDatabaseReadForTests,
+            offenders?.Select(o => o.DatabaseName).ToHashSet(StringComparer.Ordinal));
+
+        var items = DuckDbFactCollector.InStatementOrder(rows, r => r.Key).Take(RegressedQueriesLimit).Select(r => r.Item).ToList();
+
+        if (items.Count > 0)
+            finding.DrillDown!["regressed_queries"] = items;
+    }
+
+    /// <summary>The most regressed queries the drill-down lists.</summary>
+    internal const int RegressedQueriesLimit = 5;
+
+    /// <summary>
+    /// A test seam: runs before each database's read after the first, with the store's read lock let go (#9353). Null in production.
+    /// </summary>
+    internal Action? AfterRegressedQueriesDatabaseReadForTests { get; set; }
+
+    /// <summary>A drill-down row, and the key the statement ranks it by.</summary>
+    internal readonly record struct RegressedQueryRow(object Item, DuckDbFactCollector.PlanRegressionRankKey Key);
+
+    /// <summary>
+    /// Runs the regressed-queries statement on the caller's open connection, which holds the store's read lock: for one
+    /// <paramref name="database"/>, or for all of them when it is null (#9353).
+    /// </summary>
+    internal static async Task<List<RegressedQueryRow>> ReadRegressedQueriesAsync(
+        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string? database)
+    {
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
 WITH svr AS
@@ -549,6 +580,7 @@ psp_signature AS
         AND   collection_time >= $3
         AND   collection_time <= $4
         AND   delta_execution_count > 0
+        /*DB*/
     ) AS latest_cache
     WHERE rn = 1
 " + ParameterSensitivitySignature.PredicateSql("creation_time_utc <= $7", "    ") + @"
@@ -600,6 +632,7 @@ deduped AS
     AND   ($5::VARCHAR[] IS NULL
            OR (list_contains($5::VARCHAR[], database_name) AND list_contains($6::BIGINT[], query_id)))
     /*SEC*/
+    /*DB*/
 ),
 plan_agg AS
 (
@@ -723,7 +756,9 @@ SELECT
     psp_creation_time,
     best_plan_last_seen,
     svr.offset_minutes AS server_offset_minutes,
-    svr.time_zone_id AS server_time_zone_id
+    svr.time_zone_id AS server_time_zone_id,
+    -- #9353: appended, the ranking key, so a read that took the databases one at a time can put their rows in this statement's order.
+    lost_cpu_us
 FROM compared
 CROSS JOIN svr
 WHERE regression_factor >= 2
@@ -732,7 +767,9 @@ AND   latest_total_cpu_us >= 10000000
 AND   " + PerformanceMonitor.Analysis.PlanRegressionRanking.LostCpuFloorSql + @"
 -- #6548: SQL Server own housekeeping statements are not application code; left out before the LIMIT, as the PLAN_REGRESSION fact does.
 AND   NOT regexp_matches(lower(COALESCE(query_text, '')), '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"')
-ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
+-- #9353: then the row's own key (one row per database, query and replica), so ties come out in the same order every time and in the
+-- order a read that took the databases one at a time puts them in.
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", database_name, query_id, replica_role
 LIMIT 5";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
@@ -763,12 +800,19 @@ LIMIT 5";
            run and the offender list above is NULL. */
         cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 8);
 
-        var items = new List<object>();
-        cmd.CommandText = plan.Apply(cmd.CommandText);
+        var databaseFilter = "";
+        if (database is not null)
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = database });
+            databaseFilter = $"AND database_name = ${cmd.Parameters.Count}";
+        }
+
+        var items = new List<RegressedQueryRow>();
+        cmd.CommandText = plan.Apply(cmd.CommandText.Replace("/*DB*/", databaseFilter));
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
-            items.Add(new
+            items.Add(new RegressedQueryRow(new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 query_id = reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1)),
@@ -795,11 +839,16 @@ LIMIT 5";
                 /* #3953 parity with Darling: when the best plan last ran, appended so the ordinals above are
                    untouched. */
                 best_plan_last_seen = reader.IsDBNull(13) ? (DateTime?)null : Convert.ToDateTime(reader.GetValue(13))
-            });
+            },
+            new DuckDbFactCollector.PlanRegressionRankKey(
+                LostCpu: reader.IsDBNull(16) ? double.NegativeInfinity : Convert.ToDouble(reader.GetValue(16)),
+                Factor: reader.IsDBNull(9) ? 0.0 : Convert.ToDouble(reader.GetValue(9)),
+                Database: reader.IsDBNull(0) ? "" : reader.GetString(0),
+                QueryId: reader.IsDBNull(1) ? 0L : Convert.ToInt64(reader.GetValue(1)),
+                ReplicaRole: reader.IsDBNull(11) ? null : reader.GetString(11))));
         }
 
-        if (items.Count > 0)
-            finding.DrillDown!["regressed_queries"] = items;
+        return items;
     }
 
     private async Task CollectBadActorDetail(AnalysisFinding finding, AnalysisContext context)

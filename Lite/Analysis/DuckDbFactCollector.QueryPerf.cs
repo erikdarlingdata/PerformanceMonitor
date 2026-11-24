@@ -403,7 +403,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     }
 
     /// <summary>One statement of the plan regression pass: the wait for its read lock, the statement alone, the whole hold and the rows it returned.</summary>
-    private struct PlanRegressionStatementTime
+    internal struct PlanRegressionStatementTime
     {
         public TimeSpan Wait;
         public TimeSpan Statement;
@@ -506,51 +506,8 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
             AfterPlanRegressionFailuresReadForTests?.Invoke();
 
-            /* #9353: the cost statement is the pass's longest hold of the read lock, and every comparison in it stays inside one database.
-               So it is read one database at a time, each under its own hold, and a housekeeping writer waiting on its 5 s budget gets in
-               between them. The databases are listed first under a hold of their own. One database (or none) is read as one statement. */
-            var databases = new List<string>();
-            {
-                var waitStarted = Stopwatch.GetTimestamp();
-                using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
-                var heldFrom = Stopwatch.GetTimestamp();
-                costRead.Wait += Stopwatch.GetElapsedTime(waitStarted, heldFrom);
-                using var connection = _duckDb.CreateConnection();
-                await connection.OpenAsync(context.CancellationToken);
-
-                var statementFrom = Stopwatch.GetTimestamp();
-                databases = await ReadPlanRegressionDatabasesAsync(connection, context, plan);
-                costRead.Statement += Stopwatch.GetElapsedTime(statementFrom);
-                costRead.Held = Stopwatch.GetElapsedTime(heldFrom);
-            }
-
-            var ranked = new List<(PlanRegressionCandidate Candidate, double LostCpu)>();
-            var readEach = databases.Count > 1;
-            for (var d = 0; d < (readEach ? databases.Count : 1); d++)
-            {
-                if (d > 0) AfterPlanRegressionDatabaseReadForTests?.Invoke();
-
-                var waitStarted = Stopwatch.GetTimestamp();
-                using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
-                var heldFrom = Stopwatch.GetTimestamp();
-                costRead.Wait += Stopwatch.GetElapsedTime(waitStarted, heldFrom);
-                using var connection = _duckDb.CreateConnection();
-                await connection.OpenAsync(context.CancellationToken);
-
-                var statementFrom = Stopwatch.GetTimestamp();
-                ranked.AddRange(await ReadRankedPlanRegressionCandidatesAsync(
-                    connection, context, plan, PlanRegressionCostSql, readEach ? databases[d] : null));
-                costRead.Statement += Stopwatch.GetElapsedTime(statementFrom);
-                var held = Stopwatch.GetElapsedTime(heldFrom);
-                if (held > costRead.Held) costRead.Held = held;
-            }
-
-            /* The statement's own order and cut: the CPU lost, the factor second, 100 rows. Rows that tie on both keep the order the
-               databases were read in. */
-            candidates = readEach
-                ? ranked.OrderByDescending(r => r.LostCpu).ThenByDescending(r => r.Candidate.RegressionFactor)
-                    .Take(PlanRegressionCandidateLimit).Select(r => r.Candidate).ToList()
-                : ranked.Select(r => r.Candidate).ToList();
+            /* #9353: the cost statement is the pass's longest hold of the read lock, so it is read one database at a time. */
+            (candidates, costRead) = await ReadPlanRegressionCostAsync(context, plan);
             costRead.Rows = candidates.Count;
 
             /* #5630: the lock and the connection are released before any plan is fetched: a fetch is a network
