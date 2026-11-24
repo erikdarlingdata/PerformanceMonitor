@@ -67,13 +67,9 @@ public sealed class DarlingUpgradeRunRecordTests
         var driver = Path.Combine(folder, "driver.ps1");
         File.WriteAllText(driver, text.ToString(), new UTF8Encoding(true));
 
-        using var process = Process.Start(new ProcessStartInfo(pwsh!, $"-NoProfile -ExecutionPolicy Bypass -File \"{driver}\"")
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        })!;
+        /* #9432: the shared helper drops the PSModulePath a PowerShell 7 parent (CI's step shell) hands down, which
+           otherwise stops Windows PowerShell 5.1 loading Microsoft.PowerShell.Security, so Get-Acl and Set-Acl fail. */
+        using var process = Process.Start(WindowsPowerShellStartInfo.Create(pwsh!, $"-NoProfile -ExecutionPolicy Bypass -File \"{driver}\""))!;
         var output = process.StandardOutput.ReadToEnd();
         var error = process.StandardError.ReadToEnd();
         Assert.True(process.WaitForExit(120_000), "PowerShell did not finish");
