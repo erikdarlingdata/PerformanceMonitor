@@ -167,15 +167,15 @@ if (args.Contains("--probe-bytes-bound"))
     object? Scalar(string sql) { using var c = pcon.CreateCommand(); c.CommandText = sql; return c.ExecuteScalar(); }
     Directory.CreateDirectory(Path.Combine(tempDir, "spill"));
     Exec(ParquetCompaction.BuildPragma("512MB", 1, Path.Combine(tempDir, "spill").Replace("\\", "/")));
-    Console.WriteLine($"Total: DuckDB {Scalar("SELECT version()")}");
+    Console.WriteLine($"Total: DuckDB {Scalar("SELECT version()")}, input {Scalar($"SELECT (sum(total_uncompressed_size) / (SELECT count(*) FROM read_parquet([{inList}], union_by_name=true)))::BIGINT FROM parquet_metadata([{inList}])")} uncompressed bytes/row");
     try
     {
         Exec($"COPY (SELECT * FROM read_parquet([{inList}], union_by_name=true) ORDER BY {probeOrderBy}) TO '{probeOut}' " +
-             $"(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880, ROW_GROUP_SIZE_BYTES {probeMb * 1024 * 1024})");
+             $"(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE {GetArg(args, "--probe-rows", "122880")}{(probeMb > 0 ? $", ROW_GROUP_SIZE_BYTES {probeMb * 1024 * 1024}" : "")})");
         var timeCol = probeOrderBy.Split(',')[1].Trim();
         var shape = ParquetCompaction.RowGroupShape(pcon, probeOut);
         var inversions = Scalar($"SELECT count(*) FROM (SELECT server_id, {timeCol}, lag(server_id) OVER w AS ps, lag({timeCol}) OVER w AS pt FROM read_parquet('{probeOut}', file_row_number = true) WINDOW w AS (ORDER BY file_row_number)) WHERE ps > server_id OR (ps = server_id AND pt > {timeCol})");
-        Console.WriteLine($"Total: bytes bound {probeMb} MB with ORDER BY: {shape.Groups} row group(s), largest {shape.MaxGroupRows} rows, {inversions} order inversion(s), {Scalar($"SELECT count(*) FROM read_parquet('{probeOut}')")} rows");
+        Console.WriteLine($"Total: bytes bound {probeMb} MB with ORDER BY: {shape.Groups} row group(s), largest {shape.MaxGroupRows} rows, {inversions} order inversion(s), peak WS {System.Diagnostics.Process.GetCurrentProcess().PeakWorkingSet64 / 1048576} MB, {Scalar($"SELECT count(*) FROM read_parquet('{probeOut}')")} rows");
     }
     catch (Exception ex)
     {
