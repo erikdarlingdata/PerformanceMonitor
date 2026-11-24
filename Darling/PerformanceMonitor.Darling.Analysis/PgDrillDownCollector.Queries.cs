@@ -976,7 +976,8 @@ AND   NOT EXISTS (SELECT 1 FROM query_store_text AS x
                         AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
                           -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
                           OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
-ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
+-- #9353: then the row's own key, as the fact's statement ends, so rows that tie on both keys come out in one order and the same five stay.
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", database_name, query_id, replica_role NULLS LAST
 LIMIT 5";
 
     /// <summary>
@@ -1155,7 +1156,8 @@ top_five AS
                             AND (lower(x.query_sql_text) ~ '" + PerformanceMonitor.Common.InternalStatements.LowerTextPattern + @"'
                           -- #6665: or the monitor's own statement (its collector-side drop never fires on Darling)
                           OR " + PerformanceMonitor.Darling.Storage.QueryStoreSelfStatement.SelfOfStoredText + @"))
-    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
+    -- #9353: the row's own key last, as above.
+    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", database_name, query_id, replica_role NULLS LAST
     LIMIT 5
 )
 SELECT
@@ -1227,7 +1229,8 @@ LEFT JOIN query_store_text AS x
   ON  x.server_id = $1
   AND x.database_name = t.database_name
   AND x.query_id = t.query_id
-ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
+-- #9353: the top five's tail again, so the rows leave in the order the five were cut by.
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", t.database_name, t.query_id, t.replica_role NULLS LAST";
 
     /// <summary>
     /// Top regressed queries behind a PLAN_REGRESSION finding.

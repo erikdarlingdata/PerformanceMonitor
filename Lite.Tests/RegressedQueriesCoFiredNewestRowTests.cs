@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
 using Xunit;
