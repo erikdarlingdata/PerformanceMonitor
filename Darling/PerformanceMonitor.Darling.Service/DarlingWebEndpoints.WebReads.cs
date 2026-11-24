@@ -398,7 +398,10 @@ public static partial class DarlingWebEndpoints
             ["get_store_table_health"] = (c, pg, an) => DarlingMcpStoreTableHealthTools.GetStoreTableHealth(pg, Rows(c, "top", DarlingMcpStoreTableHealthTools.DefaultTop), QueryBool(c, "candidates_only", false), First(c, "section"), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["measure_store_table"] = (c, pg, an) => DarlingMcpStoreTableMeasureTools.MeasureStoreTable(pg, Str(c, "table"), c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, query_id: Str(c, "query_id"), responseByteBudget: null, c.RequestAborted),
-            ["get_service_starts"] = (c, pg, an) => DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), c.RequestAborted),
+            ["get_service_starts"] = (c, pg, an) => !OptionalInt(c, "rung", out var startsRung) ? UnparseableParam("rung")
+                : !OptionalInt(c, "hours_back", out var startsHours) ? UnparseableParam("hours_back")
+                : DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), startsRung, startsHours, c.RequestAborted),
+            ["get_store_checkpoints"] = (c, pg, an) => DarlingMcpStoreCheckpointTools.GetStoreCheckpoints(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreCheckpointTools.DefaultLimit), AsOf(c), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["get_store_pass_steps"] = (c, pg, an) => DarlingMcpStorePassStepsTools.GetStorePassSteps(pg, Hours(c, 24), Str(c, "pass"), Str(c, "step"), Rows(c, "limit", DarlingMcpStorePassStepsTools.DefaultLimit), AsOf(c), responseByteBudget: null, c.RequestAborted),
             ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), Str(c, "order_by"), logger: logger, cancellationToken: c.RequestAborted),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
@@ -412,7 +415,7 @@ public static partial class DarlingWebEndpoints
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), null, c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
             ["get_slow_reads"] = (c, pg, an) => DarlingMcpSlowReadTools.GetSlowReads(pg, Hours(c, DarlingMcpSlowReadTools.DefaultHours), Server(c), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpSlowReadTools.DefaultLimit), false, c.RequestAborted),
-            ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), readAdmission, c.RequestAborted),
+            ["get_read_latency"] = (c, pg, an) => DarlingMcpReadLatencyTools.GetReadLatency(pg, Hours(c, DarlingMcpReadLatencyTools.DefaultHours), Str(c, "surface"), Str(c, "route"), Rows(c, "limit", DarlingMcpReadLatencyTools.DefaultLimit), Str(c, "split_at"), readAdmission, c.RequestAborted),
 
             /* ── latch / spinlock ── */
             ["get_latch_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetLatchStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -1184,7 +1187,7 @@ public static partial class DarlingWebEndpoints
     private static string? NonIntegerParamRefusal(HttpContext context) =>
         NonIntegerParamRefusal(key => First(context, key));
 
-    private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
+    internal static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);
 
     /// <summary>A knob whose omitted value is derived from another knob (#5633 item 12: compare_analysis's baseline follows

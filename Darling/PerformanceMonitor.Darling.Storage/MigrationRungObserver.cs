@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -22,6 +23,13 @@ public interface IMigrationRungObserver
 
     /// <summary>One rung finished or failed. <paramref name="outcome"/> is <see cref="MigrationRungOutcome.Applied"/> or <see cref="MigrationRungOutcome.Failed"/>.</summary>
     void RungFinished(int version, string name, DateTime startedUtc, long elapsedMilliseconds, string outcome, string? errorText);
+
+    /// <summary>
+    /// What an applied rung created, changed or dropped (#9438), called right after <see cref="RungFinished"/> for that rung and only for a ladder that
+    /// began on a store that already had a version: a ladder from an empty store lists nothing, because every object would read as created. The list is
+    /// empty for a rung that changed no object the catalog diff covers (<see cref="MigrationCatalogSnapshot"/>). It is not called when the diff could not be taken.
+    /// </summary>
+    void RungObjects(int version, IReadOnlyList<MigrationObjectChange> changes);
 }
 
 /// <summary>The outcome words a rung row carries.</summary>

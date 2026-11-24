@@ -154,6 +154,9 @@ public sealed partial class DarlingWorker
                    collector has written yet — so the gap the service was down for can be raised once the alert
                    engine exists. Best effort: a failed read loses one alert and must not fail or retry the start. */
                 collectionGapReport = await ReadCollectionGapAsync(migrateConnection, stoppingToken);
+                /* #9432: the upgrade run file beside the install, recorded now that the schema is current. A run written while the store was down
+                   lands here at the next start. Failure-isolated inside: it never fails or retries the start. */
+                await TryRecordUpgradeRunAsync(migrateConnection, AppContext.BaseDirectory, stoppingToken);
                 break;
             }
             catch (Exception ex) when (ex is not OperationCanceledException
@@ -1817,6 +1820,10 @@ public sealed partial class DarlingWorker
 
                 /* #9439: the same minute keeps the lock-wait session map (pid to role and application) current. */
                 await RefreshStoreSessionMapAsync(stoppingToken);
+                /* #9437: the same minute's store connection sample. A failed read is a Debug line and a skipped minute, never a stopped loop. */
+                await SampleStoreConnectionsAsync(config.Postgres.Managed, stoppingToken);
+                /* #9427: the store's settings, compared with the last capture on this same minute pass, so there is no timer of its own. */
+                await CaptureStoreSettingChangesAsync(stoppingToken);
             }
 
             /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */

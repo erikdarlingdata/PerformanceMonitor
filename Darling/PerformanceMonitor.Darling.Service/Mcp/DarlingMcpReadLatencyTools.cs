@@ -53,6 +53,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "wait_total_ms is the summed wait for a store connection. "
         + "distinct_callers is the most different callers in one hour; no personal data. "
         + "Sorted p95 desc. Optional surface (web/compose/mcp) and route filter. Empty means no read in the window, not a failure. "
+        + "split_at: before/after start. "
         + "<<GUIDE>> "
         + "Gets the monitoring tool's OWN read-latency history: how long the web dashboard's `/api/read/*` "
         + "reads, the composed-panel runner and every MCP tool call take. This is the tool measuring itself, NOT a monitored SQL Server or PostgreSQL target. The service "
@@ -93,13 +94,23 @@ public sealed class DarlingMcpReadLatencyTools
         + "sign anything is broken. The page is capped at limit rows or the shared ~32 KB response budget, whichever cuts first: "
         + "truncated says either cut applied, reads_returned is the rows sent and reads_total the rows the window "
         + "held, so reads_total minus reads_returned were left out, always from the end of the order above. Raise "
-        + "limit (up to the budget) or narrow with surface or route to see them.")]
+        + "limit (up to the budget) or narrow with surface or route to see them. "
+        + "split_at (an ISO-8601 UTC instant such as 2026-11-24T14:30:00Z, inside the window and not in the future) adds a split object to every row: "
+        + "before and after, each with count, median_ms (a bucket upper bound like the percentiles, with median_is_at_least) and max_ms, "
+        + "so a fix can be re-timed after a new build without comparing by hand. Each hourly bucket records the start instant of the service process "
+        + "that wrote it, and a bucket counts as after when that process started at or after split_at, so the hour a new build started is divided "
+        + "exactly, because a restart inside an hour writes its own bucket. Pass the start of the build you want to judge, from the service start history when it has one. "
+        + "Buckets stored before the start was recorded have no start: they are placed by their hour, as after when the hour begins at or after split_at, "
+        + "so the hour that holds split_at counts as before, and ambiguous_count says how many reads that is (they may belong to either side). "
+        + "An unparsable split_at, one before the window starts or one in the future is refused, never moved. The split covers the same window, surface and route filters, "
+        + "and rows, as the rest of the answer. A row with no read on a side shows count 0 and null median_ms for it.")]
     public static async Task<string> GetReadLatency(
         NpgsqlDataSource postgres,
         [Description("Hours of history to summarize. Default 24; max 168 (7 days).")] int hours = DefaultHours,
         [Description("Optional: scope to one surface (web, compose, or mcp).")] string? surface = null,
         [Description("Optional: scope to one route (read/panel name).")] string? route = null,
         [Description("Maximum rows to return. Default 25; max 1000.")] int limit = DefaultLimit,
+        [Description("Optional: an ISO-8601 UTC instant (a service start) to split each row's count, median and max into before and after. Inside the window, not in the future.")] string? split_at = null,
         ReadAdmission? admission = null,
         CancellationToken cancellationToken = default)
     {
@@ -117,9 +128,15 @@ public sealed class DarlingMcpReadLatencyTools
 
         var since = DateTime.UtcNow.AddHours(-hours);
 
+        var splitProblem = ResolveSplitAt(split_at, since, out var splitAtUtc);
+        if (splitProblem != null)
+        {
+            return McpHelpers.Refusal("split_at", splitProblem);
+        }
+
         try
         {
-            var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, since, surface, route, cancellationToken);
+            var rows = await DarlingReadLatencyReader.GetSummaryAsync(postgres, since, surface, route, splitAtUtc, cancellationToken);
             if (rows.Count == 0)
             {
                 var emptyMessage = $"No read recorded {McpHelpers.InTheLast(CountText.Plural(hours, "hour"))}" +
@@ -145,6 +162,7 @@ public sealed class DarlingMcpReadLatencyTools
                 return new
                 {
                     Row = r,
+                    Split = r.Split,
                     P50 = p50,
                     P95 = p95,
                     P99 = p99,
@@ -161,7 +179,7 @@ public sealed class DarlingMcpReadLatencyTools
             .ThenBy(x => x.Row.WindowBand, StringComparer.Ordinal)
             .ToArray();
 
-            var shaped = projected.Select(x => (object)new
+            var shaped = projected.Select(x => WithSplit(new
             {
                 surface = x.Row.Surface,
                 route = x.Row.Route,
@@ -187,14 +205,99 @@ public sealed class DarlingMcpReadLatencyTools
                 rejected = x.Row.Rejected,
                 cache_hits = x.Row.CacheHits,
                 cancelled = x.Row.Cancelled,
-            }).ToArray();
+            }, x.Split)).ToArray();
 
-            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes, AdmissionObject(admission));
+            return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes, AdmissionObject(admission), splitAtUtc);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_read_latency", ex);
         }
+    }
+
+    /// <summary>The spellings <c>split_at</c> accepts, the same four as <c>as_of</c> (see <see cref="McpHelpers.ResolveAsOf"/>): an
+    /// allowlist, so <c>01/02/2026</c> is refused instead of read as a month the caller did not mean.</summary>
+    private static readonly string[] SplitAtFormats =
+    {
+        "yyyy-MM-dd",
+        "yyyy-MM-ddTHH:mmK",
+        "yyyy-MM-ddTHH:mm:ssK",
+        "yyyy-MM-ddTHH:mm:ss.FFFFFFFK",
+    };
+
+    /// <summary>Resolves the optional <c>split_at</c> (#9434). Null in, null out. A value that does not parse, one before the window
+    /// starts (<paramref name="windowStartUtc"/>) and one past now plus the <c>as_of</c> clock allowance are all refused: the reason
+    /// comes back as the sentence (the tool wraps it in <see cref="McpHelpers.Refusal"/>), because a split moved to the nearest edge
+    /// would answer a question nobody asked.</summary>
+    internal static string? ResolveSplitAt(string? splitAt, DateTime windowStartUtc, out DateTime? splitAtUtc)
+    {
+        splitAtUtc = null;
+        if (string.IsNullOrWhiteSpace(splitAt))
+        {
+            return null;
+        }
+
+        if (!DateTime.TryParseExact(
+                splitAt.Trim(),
+                SplitAtFormats,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+                out var parsed))
+        {
+            return ($"Invalid split_at value '{splitAt}'. Expected an ISO-8601 UTC instant: '2026-11-24T14:30:00Z', " +
+                   "'2026-11-24T14:30:00' (read as UTC), '2026-11-24T16:30:00+02:00', or '2026-11-24' for midnight UTC.");
+        }
+
+        var utc = DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+        if (utc > DateTime.UtcNow + McpHelpers.AsOfFutureTolerance)
+        {
+            return ($"split_at value '{splitAt}' is in the future. A split needs reads on both sides, so name a service start that has already happened (UTC).");
+        }
+
+        if (utc < windowStartUtc)
+        {
+            return ($"split_at value '{splitAt}' is before the start of the window ({windowStartUtc:yyyy-MM-dd HH:mm} UTC), so every read would fall after it. Raise hours (up to 168) to reach it, or name a later instant.");
+        }
+
+        splitAtUtc = utc;
+        return null;
+    }
+
+    /// <summary>Adds the <c>split</c> block to a shaped row when the read asked for one (#9434). A read without split_at returns
+    /// the row exactly as before, with no <c>split</c> member.</summary>
+    private static object WithSplit(object row, DarlingReadLatencyReader.ReadLatencySplit? split)
+    {
+        if (split is null)
+        {
+            return row;
+        }
+
+        var node = JsonSerializer.SerializeToNode(row)!.AsObject();
+        node["split"] = JsonSerializer.SerializeToNode(SplitObject(split));
+        return node;
+    }
+
+    /// <summary>One row's split block (#9434): per side the reads that ran, their median as a bucket upper bound, and the slowest.</summary>
+    private static object SplitObject(DarlingReadLatencyReader.ReadLatencySplit split)
+    {
+        object Side(DarlingReadLatencyReader.ReadLatencySide side)
+        {
+            var median = ReadLatencyPercentiles.FromBuckets(side.BucketCounts, ReadLatencyAccumulator.BucketUpperBoundsMs, 0.50, side.MaxMs);
+            return new
+            {
+                count = side.Count,
+                median_ms = median?.UpperBoundMs,
+                median_is_at_least = median?.IsAtLeast ?? false,
+                max_ms = side.MaxMs,
+            };
+        }
+
+        return new
+        {
+            before = Side(split.Before),
+            after = Side(split.After),
+            ambiguous_count = split.AmbiguousCount,
+        };
     }
 
     /// <summary>#5506 part 3: the live admission counts of THIS process since it started (never stored, so they reset on a
@@ -233,32 +336,35 @@ public sealed class DarlingMcpReadLatencyTools
     /// serialized and, while it is over budget with more than one row, the last row is dropped and it is
     /// serialized again — the envelope's own digits and the true/false spelling depend on the final page.
     /// </summary>
-    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes, object? admission = null)
+    internal static string BuildResponse(int hours, string? surface, string? route, IReadOnlyList<object> shaped, int limit, int budgetBytes, object? admission = null, DateTime? splitAt = null)
     {
-        string Envelope(IReadOnlyList<object> page, bool truncated) => admission is not null
-            ? JsonSerializer.Serialize(new
-            {
-                hours,
-                surface,
-                route,
-                note = BucketEstimateNote,
-                admission,
-                truncated,
-                reads_returned = page.Count,
-                reads_total = shaped.Count,
-                reads = page,
-            })
-            : JsonSerializer.Serialize(new
+        /* Insertion order is the member order of the answer. split_at appears only when the read asked for a split, so a read without one
+           is byte for byte what it was (#9434). */
+        string Envelope(IReadOnlyList<object> page, bool truncated)
         {
-            hours,
-            surface,
-            route,
-            note = BucketEstimateNote,
-            truncated,
-            reads_returned = page.Count,
-            reads_total = shaped.Count,
-            reads = page,
-        });
+            var answer = new Dictionary<string, object?>
+            {
+                ["hours"] = hours,
+                ["surface"] = surface,
+                ["route"] = route,
+            };
+            if (splitAt is { } at)
+            {
+                answer["split_at"] = at.ToString("yyyy-MM-ddTHH:mm:ss.FFFFFFF'Z'", System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            answer["note"] = BucketEstimateNote;
+            if (admission is not null)
+            {
+                answer["admission"] = admission;
+            }
+
+            answer["truncated"] = truncated;
+            answer["reads_returned"] = page.Count;
+            answer["reads_total"] = shaped.Count;
+            answer["reads"] = page;
+            return JsonSerializer.Serialize(answer);
+        }
 
         var page = new List<object>();
         var running = Encoding.UTF8.GetByteCount(Envelope(Array.Empty<object>(), true));
