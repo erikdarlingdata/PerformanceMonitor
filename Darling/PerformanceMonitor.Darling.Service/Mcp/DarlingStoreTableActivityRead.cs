@@ -31,8 +31,8 @@ internal static class DarlingStoreTableActivityRead
     /// <summary>Default window in hours.</summary>
     public const int DefaultHours = 24;
 
-    /// <summary>The longest window: 30 days of hourly rows.</summary>
-    public const int MaxHours = 24 * 30;
+    /// <summary>The longest window: the shared hours ceiling (7 days of hourly rows).</summary>
+    public const int MaxHours = McpHelpers.MaxHoursBack;
 
     /// <summary>The rankings, each over the window's summed differences.</summary>
     internal static readonly string[] RankKeys = { "rows_written", "blocks_read", "blocks_hit" };
