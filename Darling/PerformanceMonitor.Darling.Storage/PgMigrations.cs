@@ -4094,6 +4094,8 @@ END $$;";
         /* V311 (#9438): what each migration rung created, changed or dropped (collect.service_start_rung_objects): one row per object, a child of the rung
            row V307 made. One plain table and its by-rung index created empty: no data moves. An older build ignores it and records no object rows. */
         new Migration(ServiceStartRungObjects.Version, "service-start-rung-objects", ServiceStartRungObjects.CreateSql),
+        /* V312 (#9432): the record of each upgrade run, one new table keyed on the run id. No existing table changes and no data moves. An older build never names it. */
+        new Migration(UpgradeRuns.Version, "upgrade-runs", UpgradeRuns.CreateSql),
     };
 
     /// <summary>

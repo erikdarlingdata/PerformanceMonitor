@@ -1008,6 +1008,8 @@ DROP TABLE IF EXISTS collect.store_table_activity_baseline;"),
         // V311 (#9438): the migration rung object table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V311 creates it empty. Safe on a store that never
         // had it.
         new(311, "hasServiceStartRungObjects", @"DROP TABLE IF EXISTS collect.service_start_rung_objects;"),
+        // V312 (#9432): the upgrade run table. The rewind drops it, so a re-run of V312 creates it again. Safe on a store that never had it.
+        new(312, "hasUpgradeRuns", @"DROP TABLE IF EXISTS collect.upgrade_runs;"),
     ];
 
     /// <summary>
