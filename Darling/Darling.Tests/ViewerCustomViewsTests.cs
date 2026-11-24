@@ -65,6 +65,16 @@ public sealed class ViewerCustomViewsTests
         Assert.Null(ViewerDataService.ValidateCustomViewDefinition(CustomViewsEditorModel.NewViewTemplate));
     }
 
+    /// <summary>#9477: a read a tool registers in its own files is known to the Viewer, which has no Service. This is the first call here
+    /// and touches nothing from the Service assembly before it, so Storage must find the registered read itself.</summary>
+    [Fact]
+    public void ARegisteredRead_IsAcceptedByTheViewer_WithoutTheServiceHavingRun()
+    {
+        const string registered = "{\"panels\":[{\"read\":\"get_store_maintenance_readiness\",\"viz\":\"table\"}]}";
+        Assert.Null(ViewerDataService.ValidateCustomViewDefinition(registered));
+        Assert.Contains("get_store_maintenance_readiness", CustomViewValidation.KnownReadNames);
+    }
+
     [Fact]
     public void ARoundTrip_ThroughExportAndImport_KeepsTheNameDescriptionAndDefinition()
     {

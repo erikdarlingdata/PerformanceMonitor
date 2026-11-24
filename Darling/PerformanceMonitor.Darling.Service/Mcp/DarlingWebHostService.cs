@@ -1799,6 +1799,28 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
+        /* #9431: a front door answers GET /version with no sign-in, so a person can check which build is serving with one request. It sits after
+           the Host guard and the network test (an address outside web.network.allowFrom still gets the gate's refusal) and before the
+           sign-in gate, so it works on defaults with no health block. It carries only the build, the commit, the start time and the
+           count of stores that are up (DarlingFrontDoorVersion). */
+        if (frontDoorProxy is not null)
+        {
+            var versionCidr = allowedCidr;
+            app.Use(async (context, next) =>
+            {
+                if (DarlingFrontDoorWebProxy.IsVersionRequest(context.Request)
+                    && DecideWebRequest(
+                        context.Connection.RemoteIpAddress, versionCidr, isAuthFlowRoute: false, hasValidCookie: false,
+                        context.Items.TryGetValue(ConnectionIpItemKey, out var stashed) ? stashed as IPAddress : null) != WebRequestAction.Forbid)
+                {
+                    await frontDoorProxy.WriteVersionAsync(context);
+                    return;
+                }
+
+                await next(context);
+            });
+        }
+
         /* The auth gate installs in network mode and, on a loopback-only server that has a configured token
            (requireTokenWhenLoopbackOnly, #5288), too: the token-to-cookie gate is the
            one credential check this host has, and the CIDR test inside it exempts loopback, so on a server that

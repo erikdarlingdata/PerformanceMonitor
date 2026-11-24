@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using ModelContextProtocol.Server;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -36,7 +38,13 @@ internal static class DarlingMcpInstructions
     /// fleet-coverage section can sit between them, high enough that an agent reads which store it is talking
     /// to before it reads the tool census.
     /// </summary>
-    public static readonly string Text = Preamble + "\n\n" + BodyHead + "\n\n" + CatalogCensus + "\n\n" + BodyTail;
+    public static string Text => TextOnce.Value;
+
+    /* #9474: lazy, so the text and the census are built on first use, after every static field of this class (LiteToolNames,
+       DirectMuteLimits) and of the policy class they read is initialized. Field initializers run in textual order, and a
+       census computed from the catalog would otherwise run before them. */
+    private static readonly Lazy<string> TextOnce = new(
+        () => Preamble + "\n\n" + BodyHead + "\n\n" + CatalogCensus + "\n\n" + BodyTail);
 
     /// <summary>
     /// Renders the instructions with the whole-catalog census, inserting the declared fleet-coverage section
@@ -141,6 +149,7 @@ internal static class DarlingMcpInstructions
         var count = served.Count;
         var total = catalog.Count;
         var shared = served.Count(LiteToolNames.Contains);
+        var postgres = served.Count(n => n.StartsWith("get_pg_", StringComparison.Ordinal));
         var writesServed = WritesArmServed(served);
         var agentActionServed = writesServed ? 0 : served.Count(n => DarlingMcpWritePolicy.IsWrite(n)
             && DarlingMcpWritePolicy.AgentActionTools.Contains(n) && !DarlingMcpWritePolicy.NeverAgentTools.Contains(n));
@@ -201,21 +210,44 @@ internal static class DarlingMcpInstructions
                 : "the Custom Views, custom-alert-rule and query-tag reads and the investigation-wait tool";
 
         return opening + $" {shared} are the same names Lite exposes. The remaining {count - shared} are unique to Darling: " +
-               $"thirty-five are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
-               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_store_metrics`, `get_store_table_health`, `measure_store_table`, `get_store_maintenance_readiness`, " +
-               "`get_store_log`, `get_store_connections`). `get_blocking` = Lite's `get_blocked_process_reports`.";
+               $"{postgres} are the PostgreSQL reads (`get_pg_*`), plus {families}, and central-store-only reads " +
+               "(`get_fleet_overview`, `get_ag_health` (Availability Groups), `get_sweep_reports`, `get_service_starts`, and the store's own reads: `get_store_*` except `get_store_health`, plus `measure_store_table`). " +
+               "`get_blocking` = Lite's `get_blocked_process_reports`.";
     }
 
     /// <summary>
-    /// The census of the whole catalog: <see cref="ToolCensus"/> with every tool served, written out as a constant
-    /// so <see cref="Text"/> stays a plain string. <c>DarlingMcpInstructionsBudgetTests</c> fails unless the two
-    /// are identical, so a new tool moves this or fails there.
+    /// The census of the whole catalog: <see cref="ToolCensus(IReadOnlyCollection{string}, IReadOnlyCollection{string})"/> with every tool
+    /// served, computed once from the tools the service registers (#9474), so adding a tool never edits this file.
+    /// <c>DarlingMcpInstructionsBudgetTests</c> checks the registered names against the host's own catalog.
     /// </summary>
-    private const string CatalogCensus =
-        "This server exposes 292 tools. 114 are the same names Lite exposes. The remaining 178 are unique to Darling: " +
-        "thirty-five are the PostgreSQL reads (`get_pg_*`), plus Custom Views, custom-alert-rule, alert-tuning, server/query-tag, " +
-        "onboarding and investigation-wait tools, and central-store-only reads (`get_fleet_overview`, `get_ag_health` (Availability Groups), " +
-        "`get_sweep_reports`, `get_store_metrics`, `get_store_table_health`, `measure_store_table`, `get_store_maintenance_readiness`, `get_store_log`, `get_store_connections`). `get_blocking` = Lite's `get_blocked_process_reports`.";
+    private static string CatalogCensus => CatalogCensusOnce.Value;
+
+    private static readonly Lazy<string> CatalogCensusOnce = new(() =>
+    {
+        var catalog = RegisteredToolNames();
+        return ToolCensus(catalog, catalog);
+    });
+
+    /// <summary>
+    /// The protocol name of every tool the service registers: each method in this assembly that carries a tool attribute with a name,
+    /// less <c>call_tool</c>, which is served on <c>/lean</c> only and which <see cref="DarlingMcpWritePolicy.ToolNames"/> leaves out
+    /// of every census too (#9388). Read from the attributes, not listed by hand (#9474).
+    /// </summary>
+    internal static List<string> RegisteredToolNames()
+    {
+        var names = new List<string>();
+        foreach (var type in typeof(DarlingMcpInstructions).Assembly.GetTypes())
+        {
+            foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            {
+                var name = method.GetCustomAttribute<McpServerToolAttribute>()?.Name;
+                if (name is not null && !string.Equals(name, DarlingLeanToolProfile.CallToolName, StringComparison.Ordinal))
+                    names.Add(name);
+            }
+        }
+
+        return names;
+    }
 
     /// <summary>
     /// Every tool name Performance Monitor Lite registers, so the census counts the overlap of what THIS server
@@ -244,7 +276,7 @@ internal static class DarlingMcpInstructions
         "get_pvs_stats", "get_query_duration_trend", "get_query_heatmap", "get_query_store_duration_trend",
         "get_query_store_health", "get_query_store_regressions", "get_query_store_top", "get_query_trend",
         "get_resource_semaphore", "get_resource_use_by_tag", "get_running_jobs", "get_server_config", "get_server_config_changes",
-        "get_server_properties", "get_server_summary", "get_session_stats", "get_spinlock_stats",
+        "get_server_properties", "get_server_summary", "get_session_stats", "get_slow_mcp_calls", "get_spinlock_stats",
         "get_store_health", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide", "get_top_procedures_by_cpu",
         "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags", "get_wait_stats", "get_wait_trend",
         "get_wait_types", "get_waiting_tasks", "list_investigation_requests", "list_servers",
@@ -256,8 +288,7 @@ internal static class DarlingMcpInstructions
         "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
     };
 
-    /* A property, not a field: Text above is initialized first in textual order, and the settings paragraph it carries
-       is built from DarlingMcpWritePolicy's tool sets at run time. */
+    /* A property, not a field: the settings paragraph it carries is built from DarlingMcpWritePolicy's tool sets at run time. */
     private static string Preamble => PreambleHead + DarlingMcpWritePolicy.InstructionsLine();
 
     /// <summary>The preamble up to the settings paragraph, which <see cref="Compose"/> appends for the policy it renders.</summary>

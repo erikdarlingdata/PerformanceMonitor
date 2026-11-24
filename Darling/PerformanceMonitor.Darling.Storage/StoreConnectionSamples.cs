@@ -44,7 +44,7 @@ public readonly record struct StoreHostLoad(double? CpuPercent, long? AvailableM
 public static class StoreConnectionSamples
 {
     /// <summary>The store migration that creates the two tables. One constant so a renumber is mechanical.</summary>
-    public const int Version = 306;
+    public const int Version = 309;
 
     /// <summary>
     /// Days the samples are kept. Short on purpose: the rows are for finding out what a stall looked like, and a minute grain across the
@@ -56,7 +56,7 @@ public static class StoreConnectionSamples
     public const int CaptureTimeoutSeconds = 10;
 
     /// <summary>
-    /// V306 (#9437): the two tables, created empty. No data moves. An older build ignores both.
+    /// V309 (#9437): the two tables, created empty. No data moves. An older build ignores both.
     /// </summary>
     public const string CreateSql = @"
 CREATE TABLE IF NOT EXISTS collect.store_connection_samples

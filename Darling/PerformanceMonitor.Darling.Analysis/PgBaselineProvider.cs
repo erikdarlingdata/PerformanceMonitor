@@ -1131,7 +1131,7 @@ LIMIT 1";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, cancellationToken);
 
             /* The successor/legacy supply swap is the SQL Server pair's (#3653) and compares the text against this
                class's own unkeyed successor arm; a keyed arm's text never matches it, so the swap is inert for a keyed

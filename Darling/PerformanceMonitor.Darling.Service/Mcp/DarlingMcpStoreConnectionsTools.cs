@@ -28,6 +28,34 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpStoreConnectionsTools
 {
+    /// <summary>This tool's entries on the web read surface and in Custom Views validation, kept here and not in the shared lists (#9477).</summary>
+    internal sealed class Registration : IReadToolRegistration
+    {
+        public ReadToolRegistration Read { get; } = new(
+            "get_store_connections",
+            (c, pg, an) => GetStoreConnections(
+                pg,
+                DarlingWebEndpoints.Hours(c, DefaultHoursBack),
+                DarlingWebEndpoints.Rows(c, "limit", DefaultLimit),
+                DarlingWebEndpoints.Str(c, "role"),
+                DarlingWebEndpoints.Str(c, "application"),
+                DarlingWebEndpoints.Str(c, "group_by") ?? "none",
+                DarlingWebEndpoints.AsOf(c),
+                c.RequestAborted),
+            new(
+                DarlingWebEndpoints.CatOverview,
+                "The monitoring store's OWN connections a minute at a time: client backends by role, application, state and wait type, with the slots left before new logins are refused. Not a monitored server's.",
+                new[]
+                {
+                    DarlingWebEndpoints.PHours(DefaultHoursBack),
+                    DarlingWebEndpoints.PLimit(DefaultLimit),
+                    DarlingWebEndpoints.PText("role"),
+                    DarlingWebEndpoints.PText("application"),
+                    DarlingWebEndpoints.PTextDefault("group_by", "none"),
+                    DarlingWebEndpoints.PAsOf(),
+                }));
+    }
+
     /// <summary>Default minutes returned: an hour at the sample's one-minute grain.</summary>
     public const int DefaultLimit = 60;
 

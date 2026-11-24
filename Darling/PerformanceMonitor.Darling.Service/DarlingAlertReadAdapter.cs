@@ -512,7 +512,7 @@ LIMIT 200";
         var items = new List<BlockedProcessAlertRow>();
         var dmvItems = new List<BlockedProcessAlertRow>();
 
-        await using (var connection = await _postgres.OpenConnectionAsync(cancellationToken))
+        await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken))
         {
             using (var command = new NpgsqlCommand(BlockedProcessReportsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
             {
@@ -630,7 +630,7 @@ GROUP BY collection_time";
     {
         var serverId = ParseServerKey(serverKey);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(CurrentBlockingWaitSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
@@ -697,7 +697,7 @@ LIMIT 50";
         var (startTime, endTime) = Window(hoursBack);
 
         var items = new List<DeadlockAlertRow>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(DeadlocksSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(startTime);
@@ -805,7 +805,7 @@ ORDER BY accumulated_wait_ms DESC";
         var serverId = ParseServerKey(serverKey);
 
         var items = new List<PoisonWaitAccumulation>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(PoisonWaitsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         /* The engine's window, not a local recency constant: the window IS the denominator the bars
@@ -880,7 +880,7 @@ ORDER BY collection_time DESC
     {
         var serverId = ParseServerKey(serverKey);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(RunnableQueueSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(NaiveUtcNow().AddMinutes(-lookbackMinutes));
@@ -932,7 +932,7 @@ ORDER BY collection_time DESC
         var serverId = ParseServerKey(serverKey);
         var floor = NaiveUtcNow().AddMinutes(-lookbackMinutes);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
 
         var runs = await QueryAttentionAsync(connection, AttentionWindowSql.Runs("collection_log"), serverId, floor,
             r => r.GetDateTime(0), cancellationToken);
@@ -993,7 +993,7 @@ ORDER BY collection_time DESC
         var to = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified);
         var from = to.AddDays(-AttentionBaselineMath.LookbackDays);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         /* #9024: the baseline is a 7-day read, so during the store 277 copy it must see the rows still waiting in the legacy table. */
         var minutes = await AttentionReadRelation.ReadAsync(connection, async events =>
         {
@@ -1243,7 +1243,7 @@ LIMIT $3";
         int excludedByProgramPrefix = 0;
         int excludedByLogin = 0;
         int excludedByDatabase = 0;
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdMs);
@@ -1394,7 +1394,7 @@ ORDER BY c.database_name, c.file_name";
             DateTime.UtcNow.AddMinutes(-Math.Max(1, lookbackMinutes)), DateTimeKind.Unspecified);
 
         var items = new List<DatabaseFileGrowthInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(DatabaseFileGrowthSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(windowStart);
@@ -1510,7 +1510,7 @@ ORDER BY MIN(volume_free_mb) / MAX(volume_total_mb)";
         var serverId = ParseServerKey(serverKey);
 
         var items = new List<VolumeFreeSpaceInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         /* #7017: the shared floor loop (see GetTempDbSpaceCoreAsync). Every row of one read carries the newest snapshot's instant,
            so the floor is the newest one seen. A bounded read that finds nothing asks again without a bound. */
         await _volumeFloor.ReadAsync(serverId, async since =>
@@ -1633,7 +1633,7 @@ ORDER BY
         var serverId = ParseServerKey(serverKey);
 
         var items = new List<PvsPressureInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         /* #7017: the shared floor loop (see GetTempDbSpaceCoreAsync). Every row of one read carries the newest snapshot's instant,
            so the floor is the newest one seen. A snapshot with no ADR-on database returns no row, which the floor treats as an
            empty read: the unbounded read it falls back to returns no row either, so the result is the same. */
@@ -1765,7 +1765,7 @@ LIMIT 1";
     {
         var serverId = ParseServerKey(serverKey);
 
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         TempDbSpaceInfo? found = null;
         /* #6968: the shared floor loop remembers where the newest row is. A bounded read that finds nothing means the row the
            bound came from is gone, so it asks again without one (the read that shipped before). collection_time is NOT NULL,
@@ -1903,7 +1903,7 @@ ORDER BY file_id";
         var serverId = ParseServerKey(serverKey);
 
         var items = new List<TempDbFileInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         await _tempDbFilesFloor.ReadAsync(serverId, async since =>
         {
             items.Clear();
@@ -2021,7 +2021,7 @@ LIMIT 5";
         var thresholdPercent = (decimal)(multiplier * 100);
 
         var items = new List<AnomalousJobInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
 
         /* #1812: the latest snapshot is only evidence when fresh — a stopped collector, missed cycles,
            or lost msdb access leaves a stale "latest" that would otherwise read as NOW, and the engine's
@@ -2286,7 +2286,7 @@ AND   (e.expected_state = '(ignore)'
         var serverId = ParseServerKey(serverKey);
 
         var items = new List<DatabaseStateInfo>();
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
 
         /* #4606: the seed/heal/prune/clear-recovered maintenance run ahead of the deviation read is wrapped
            in its OWN deadlock retry — the narrowest seam that covers the victim statement — rather than
@@ -2578,7 +2578,7 @@ AND   qs.collection_time > $2";
         string serverKey, CancellationToken cancellationToken)
     {
         var serverId = ParseServerKey(serverKey);
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(InstanceEvents.StateSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
         var state = new List<BaselineDiscontinuities.StateRow>();
@@ -2621,7 +2621,7 @@ AND   qs.collection_time > $2";
         var windowStart = FloorToMicrosecond(NaiveUtcNow() - ForcePlanFailureWindow);
         var fence = _queryStoreWriteFence;
         var before = fence?.Snapshot(serverId);
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
 
         DateTime? newest;
         using (var probe = new NpgsqlCommand(ForcePlanFailuresNewestCollectionSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })

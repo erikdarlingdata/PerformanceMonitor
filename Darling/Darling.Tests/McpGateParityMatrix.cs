@@ -152,7 +152,7 @@ internal static class McpGateParityMatrix
         DarlingAgentActionTools.Append(DarlingInvestigationMessageTool).ToArray();
 
     /// <summary>Lite's tools with no Darling tool of the same name: a read each. Darling's twin of get_blocked_process_reports is <c>get_blocking</c>; get_store_health (#8788) has none, Darling's store page being #8787.</summary>
-    internal static readonly string[] LiteOnlyReads = { "get_blocked_process_reports", "get_store_health" };
+    internal static readonly string[] LiteOnlyReads = { "get_blocked_process_reports", "get_store_health", "get_slow_mcp_calls" };
 
     /// <summary>Every tool name a row calls, in both apps: the 112 shared names and the names one app alone answers.</summary>
     internal static readonly string[] Tools = SharedReads
