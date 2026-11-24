@@ -189,7 +189,7 @@ GROUP BY database_name, query_hash";
             using var readLock = _duckDb.AcquireReadLock();
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync();
-            rows.AddRange((await DrillDownCollector.ReadRegressedQueriesAsync(connection, context, plan, database))
+            rows.AddRange((await DrillDownCollector.ReadRegressedQueriesAsync(connection, context, plan, new[] { database }))
                 .Select(r => JsonSerializer.SerializeToElement(r.Item)));
         }
 

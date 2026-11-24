@@ -391,7 +391,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
             using var readLock = _duckDb.AcquireReadLock();
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync();
-            return (await DrillDownCollector.ReadRegressedQueriesAsync(connection, c, plan, database: null))
+            return (await DrillDownCollector.ReadRegressedQueriesAsync(connection, c, plan, databases: null))
                 .Select(r => System.Text.Json.JsonSerializer.Serialize(r.Item)).ToList();
         }
 
