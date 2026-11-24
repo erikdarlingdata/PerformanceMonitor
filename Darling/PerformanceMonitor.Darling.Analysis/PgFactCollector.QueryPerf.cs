@@ -1696,25 +1696,22 @@ AND   delta_execution_count > 0";
    A row has a plan when its own column or its dimension row carries one (the dimension's text column or its gzip
    bytes, #2069), and a digest whose dimension row is gone has none. Each plan is represented by its costliest row
    that has a plan, so a plan whose costliest row has none is ranked again over all its rows (misses, demoted). */
-WITH cand AS MATERIALIZED
+WITH grp AS
 (
+    /* #9495: the rows of the window are grouped before they are ranked. Every step below reads only a row's plan key,
+       its query_plan_xml and query_plan_digest, and its cost, so rows that share those three are interchangeable
+       except for cost, and only the costliest of them can matter. A seven-day window holds every snapshot row of the
+       server, and ranking them all spilled to disk; the groups are a few percent as many. A NULL cost sorts first
+       under DESC, so a group that holds any NULL-cost row takes that NULL, as the row would have ranked. */
     SELECT
+        f.database_name,
+        f.query_hash,
+        COALESCE(f.query_plan_hash, f.plan_handle) AS plan_key,
         f.query_plan_xml,
         f.query_plan_digest,
-        f.delta_worker_time,
-        /* #7886: one row per plan. query_stats holds one row per query per snapshot, and every snapshot row of a
-           cached plan resolves to the same plan XML. Without this rank the hottest plan fills all ten slots and is
-           parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count multiply by its snapshot
-           count and the two facts cover one to three plans instead of ten. The plan's costliest row with a plan
-           stands for it, and the limit counts distinct plans. A plan is a statement's plan in one database:
-           query_plan_hash is a shape hash that two statements with one shape share, as does one statement in two
-           databases, and a hashless row's plan_handle is shared by every statement in its batch, so database_name
-           and query_hash stay in the key. plan_id numbers the key so the steps below can match on it: the key's
-           columns can be NULL, and an equality join on them would not match a NULL to a NULL. */
-        DENSE_RANK() OVER (ORDER BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle)) AS plan_id,
-        ROW_NUMBER() OVER (PARTITION BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle) ORDER BY f.delta_worker_time DESC) AS plan_rank
-    /* #8570: the rank sorts the table's own thin columns and the plan's digest, not the plan. A plan under the 2 KB
-       TOAST limit sits inline in the dimension row, so a join to the dimension here would sort every snapshot row
+        CASE WHEN bool_or(f.delta_worker_time IS NULL) THEN NULL ELSE max(f.delta_worker_time) END AS delta_worker_time
+    /* #8570: the group reads the table's own thin columns and the plan's digest, not the plan. A plan under the 2 KB
+       TOAST limit sits inline in the dimension row, so a join to the dimension here would carry every snapshot row
        with its whole plan (on 67,200 rows of 1.4 KB plans, 26 MB and 21 MB written to disk against 4.5 MB). */
     FROM query_stats AS f
     WHERE f.server_id = $1
@@ -1726,6 +1723,26 @@ WITH cand AS MATERIALIZED
        idx_query_stats_time (server_id, collection_time): it walks the window's rows of every server and fetches
        each one's heap page to test server_id (25,400 pages on a store of 18 servers, against 5,600 through the
        server index, for one server's 86,000-row window). */
+    GROUP BY f.database_name, f.query_hash, COALESCE(f.query_plan_hash, f.plan_handle), f.query_plan_xml, f.query_plan_digest
+),
+cand AS MATERIALIZED
+(
+    SELECT
+        g.query_plan_xml,
+        g.query_plan_digest,
+        g.delta_worker_time,
+        /* #7886: one row per plan. query_stats holds one row per query per snapshot, and every snapshot row of a
+           cached plan resolves to the same plan XML. Without this rank the hottest plan fills all ten slots and is
+           parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count multiply by its snapshot
+           count and the two facts cover one to three plans instead of ten. The plan's costliest row with a plan
+           stands for it, and the limit counts distinct plans. A plan is a statement's plan in one database:
+           query_plan_hash is a shape hash that two statements with one shape share, as does one statement in two
+           databases, and a hashless row's plan_handle is shared by every statement in its batch, so database_name
+           and query_hash stay in the key. plan_id numbers the key so the steps below can match on it: the key's
+           columns can be NULL, and an equality join on them would not match a NULL to a NULL. */
+        DENSE_RANK() OVER (ORDER BY g.database_name, g.query_hash, g.plan_key) AS plan_id,
+        ROW_NUMBER() OVER (PARTITION BY g.database_name, g.query_hash, g.plan_key ORDER BY g.delta_worker_time DESC) AS plan_rank
+    FROM grp AS g
 ),
 hits AS MATERIALIZED
 (
