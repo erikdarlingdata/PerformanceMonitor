@@ -66,10 +66,10 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     public const string XeSessionName = "PerformanceMonitor_Attention";
 
     /// <summary>A run's counter row, written only when the delta is above zero: collection_time is the run's time, attention_count the counter delta, event_time NULL.</summary>
-    public const string KindCount = "count";
+    public const string KindCount = AttentionWindowSql.KindCount;
 
     /// <summary>One kept ring-buffer event: the detail of an attention, attention_count 0, never summed into a count.</summary>
-    public const string KindSample = "sample";
+    public const string KindSample = AttentionWindowSql.KindSample;
 
     /// <summary>
     /// #9507: one sampled captured call, from an <c>rpc_completed</c> or <c>sql_batch_completed</c> event the session kept because
@@ -78,7 +78,7 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     /// and <c>statement_text</c> is the object name, a colon and the statement for an RPC, or the batch text for a batch. The
     /// judge matches it to an attention sample by session and time. No count row: the attention count stays the exact total.
     /// </summary>
-    public const string KindAborted = "aborted";
+    public const string KindAborted = AttentionWindowSql.KindAborted;
 
     /// <summary>The stored statement text is cut here (after the statement filter).</summary>
     public const int MaxStatementTextLength = 4000;
