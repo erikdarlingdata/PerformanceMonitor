@@ -29,6 +29,7 @@ namespace Darling.Tests;
 /// </summary>
 /* #1776 own-store: each fact mints its own scratch database through ScratchPostgres and never touches the
    shared store's tables, so it cannot race the live collection and serializing it would be pure slowdown. */
+[Collection("timing")]
 public sealed class MigrationRungObjectsLiveTests
 {
     private const string SkipText = "Set DARLING_TEST_PG to a Postgres connection string to run the migration rung object tests.";
