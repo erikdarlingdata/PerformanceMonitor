@@ -43,8 +43,9 @@ public sealed class MigrationRungObjectsLiveTests
     /// <summary>Rung 1: the history tables, and a table, an index and a function for later rungs to change. It moves the version table into collect, as V8 does, so a later start reads its stamps there.</summary>
     private static PgMigrations.Migration Setup() => new(1, "setup",
         "CREATE SCHEMA IF NOT EXISTS collect; ALTER TABLE darling_schema_version SET SCHEMA collect; " + ServiceStartHistory.CreateSql + ServiceStartRungObjects.CreateSql +
-        @" CREATE TABLE collect.probe_existing (id integer NOT NULL, old_note text, keep_me integer);
+        @" CREATE TABLE collect.probe_existing (id integer NOT NULL, old_note text, keep_me integer, with_default integer DEFAULT 1, CONSTRAINT ck_old CHECK (id > 0));
            CREATE INDEX ix_probe ON collect.probe_existing(id);
+           CREATE VIEW collect.probe_view AS SELECT id FROM collect.probe_existing;
            CREATE FUNCTION collect.probe_fn() RETURNS integer LANGUAGE sql AS 'SELECT 1';");
 
     private static ServiceStartRecorder NewRecorder(string host, DateTime started, Func<DateTime> clock) =>
@@ -156,6 +157,48 @@ public sealed class MigrationRungObjectsLiveTests
             Assert.Contains(("column", "alter", "probe_existing", "keep_me"), rows);
             Assert.Contains(("index", "alter", "ix_probe", null), rows);
             Assert.Contains(("function", "alter", "probe_fn()", null), rows);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// A rung that changes only a column's nullability, a column's default, a constraint and a view's body is listed: the column and the view as an
+    /// alter, the new constraint as a create and the removed one as a drop. The rung changes no column type, index or function.
+    /// </summary>
+    [Fact]
+    public async Task ANullabilityChange_ADefaultChange_ConstraintChanges_AndAViewBodyChange_AreListed()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), SkipText);
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
+        var bodySucceeded = false;
+        try
+        {
+            await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+            await StartAsync(scratch, source, "host-a", T0, [Setup()], ct);
+
+            var rung2 = new PgMigrations.Migration(2, "shape-changes",
+                @"ALTER TABLE collect.probe_existing ALTER COLUMN keep_me SET NOT NULL;
+                  ALTER TABLE collect.probe_existing ALTER COLUMN with_default SET DEFAULT 2;
+                  ALTER TABLE collect.probe_existing ADD CONSTRAINT ck_new CHECK (keep_me > 0);
+                  ALTER TABLE collect.probe_existing DROP CONSTRAINT ck_old;
+                  CREATE OR REPLACE VIEW collect.probe_view AS SELECT id FROM collect.probe_existing WHERE id > 5;");
+            await StartAsync(scratch, source, "host-a", T0.AddHours(1), [Setup(), rung2], ct);
+
+            var root = Parse(await DarlingMcpServiceStartTools.GetServiceStarts(source, rung: 2, cancellationToken: ct));
+            var rows = Rows(Assert.Single(root.GetProperty("starts").EnumerateArray()));
+            Assert.Equal(5, rows.Count);
+            Assert.Contains(("column", "alter", "probe_existing", "keep_me"), rows);
+            Assert.Contains(("column", "alter", "probe_existing", "with_default"), rows);
+            Assert.Contains(("constraint", "create", "probe_existing.ck_new", null), rows);
+            Assert.Contains(("constraint", "drop", "probe_existing.ck_old", null), rows);
+            Assert.Contains(("view", "alter", "probe_view", null), rows);
 
             bodySucceeded = true;
         }
