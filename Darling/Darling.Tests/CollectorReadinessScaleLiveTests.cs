@@ -214,7 +214,7 @@ GROUP BY server_id, collector_name";
             {
                 var row = one.RootElement.GetProperty("waiting").EnumerateArray().Single(w => w.GetProperty("collector").GetString() == late);
                 waitingSince = row.GetProperty("waiting_since").GetString()!;
-                Assert.NotEqual(start.ToString("o"), DateTime.SpecifyKind(start, DateTimeKind.Utc).ToString("o") == waitingSince ? "same" : start.ToString("o"));
+                Assert.NotEqual(DateTime.SpecifyKind(start, DateTimeKind.Utc).ToString("o"), waitingSince);
             }
 
             using var doc = JsonDocument.Parse(await DarlingMcpCollectorReadinessTools.GetCollectorReadiness(postgres, null, start, now, ct));
