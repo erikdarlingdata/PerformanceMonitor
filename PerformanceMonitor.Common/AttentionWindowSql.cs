@@ -77,6 +77,12 @@ public static class AttentionWindowSql
     /// duration (NULL) is not under the floor and still counts, the way every sample did before the floor.</summary>
     public const long MinInterruptDurationUs = 1_000_000;
 
+    /// <summary>The shortest call, in microseconds, that both the session keeps and the read counts as a captured call (#9538). A command
+    /// timeout is whole seconds in every driver, so a real one runs about 1 s and can be recorded a little under it: the session keeps calls
+    /// from 0.9 s, and the read of the captured calls uses the same value, so a call that was kept is never thrown away by the read. It is
+    /// below <see cref="MinInterruptDurationUs"/> on purpose: that floor judges an attention sample, this one judges a call.</summary>
+    public const long CapturedCallMinDurationUs = 900_000;
+
     /// <summary>The floor as it reads in a message: "1 s" for a whole number of seconds, "N ms" for a whole number of milliseconds, else
     /// microseconds. Follows <see cref="MinInterruptDurationUs"/>, so no message carries its own copy of the value (#9030).</summary>
     public static string MinInterruptDurationText => DurationText(MinInterruptDurationUs);
@@ -177,9 +183,9 @@ public static class AttentionWindowSql
     /// Azure Data Studio or dbatools metadata work, judged on the CALL's own statement (the attention row carries none, so the call is the
     /// only place the statement can be told apart). <paramref name="range"/> is the collection_time cut, written with the prefix passed in.
     /// A call is collected with its attention event or just after it, so it takes the same floor and ceiling as the samples.
-    /// A call that ran under the duration floor (<see cref="MinInterruptDurationUs"/>) is not a call here (#9538): an application cancel
+    /// A call that ran under the capture floor (<see cref="CapturedCallMinDurationUs"/>) is not a call here (#9538): an application cancel
     /// a few milliseconds into a call, such as a data layer cancelling before it closes a reader, is no command timeout, and a driver's
-    /// command timeout is whole seconds. A call with no recorded duration is left out too, as the collector always writes one.
+    /// command timeout runs about a second. The floor is the one the session captures from, so nothing it kept is thrown away here. A call with no recorded duration is left out too, as the collector always writes one.
     /// <para>MATERIALIZED: the CTE is read once, however many samples look at it. Left to inline, the planner built the hash join of the 7-day baseline
     /// on the samples (about half a million rows spilled to disk) instead of on the few hundred calls, and the sample list ran the whole
     /// call scan again for every listed sample. A plan check on a week at 60 samples a minute (#9507) took the window read from 138 ms to 26 ms
@@ -198,7 +204,7 @@ calls AS MATERIALIZED (
     WHERE server_id = $1
     AND   {range}
     AND   event_kind = '{KindAborted}'
-    AND   interrupt_duration_us >= {MinInterruptDurationUs}
+    AND   interrupt_duration_us >= {CapturedCallMinDurationUs}
     AND   session_id IS NOT NULL
     AND   event_time IS NOT NULL
 )

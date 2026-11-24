@@ -479,10 +479,12 @@ public static class AlwaysOnXeSessions
     internal const int ErrorResultMapKey = 1;
 
     /// <summary>
-    /// The shortest elapsed time, in microseconds, of an Error call the session keeps (#9507). A command timeout is whole seconds in
-    /// every driver, so a real one runs at least about 1 s, and the floor keeps ordinary fast failed batches out of the ring buffer.
+    /// The shortest elapsed time, in microseconds, of a completed call the session keeps (#9507). A command timeout is whole seconds in
+    /// every driver, so a real one runs about 1 s and can be recorded just under it, and the floor keeps ordinary fast failed batches out of
+    /// the ring buffer. The value lives in <see cref="PerformanceMonitor.Common.AttentionWindowSql.CapturedCallMinDurationUs"/> so the read of the captured calls
+    /// keeps the same floor (#9538).
     /// </summary>
-    internal const long CapturedCallMinDurationUs = 900_000;
+    internal const long CapturedCallMinDurationUs = PerformanceMonitor.Common.AttentionWindowSql.CapturedCallMinDurationUs;
 
     /* event_counter is the exact count (it never drops an event); the ring buffer is a sample for the detail. 1024 KB is
        Microsoft's tip for a ring buffer and stays under the 4 MB cut-off of the XML a read shreds. */

@@ -327,7 +327,7 @@ public sealed class ClientTimeoutsCapturedCallMatchTests : IClassFixture<SharedD
         var (at, eventTime) = await SeedJudgedSpanAsync(ShortCallServer);
 
         /* Three 4 ms attentions. Session 1 cancelled a call 50 ms into its run (a data layer cancelling before it closes a reader), session 2 a call
-           that had run 5 s (a command timeout), session 3 a call that ran exactly the floor. Only the longer two are command timeouts. */
+           that had run 5 s (a command timeout), session 3 a call that ran 0.95 s (a 1 s command timeout recorded a little short, under the 1 s attention floor but over the capture floor). Only the longer two are command timeouts. */
         for (var session = 1; session <= 3; session++)
         {
             await RowAsync(ShortCallServer, at, "sample", "db1", "app", null, null, durationUs: 4_000, eventTime: eventTime, sessionId: session);
@@ -335,7 +335,7 @@ public sealed class ClientTimeoutsCapturedCallMatchTests : IClassFixture<SharedD
 
         await RowAsync(ShortCallServer, at, "aborted", "db1", "app", "fp-call", "dbo.A: EXEC dbo.A", durationUs: 50_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 1);
         await RowAsync(ShortCallServer, at, "aborted", "db1", "app", "fp-call", "dbo.B: EXEC dbo.B", durationUs: 5_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 2);
-        await RowAsync(ShortCallServer, at, "aborted", "db1", "app", "fp-call", "dbo.C: EXEC dbo.C", durationUs: AttentionWindowSql.MinInterruptDurationUs, eventTime: eventTime.AddMilliseconds(10), sessionId: 3);
+        await RowAsync(ShortCallServer, at, "aborted", "db1", "app", "fp-call", "dbo.C: EXEC dbo.C", durationUs: 950_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 3);
 
         var window = await new LocalDataService(_duckDb).GetAttentionWindowAsync(ShortCallServer, Lookback);
 

@@ -259,7 +259,7 @@ public sealed class ClientTimeoutsToolLiveTests
             var (at, eventTime) = await SeedJudgedSpanAsync(connection, ShortCallsId, ct);
 
             /* Three 4 ms attentions. Session 1 cancelled a call 50 ms into its run (a data layer cancelling before it closes a reader), session 2 a call
-               that had run 5 s (a command timeout), session 3 a call that ran exactly the floor. Only the longer two are command timeouts (#9538). */
+               that had run 5 s (a command timeout), session 3 a call that ran 0.95 s (a 1 s command timeout recorded a little short, under the 1 s attention floor but over the capture floor). Only the longer two are command timeouts (#9538). */
             for (var session = 1; session <= 3; session++)
             {
                 await RowAsync(connection, ShortCallsId, at, "sample", 0, "db1", "etl", null, null, ct, durationUs: 4_000, eventTime: eventTime, sessionId: session);
@@ -267,7 +267,7 @@ public sealed class ClientTimeoutsToolLiveTests
 
             await RowAsync(connection, ShortCallsId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.A: EXEC dbo.A", ct, durationUs: 50_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 1);
             await RowAsync(connection, ShortCallsId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.B: EXEC dbo.B", ct, durationUs: 5_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 2);
-            await RowAsync(connection, ShortCallsId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.C: EXEC dbo.C", ct, durationUs: AttentionWindowSql.MinInterruptDurationUs, eventTime: eventTime.AddMilliseconds(10), sessionId: 3);
+            await RowAsync(connection, ShortCallsId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.C: EXEC dbo.C", ct, durationUs: 950_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 3);
 
             using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(ShortCallsId), 1, cancellationToken: ct));
             var body = doc.RootElement.GetProperty("client_timeouts");
