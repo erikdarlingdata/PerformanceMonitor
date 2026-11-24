@@ -55,7 +55,11 @@ public sealed record ServiceStartRow(
     long? Errors30Minutes,
     long? Warns30Minutes);
 
-/// <summary>One migration rung a start applied, or failed (#9415). <paramref name="Attempt"/> counts the start's tries at the ladder: a rung that failed and then applied has two rows.</summary>
+/// <summary>
+/// One migration rung a start applied, or failed (#9415). <paramref name="Attempt"/> counts the start's tries at the ladder: a rung that failed and then applied has two rows.
+/// <paramref name="Objects"/> is how many object rows (#9438) the rung has in <c>collect.service_start_rung_objects</c>, and <paramref name="FreshInstall"/> is true when the
+/// start's ladder began on an empty store, which writes no object rows for any rung.
+/// </summary>
 public sealed record ServiceStartRung(
     Guid StartId,
     int Version,
@@ -64,7 +68,9 @@ public sealed record ServiceStartRung(
     DateTime StartedUtc,
     long ElapsedMilliseconds,
     string Outcome,
-    string? ErrorText);
+    string? ErrorText,
+    int Objects = 0,
+    bool FreshInstall = false);
 
 /// <summary>A start row with its rungs, as <see cref="ServiceStartHistory.ReadAsync"/> returns it. <paramref name="Current"/> is true for the newest start of its host.</summary>
 public sealed record ServiceStartRecord(ServiceStartRow Start, IReadOnlyList<ServiceStartRung> Rungs, bool Current);
@@ -78,14 +84,15 @@ public sealed record ServiceBuildChange(string ServiceHost, DateTime StartedUtc,
 
 /// <summary>
 /// The store's record of each service start (V307, #9415): one row per start in <c>collect.service_starts</c>, one row per migration rung that
-/// start tried in <c>collect.service_start_rungs</c>. <c>config.service_version</c> (V174) stays as it is: it holds the version each host last
+/// start tried in <c>collect.service_start_rungs</c>. The objects each rung created, changed or dropped are the child rows in <c>collect.service_start_rung_objects</c> (V311, #9438, <see cref="ServiceStartRungObjects"/>). <c>config.service_version</c> (V174) stays as it is: it holds the version each host last
 /// reported, and this holds every start.
 ///
 /// <para><b>Why the rows are written late.</b> The rung rows cannot be written by the runner as it goes, because the migration that creates
 /// these tables is itself a rung. The service keeps what the runner reports in memory and writes it once the table exists.</para>
 ///
 /// <para><b>Retention.</b> <see cref="RetentionDays"/> days, the same as the other store self-metrics tables, so the history covers the longest store
-/// trend window. A start is removed when its last flush is older than that, so the start the service is running is never removed.</para>
+/// trend window. A start is removed when its last flush is older than that, so the start the service is running is never removed. Its rung rows and
+/// object rows go with it.</para>
 /// </summary>
 public static class ServiceStartHistory
 {
@@ -179,8 +186,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (start_id, rung_version, attempt) DO NOTHING;";
 
     /// <summary>
-    /// The retention: removes the starts whose last flush is before $1 (naive UTC) and, in the same statement, their rungs. The running start flushes
-    /// every minute, so it is never removed.
+    /// The retention: removes the starts whose last flush is before $1 (naive UTC) and, in the same statement, their rungs and the objects of those rungs
+    /// (#9438). The running start flushes every minute, so it is never removed.
     /// </summary>
     public const string RetentionSql = @"
 WITH gone AS
@@ -188,12 +195,19 @@ WITH gone AS
     DELETE FROM collect.service_starts
     WHERE last_flush_at < $1
     RETURNING start_id
+),
+gone_rungs AS
+(
+    DELETE FROM collect.service_start_rungs AS r
+    USING gone
+    WHERE r.start_id = gone.start_id
+    RETURNING r.start_id
 )
-DELETE FROM collect.service_start_rungs AS r
+DELETE FROM collect.service_start_rung_objects AS o
 USING gone
-WHERE r.start_id = gone.start_id;";
+WHERE o.start_id = gone.start_id;";
 
-    /// <summary>The newest starts, newest first, with the current flag. $1 limit, $2 host filter (null for every host).</summary>
+    /// <summary>The newest starts, newest first, with the current flag. $1 limit, $2 host filter (null for every host), $3 earliest process start (naive UTC, null for no bound).</summary>
     public const string SelectStartsSql = @"
 SELECT s.start_id, s.service_host, s.product_version, s.commit_id, s.process_started_at, s.schema_version_before, s.schema_version_after,
        s.store_ready_at, s.previous_stop_at, s.last_flush_at, s.error_count, s.warn_count, s.first_errors, s.first_warns,
@@ -201,6 +215,7 @@ SELECT s.start_id, s.service_host, s.product_version, s.commit_id, s.process_sta
        NOT EXISTS (SELECT 1 FROM collect.service_starts AS n WHERE n.service_host = s.service_host AND n.process_started_at > s.process_started_at) AS is_current
 FROM collect.service_starts AS s
 WHERE ($2::text IS NULL OR s.service_host = $2::text)
+AND   ($3::timestamp IS NULL OR s.process_started_at >= $3::timestamp)
 ORDER BY s.process_started_at DESC, s.start_id
 LIMIT $1;";
 
@@ -221,12 +236,18 @@ AND   x.previous_build <> x.product_version
 AND   x.process_started_at >= $1
 ORDER BY x.process_started_at, x.service_host;";
 
-    /// <summary>The rungs of the given starts, in the order they ran. $1 start ids.</summary>
+    /// <summary>
+    /// The rungs of the given starts, in the order they ran, each with how many object rows it has (#9438) and whether its start wrote the fresh-install marker.
+    /// The marker is the object row of rung 0 (<see cref="ServiceStartRungObjects.MarkerRung"/>). $1 start ids.
+    /// </summary>
     public const string SelectRungsSql = @"
-SELECT start_id, rung_version, rung_name, attempt, started_at, elapsed_ms, outcome, error_text
-FROM collect.service_start_rungs
-WHERE start_id = ANY($1)
-ORDER BY start_id, attempt, started_at, rung_version;";
+SELECT r.start_id, r.rung_version, r.rung_name, r.attempt, r.started_at, r.elapsed_ms, r.outcome, r.error_text,
+       (SELECT count(*) FROM collect.service_start_rung_objects AS o
+        WHERE o.start_id = r.start_id AND o.rung_version = r.rung_version AND o.attempt = r.attempt)::integer AS object_count,
+       EXISTS (SELECT 1 FROM collect.service_start_rung_objects AS m WHERE m.start_id = r.start_id AND m.rung_version = 0) AS fresh_install
+FROM collect.service_start_rungs AS r
+WHERE r.start_id = ANY($1)
+ORDER BY r.start_id, r.attempt, r.started_at, r.rung_version;";
 
     /// <summary>
     /// Writes the start row. A store without the tables (a store below V307 that has not migrated yet) throws
@@ -297,8 +318,13 @@ ORDER BY start_id, attempt, started_at, rung_version;";
     /// The newest <paramref name="limit"/> starts, newest first, each with its rungs. A store without the tables throws
     /// <see cref="PostgresException"/> with <see cref="PostgresErrorCodes.UndefinedTable"/>, so the caller can say why.
     /// </summary>
-    public static async Task<IReadOnlyList<ServiceStartRecord>> ReadAsync(
+    public static Task<IReadOnlyList<ServiceStartRecord>> ReadAsync(
         NpgsqlDataSource dataSource, int limit, string? serviceHost, CancellationToken cancellationToken = default)
+        => ReadAsync(dataSource, limit, serviceHost, sinceUtc: null, cancellationToken);
+
+    /// <summary>The starts that began at or after <paramref name="sinceUtc"/> (all of them when null), as <see cref="ReadAsync(NpgsqlDataSource, int, string?, CancellationToken)"/> returns them.</summary>
+    public static async Task<IReadOnlyList<ServiceStartRecord>> ReadAsync(
+        NpgsqlDataSource dataSource, int limit, string? serviceHost, DateTime? sinceUtc, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
 
@@ -308,6 +334,7 @@ ORDER BY start_id, attempt, started_at, rung_version;";
             command.CommandTimeout = CommandTimeoutSeconds;
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = limit });
             command.Parameters.Add(Nullable(NpgsqlDbType.Text, serviceHost));
+            command.Parameters.Add(Nullable(NpgsqlDbType.Timestamp, sinceUtc is { } since ? Naive(DateTime.SpecifyKind(since, DateTimeKind.Utc)) : null));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
@@ -341,7 +368,8 @@ ORDER BY start_id, attempt, started_at, rung_version;";
             {
                 var rung = new ServiceStartRung(
                     reader.GetGuid(0), reader.GetInt32(1), reader.GetString(2), reader.GetInt32(3), Utc(reader.GetDateTime(4)),
-                    reader.GetInt64(5), reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7));
+                    reader.GetInt64(5), reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.GetInt32(8), reader.GetBoolean(9));
                 if (!rungsByStart.TryGetValue(rung.StartId, out var list))
                 {
                     rungsByStart[rung.StartId] = list = new List<ServiceStartRung>();

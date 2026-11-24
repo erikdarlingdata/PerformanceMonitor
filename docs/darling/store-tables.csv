@@ -205,6 +205,7 @@ schema_triggers,collected,yes,captured trigger definitions
 server_config,collected,yes,
 server_properties,collected,yes,
 servers,internal,yes,server registry mapping server_id to a name
+service_start_rung_objects,internal,no,objects each migration rung created or changed or dropped
 service_start_rungs,internal,no,migration rungs each service start tried
 service_starts,internal,no,service start history
 session_stats,collected,yes,

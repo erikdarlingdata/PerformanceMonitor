@@ -212,7 +212,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_read_latency` | `collect.read_latency` |
 | `get_server_actions` | `config.config_monitored_servers`<br>`config.config_server_actions`<br>`collect.servers` |
 | `get_server_settings` | `config.config_monitored_servers` |
-| `get_service_starts` | `collect.service_starts`<br>`collect.service_start_rungs` |
+| `get_service_starts` | `collect.service_starts`<br>`collect.service_start_rungs`<br>`collect.service_start_rung_objects` |
 | `get_slow_reads` | `collect.slow_reads` |
 | `get_store_host` | `collect.store_metrics` |
 | `get_store_log` | `collect.store_log_captures`<br>`collect.store_log_events` |
