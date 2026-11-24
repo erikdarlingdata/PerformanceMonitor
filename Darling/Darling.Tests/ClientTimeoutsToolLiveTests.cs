@@ -50,8 +50,9 @@ public sealed class ClientTimeoutsToolLiveTests
     private const int NearMissId = -5640113;
     private const int MetadataCallsId = -5640114;
     private const int NoCallsId = -5640115;
+    private const int TwoCallsId = -5640116;
 
-    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, NearMissId, MetadataCallsId, NoCallsId };
+    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, NearMissId, MetadataCallsId, NoCallsId, TwoCallsId };
 
     private static string Name(int id) => "ct-live" + (-id).ToString(CultureInfo.InvariantCulture);
 
@@ -356,6 +357,40 @@ public sealed class ClientTimeoutsToolLiveTests
             var calls = body.GetProperty("matched_calls").EnumerateArray().ToList();
             Assert.Single(calls);
             Assert.Equal(303, calls[0].GetProperty("session_id").GetInt32());
+        });
+    }
+
+    /* #9507 review: the groups count a sample as metadata when ANY call it matches is metadata work, so the listed sample says the same.
+       The ordinary call is the earlier one here, so a list that read only the earliest call would call the sample ordinary. */
+    [Fact]
+    public async Task ASampleThatMatchesAMetadataCallAndAnOrdinaryOne_IsListedAsMetadata_LikeTheGroupsCountIt()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var (at, eventTime) = await SeedJudgedSpanAsync(connection, TwoCallsId, ct);
+
+            await RowAsync(connection, TwoCallsId, at, "sample", 0, "master", "etl", null, null, ct, durationUs: 4_000, eventTime: eventTime, sessionId: 401);
+            await RowAsync(connection, TwoCallsId, at, "aborted", 0, "master", AttentionWindowSql.AzdataClientApp, "fp-call", "SELECT * FROM dbo.Orders", ct,
+                durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 401);
+            await RowAsync(connection, TwoCallsId, at, "aborted", 0, "master", AttentionWindowSql.AzdataClientApp, "fp-meta", "create table #SVer(ID int, Name sysname)", ct,
+                durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(30), sessionId: 401);
+
+            /* A second attention, whose only call is an ordinary one, stays ordinary. */
+            await RowAsync(connection, TwoCallsId, at, "sample", 0, "master", "etl", null, null, ct, durationUs: 4_000, eventTime: eventTime, sessionId: 402);
+            await RowAsync(connection, TwoCallsId, at, "aborted", 0, "master", AttentionWindowSql.AzdataClientApp, "fp-call", "SELECT * FROM dbo.Orders", ct,
+                durationUs: 30_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 402);
+
+            using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(TwoCallsId), 1, cancellationToken: ct));
+            var body = doc.RootElement.GetProperty("client_timeouts");
+
+            Assert.Equal(1, body.GetProperty("excluded_from_alert").GetProperty("azdata_metadata_events").GetInt64());
+            var listed = body.GetProperty("sampled_events").EnumerateArray().ToList();
+            Assert.Equal(2, listed.Count);
+            Assert.Equal(1, listed.Count(e => e.GetProperty("azdata_metadata").GetBoolean()));
+            Assert.All(listed, e => Assert.True(e.GetProperty("matched_call").GetBoolean()));
+            Assert.Equal(
+                body.GetProperty("excluded_from_alert").GetProperty("azdata_metadata_events").GetInt64(),
+                listed.Count(e => e.GetProperty("azdata_metadata").GetBoolean()));
         });
     }
 

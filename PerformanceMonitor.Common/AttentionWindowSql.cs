@@ -433,6 +433,9 @@ LIMIT {TopCount}
 
     /// <summary>
     /// The newest kept ring-buffer events, for the read surface only (get_client_timeouts): one row per <c>sample</c>, newest first.
+    /// The listed metadata flags come from ALL the calls a sample matches, with <c>bool_or</c>, the rule <see cref="MatchedCte"/> uses for the
+    /// groups, so a sample that matches a metadata call and an ordinary one is listed as metadata, the way the groups count it (#9507). The
+    /// aggregate returns one row for a sample that matches nothing, with NULL flags, which is what <c>matched_call</c> tests.
     /// Columns: event_time, collection_time, database_name, client_app_name, client_hostname, session_id, interrupt_duration_us,
     /// statement_fingerprint, statement_text, below_duration_floor (boolean), azdata_metadata (boolean), dbatools_metadata (boolean). Always bounded: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive row ceiling (see <see cref="SpanFloor"/>). Newest first, ties broken by the table's unique id so a page edge is stable. <paramref name="limit"/> is a validated integer, never caller text.
     /// </summary>
@@ -477,12 +480,12 @@ SELECT
     (m.azdata_metadata IS NOT NULL) AS matched_call
 FROM newest AS n
 LEFT JOIN LATERAL (
-    SELECT c.azdata_metadata, c.dbatools_metadata
+    SELECT
+        bool_or(c.azdata_metadata) AS azdata_metadata,
+        bool_or(c.dbatools_metadata) AS dbatools_metadata
     FROM calls AS c
     WHERE n.short_duration
     AND   {MatchOn("c", "n")}
-    ORDER BY c.event_time
-    LIMIT 1
 ) AS m ON TRUE
 ORDER BY n.collection_time DESC, n.event_time DESC NULLS LAST, n.attention_event_id DESC
 """;
