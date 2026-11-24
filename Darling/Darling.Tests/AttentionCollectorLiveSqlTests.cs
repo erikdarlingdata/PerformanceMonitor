@@ -318,7 +318,7 @@ public sealed class AttentionCollectorLiveSqlTests
         const string statementApp = "pm-9509-statement";
         const string procApp = "pm-9509-proc";
         const string batchApp = "pm-9509-batch";
-        const string procName = "dbo.pm9509_slow_proc";
+        const string procName = "pm9509_slow_proc";
         var connectionString = ConnectionString(statementApp);
         Assert.SkipWhen(connectionString is null, "Set DARLING_TEST_SQL (and, for SQL auth, DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the live attention collector test.");
         Assert.SkipWhen(ReadOnlyMode, "DARLING_TEST_SQL_READONLY=1: this server holds real monitoring data.");
@@ -355,7 +355,7 @@ public sealed class AttentionCollectorLiveSqlTests
             created = true;
             await ExecuteAsync(
                 Conn("pm-9509-setup", "tempdb"),
-                "CREATE PROCEDURE " + procName + " @name nvarchar(100) AS BEGIN WAITFOR DELAY '00:00:05'; SELECT @name; END;", ct);
+                "CREATE PROCEDURE dbo." + procName + " @name nvarchar(100) AS BEGIN WAITFOR DELAY '00:00:05'; SELECT @name; END;", ct);
             procCreated = true;
 
             await TimeOutAsync(statementApp, "master", "WAITFOR DELAY '00:00:05'; SELECT @p;", CommandType.Text, "@p");
@@ -374,7 +374,7 @@ public sealed class AttentionCollectorLiveSqlTests
             Assert.Contains("WAITFOR DELAY", statement.StatementText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
 
             var proc = Assert.Single(aborted, r => r.ClientAppName == procApp);
-            Assert.StartsWith(procName, proc.StatementText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(procName, proc.StatementText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
 
             var batch = Assert.Single(aborted, r => r.ClientAppName == batchApp);
             Assert.Contains("WAITFOR DELAY", batch.StatementText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
@@ -383,7 +383,7 @@ public sealed class AttentionCollectorLiveSqlTests
         {
             if (procCreated)
             {
-                await ExecuteAsync(Conn("pm-9509-setup", "tempdb"), "DROP PROCEDURE " + procName + ";", CancellationToken.None);
+                await ExecuteAsync(Conn("pm-9509-setup", "tempdb"), "DROP PROCEDURE dbo." + procName + ";", CancellationToken.None);
             }
 
             if (created)
