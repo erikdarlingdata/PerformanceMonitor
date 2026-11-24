@@ -47,6 +47,21 @@ public sealed class PlanRegressionBlockReadLiveTests
         public required DateTime End { get; init; }
         public required DateTime Now { get; init; }
         public required DateTime WindowFloor { get; init; }
+
+        /// <summary>How many whole 4-day blocks the days the tick built allow (<see cref="WholeBlocks"/>).</summary>
+        public required int ExpectedBlocks { get; init; }
+    }
+
+    /// <summary>
+    /// The aligned blocks whose days are all whole builds. Today is a partial build, and so is yesterday before the partial watermark lag has passed,
+    /// so the rig's whole days are 13 or 14 consecutive days. Blocks are aligned to the day number, so those days hold three whole blocks on some dates
+    /// and only two on others (one date in four). The read is right either way: it takes the blocks there are and reads the other days from daily rows.
+    /// </summary>
+    private static int WholeBlocks(IEnumerable<PlanRegressionDaily.BuiltDay> built)
+    {
+        var whole = built.Where(b => b.Through is null).Select(b => b.Day).ToHashSet();
+        return whole.Select(PlanRegressionBlock.BlockStart).Distinct()
+            .Count(start => Enumerable.Range(0, PlanRegressionBlock.BlockDays).All(i => whole.Contains(start.AddDays(i))));
     }
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
@@ -145,11 +160,14 @@ CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 })
 
             var tick = await PlanRegressionDaily.RunTickAsync(source, now, NullLogger.Instance, ct);
             Assert.True(tick.Built >= 14, "the tick builds the window's days");
-            Assert.True(tick.BlocksBuilt >= 3, "the tick builds the blocks of the days");
+            var builtAfterTick = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(connection, null, ServerId, windowFloor, 60, null, _ => false, ct);
+            var expectedBlocks = WholeBlocks(builtAfterTick);
+            Assert.True(expectedBlocks >= 2, "the window's whole days hold at least two whole blocks, on any date");
+            Assert.Equal(expectedBlocks, tick.BlocksBuilt);
             await ExecAsync(connection, "ANALYZE collect.plan_regression_daily", ct);
             await ExecAsync(connection, "ANALYZE collect.plan_regression_block", ct);
 
-            await body(new Rig { Connection = connection, Source = source, End = end, Now = now, WindowFloor = windowFloor }, ct);
+            await body(new Rig { Connection = connection, Source = source, End = end, Now = now, WindowFloor = windowFloor, ExpectedBlocks = expectedBlocks }, ct);
             bodySucceeded = true;
         }
         finally
@@ -277,7 +295,7 @@ CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 })
         await RunLiveAsync(async (rig, ct) =>
         {
             var (built, blocks, leftover) = await PlanAsync(rig, ct);
-            Assert.True(blocks.Count >= 3, "a window of built days holds at least three whole blocks");
+            Assert.Equal(rig.ExpectedBlocks, blocks.Count);
             Assert.True(leftover.Count < built.Count, "the blocks' days leave the daily list");
 
             var daily = await ReadAsync(rig, built, null, null, ct);
@@ -340,7 +358,7 @@ CROSS JOIN generate_series(1, 2) AS p", connection) { CommandTimeout = 120 })
         await RunLiveAsync(async (rig, ct) =>
         {
             var withBlocks = await FactAsync(rig);
-            Assert.True(withBlocks.Blocks >= 3, "the read takes the blocks the tick built");
+            Assert.True(withBlocks.Blocks >= rig.ExpectedBlocks, "the read takes the blocks the tick built");
             Assert.True(withBlocks.LeftoverDays > 0 && withBlocks.LeftoverDays < 14, "the days no block covers are read from the daily rows");
             Assert.Contains("blockdb/900001", withBlocks.Offenders);
 
