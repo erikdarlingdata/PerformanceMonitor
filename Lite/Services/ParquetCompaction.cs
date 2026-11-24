@@ -235,8 +235,12 @@ public static class ParquetCompaction
        24 h window over all servers read 1.39 s CPU against 1.09 s, one hour no change).
 
        The cap is a hard ceiling for the parquet writer (see MergeBatchToFile), and a sorted merge has no row-group byte
-       bound, so a day of very long statement texts can fill a 2,048-row group past 512MB. MergeBatchToFile then reruns
-       that batch unsorted at DefaultMemoryLimit with the byte bound, as the merge ran before #9255, and logs a warning.
+       bound (DuckDB's ROW_GROUP_SIZE_BYTES needs preserve_insertion_order off, which would drop the sort), so the
+       writer holds a whole row group in memory. At 2,048 rows a day of very long statement texts could pass 512MB, and
+       at 122,880 rows (SortedArchiveRowGroupSize, 60 times as many) a day of texts averaging a few KB can. MergeBatchToFile
+       then reruns the batch sorted at 2,048 rows, which keeps the #9255 clustering, and only when that runs out too
+       reruns it unsorted at DefaultMemoryLimit with the byte bound, as the merge ran before #9255. Each logs a warning
+       that names which one ran. The re-cut keeps its own rule: a sort that runs out at the sorted size keeps the file.
        DuckDB's out-of-memory error fires quickly, before anything is spilled. Field compressibility does not reach
        this case, so the fallback guards against unusually long, repetitive statement texts or a DuckDB change.
 
@@ -377,27 +381,52 @@ public static class ParquetCompaction
         int? threads = null,
         int? rowGroupSize = null,
         long? rowGroupBytes = null,
-        Action<string, int, string>? onSortFallback = null)
+        Action<string, int, string>? onSortFallback = null,
+        Action<string, int, string>? onSortedAtSmallGroups = null)
     {
         var orderBy = ServerOrderByFor(table);
+        var sortedThreads = threads ?? ThreadsFor(table, sortedAttempt: orderBy is not null);
+        var sortedGroupRows = rowGroupSize ?? (orderBy is null ? ArchiveRowGroupSize : SortedArchiveRowGroupSize);
         try
         {
             RunMerge(table, sourcePaths, outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
-                threads ?? ThreadsFor(table, sortedAttempt: orderBy is not null),
-                rowGroupSize ?? (orderBy is null ? ArchiveRowGroupSize : SortedArchiveRowGroupSize), rowGroupBytes, orderBy);
+                sortedThreads, sortedGroupRows, rowGroupBytes, orderBy);
         }
         catch (DuckDBException ex) when (orderBy is not null && IsOutOfMemoryOrTempSpace(ex))
         {
             /* The cap is a hard ceiling for the parquet writer and a sorted merge has no row-group byte bound, so a
-               batch of very long rows can pass it (#9255). Without this the day's compaction would fail on every
-               pass and its hourly files would pile up. Rerun the batch as dev ran it before the sort: unsorted, at
-               the default limit, with the byte bound, on a fresh connection (a failed instance may hold memory). */
+               batch of very long rows can pass it (#9255). Without a fallback the day's compaction would fail on every
+               pass and its hourly files would pile up. The writer holds one whole row group, so the large sorted size
+               (#9407) can pass the cap on a day of long statement texts where 2,048 rows did not: the first retry is
+               the same sorted merge at 2,048 rows, which keeps the clustering. Only when that runs out too is the batch
+               rerun as dev ran it before the sort: unsorted, at the default limit, with the byte bound. Each rerun is on
+               a fresh connection (a failed instance may hold memory). */
+            var error = ex;
             if (File.Exists(outputPath))
             {
                 File.Delete(outputPath);
             }
 
-            onSortFallback?.Invoke(table, sourcePaths.Count, ex.Message);
+            if (sortedGroupRows > ArchiveRowGroupSize)
+            {
+                try
+                {
+                    RunMerge(table, sourcePaths, outputPath, spillDirSql, EffectiveMemoryLimit(table, memoryLimit),
+                        sortedThreads, ArchiveRowGroupSize, rowGroupBytes, orderBy);
+                    onSortedAtSmallGroups?.Invoke(table, sourcePaths.Count, ex.Message);
+                    return;
+                }
+                catch (DuckDBException retryEx) when (IsOutOfMemoryOrTempSpace(retryEx))
+                {
+                    error = retryEx;
+                    if (File.Exists(outputPath))
+                    {
+                        File.Delete(outputPath);
+                    }
+                }
+            }
+
+            onSortFallback?.Invoke(table, sourcePaths.Count, error.Message);
             RunMerge(table, sourcePaths, outputPath, spillDirSql, DefaultMemoryLimit,
                 threads ?? ThreadsFor(table), rowGroupSize ?? ArchiveRowGroupSize, rowGroupBytes, orderBy: null);
         }

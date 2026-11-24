@@ -260,4 +260,212 @@ public sealed class ArchiveSortedRowGroupSizeTests : IDisposable
             ParquetCompaction.MergeAttemptObservedForTests = previous;
         }
     }
+
+    private string DayPath => P(DayFile);
+
+    /// <summary>
+    /// A merge whose swap cannot delete an input leaves its journal. The re-cut of the same pass must not take a file of that
+    /// group: its swap would write the same journal name over the live one and delete it when it resolves, which leaves rows
+    /// read twice or a set-aside file never restored. The journal and the merged file stay as the merge left them.
+    /// </summary>
+    [Fact]
+    public void AMergeThatLeavesItsJournal_KeepsItsGroupOutOfTheCut()
+    {
+        var input = WriteUnsorted("20260928_1000_query_store_stats.parquet", 30_000);
+        var journal = P("20260928_query_store_stats.swap");
+        byte[]? journalAtSwap = null;
+        byte[]? outputAtSwap = null;
+        var service = NewService(sortedRowGroupSize: 4096);
+        service.AfterCompactionSwapForTests = _ =>
+        {
+            journalAtSwap = File.Exists(journal) ? File.ReadAllBytes(journal) : null;
+            outputAtSwap = File.ReadAllBytes(DayPath);
+
+            /* The merge wrote 4,096-row groups. Raise the size the cut aims for so the merged file would be a candidate. */
+            service.SortedRowGroupSizeOverride = 8192;
+        };
+
+        /* A scanner-like handle: readable, but without FileShare.Delete, so the input cannot be deleted. */
+        using (new FileStream(input.Replace("/", "\\"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            service.CompactParquetFiles();
+        }
+
+        Assert.NotNull(journalAtSwap);
+        Assert.True(journalAtSwap!.AsSpan().SequenceEqual(File.ReadAllBytes(journal)), "the journal was rewritten or removed");
+        Assert.True(outputAtSwap!.AsSpan().SequenceEqual(File.ReadAllBytes(DayPath)), "the merged file was cut again");
+        Assert.False(File.Exists(DayPath + ".tmp"));
+    }
+
+    /// <summary>
+    /// A journal that appears after the pass started, for a file the cut is about to take, is checked right before that
+    /// cut: the file is left alone and the journal keeps its bytes.
+    /// </summary>
+    [Fact]
+    public void AJournalThatAppearsDuringThePass_KeepsItsFileOutOfTheCut()
+    {
+        var candidate = WriteUnsorted("20260927_query_store_stats.parquet", 30_000);
+        WriteUnsorted("20260928_1000_query_store_stats.parquet", 30_000);
+        var bytes = File.ReadAllBytes(candidate);
+        var journal = P("20260927_query_store_stats.swap");
+        string[] journalLines = ["state|swapped", "output|replacing|20260927_query_store_stats.parquet"];
+        var service = NewService(sortedRowGroupSize: 4096);
+        service.AfterCompactionSwapForTests = _ => File.WriteAllLines(journal, journalLines);
+
+        service.CompactParquetFiles();
+
+        Assert.True(bytes.AsSpan().SequenceEqual(File.ReadAllBytes(candidate)), "the file was cut under a live journal");
+        Assert.Equal(journalLines, File.ReadAllLines(journal));
+        Assert.False(File.Exists(candidate + ".tmp"));
+    }
+
+    /// <summary>
+    /// Retention deletes an expired file under the write lock. A source removed after the cut's row-count check has no file at
+    /// its name for the swap to replace: the cut drops its temp and the file stays gone.
+    /// </summary>
+    [Fact]
+    public void ASourceRemovedBeforeTheSwap_IsNotBroughtBack()
+    {
+        WriteUnsorted(DayFile, 30_000);
+        var service = NewService(sortedRowGroupSize: 4096);
+        service.AfterRecutMergedForTests = _ => File.Delete(DayPath);
+
+        service.CompactParquetFiles();
+
+        Assert.Empty(Directory.GetFiles(_archiveDir));
+    }
+
+    /// <summary>
+    /// The merge leaves a file over its batch budget alone. A file over that budget is not cut either: the sort is one thread
+    /// holding the archive lock, which the hourly archive does not wait for.
+    /// </summary>
+    [Fact]
+    public void AFileOverTheMergeBudget_IsNotCut()
+    {
+        var file = WriteUnsorted(DayFile, 30_000);
+        var bytes = File.ReadAllBytes(file);
+        var merges = new List<string>();
+        var previous = ParquetCompaction.MergeAttemptObservedForTests;
+        ParquetCompaction.MergeAttemptObservedForTests = (path, _, _) => { lock (merges) { merges.Add(path); } };
+        try
+        {
+            var service = NewService(sortedRowGroupSize: 4096);
+            service.DailyCompactionBatchInputBytes = bytes.Length - 1;
+            service.CompactParquetFiles();
+
+            Assert.Empty(merges);
+            Assert.True(bytes.AsSpan().SequenceEqual(File.ReadAllBytes(file)), "the file was cut");
+            AssertOnlyTheDayFile();
+
+            /* The same file under a budget that holds it is cut. */
+            service = NewService(sortedRowGroupSize: 4096);
+            service.DailyCompactionBatchInputBytes = bytes.Length;
+            service.CompactParquetFiles();
+
+            Assert.Single(merges);
+            Assert.Equal(4096, MaxGroupRows(file));
+        }
+        finally
+        {
+            ParquetCompaction.MergeAttemptObservedForTests = previous;
+        }
+    }
+
+    /// <summary>
+    /// The sort spills about the size of its source on top of the file it writes. A volume with room for the source and the
+    /// reserve, but not for the spill, does not start the cut.
+    /// </summary>
+    [Fact]
+    public void ACutNeedsRoomForTheSortsSpill_AsWellAsTheOutput()
+    {
+        var file = WriteUnsorted(DayFile, 30_000);
+        var bytes = File.ReadAllBytes(file);
+        var reserve = DataVolumeSpace.CompactionReserveBytes(Path.Combine(_tempDir, "test.duckdb"));
+
+        var service = NewService(sortedRowGroupSize: 4096);
+        _initializers[^1].AvailableFreeBytesProvider = _ => reserve + bytes.Length + bytes.Length / 2;
+        service.CompactParquetFiles();
+
+        Assert.True(bytes.AsSpan().SequenceEqual(File.ReadAllBytes(file)), "the file was cut without room for the spill");
+
+        service = NewService(sortedRowGroupSize: 4096);
+        _initializers[^1].AvailableFreeBytesProvider = _ => reserve + 2L * bytes.Length;
+        service.CompactParquetFiles();
+
+        Assert.Equal(4096, MaxGroupRows(file));
+    }
+
+    /// <summary>
+    /// The sort of the cut is the merge's sorted attempt: when it runs out of memory the call returns false and leaves nothing
+    /// at the output, so the caller keeps the original.
+    /// </summary>
+    [Fact]
+    public void TryRecutToFile_ReturnsFalse_AndLeavesNoOutput_WhenTheSortRunsOutOfMemory()
+    {
+        var source = WriteUnsorted("wide_source.parquet", 60_000, payloadCopies: 4);
+        var output = P("wide_out.parquet.tmp");
+        Directory.CreateDirectory(P("spill"));
+
+        var done = ParquetCompaction.TryRecutToFile("query_store_stats", source, output, P("spill"), "2MB", 4096);
+
+        Assert.False(done);
+        Assert.False(File.Exists(output));
+    }
+
+    /// <summary>
+    /// A compaction merge that falls back to the unsorted order writes 2,048-row groups, which the cut would take. The merge
+    /// marks its output so the cut of the same pass leaves it alone: no sorted attempt follows the three of the merge.
+    /// </summary>
+    [Fact]
+    public void AMergeThatFallsBackUnsorted_LeavesItsOutputOutOfTheCut()
+    {
+        WriteUnsorted("20260928_1000_query_store_stats.parquet", 60_000, payloadCopies: 4);
+        var attempts = new List<bool>();
+        var previous = ParquetCompaction.MergeAttemptObservedForTests;
+        ParquetCompaction.MergeAttemptObservedForTests = (_, sorted, _) => { lock (attempts) { attempts.Add(sorted); } };
+        try
+        {
+            var service = NewService();
+            service.MergeMemoryLimit = "2MB";
+            service.CompactParquetFiles();
+
+            /* Sorted at the large size, sorted at 2,048 rows, then unsorted. */
+            Assert.Equal([true, true, false], attempts);
+            Assert.True(Groups(DayPath) > 1);
+            Assert.Equal(ParquetCompaction.ArchiveRowGroupSize, MaxGroupRows(DayPath));
+        }
+        finally
+        {
+            ParquetCompaction.MergeAttemptObservedForTests = previous;
+        }
+    }
+
+    private const int WideRows = 125_000;
+    private const int WideCopies = 8;
+    /* Measured with this source: a sorted merge at 80 to 192 MB runs out of memory at 122,880-row groups and fits at 2,048. */
+    private const string WideLimit = "128MB";
+
+    /// <summary>
+    /// A batch of long rows can pass the memory cap at the large row-group size, where the writer holds a whole group, yet fit
+    /// at 2,048 rows. The merge sorts it again at 2,048 rows before it gives up the order: no fallback to the unsorted merge,
+    /// and a server per row group but for the seams.
+    /// </summary>
+    [Fact]
+    public void ASortedMergeThatOutgrowsTheCapAtTheLargeSize_IsSortedAgainAt2048Rows()
+    {
+        var source = WriteUnsorted("wide_source.parquet", WideRows, WideCopies);
+        var output = P("wide_merged.parquet");
+        Directory.CreateDirectory(P("spill"));
+        var retries = new List<string>();
+        var fallbacks = new List<string>();
+
+        ParquetCompaction.MergeBatchToFile("query_store_stats", [source], output, P("spill"), memoryLimit: WideLimit,
+            onSortFallback: (t, _, _) => fallbacks.Add(t), onSortedAtSmallGroups: (t, _, _) => retries.Add(t));
+
+        Assert.Empty(fallbacks);
+        Assert.Single(retries);
+        Assert.Equal(WideRows, Scalar($"SELECT count(*) FROM read_parquet('{output}')"));
+        Assert.Equal(ParquetCompaction.ArchiveRowGroupSize, MaxGroupRows(output));
+        Assert.True(MixedGroups(output) <= Servers - 1, $"{MixedGroups(output)} of {Groups(output)} row groups hold more than one server");
+    }
 }

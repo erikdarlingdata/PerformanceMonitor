@@ -120,6 +120,9 @@ public class ArchiveService
        sort run out of memory, which the re-cut answers by keeping the original. */
     internal string? RecutMemoryLimit { get; set; }
 
+    /* Tests only (#9407): the memory limit of the compaction merge's sorted attempts, null for the sorted merge's own limit. */
+    internal string? MergeMemoryLimit { get; set; }
+
     /* Tests only (#9407): fires with the re-cut's temp path after it is written and checked, before the swap. A test throws or
        cancels here to stop a re-cut where it leaves a complete temp beside the untouched original. */
     internal Action<string>? AfterRecutMergedForTests { get; set; }
@@ -1686,15 +1689,25 @@ COPY (
                        fallback on ParquetCompaction.ThreadsFor(table) (#9320). */
                     var outputFinalPath = batchOutputs[i].FinalPath;
                     ParquetCompaction.MergeBatchToFile(table, batches[i], batchOutputs[i].TempPath, spillDirSql,
+                        memoryLimit: MergeMemoryLimit,
                         rowGroupSize: ParquetCompaction.ServerOrderByFor(table) is null ? null : SortedRowGroupSizeOverride,
+                        onSortedAtSmallGroups: (retryTable, files, error) =>
+                        {
+                            /* The output is sorted but in 2,048-row groups: the re-cut below would sort it at the large size
+                               and run out of memory again, so it leaves the file alone (#9407). */
+                            SkipRecut(outputFinalPath);
+                            _logger?.LogWarning(
+                                "Compaction of {Table}: the server-ordered merge ran out of memory or temp space at the large row-group size, so this batch of {Files} files is sorted again at {RowGroupRows}-row groups: {Error}",
+                                retryTable, files, ParquetCompaction.ArchiveRowGroupSize, error);
+                        },
                         onSortFallback: (fallbackTable, files, error) =>
                         {
                             /* The output is in the unsorted order at the small size: the re-cut below would sort it again
                                and fall back again, so it leaves the file alone (#9407). */
                             SkipRecut(outputFinalPath);
                             _logger?.LogWarning(
-                                "Compaction of {Table}: the server-ordered merge ran out of memory or temp space, so this batch of {Files} files fell back to the unsorted order: {Error}",
-                                fallbackTable, files, error);
+                                "Compaction of {Table}: the server-ordered merge ran out of memory or temp space even at {RowGroupRows}-row groups, so this batch of {Files} files fell back to the unsorted order: {Error}",
+                                fallbackTable, ParquetCompaction.ArchiveRowGroupSize, files, error);
                         });
                     AfterCompactionBatchMergedForTests?.Invoke(i);
                 }
@@ -1720,6 +1733,14 @@ COPY (
                 using (_duckDb.AcquireWriteLock(WriteLockBudget))
                 {
                     var removed = SwapCompactionOutputs(month, table, sourcePaths, batchOutputs);
+
+                    /* A swap that could not delete an input or a set-aside file leaves its journal. The group is unresolved
+                       until a later pass finishes it, so the re-cut below must not start a swap of its own that would
+                       overwrite the journal and delete it when it resolves (#9407). */
+                    if (File.Exists(SwapJournalPathFor(month, table)))
+                    {
+                        unresolvedGroups.Add((month, table));
+                    }
 
                     /* The group is compacted from here on: the merged files are in place and the inputs are gone.
                        It counts now, so a rebuild that throws below is not reported as a compaction that failed. */
@@ -1779,6 +1800,12 @@ COPY (
             {
                 failedGroups++;
                 _logger?.LogError(ex, "Failed to compact {Month}/{Table} ({Count} files)", month, table, files.Count);
+
+                /* A swap that threw after a failed undo leaves a "swapping" journal: the group stays out of the re-cut (#9407). */
+                if (File.Exists(SwapJournalPathFor(month, table)))
+                {
+                    unresolvedGroups.Add((month, table));
+                }
 
                 /* Best-effort cleanup of this group's temps. */
                 foreach (var (tempPath, _) in batchOutputs)
@@ -1931,6 +1958,7 @@ COPY (
         var recut = 0;
         var started = 0;
         var lowSpace = 0;
+        var tooLarge = 0;
         var spillDir = Path.Combine(_archivePath, "duckdb_tmp");
         Directory.CreateDirectory(spillDir);
         var spillDirSql = spillDir.Replace("\\", "/");
@@ -1962,6 +1990,17 @@ COPY (
 
             var table = tables[path];
             var tempPath = path + ".tmp";
+
+            /* A live swap journal of this period and table is the record of a swap still to finish, and a re-cut's swap
+               writes the same journal name over it: a base file whose rows also sit in a newer part file would stay live
+               (rows read twice), or a file left only at its .replaced name would never be restored (rows lost). Checked
+               before each file, not once at the start: a merge or an earlier re-cut of this pass may have left one (#9407). */
+            if (File.Exists(SwapJournalPathFor(period, table)))
+            {
+                unresolvedGroups.Add((period, table));
+                continue;
+            }
+
             try
             {
                 if (!ParquetCompaction.NeedsRecut(probe, path, SortedRowGroupSizeOverride ?? ParquetCompaction.SortedArchiveRowGroupSize))
@@ -1970,8 +2009,19 @@ COPY (
                 }
 
                 var sourceBytes = new FileInfo(path.Replace("/", "\\")).Length;
+
+                /* The merge leaves a file over its batch budget alone, and the sort here is one thread holding s_archiveLock,
+                   which the hourly archive and a reset wait on without queuing. A file the merge would not take is not cut. */
+                if (sourceBytes > ParquetCompaction.BatchInputBytesFor(
+                        table, CompactionBatchInputBytes, DailyCompactionBatchInputBytes, SortedCompactionBatchInputBytes))
+                {
+                    tooLarge++;
+                    continue;
+                }
+
+                /* The output, plus the sort's spill (about the source again) and the reserve a merge keeps. */
                 var freeBytes = _duckDb.AvailableFreeBytesProvider(_archivePath);
-                if (freeBytes is long free && sourceBytes + DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath) > free)
+                if (freeBytes is long free && 2 * sourceBytes + DataVolumeSpace.CompactionReserveBytes(_duckDb.DatabasePath) > free)
                 {
                     lowSpace++;
                     continue;
@@ -2002,6 +2052,15 @@ COPY (
 
                 using (_duckDb.AcquireWriteLock(WriteLockBudget))
                 {
+                    /* Retention deletes expired files under this lock. A source it removed after the row-count check has
+                       nothing at its name for the swap to replace, so the swap would treat the temp as a fresh output and
+                       bring the expired file back. */
+                    if (!File.Exists(path))
+                    {
+                        File.Delete(tempPath);
+                        continue;
+                    }
+
                     SwapCompactionOutputs(period, table, [path], [(tempPath, path)]);
                 }
 
@@ -2024,6 +2083,13 @@ COPY (
                 _logger?.LogError(ex, "Re-cut of {File} failed; the file stays as it is and is not tried again until the service restarts", Path.GetFileName(path));
                 try { File.Delete(tempPath); } catch { /* best effort */ }
             }
+        }
+
+        if (tooLarge > 0)
+        {
+            _logger?.LogInformation(
+                "Re-cut skipped {Count} archive file(s) larger than the table's merge batch budget: the sort would hold the archive lock for too long",
+                tooLarge);
         }
 
         if (recut > 0 || lowSpace > 0)
@@ -2072,6 +2138,10 @@ COPY (
         public List<string> Inputs { get; } = [];
     }
 
+    /* The one journal a period and table can have, whichever pass writes it: the merge and the re-cut share the name. */
+    private string SwapJournalPathFor(string period, string table) =>
+        Path.Combine(_archivePath, $"{period}_{table}{SwapJournalSuffix}").Replace("\\", "/");
+
     /// <summary>
     /// Moves a group's merged temps to their final names and removes the inputs, without ever having a
     /// moment where a month's rows are on disk only in a file that a failure would delete. Returns the number
@@ -2083,7 +2153,7 @@ COPY (
         var outputNames = new HashSet<string>(batchOutputs.Select(o => o.FinalPath), StringComparer.OrdinalIgnoreCase);
         var swap = new CompactionSwap
         {
-            JournalPath = Path.Combine(_archivePath, $"{month}_{table}{SwapJournalSuffix}").Replace("\\", "/")
+            JournalPath = SwapJournalPathFor(month, table)
         };
         foreach (var (tempPath, finalPath) in batchOutputs)
         {
