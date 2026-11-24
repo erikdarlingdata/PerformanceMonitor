@@ -270,6 +270,10 @@ public sealed class McpHostService : BackgroundService
            policy so its instructions census (built there) counts only the tools this start offers. */
         services.AddMcpInvestigationPolicy(McpInvestigationPolicy.Served(allowInvestigations, allowWrites));
 
+        /* #9423: the per-tool figures and the slow-call rows. The timing filter (AddCallToolFilters) finds this singleton on each call; a host
+           that registers none passes every call straight through. */
+        services.AddSingleton<McpCallTimingRecorder>(sp => new McpCallTimingRecorder(sp.GetRequiredService<LocalDataService>()));
+
         /* #5820: mcp_data_detail, read once per start. McpDataDetailFilter (AddCallToolFilters) reads this singleton on
            every call; Full passes everything through. */
         services.AddSingleton(new McpDataDetailSetting(dataDetail));
@@ -345,6 +349,8 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpToolGuideTools>()
             /* #9388: find_tools searches the tools this request serves (the served ToolCollection). Darling twin: DarlingMcpToolSearchTools. */
             .WithGeminiCompatibleTools<McpToolSearchTools>()
+            /* #9423: get_slow_reads, the MCP calls that took 2 seconds or more and the per-tool figures. Darling's tool name. */
+            .WithGeminiCompatibleTools<McpSlowCallTools>()
             /* The unknown-argument guard (#3870): ONE call-tool filter, registered once, covering
                every tool with no per-tool change. A call carrying an argument no tool parameter
                declares is refused before dispatch — the refusal names the key and lists what the
@@ -545,6 +551,8 @@ public sealed class McpHostService : BackgroundService
     /// letting the call run as given. Named apart from <see cref="AddCallToolFilters"/> because a test finds that one by name.
     /// </summary>
     internal static void AddCallToolFiltersWithLookupDeadline(IMcpRequestFilterBuilder filters, TimeSpan lookupDeadline) => filters
+        /* #9423: first, so it times the whole call, the other filters included. */
+        .AddCallToolFilter(McpCallTimingFilter.Instance)
         .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
         .AddCallToolFilter(McpDatabaseNameFilter.Using(McpDatabaseNames.CandidatesAsync, lookupDeadline))
         .AddCallToolFilter(McpDataDetailFilter.Instance)
