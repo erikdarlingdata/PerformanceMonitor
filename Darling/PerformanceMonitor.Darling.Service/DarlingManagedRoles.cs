@@ -4386,7 +4386,9 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
     /// (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or admin login could write a false <c>proposal_approved</c> row. So is a proposal's notice mark
     /// (<see cref="InvestigationRequestStore.ProposalNoticeSent"/>, #7109): another login that wrote it first would stop the proposal's notice. So is
     /// <see cref="InvestigationRequestStore.AskerJournalEvent"/> (#7109): the approver check reads askers from it, so a row another login wrote would
-    /// block an approver.</summary>
+    /// block an approver. So is <see cref="InvestigationEvents.ChangeWindowClosed"/> (#9485): the service journals the one summary row of a closed change
+    /// window itself, with no request, so another login could otherwise write a false close summary. It is not in <see cref="InvestigationEvents.Kinds"/>:
+    /// it is audit only and no long poll or signed POST delivers it.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Concat(AgentActionEvents.OwnerOnly)
@@ -4398,6 +4400,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
             .Append(InvestigationRequestStore.SlackPressed)
             .Append(InvestigationRequestStore.AskerJournalEvent)
             .Append(InvestigationRequestStore.AgentMessage)
+            .Append(InvestigationEvents.ChangeWindowClosed)
             .Select(k => "'" + k + "'"));
 
     /// <summary>

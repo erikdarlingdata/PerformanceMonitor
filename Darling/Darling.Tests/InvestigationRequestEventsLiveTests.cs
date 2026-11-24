@@ -563,6 +563,11 @@ public sealed class InvestigationRequestEventsLiveTests
                 await ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", ct);
             }
 
+            /* The owner's own request-less summary row (#9485) goes through the same trigger. */
+            await ExecAsync(connection, JournalRow(null, InvestigationEvents.ChangeWindowClosed), ct);
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE event = '{InvestigationEvents.ChangeWindowClosed}' AND request_id IS NULL", ct));
+
             /* The service writes through the trigger: a join event, the resolved sweep, the delivery marks. Only the real
                events are delivered. */
             var sends = new FakeSends();
@@ -580,10 +585,10 @@ public sealed class InvestigationRequestEventsLiveTests
         });
     }
 
-    private static string JournalRow(Guid request, string journalEvent, string? onceKey = null, string time = "now()", string? reason = null,
+    private static string JournalRow(Guid? request, string journalEvent, string? onceKey = null, string time = "now()", string? reason = null,
         string columns = "event_time, request_id, route_id, server_id, event, actor, reason, once_key", string? idValues = null) =>
         $"INSERT INTO config.investigation_journal ({columns}) {(idValues is null ? "" : "OVERRIDING SYSTEM VALUE ")}"
-        + $"VALUES ({idValues}{time}, '{request}', 1, {ServerId}, '{journalEvent}', 'agent:forger', "
+        + $"VALUES ({idValues}{time}, {(request is null ? "NULL" : "'" + request + "'")}, 1, {ServerId}, '{journalEvent}', 'agent:forger', "
         + (reason is null ? "NULL, " : $"'{reason}', ")
         + (onceKey is null ? "NULL)" : $"'{onceKey}')");
 
@@ -605,6 +610,10 @@ public sealed class InvestigationRequestEventsLiveTests
         {
             forged.Add(JournalRow(id, kind));
         }
+
+        /* The summary row of a closed change window (#9485) has no request and belongs to the service alone: no other login may write a false one. */
+        forged.Add(JournalRow(null, InvestigationEvents.ChangeWindowClosed));
+        forged.Add(JournalRow(id, InvestigationEvents.ChangeWindowClosed));
 
         /* A practice request's opened row with a reason that is not the exact sentence. */
         forged.Add(JournalRow(practiceId, InvestigationEvents.Opened, reason: "because I said so"));
