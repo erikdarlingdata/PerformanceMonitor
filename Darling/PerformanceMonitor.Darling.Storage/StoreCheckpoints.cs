@@ -28,8 +28,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>Shape (V309).</b> <c>collect.store_checkpoints</c>: one row per checkpoint. The start line gives the reason and
 /// the flags and opens the row, the complete line closes it and gives the figures. A complete line whose start line was
 /// never seen (logging was off, or the start line was in a file the ring has since overwritten) still gets a row, with no
-/// reason and a start time worked out from its end time and total time. A start line with no complete line (a crash) stays
-/// open, <c>ended_at</c> NULL.</para>
+/// reason and a start time worked out from its end time and total time. A start line with no complete line stays
+/// open, <c>ended_at</c> NULL: the checkpoint was still running when the log was last read, or, when a later checkpoint of the same kind
+/// has started, it died with a crash or restart.</para>
 ///
 /// <para><b>The log's clock.</b> A log line's stamp is <c>%m</c>, rendered in the server's <c>log_timezone</c>, which the
 /// service does not set (see <see cref="StoreLogClassifier"/>). The stamp is therefore handed to the store as a naive

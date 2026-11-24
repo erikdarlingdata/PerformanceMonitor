@@ -32,6 +32,9 @@ public sealed class ArchiveRowGroupOrderTests : IDisposable
 {
     private const int Servers = 6;
 
+    /* These tests read the order of a few thousand rows from small row groups, so the sorted merges write the old size (#9407). */
+    private const int SmallGroups = 2048;
+
     private readonly List<DuckDbInitializer> _initializers = [];
     private readonly string _tempDir;
     private readonly string _dbPath;
@@ -163,7 +166,7 @@ SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.
         const int rows = 24_000;
         var initializer = await SeedHotAsync(rows);
 
-        Assert.True(await new ArchiveService(initializer, _archiveDir).ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
+        Assert.True(await new ArchiveService(initializer, _archiveDir) { SortedRowGroupSizeOverride = SmallGroups }.ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
 
         var file = SingleQueryStoreFile();
         Assert.Equal(rows, Scalar($"SELECT count(*) FROM read_parquet('{file}')"));
@@ -193,7 +196,7 @@ SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.
 
         var initializer = new DuckDbInitializer(_dbPath);
         _initializers.Add(initializer);
-        new ArchiveService(initializer, _archiveDir).CompactParquetFiles();
+        new ArchiveService(initializer, _archiveDir) { SortedRowGroupSizeOverride = SmallGroups }.CompactParquetFiles();
 
         var file = SingleQueryStoreFile();
         Assert.Equal(filesPerDay * rowsPerFile, Scalar($"SELECT count(*) FROM read_parquet('{file}')"));
@@ -214,8 +217,8 @@ SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.
     {
         const int rows = 24_000;
         var initializer = await SeedHotAsync(rows);
-        Assert.True(await new ArchiveService(initializer, _archiveDir).ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
-        new ArchiveService(initializer, _archiveDir).CompactParquetFiles();
+        Assert.True(await new ArchiveService(initializer, _archiveDir) { SortedRowGroupSizeOverride = SmallGroups }.ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
+        new ArchiveService(initializer, _archiveDir) { SortedRowGroupSizeOverride = SmallGroups }.CompactParquetFiles();
         var merged = SingleQueryStoreFile();
         Assert.EndsWith("_query_store_stats.parquet", merged);
         Assert.Equal(rows, Scalar($"SELECT count(*) FROM read_parquet('{merged}')"));
@@ -228,7 +231,7 @@ SELECT count(*) FROM g a JOIN g b ON a.server = b.server AND a.row_group_id < b.
         var mergedBytesBefore = File.ReadAllBytes(merged);
         var mergedWrittenBefore = File.GetLastWriteTimeUtc(merged);
 
-        Assert.True(await new ArchiveService(initializer, _archiveDir) { DailyCompactionBatchInputBytes = 1 }
+        Assert.True(await new ArchiveService(initializer, _archiveDir) { DailyCompactionBatchInputBytes = 1, SortedRowGroupSizeOverride = SmallGroups }
             .ArchiveAllAndResetAsync(TestContext.Current.CancellationToken));
 
         Assert.True(File.Exists(merged), "the day's merged file is gone");
