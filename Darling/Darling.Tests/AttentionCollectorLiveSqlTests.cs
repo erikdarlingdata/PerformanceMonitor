@@ -235,7 +235,8 @@ public sealed class AttentionCollectorLiveSqlTests
     }
 
     /// <summary>
-    /// #9507: the session keeps a call the client cancelled while it ran, and only that. A 2 s command timeout against a 5 s WAITFOR
+    /// #9507: the session keeps a call the client cancelled while it ran, plus a batch-aborting error after 0.9 s or more (which has no
+    /// attention partner, so every read leaves it out). A 2 s command timeout against a 5 s WAITFOR
     /// leaves one captured call of about 2 s (result Abort on SQL Server 2016 to 2022, Error on 2025), which sits at the attention's time
     /// on the same session. A fast failed batch and a reader disposed early after a call that finished leave none.
     /// </summary>
@@ -296,6 +297,94 @@ public sealed class AttentionCollectorLiveSqlTests
         }
         finally
         {
+            if (created)
+            {
+                await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + sessionName + "] ON SERVER;", CancellationToken.None);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #9507: the session keeps the call's parameter values out of the store. rpc_completed's own <c>statement</c> field carries them
+    /// (<c>exec dbo.proc @name=N'...'</c>), and sensitive-statement withholding does not strip values, so the session switches that field
+    /// and <c>batch_text</c> off and the row's text comes from the <c>sql_text</c> action, which declares parameters and holds no value.
+    /// Three timed-out calls: a parameterised statement (sp_executesql), a stored procedure that has an object name, and a plain batch.
+    /// </summary>
+    [Fact]
+    public async Task OwnSession_ATimedOutRpcStoresTheSqlTextAndNeverTheParameterValue()
+    {
+        const string secret = "jane.doe@pm9509-secret.example";
+        const string statementApp = "pm-9509-statement";
+        const string procApp = "pm-9509-proc";
+        const string batchApp = "pm-9509-batch";
+        const string procName = "dbo.pm9509_slow_proc";
+        var connectionString = ConnectionString(statementApp);
+        Assert.SkipWhen(connectionString is null, "Set DARLING_TEST_SQL (and, for SQL auth, DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the live attention collector test.");
+        Assert.SkipWhen(ReadOnlyMode, "DARLING_TEST_SQL_READONLY=1: this server holds real monitoring data.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var sessionName = AlwaysOnXeSessions.OwnNameFor(
+            LongQueryCompletionsCollector.DarlingProduct, Guid.NewGuid().ToString("N")[..8], AlwaysOnXeSessionKind.Attention);
+        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+            .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + sessionName + "]", StringComparison.Ordinal)
+            .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
+        Assert.DoesNotContain("[" + AttentionCollector.XeSessionName + "]", create, StringComparison.Ordinal);
+
+        string Conn(string app, string database) =>
+            new SqlConnectionStringBuilder(connectionString!) { ApplicationName = app, InitialCatalog = database }.ConnectionString;
+
+        async Task TimeOutAsync(string app, string database, string text, CommandType type, string? parameterName)
+        {
+            await using var connection = new SqlConnection(Conn(app, database));
+            await connection.OpenAsync(ct);
+            await using var command = new SqlCommand(text, connection) { CommandTimeout = 2, CommandType = type };
+            if (parameterName is not null)
+            {
+                command.Parameters.Add(new SqlParameter(parameterName, SqlDbType.NVarChar, 100) { Value = secret });
+            }
+
+            await Assert.ThrowsAnyAsync<SqlException>(() => command.ExecuteNonQueryAsync(ct));
+        }
+
+        var created = false;
+        var procCreated = false;
+        try
+        {
+            await ExecuteAsync(connectionString!, create, ct);
+            created = true;
+            await ExecuteAsync(
+                Conn("pm-9509-setup", "tempdb"),
+                "CREATE PROCEDURE " + procName + " @name nvarchar(100) AS BEGIN WAITFOR DELAY '00:00:05'; SELECT @name; END;", ct);
+            procCreated = true;
+
+            await TimeOutAsync(statementApp, "master", "WAITFOR DELAY '00:00:05'; SELECT @p;", CommandType.Text, "@p");
+            await TimeOutAsync(procApp, "tempdb", procName, CommandType.StoredProcedure, "@name");
+            await TimeOutAsync(batchApp, "master", "WAITFOR DELAY '00:00:05'; SELECT 1;", CommandType.Text, null);
+
+            var rows = await CollectUntilAsync(
+                connectionString!, sessionName,
+                r => new[] { statementApp, procApp, batchApp }.All(
+                    app => r.Exists(x => x.EventKind == AttentionCollector.KindAborted && x.ClientAppName == app)), ct);
+
+            var aborted = rows.Where(r => r.EventKind == AttentionCollector.KindAborted).ToList();
+            Assert.DoesNotContain(aborted, r => (r.StatementText ?? string.Empty).Contains(secret, StringComparison.Ordinal));
+
+            var statement = Assert.Single(aborted, r => r.ClientAppName == statementApp);
+            Assert.Contains("WAITFOR DELAY", statement.StatementText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+            var proc = Assert.Single(aborted, r => r.ClientAppName == procApp);
+            Assert.StartsWith(procName, proc.StatementText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+            var batch = Assert.Single(aborted, r => r.ClientAppName == batchApp);
+            Assert.Contains("WAITFOR DELAY", batch.StatementText ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (procCreated)
+            {
+                await ExecuteAsync(Conn("pm-9509-setup", "tempdb"), "DROP PROCEDURE " + procName + ";", CancellationToken.None);
+            }
+
             if (created)
             {
                 await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + sessionName + "] ON SERVER;", CancellationToken.None);

@@ -39,9 +39,11 @@ public static class AttentionWindowSql
     /// <summary>The <c>event_kind</c> of a kept ring-buffer event.</summary>
     public const string KindSample = "sample";
 
-    /// <summary>The <c>event_kind</c> of one captured call that ended aborted: a command the client cancelled while it still ran (#9507).
-    /// Its <c>interrupt_duration_us</c> is the call's elapsed time, which is the length of the command timeout. The same value as
-    /// <c>AttentionCollector.KindAborted</c>.</summary>
+    /// <summary>The <c>event_kind</c> of one captured call that ended Abort, or Error after at least 0.9 s (#9507). A command the
+    /// client cancelled while it still ran has that shape, and its <c>interrupt_duration_us</c> is the call's elapsed time, which is
+    /// the length of the command timeout. A batch-aborting error after 0.9 s or more (a conversion error, a deadlock victim that
+    /// waited) ends with result Error too, on SQL Server 2022 as well as 2025. Such a row has no attention partner, so every read
+    /// leaves it out. The same value as <c>AttentionCollector.KindAborted</c>.</summary>
     public const string KindAborted = "aborted";
 
     /// <summary>How far BEFORE an attention sample's event_time a captured call's event_time may fall and still match it (#9507), in
