@@ -144,7 +144,7 @@ FROM config.investigation_change_windows AS w
 WHERE r.request_id = $1
   AND r.held_window_id = w.window_id
   AND r.hold_released_at IS NULL
-  AND $2 > w.ends_at + " + InvestigationChangeWindows.TailIntervalSql + @"
+  AND false AND $2 > w.ends_at + " + InvestigationChangeWindows.TailIntervalSql + @"
 RETURNING w.window_id";
 
     /* #9485: the close summary. A window is closed when its tail has ended (ends_at + tail), or at cleared_at when that is earlier. One journal
