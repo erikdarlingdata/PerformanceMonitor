@@ -53,7 +53,7 @@ public partial class LocalDataService
                 command.Parameters.Add(new DuckDBParameter { Value = serverId });
                 command.Parameters.Add(new DuckDBParameter { Value = slice.Min(r => r.CollectionTime) });
                 command.Parameters.Add(new DuckDBParameter { Value = slice.Max(r => r.CollectionTime) });
-                using var reader = await command.ExecuteReaderAsync();
+                using var reader = await command.ExecuteProfiledReaderAsync("query-store-top-text-by-row");
                 while (await reader.ReadAsync())
                 {
                     result[(reader.GetInt64(0), reader.GetDateTime(1))] = reader.IsDBNull(2) ? null : reader.GetString(2);
@@ -142,7 +142,7 @@ GROUP BY v.database_name, v.query_id", "query_store_stats", relation);
                 command.Parameters.Add(new DuckDBParameter { Value = notBefore.Value });
             }
 
-            using var reader = await command.ExecuteReaderAsync();
+            using var reader = await command.ExecuteProfiledReaderAsync("query-store-top-latest-rows");
             while (await reader.ReadAsync())
             {
                 result[(reader.GetString(0), reader.GetInt64(1))] = (reader.GetInt64(2), reader.GetDateTime(3));

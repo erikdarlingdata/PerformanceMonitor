@@ -30,35 +30,59 @@ WITH deduped AS
     -- silent. Same reasoning, same key as the read side (#1845).
     -- execution_type_desc is correctly absent: the WHERE pins it to 'Regular', so it is constant here.
     -- #9195: no query_text here, or in the two grouping steps below: it is read once, for the candidates, in `texts`.
+    -- #9195: one aggregate per interval, not ROW_NUMBER() OVER the same key. The window sorted every row of the 14-day window with
+    -- its whole payload (most of the statement's time, whether or not any query regressed) to keep one row in a dozen. The newest
+    -- row of an interval is the largest (collection_time, execution_count, collection_id), which is the old ORDER BY
+    -- (collection_time DESC, execution_count DESC, collection_id DESC): a NULL execution_count sorted last there, so it is -1 here,
+    -- below every count. The winner's fields ride in the struct, so they are the winner row's, as rn = 1 gave. collection_id is
+    -- unique per row, so the key picks one row (a row held by both the hot table and the archive is the same row twice).
     SELECT
         database_name,
         query_id,
         plan_id,
         replica_role,
-        query_plan_hash,
-        execution_count,
-        avg_cpu_time_us,
-        avg_duration_us,
+        w.query_plan_hash AS query_plan_hash,
+        w.execution_count AS execution_count,
+        w.avg_cpu_time_us AS avg_cpu_time_us,
+        w.avg_duration_us AS avg_duration_us,
         -- #5631: appended to the dedup's columns; feeds rows per call below.
-        avg_rowcount,
-        last_execution_time,
-        is_forced_plan,
-        force_failure_count,
+        w.avg_rowcount AS avg_rowcount,
+        w.last_execution_time AS last_execution_time,
+        w.is_forced_plan AS is_forced_plan,
+        w.force_failure_count AS force_failure_count,
         -- #9195: the row's key, carried so the candidates' text is read by it after the gates (`texts` below).
-        collection_id,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
-            ORDER BY collection_time DESC, execution_count DESC, collection_id DESC
-        ) AS rn
-    FROM v_query_store_stats
-    WHERE server_id = $1
-    AND   execution_type_desc = 'Regular'
-    AND   last_execution_time >= $2
-    -- $3 is the window's end. A row collected after it was not in the store at that instant, so a pass as of a past
-    -- instant ranks the plans that instant had; the dedup keeps each interval's newest row collected by then.
-    AND   collection_time <= $3
-    /*SEC*/
+        w.collection_id AS collection_id
+    FROM
+    (
+        SELECT
+            database_name,
+            query_id,
+            plan_id,
+            replica_role,
+            max(
+            {
+                'collection_time': collection_time,
+                'execution_rank': COALESCE(execution_count, -1),
+                'collection_id': collection_id,
+                'query_plan_hash': query_plan_hash,
+                'execution_count': execution_count,
+                'avg_cpu_time_us': avg_cpu_time_us,
+                'avg_duration_us': avg_duration_us,
+                'avg_rowcount': avg_rowcount,
+                'last_execution_time': last_execution_time,
+                'is_forced_plan': is_forced_plan,
+                'force_failure_count': force_failure_count
+            }) AS w
+        FROM v_query_store_stats
+        WHERE server_id = $1
+        AND   execution_type_desc = 'Regular'
+        AND   last_execution_time >= $2
+        -- $3 is the window's end. A row collected after it was not in the store at that instant, so a pass as of a past
+        -- instant ranks the plans that instant had; the dedup keeps each interval's newest row collected by then.
+        AND   collection_time <= $3
+        /*SEC*/
+        GROUP BY database_name, query_id, plan_id, replica_role, runtime_stats_interval_id, first_execution_time
+    )
 ),
 plan_agg AS
 (
@@ -86,7 +110,6 @@ plan_agg AS
              ELSE SUM(avg_rowcount * execution_count)::DOUBLE PRECISION / NULLIF(SUM(execution_count), 0)
         END AS rows_per_exec
     FROM deduped
-    WHERE rn = 1
     GROUP BY database_name, query_id, plan_id, replica_role
 ),
 plan_dedup AS
@@ -271,7 +294,7 @@ LIMIT 100";
            primary stay in the window, so the read skips those databases. */
         cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 4);
         cmd.CommandText = plan.Apply(cmd.CommandText);
-        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        using var reader = await cmd.ExecuteProfiledReaderAsync("plan-regression-cost", context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
             candidates.Add(new PlanRegressionCandidate(

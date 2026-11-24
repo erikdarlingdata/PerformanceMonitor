@@ -538,6 +538,8 @@ public sealed class McpQueryTools
 
         /* #9195: the call's read lock wait and phases, for the slow-read line the finally block writes. */
         using var lockWaits = ReadLockWaitTally.Begin();
+        /* #9195: the profile files this call writes when DuckDbReadProfile is on, named on the slow-read line. */
+        using var profiles = DuckDbProfileTrail.Begin();
         var phases = new ReadPhaseSplit();
         try
         {
@@ -707,7 +709,7 @@ public sealed class McpQueryTools
         }
         finally
         {
-            ReportSlowQueryStoreTopRead(resolved.DisplayName, resolved.ServerId, phases, lockWaits);
+            ReportSlowQueryStoreTopRead(resolved.DisplayName, resolved.ServerId, phases, lockWaits, profiles);
         }
     }
 
@@ -717,14 +719,14 @@ public sealed class McpQueryTools
     /// lock added up over every connection the call opened, and the time the archive span reads took. The lock wait and the
     /// archive span are inside the phases, not beside them, and "other" is what no phase accounts for (the empty-answer checks).
     /// </summary>
-    private static void ReportSlowQueryStoreTopRead(string serverName, int serverId, ReadPhaseSplit phases, ReadLockWaitTally lockWaits)
+    private static void ReportSlowQueryStoreTopRead(string serverName, int serverId, ReadPhaseSplit phases, ReadLockWaitTally lockWaits, DuckDbProfileTrail profiles)
     {
         var total = phases.Total;
         if (total <= ReadLockWaitTally.SlowReadThreshold) return;
 
         AppLogger.Info("McpQueryTools",
             $"Query Store top read took {(long)total.TotalMilliseconds} ms for {serverName} (server {serverId}): " +
-            $"{lockWaits.DescribeLockWait()}, archive span {(long)lockWaits.ArchiveSpan.TotalMilliseconds} ms (both inside the phases), {phases.Describe(total)}");
+            $"{lockWaits.DescribeLockWait()}, archive span {(long)lockWaits.ArchiveSpan.TotalMilliseconds} ms (both inside the phases), {phases.Describe(total)}{profiles.Describe()}");
     }
 
     /// <summary>

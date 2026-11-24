@@ -52,7 +52,7 @@ public sealed class QueryStoreSliceTieBreakSourceTests
     [
         (Path.Combine("Lite", "Services", "LocalDataService.QueryStore.cs"), 5), // one site is now the arg_max pick (#9195)
         (Path.Combine("Lite", "Analysis", "DrillDownCollector.Queries.cs"), 1),
-        (Path.Combine("Lite", "Analysis", "DuckDbFactCollector.PlanRegressionCost.cs"), 1),
+        (Path.Combine("Lite", "Analysis", "DuckDbFactCollector.PlanRegressionCost.cs"), 0), // #9195: the newest snapshot per interval is an arg_max pick now, no ROW_NUMBER site
         /* #8784: get_object_usage sums module executions over the stored Query Store rows, newest snapshot per interval. #8784 part 2: and
            reads each statement's text with its executions the same way, for the view usage read. */
         (Path.Combine("Lite", "Services", "LocalDataService.ObjectUsage.cs"), 2),
@@ -99,7 +99,8 @@ public sealed class QueryStoreSliceTieBreakSourceTests
            by its own per-file assertion, and this states the total the fix actually swept. */
         /* 8 -> 9 with #8784 (get_object_usage's module executions). */
         /* 9 -> 8 with #9195: one site is now the arg_max pick. 8 -> 9 with #8784 part 2 (its statement text read). */
-        Assert.Equal(9, total);
+        /* 9 -> 8 with #9195: the plan regression cost read's newest snapshot per interval is an arg_max pick. */
+        Assert.Equal(8, total);
     }
 
     /// <summary>

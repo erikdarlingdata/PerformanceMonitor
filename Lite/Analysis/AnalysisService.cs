@@ -642,6 +642,8 @@ public class AnalysisService
         var readStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         /* #9195: the read lock wait of every store read this call makes, for the slow-read line. */
         using var lockWaits = ReadLockWaitTally.Begin();
+        /* #9195: the profile files this call writes when DuckDbReadProfile is on, named on the slow-read line. */
+        using var profiles = DuckDbProfileTrail.Begin();
         context.SeparatelyMonitoredDatabases ??= ResolveSeparatelyMonitoredDatabases(serverId);
         await SecondaryReplicaScope.EnsureAsync(_duckDb, context); /* #5558 */
         var scopeTime = System.Diagnostics.Stopwatch.GetElapsedTime(readStarted);
@@ -662,7 +664,7 @@ public class AnalysisService
                 facts.AddRange(anomalies);
                 detectorTime = System.Diagnostics.Stopwatch.GetElapsedTime(detectorStarted);
             }
-            ReportSlowFactsRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), scopeTime, passTime, detectorTime, lockWaits, context.InteractiveFetches);
+            ReportSlowFactsRead(serverName, serverId, System.Diagnostics.Stopwatch.GetElapsedTime(readStarted), scopeTime, passTime, detectorTime, lockWaits, context.InteractiveFetches, profiles);
             if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
@@ -684,7 +686,7 @@ public class AnalysisService
     /// </summary>
     private static void ReportSlowFactsRead(
         string serverName, int serverId, TimeSpan total, TimeSpan scope, TimeSpan pass, TimeSpan detector, ReadLockWaitTally lockWaits,
-        InteractivePlanFetchAllowance? planFetches)
+        InteractivePlanFetchAllowance? planFetches, DuckDbProfileTrail profiles)
     {
         if (total <= ReadLockWaitTally.SlowReadThreshold) return;
 
@@ -693,7 +695,7 @@ public class AnalysisService
             $"Analysis facts read took {Ms(total)} ms for {serverName} (server {serverId}): secondary replica scope {Ms(scope)} ms, " +
             $"fact pass {Ms(pass)} ms, anomaly detector {Ms(detector)} ms, other {Ms(total - scope - pass - detector)} ms, " +
             $"plan fetches {planFetches?.Fetches ?? 0} in {Ms(planFetches?.FetchTime ?? TimeSpan.Zero)} ms (inside the fact pass), " +
-            $"{lockWaits.DescribeLockWait()} (inside those)");
+            $"{lockWaits.DescribeLockWait()} (inside those){profiles.Describe()}");
     }
 
     /// <summary>

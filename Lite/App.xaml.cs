@@ -1712,6 +1712,8 @@ public partial class App : Application
                     MuteRuleDefaultExpiration = exp;
             }
             if (read.TryGetProperty("log_alert_dismissals", out v)) LogAlertDismissals = v.Bool(LogAlertDismissals);
+            /* #9195: a diagnostic, off unless an operator turns it on. DuckDB writes an operator profile of the slow reads to the logs folder. */
+            if (read.TryGetProperty("duckdb_profile_slow_reads", out v)) PerformanceMonitorLite.Database.DuckDbReadProfile.Enabled = v.Bool(PerformanceMonitorLite.Database.DuckDbReadProfile.Enabled);
 
             /* Connection settings */
             if (read.TryGetProperty("connection_timeout_seconds", out v))

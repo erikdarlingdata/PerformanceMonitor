@@ -240,6 +240,12 @@
   // in DuckDB's collection_log table at every level, including "None".
   "log_minimum_level": "Information",
 
+  // A diagnostic for a slow read, off by default. When true, the analysis anomaly detector, the plan
+  // regression reads and the Query Store top read run with DuckDB profiling on. DuckDB writes one JSON
+  // operator profile per statement to duckdb-profiles under the logs folder, and the 20 newest files
+  // per read are kept. Each profiled read takes somewhat longer. Applied at startup.
+  "duckdb_profile_slow_reads": false,
+
   // ---- Teams / Slack / generic / PagerDuty webhooks --------------------------------------------------
   // The URLs, the generic headers JSON and the PagerDuty routing key are SECRETS and live in
   // Windows Credential Manager, never in this file. Only these plain prefs are stored here.

@@ -405,7 +405,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     /// </summary>
     private static void ReportSlowPlanRegressionPass(
         AnalysisContext context, TimeSpan total, TimeSpan archivePlan, PlanRegressionStatementTime failures, PlanRegressionStatementTime cost,
-        TimeSpan verify, int planFetches)
+        TimeSpan verify, int planFetches, DuckDbProfileTrail profiles)
     {
         if (total <= ReadLockWaitTally.SlowReadThreshold) return;
 
@@ -416,7 +416,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
                 $"Plan regression read took {Ms(total)} ms for {context.ServerName} (server {context.ServerId}): archive read plan {Ms(archivePlan)} ms, " +
                 $"failures read {Ms(failures.Statement)} ms for {failures.Rows} rows (read lock wait {Ms(failures.Wait)} ms), " +
                 $"cost read {Ms(cost.Statement)} ms for {cost.Rows} candidates (read lock wait {Ms(cost.Wait)} ms), " +
-                $"longest single read lock hold {Ms(longestHold)} ms, plan check {Ms(verify)} ms with {planFetches} plan fetches"));
+                $"longest single read lock hold {Ms(longestHold)} ms, plan check {Ms(verify)} ms with {planFetches} plan fetches{profiles.Describe()}"));
     }
 
     /// <summary>
@@ -440,6 +440,8 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
         try
         {
             var passStarted = Stopwatch.GetTimestamp();
+            /* #9195: the profile files this pass writes when DuckDbReadProfile is on, named on the slow-read line. */
+            using var profiles = DuckDbProfileTrail.Begin();
             var candidates = new List<PlanRegressionCandidate>();
             var failures = new List<PlanRegressionFailureRule.Failure>();
             var failuresRead = default(PlanRegressionStatementTime);
@@ -499,7 +501,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
             var verification = await VerifyPlanRegressionInputsAsync(context, candidates);
             ReportSlowPlanRegressionPass(
                 context, Stopwatch.GetElapsedTime(passStarted), archivePlanTime, failuresRead, costRead,
-                Stopwatch.GetElapsedTime(verifyStarted), verification.PlanFetches);
+                Stopwatch.GetElapsedTime(verifyStarted), verification.PlanFetches, profiles);
             var kept = verification.Kept;
 
             var offenderCount = kept.Count;

@@ -215,6 +215,81 @@ VALUES
         Assert.Equal("/* newest */ SELECT 3", candidate.QueryText);
     }
 
+    /// <summary>
+    /// #9195: the newest row (and its text) of a candidate is read from the hot table when that row is newer than everything archived,
+    /// and from the view otherwise. Three candidates with a different text on every row: A has an archived row and a newer hot row (its
+    /// answer is the hot row's text), B has an archived row and an OLDER hot row, as a backfilled slice leaves until the next archive pass
+    /// (its answer is the archived row's text), and C has archived rows only. Every answer must be the newest row's text in the view.
+    /// </summary>
+    [Fact]
+    public async Task TheTopRead_ReturnsTheTextOfTheNewestRow_WhetherItIsHotOrArchived()
+    {
+        var initializer = new DuckDbInitializer(Path.Combine(_tempDir, "test.duckdb"));
+        _initializers.Add(initializer);
+        await initializer.InitializeFromTemplateAsync();
+        _now = DateTime.UtcNow;
+
+        async Task InsertAsync(DuckDbInitializer target, long id, DateTime collected, long queryId, string text)
+        {
+            var intervalStart = collected.AddHours(-1);
+            using var readLock = target.AcquireReadLock();
+            using var connection = target.CreateConnection();
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = $@"
+INSERT INTO query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc,
+     first_execution_time, last_execution_time, query_text, query_hash, execution_count,
+     avg_duration_us, min_duration_us, max_duration_us, avg_cpu_time_us, min_cpu_time_us, max_cpu_time_us,
+     avg_logical_io_reads, min_logical_io_reads, max_logical_io_reads, avg_logical_io_writes, avg_physical_io_reads,
+     avg_rowcount, min_dop, max_dop, plan_type, is_forced_plan, force_failure_count, query_plan_hash,
+     runtime_stats_interval_id, interval_start_time_utc, interval_end_time_utc)
+VALUES
+    ({id}, TIMESTAMP '{collected:yyyy-MM-dd HH:mm:ss}', {ServerId}, 'SRV{ServerId}', 'DbHotArchive', {queryId}, {queryId}, 'Regular',
+     TIMESTAMP '{intervalStart:yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{intervalStart:yyyy-MM-dd HH:mm:ss}', '{text}', '0xAB', 1000000,
+     500000, 500000, 500000, 400000, 400000, 400000, 100, 100, 100, 10, 10, 5, 1, 1, 'Regular', FALSE, 0, '0xCD',
+     {id % 1_000_000}, TIMESTAMP '{intervalStart:yyyy-MM-dd HH:mm:ss}', TIMESTAMP '{intervalStart.AddHours(1):yyyy-MM-dd HH:mm:ss}')";
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        using (var connection = new DuckDBConnection($"Data Source={Path.Combine(_tempDir, "test.duckdb")}"))
+        {
+            await connection.OpenAsync(TestContext.Current.CancellationToken);
+            await QueryStoreArchiveFixture.SeedAsync(connection, _now, 6, [60, 15], 4, 600, TestContext.Current.CancellationToken);
+        }
+
+        /* The archived rows: A's older row, B's newest row (a day and a half back) and C's two. */
+        await InsertAsync(initializer, 9_000_000_000_011, _now.AddHours(-70), 990201, "/* A old */ SELECT 1");
+        await InsertAsync(initializer, 9_000_000_000_021, _now.AddHours(-36), 990202, "/* B archived newest */ SELECT 2");
+        await InsertAsync(initializer, 9_000_000_000_031, _now.AddHours(-60), 990203, "/* C older */ SELECT 3");
+        await InsertAsync(initializer, 9_000_000_000_032, _now.AddHours(-40), 990203, "/* C newest */ SELECT 4");
+
+        var archive = new ArchiveService(initializer, Path.Combine(_tempDir, "archive"));
+        foreach (var days in new[] { 4, 2, 1 })
+        {
+            archive.TimestampForTests = _now.AddDays(-days).ToString("yyyyMMdd_HHmm");
+            await archive.ArchiveOldDataAsync(hotDataDays: days, cancellationToken: TestContext.Current.CancellationToken);
+        }
+
+        /* After the archive passes: A's newer row, and B's older row, collected before B's archived one. Both stay in the hot table. */
+        await InsertAsync(initializer, 9_000_000_000_012, _now.AddHours(-3), 990201, "/* A hot newest */ SELECT 5");
+        await InsertAsync(initializer, 9_000_000_000_022, _now.AddHours(-50), 990202, "/* B hot older */ SELECT 6");
+
+        var data = new LocalDataService(initializer);
+        using (var connection = await data.OpenConnectionAsync())
+        {
+            Assert.Equal(1, await ScalarAsync(connection, "SELECT count(*) FROM query_store_stats WHERE query_id = 990201"));
+            Assert.Equal(1, await ScalarAsync(connection, "SELECT count(*) FROM query_store_stats WHERE query_id = 990202"));
+            Assert.Equal(0, await ScalarAsync(connection, "SELECT count(*) FROM query_store_stats WHERE query_id = 990203"));
+        }
+
+        var rows = await data.GetQueryStoreTopQueriesAsync(ServerId, 168, 50);
+
+        Assert.Equal("/* A hot newest */ SELECT 5", Assert.Single(rows, r => r.QueryId == 990201).QueryText);
+        Assert.Equal("/* B archived newest */ SELECT 2", Assert.Single(rows, r => r.QueryId == 990202).QueryText);
+        Assert.Equal("/* C newest */ SELECT 4", Assert.Single(rows, r => r.QueryId == 990203).QueryText);
+    }
+
     /// <summary>The rows the Parquet scans of the one statement <paramref name="read"/> runs output, from DuckDB's profile of it.</summary>
     private async Task<long> ParquetRowsScannedAsync<T>(LockedConnection connection, Func<Task<T>> read)
     {
