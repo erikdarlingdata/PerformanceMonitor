@@ -427,6 +427,8 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_pg_wait_stats"] = UnavailableBare,
         ["get_pg_xmin_horizon"] = UnavailableBare,
         ["get_plan_cache_bloat"] = SnapshotSearch,
+        /* #9440: a log of events read live from TimescaleDB, not a series: a window with no run is the answer, and the answer says how far back TimescaleDB keeps history, so there is no data floor to notice. */
+        ["get_store_job_runs"] = "job run log read live from TimescaleDB: the answer names the oldest row TimescaleDB still holds (#9440)",
         /* #7010: not a data window by design. The window selects captures of the store's own PostgreSQL log, and every answer carries the capture
            denominator (captures against expected, bytes read and unread), which is how a window the store did not capture is told apart from a quiet one. */
         /* #9413: only the table_activity mode windows (hours_back and as_of); the size answers have no window to anchor, refuse as_of and carry no truncation notice. */
