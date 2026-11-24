@@ -150,8 +150,8 @@ public sealed class DarlingMcpInstructionsBudgetTests
         Assert.True(text.Length <= InstructionsBudget, $"the writes-on instructions are {text.Length} characters; D2's budget is {InstructionsBudget}");
     }
 
-    /// <summary>Everything served: the rendered census is exactly the catalog census <see cref="DarlingMcpInstructions.Text"/>
-    /// carries, so the constant cannot drift from the registered tools or from the Lite overlap.</summary>
+    /// <summary>Everything served: <see cref="DarlingMcpInstructions.Text"/> carries a census computed from the registered tools
+    /// (#9474), so its figures must equal the host's own catalog and the Lite overlap, and the text is what the host renders.</summary>
     [Fact]
     public void ServedCensus_EverythingOn_IsTheCatalogCensus()
     {
@@ -163,7 +163,11 @@ public sealed class DarlingMcpInstructionsBudgetTests
 
         var census = DarlingMcpInstructions.ToolCensus(catalog, served);
         Assert.StartsWith($"This server exposes {catalog.Count} tools. ", census, StringComparison.Ordinal);
-        Assert.Contains(census, DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        var shared = catalog.Count(DarlingMcpInstructions.LiteToolNames.Contains);
+        Assert.StartsWith(
+            $"This server exposes {catalog.Count} tools. {shared} are the same names Lite exposes. The remaining {catalog.Count - shared} are unique to Darling: ",
+            DarlingMcpInstructions.Text.Substring(DarlingMcpInstructions.Text.IndexOf("This server exposes", StringComparison.Ordinal)),
+            StringComparison.Ordinal);
         Assert.Equal(DarlingMcpInstructions.Text, DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served));
     }
 
@@ -209,6 +213,35 @@ public sealed class DarlingMcpInstructionsBudgetTests
 
         Assert.True(named.Count(catalog.Contains) > 10, "the scan found almost no tool names; the backtick pattern no longer matches the text");
         Assert.True(unserved.Count == 0, "the instructions name tools this configuration does not serve: " + string.Join(", ", unserved));
+    }
+
+    /// <summary>#9474: the names the instructions count come from the service's tool attributes, and they are exactly the host's
+    /// registered catalog (less <c>call_tool</c>), so the census never needs a hand edit when a tool is added.</summary>
+    [Fact]
+    public void RegisteredToolNames_AreTheHostCatalog()
+    {
+        Assert.Equal(
+            Catalog().OrderBy(n => n, StringComparer.Ordinal).ToArray(),
+            DarlingMcpInstructions.RegisteredToolNames().OrderBy(n => n, StringComparer.Ordinal).ToArray());
+    }
+
+    /// <summary>#9474: one more registered tool makes the census sentence say one more tool, in the total and in the Darling-only
+    /// remainder. The old fixed census said 292 whatever the catalog held.</summary>
+    [Fact]
+    public void Build_WithOneMoreRegisteredTool_CountsIt()
+    {
+        var catalog = Catalog();
+        var served = Served(new DarlingMcpWritePolicy.Effective(Writes: true, ServerAdmin: true, Investigations: true));
+        var shared = served.Count(DarlingMcpInstructions.LiteToolNames.Contains);
+        var withExtra = catalog.Append("get_a_tool_added_later").ToList();
+        var servedWithExtra = served.Append("get_a_tool_added_later").ToList();
+
+        var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, withExtra, servedWithExtra);
+
+        Assert.Contains(
+            $"This server exposes {catalog.Count + 1} tools. {shared} are the same names Lite exposes. The remaining {catalog.Count + 1 - shared} are unique to Darling: ",
+            text, StringComparison.Ordinal);
+        Assert.DoesNotContain($"This server exposes {catalog.Count} tools.", text, StringComparison.Ordinal);
     }
 
     /// <summary><see cref="DarlingMcpInstructions.LiteToolNames"/> is exactly the set of tool names Lite registers,
