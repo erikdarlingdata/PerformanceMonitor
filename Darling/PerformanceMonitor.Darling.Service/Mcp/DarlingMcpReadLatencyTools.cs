@@ -87,6 +87,11 @@ public sealed class DarlingMcpReadLatencyTools
         + "When the host admits long reads, admission is this service process's live state since it started (never stored): limit, "
         + "running, queued, and per route the reads admitted, queued, rejected, answered from the cache and missed by it. "
         + "Older rows read as band none with 0 for both. "
+        + "reply_bytes_total is the summed size in bytes of the replies the reads that ran sent (an MCP read's text, a web read's answer text, counted as UTF-8 once "
+        + "the read finished), null when none of those reads was measured, and mean_reply_bytes is that sum over the reads that were measured, null when none was. "
+        + "A read whose reply size was never taken (a composed panel, a tool call that threw, a web read answered with the service's fixed failure body or a plain sentence) is left out of both, "
+        + "as are the hours stored before this column existed, so an hour that mixes measured and unmeasured reads averages its measured reads only. "
+        + "mean_reply_bytes covers the reads that ran: the size of a read answered from the cache (cache_hits) is stored but is left out of both the sum and the average. "
         + "distinct_callers is the most different callers (MCP clients by name and version, web sessions by a salted hash that "
         + "holds no personal data) that read the route in any one hour of the window, 0 on older rows. At most 1,000 are counted per hour; 1,000 means at least that many. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
@@ -212,6 +217,8 @@ public sealed class DarlingMcpReadLatencyTools
                 rejected = x.Row.Rejected,
                 cache_hits = x.Row.CacheHits,
                 cancelled = x.Row.Cancelled,
+                reply_bytes_total = x.Row.ReplyBytesTotal,
+                mean_reply_bytes = x.Row.MeanReplyBytes,
             }, x.Split)).ToArray();
 
             return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes, AdmissionObject(admission), splitAtUtc, processStarts);

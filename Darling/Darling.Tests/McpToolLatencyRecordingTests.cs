@@ -99,6 +99,9 @@ public sealed class McpToolLatencyRecordingTests
             return done;
         }
 
+        [McpServerTool(Name = "latency_probe_wide"), Description("Test-only: answers text of two-byte characters, so its size in bytes is not its length.")]
+        public static string ProbeWide() => "{\"note\":\"" + new string('\u00e9', 300) + "\"}";
+
         [McpServerTool(Name = "latency_probe_json"), Description("Test-only: answers a JSON object that names its run.")]
         public static async Task<string> ProbeJson([Description("Hours.")] int hours_back = 24)
         {
@@ -358,6 +361,31 @@ public sealed class McpToolLatencyRecordingTests
         using var reader = new System.IO.StreamReader(ctx.Response.Body);
         var body = await reader.ReadToEndAsync();
         return (ctx.Response.StatusCode, body);
+    }
+
+    /// <summary>#9433: the size recorded for an MCP read, in the hourly histogram and in the slow-read row, equals the bytes of the text the client
+    /// received. The answer holds two-byte characters, so a count of characters instead of bytes would not match.</summary>
+    [Fact]
+    public async Task AToolCall_RecordsTheBytesOfTheTextTheClientReceived_InTheHistogramAndTheSlowReadRow()
+    {
+        var readLatency = new ReadLatencyAccumulator();
+        var slowReads = new SlowReadLog(0);
+        using var server = await BuildServer(readLatency, slowReads);
+
+        var answer = await ToolsCallAsync(server, "/", "latency_probe_wide", "{}");
+
+        var data = answer.Body.Split('\n').Select(l => l.TrimEnd('\r')).FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var envelope = JsonDocument.Parse(data is null ? answer.Body : data["data:".Length..].Trim());
+        var received = envelope.RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+        var bytes = Encoding.UTF8.GetByteCount(received);
+
+        Assert.True(bytes > received.Length, "the answer holds two-byte characters");
+        var sample = Assert.Single(readLatency.Drain(), d => d.Route == "latency_probe_wide" && d.Outcome == ReadOutcome.Ok);
+        Assert.Equal(bytes, sample.ReplyBytesTotal);
+        Assert.Equal(1L, sample.ReplyBytesCount);
+        Assert.True(slowReads.TryRead(out var record));
+        Assert.Equal("latency_probe_wide", record!.Route);
+        Assert.Equal(bytes, record.ReplyBytes);
     }
 
     [Fact]
