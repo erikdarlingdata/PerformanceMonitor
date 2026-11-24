@@ -94,7 +94,7 @@ VALUES ($1, $2, $3, 'CoFiredSrv', $4, $5, $6, $7, $8, 20000, $9, 1024, 1048576, 
                 collectionId, at, ServerId, database, hash, planHash, WindowStart.AddDays(-3), execs, firing ? 20_000_000L : 20_000L, deltaExecs);
         }
 
-        /* The Query Store side: a cheap plan a few days back and a costly newest plan, 30 runs each, so every query is a regression. */
+        /* The Query Store side: a cheap plan a few days back and a costly newest plan, 500 runs each, so every query is a regression the floors keep. */
         async Task Store(string database, long query, string hash, double costlyCpu)
         {
             foreach (var (plan, planHash, cpu, last) in new[]
@@ -108,7 +108,7 @@ INSERT INTO query_store_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_id, plan_id, execution_type_desc,
      first_execution_time, last_execution_time, query_hash, execution_count, avg_cpu_time_us, avg_duration_us,
      query_plan_hash, is_forced_plan, force_failure_count, runtime_stats_interval_id, interval_start_time_utc, avg_rowcount)
-VALUES ($1, $2, $3, 'CoFiredSrv', $4, $5, $6, 'Regular', $7, $8, $9, 30, $10, $11, $12, false, 0, $13, $7, 10)",
+VALUES ($1, $2, $3, 'CoFiredSrv', $4, $5, $6, 'Regular', $7, $8, $9, 500, $10, $11, $12, false, 0, $13, $7, 10)",
                     _nextStoreId++, last.AddMinutes(1), ServerId, database, query, plan, last.AddHours(-1), last, hash, cpu, cpu + 20_000,
                     planHash, plan);
             }
