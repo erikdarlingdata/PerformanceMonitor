@@ -738,12 +738,12 @@ public sealed class QueryStoreClutterTests
         var body = source[source.IndexOf("internal static async Task<string> GetQueryStoreClutter", StringComparison.Ordinal)..];
         Assert.DoesNotContain("DateTime.UtcNow", body, StringComparison.Ordinal);
         /* #4203: cancellationToken threads to every store call, so the anchor pin matches the call text
-           including the token rather than the pre-#4203 shape. */
+           including the token rather than the pre-#4203 shape. #9478: the fleet reads carry the fleet budget's token, linked to the caller's. */
         /* #5633: the fleet reads also pass the as_of anchor (asOfUtc), so a database dropped after the window still
            counts toward the fleet median exactly as it does in the tool's own server read. */
-        Assert.Contains("GetReadCostAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: cancellationToken)", body, StringComparison.Ordinal);
-        Assert.Contains("GetPlanChurnAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: cancellationToken)", body, StringComparison.Ordinal);
-        Assert.Contains("GetQdsWaitsAsync(postgres, fleetIds, requestedStart, now, cancellationToken)", body, StringComparison.Ordinal);
+        Assert.Contains("GetReadCostAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken)", body, StringComparison.Ordinal);
+        Assert.Contains("GetPlanChurnP95Async(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken)", body, StringComparison.Ordinal);
+        Assert.Contains("GetQdsWaitsAsync(postgres, fleetIds, requestedStart, now, fleetToken)", body, StringComparison.Ordinal);
         /* the page is observed, never inferred */
         Assert.Contains("McpHelpers.BoundPage(composed, limit)", body, StringComparison.Ordinal);
         Assert.DoesNotContain(">= limit", body, StringComparison.Ordinal);

@@ -677,7 +677,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 85;
+    internal const int CurrentSchemaVersion = 86;
 
     /* #9425: what this instance's start did to the schema, for the build history row. The version stamp the file carried before
        the first open (0 for a fresh file), the stamp after the last one, and the milliseconds the migration steps took. A start
@@ -3563,6 +3563,23 @@ public partial class DuckDbInitializer : IDisposable
                the table statements that run after the migrations. An older build refuses a file stamped v85 (SchemaVersionTooNewException). */
             _logger?.LogInformation("Running migration to v85: adding query_text_digest to query_store_stats, query_stats and plan_correction");
             await AddMissingColumnsAsync(connection, LiteTextDimensions.DigestColumns(85));
+        }
+
+        if (fromVersion < 86)
+        {
+            /* v86 (#9423): mcp_slow_calls, the MCP calls that took two seconds or more. A new table with no row to backfill: a database older
+               than v86 has no slow calls recorded, which is the state before the feature. Non-fatal, matching v69: without the table a row
+               write fails and is logged at Debug, the read tool answers an error, and every other tool is untouched. The table statements
+               that follow retry the CREATE on the next start. An older build refuses a file stamped v86 (SchemaVersionTooNewException). */
+            _logger?.LogInformation("Running migration to v86: adding mcp_slow_calls (the slow MCP call rows)");
+            try
+            {
+                await ExecuteNonQueryAsync(connection, Schema.CreateMcpSlowCallsTable);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v86 encountered an error (non-fatal): {Error}", ex.Message);
+            }
         }
     }
 

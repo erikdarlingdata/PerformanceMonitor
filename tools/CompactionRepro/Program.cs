@@ -32,7 +32,7 @@ using PerformanceMonitorLite.Services;
  * Tuning knobs (defaults = ParquetCompaction's non-table-specific defaults):
  *   --memory-limit <str>   DuckDB memory_limit per merge connection. Default: the table's production limit
  *   --threads <int>        DuckDB threads per merge connection. Default: the production pick
- *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: ParquetCompaction.DefaultRowGroupSize (2048)
+ *   --row-group-size <int> Output ROW_GROUP_SIZE. Default: production size of the table (2048, or 122880 for a table that merges in server order)
  *   --row-group-bytes-mb <int>  Output ROW_GROUP_SIZE_BYTES in MiB (0 = none). Default: the table's
  *                          ParquetCompaction.RowGroupBytesFor (#5393: the daily table's byte bound)
  *   (Absent --threads is the production pick: one thread for the sorted attempt, ThreadsFor(--table) for the fallback.)
@@ -104,9 +104,10 @@ var table = GetArg(args, "--table", "query_snapshots");
 var memoryLimitArg = GetArg(args, "--memory-limit", "");
 string? memoryLimit = memoryLimitArg.Length > 0 ? memoryLimitArg : null;
 int? threads = args.Contains("--threads") ? int.Parse(GetArg(args, "--threads", "")) : null;
-var rowGroupSize = int.Parse(GetArg(args, "--row-group-size", ParquetCompaction.DefaultRowGroupSize.ToString()));
-var rowGroupBytesMb = long.Parse(GetArg(args, "--row-group-bytes-mb", (ParquetCompaction.RowGroupBytesFor(table) / (1024 * 1024)).ToString()));
-var rowGroupBytes = rowGroupBytesMb * 1024L * 1024L;
+/* Absent means null, so MergeBatchToFile picks what production does: 122,880-row groups for a sorted table, and for its
+   unsorted fallback 2,048-row groups with the table's byte bound. Passing a size here fixes it for the fallback too. */
+int? rowGroupSize = args.Contains("--row-group-size") ? int.Parse(GetArg(args, "--row-group-size", "")) : null;
+long? rowGroupBytes = args.Contains("--row-group-bytes-mb") ? long.Parse(GetArg(args, "--row-group-bytes-mb", "")) * 1024L * 1024L : null;
 var copies = int.Parse(GetArg(args, "--copies", "1"));
 var repeatPlans = int.Parse(GetArg(args, "--repeat-plans", "1"));
 var repeatColumns = GetArg(args, "--repeat-columns", "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -121,6 +122,8 @@ var seedNumericCols = int.Parse(GetArg(args, "--seed-numeric-cols", "50"));
 var seedTextCols = int.Parse(GetArg(args, "--seed-text-cols", "10"));
 var seedTextBytes = int.Parse(GetArg(args, "--seed-text-bytes", "24"));
 var seedNoise = int.Parse(GetArg(args, "--seed-noise", "97"));
+/* Distinct text values per file: 5,000 by default (compressible), the row count for text that never repeats. */
+var seedTextDistinct = int.Parse(GetArg(args, "--seed-text-distinct", "5000"));
 var seedTimeColumn = GetArg(args, "--seed-time-column", "collection_time");
 var keep = args.Contains("--keep");
 var profileOnly = args.Contains("--profile-only");
@@ -146,7 +149,41 @@ foreach (var mf in mergeFiles)
 
 if (seedFiles > 0)
 {
-    mergeFiles = GenerateSeededMonth(tempDir, seedFiles, seedRows, seedServers, seedNumericCols, seedTextCols, seedTextBytes, seedTimeColumn, seedNoise);
+    mergeFiles = GenerateSeededMonth(tempDir, seedFiles, seedRows, seedServers, seedNumericCols, seedTextCols, seedTextBytes, seedTimeColumn, seedNoise, seedTextDistinct);
+}
+
+/* #9455: does ROW_GROUP_SIZE_BYTES cap a sorted COPY on the DuckDB this build runs, and does the file stay sorted? One
+   COPY with the ORDER BY kept at the production pragmas (preserve_insertion_order off, the sorted merge's limit and one
+   thread), then the row groups, the order inversions and the row count read back. */
+if (args.Contains("--probe-bytes-bound"))
+{
+    var probeMb = long.Parse(GetArg(args, "--probe-bytes-bound", "64"));
+    var probeOut = Path.Combine(tempDir, "probe_out.parquet").Replace("\\", "/");
+    var inList = string.Join(", ", mergeFiles.Select(f => $"'{f.Replace("'", "''").Replace("\\", "/")}'"));
+    var probeOrderBy = ParquetCompaction.ServerOrderByFor(table) ?? throw new ArgumentException("table is not sorted");
+    using var pcon = new DuckDBConnection("DataSource=:memory:");
+    pcon.Open();
+    void Exec(string sql) { using var c = pcon.CreateCommand(); c.CommandText = sql; c.ExecuteNonQuery(); }
+    object? Scalar(string sql) { using var c = pcon.CreateCommand(); c.CommandText = sql; return c.ExecuteScalar(); }
+    Directory.CreateDirectory(Path.Combine(tempDir, "spill"));
+    Exec(ParquetCompaction.BuildPragma("512MB", 1, Path.Combine(tempDir, "spill").Replace("\\", "/")));
+    Console.WriteLine($"Total: DuckDB {Scalar("SELECT version()")}, input {Scalar($"SELECT (sum(total_uncompressed_size) / (SELECT count(*) FROM read_parquet([{inList}], union_by_name=true)))::BIGINT FROM parquet_metadata([{inList}])")} uncompressed bytes/row");
+    try
+    {
+        Exec($"COPY (SELECT * FROM read_parquet([{inList}], union_by_name=true) ORDER BY {probeOrderBy}) TO '{probeOut}' " +
+             $"(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE {GetArg(args, "--probe-rows", "122880")}{(probeMb > 0 ? $", ROW_GROUP_SIZE_BYTES {probeMb * 1024 * 1024}" : "")})");
+        var timeCol = probeOrderBy.Split(',')[1].Trim();
+        var shape = ParquetCompaction.RowGroupShape(pcon, probeOut);
+        var inversions = Scalar($"SELECT count(*) FROM (SELECT server_id, {timeCol}, lag(server_id) OVER w AS ps, lag({timeCol}) OVER w AS pt FROM read_parquet('{probeOut}', file_row_number = true) WINDOW w AS (ORDER BY file_row_number)) WHERE ps > server_id OR (ps = server_id AND pt > {timeCol})");
+        Console.WriteLine($"Total: bytes bound {probeMb} MB with ORDER BY: {shape.Groups} row group(s), largest {shape.MaxGroupRows} rows, {inversions} order inversion(s), peak WS {System.Diagnostics.Process.GetCurrentProcess().PeakWorkingSet64 / 1048576} MB, {Scalar($"SELECT count(*) FROM read_parquet('{probeOut}')")} rows");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Total: bytes bound {probeMb} MB with ORDER BY failed: {ex.Message.Replace("\r", " ").Replace("\n", " ")[..Math.Min(160, ex.Message.Length)]}");
+    }
+
+    if (!keep) { try { Directory.Delete(tempDir, true); } catch { /* best effort */ } }
+    return 0;
 }
 
 if (synthetic)
@@ -185,7 +222,7 @@ if (sweep)
 }
 else
 {
-    Console.WriteLine($"Settings: memory_limit={memoryLimit ?? "default"}, threads={(threads?.ToString() ?? "production pick")}, ROW_GROUP_SIZE={rowGroupSize}, ROW_GROUP_SIZE_BYTES={(rowGroupBytes > 0 ? rowGroupBytesMb + " MiB" : "none")}, max-batch={maxBatchMb} MB");
+    Console.WriteLine($"Settings: memory_limit={memoryLimit ?? "default"}, threads={(threads?.ToString() ?? "production pick")}, ROW_GROUP_SIZE={(rowGroupSize?.ToString() ?? "production pick")}, ROW_GROUP_SIZE_BYTES={(rowGroupBytes is null ? "production pick" : rowGroupBytes > 0 ? rowGroupBytes / (1024 * 1024) + " MiB" : "none")}, max-batch={maxBatchMb} MB");
 }
 if (mergeFiles.Count == 0)
     Console.WriteLine($"Splitting source into {numFiles} chunks");
@@ -259,7 +296,7 @@ try
        given config. Never throws — a merge OOM is caught and returned as
        Ok=false so a sweep can carry on to the next config. */
     (bool Ok, double StartMb, double PeakMb, double Sec, int Batches, string? Fail, List<string> Outputs)
-        RunOneConfig(int rgs, long batchBytes, string? memLimit, int? thr, bool verbose)
+        RunOneConfig(int? rgs, long batchBytes, string? memLimit, int? thr, bool verbose)
     {
         var batches = ParquetCompaction.BuildSizeBudgetedBatches(sorted, batchBytes);
         if (verbose)
@@ -313,7 +350,10 @@ try
                 ParquetCompaction.MergeBatchToFile(table, batches[i], outPath, spillDir, memLimit, thr, rgs, rowGroupBytes,
                     onSortFallback: (fallbackTable, files, error) => Console.WriteLine(
                         $"        [sort fallback] {fallbackTable}: the server-ordered merge of {files} file(s) ran out of memory or temp space, " +
-                        $"so this batch fell back to the unsorted order: {(error.Length > 160 ? error[..160] + "..." : error).Replace("\r", " ").Replace("\n", " ")}"));
+                        $"so this batch fell back to the unsorted order: {(error.Length > 160 ? error[..160] + "..." : error).Replace("\r", " ").Replace("\n", " ")}"),
+                    onSortedAtSmallGroups: (retryTable, files, error) => Console.WriteLine(
+                        $"        [sorted at {ParquetCompaction.ArchiveRowGroupSize} rows] {retryTable}: the server-ordered merge of {files} file(s) ran out of memory or temp space at the large row-group size, " +
+                        $"so this batch was sorted again at {ParquetCompaction.ArchiveRowGroupSize}-row groups: {(error.Length > 160 ? error[..160] + "..." : error).Replace("\r", " ").Replace("\n", " ")}"));
                 bsw.Stop();
 
                 process.Refresh();
@@ -552,12 +592,12 @@ static string MixedServerRowGroups(List<string> paths)
    time column, server_id, server_name, numeric counters that grow slowly (so they compress like real counters), and
    text columns drawn from a few thousand distinct values. Returns the file paths. */
 static List<string> GenerateSeededMonth(string dir, int files, int rows, int servers, int numericCols, int textCols,
-    int textBytes, string timeColumn, int noise = 97)
+    int textBytes, string timeColumn, int noise = 97, int textDistinct = 5000)
 {
     var numeric = string.Concat(Enumerable.Range(1, numericCols).Select(k =>
         $", (((h * {rows} + i) // 50) * {k} + (hash(i, {k}) % {noise}))::BIGINT AS c{k}"));
     var text = string.Concat(Enumerable.Range(1, textCols).Select(k =>
-        $", substr(repeat(md5((((h * {rows} + i) % 5000) + {k})::VARCHAR), {textBytes / 32 + 1}), 1, {textBytes}) AS t{k}"));
+        $", substr(repeat(md5((((h * {rows} + i) % {textDistinct}) + {k})::VARCHAR), {textBytes / 32 + 1}), 1, {textBytes}) AS t{k}"));
     var paths = new List<string>();
     using var con = new DuckDBConnection("DataSource=:memory:");
     con.Open();

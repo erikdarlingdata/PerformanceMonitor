@@ -27,6 +27,18 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpStoreMaintenanceReadinessTools
 {
+    /// <summary>This tool's entries on the web read surface and in Custom Views validation, kept here and not in the shared lists (#9477).</summary>
+    internal sealed class Registration : IReadToolRegistration
+    {
+        public ReadToolRegistration Read { get; } = new(
+            "get_store_maintenance_readiness",
+            (c, pg, an) => GetStoreMaintenanceReadiness(pg, c.RequestAborted),
+            new(
+                DarlingWebEndpoints.CatOverview,
+                "Whether the monitoring store is safe for maintenance now: one verdict line, then strong locks on product tables, long transactions, running vacuums, replication slots holding WAL (every slot on the server, not only this database) and crashing background jobs.",
+                Array.Empty<DarlingWebEndpoints.CatalogParam>()));
+    }
+
     [McpServerTool(Name = "get_store_maintenance_readiness"), Description(
         "Says whether the monitoring STORE (not a monitored server) is safe for maintenance right now: an install, an upgrade or a table "
         + "rewrite. One verdict line, 'Safe for maintenance now.' or the reasons it is not, plus the detail. Run it before every install. "
