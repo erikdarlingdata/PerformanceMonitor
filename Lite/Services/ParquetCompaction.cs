@@ -106,7 +106,7 @@ public static class ParquetCompaction
        ArchiveSortedRowGroupSizeTests, not by a quiet return to the out-of-memory retry. 24 MiB, not the largest that
        fit: the memory cliff is sharp (a width that fits at 32 MiB ran out at 48) and a real archive's rows can be wider
        than the seeded ones. A table that still runs out is sorted again at ArchiveRowGroupSize (MergeBatchToFile). */
-    public const long SortedRowGroupBytes = 1L * 1024 * 1024; /* 24 MiB */
+    public const long SortedRowGroupBytes = 24L * 1024 * 1024; /* 24 MiB */
 
     /* The temp spill of a sort, as a multiple of its input: #5410 measured about 4 and 11 times the input size. A re-cut
        starts only when the volume has room for its output plus this many times its source (#9407). */
