@@ -291,34 +291,53 @@ WITH svr AS
 ),
 latest AS
 (
+    -- #9195: each plan's newest row by one hash aggregate, not ROW_NUMBER() over the window (the same change as the fact read,
+    -- DuckDbFactCollector.CollectParameterSensitivityFactsAsync). The window sorted every row of the analysis window, so its time
+    -- and memory grew with the window. The newest row is the largest (collection_time, collection_id), the old ORDER BY
+    -- collection_time DESC, collection_id DESC, and a NULL key groups with its own kind in both. Its fields ride in the struct.
+    -- #5361: no text here. The text of the plans that print is read afterwards (ParameterSensitiveTextSql); a plan whose
+    -- newest row has no text prints empty text, as before.
     SELECT
-        database_name,
-        query_hash,
-        query_plan_hash,
-        execution_count,
-        creation_time,
-        creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
+        g.database_name,
+        g.query_hash,
+        g.query_plan_hash,
+        g.w.execution_count AS execution_count,
+        g.w.creation_time AS creation_time,
+        g.w.creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
         svr.offset_minutes AS server_offset_minutes,
         svr.time_zone_id AS server_time_zone_id,
-        min_worker_time,
-        max_worker_time,
-        min_grant_kb,
-        max_grant_kb,
-        min_spills,
-        max_spills,
-        -- #5361: no text here. This window sort would carry every row's whole text (up to 64 KB each) to keep five
-        -- plans, and even a test of the column for NULL reads it, so the text of the plans that print is read afterwards
-        -- (ParameterSensitiveTextSql); a plan whose newest row has no text prints empty text, as before.
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_hash, query_plan_hash
-            ORDER BY collection_time DESC, collection_id DESC
-        ) AS rn
-    FROM v_query_stats, svr
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   delta_execution_count > 0
+        g.w.min_worker_time AS min_worker_time,
+        g.w.max_worker_time AS max_worker_time,
+        g.w.min_grant_kb AS min_grant_kb,
+        g.w.max_grant_kb AS max_grant_kb,
+        g.w.min_spills AS min_spills,
+        g.w.max_spills AS max_spills
+    FROM
+    (
+        SELECT
+            database_name,
+            query_hash,
+            query_plan_hash,
+            max(
+            {
+                'collection_time': collection_time,
+                'collection_id': collection_id,
+                'execution_count': execution_count,
+                'creation_time': creation_time,
+                'min_worker_time': min_worker_time,
+                'max_worker_time': max_worker_time,
+                'min_grant_kb': min_grant_kb,
+                'max_grant_kb': max_grant_kb,
+                'min_spills': min_spills,
+                'max_spills': max_spills
+            }) AS w
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   delta_execution_count > 0
+        GROUP BY database_name, query_hash, query_plan_hash
+    ) AS g, svr
 )
 SELECT
     database_name,
@@ -334,7 +353,7 @@ SELECT
     server_offset_minutes,
     server_time_zone_id
 FROM latest
-WHERE rn = 1
+WHERE 1 = 1
 " + ParameterSensitivitySignature.PredicateSql("creation_time_utc <= $4") + @"
 ORDER BY worker_ratio DESC";
 
@@ -420,7 +439,7 @@ ORDER BY worker_ratio DESC";
     /// <summary>
     /// The whole text of the parameter-sensitive plans the reader keeps (#5361): each plan's newest row of the window
     /// with <c>delta_execution_count &gt; 0</c>, the row the ranking read called <c>rn = 1</c>, so a kept plan prints
-    /// the text it printed when the ranking read carried it. <c>$1</c> to <c>$3</c> are the server and the window; the
+    /// the text it printed when the ranking read carried it (two rows on one stamp: the larger collection_id, as the ranking read has it). <c>$1</c> to <c>$3</c> are the server and the window; the
     /// plans follow as <c>$4</c> upward, three to a plan, and a NULL part matches a NULL part (as the ranking's
     /// <c>PARTITION BY</c> groups it). <c>{KEYS}</c> is replaced with that plan list.
     /// </summary>
@@ -435,7 +454,7 @@ AND   ({KEYS})
 QUALIFY ROW_NUMBER() OVER
 (
     PARTITION BY database_name, query_hash, query_plan_hash
-    ORDER BY collection_time DESC
+    ORDER BY collection_time DESC, collection_id DESC
 ) = 1";
 
     private async Task<Dictionary<PlanKey, string>> ReadParameterSensitiveTextAsync(

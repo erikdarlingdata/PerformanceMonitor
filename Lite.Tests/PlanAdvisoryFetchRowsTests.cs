@@ -106,7 +106,60 @@ CROSS JOIN range(0, 4) AS ss(s)";
         await command.ExecuteNonQueryAsync();
     }
 
-    private async Task<List<string>> ReadAsync(string sql)
+    /// <summary>
+    /// #9195: the plan's costliest row is now picked by one hash aggregate in place of a window function ordered by worker time, so its edges are held
+    /// here against the old statement. Plan 1 has a NULL worker time on its newest snapshot and a real one on the older ones, and its plan text
+    /// differs by snapshot, so the text read says which snapshot stood for it (the costliest real one, never the NULL one). Plan 2 has a NULL worker
+    /// time on every snapshot and still stands for itself, after the plans that have one. Plans 3 to 5 repeat their costliest value across snapshots
+    /// that carry the same text, since the old statement's pick among equal rows was arbitrary and only the text it reads can be compared.
+    /// </summary>
+    [Fact]
+    public async Task ThePlanFetch_NullAndRepeatedWorkerTimes_GiveTheOldStatementsPlans()
+    {
+        const int server = 857_002;
+        using (var readLock = _duckDb.AcquireReadLock())
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync();
+            using var command = connection.CreateCommand();
+            command.CommandText = @"
+INSERT INTO query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, query_plan_hash, plan_handle,
+     creation_time, delta_execution_count, delta_worker_time, delta_elapsed_time, delta_logical_reads, delta_spills,
+     query_text, query_plan_xml)
+SELECT
+    $1 + row_number() OVER (),
+    $2 - s * INTERVAL 7 MINUTE,
+    $3, 'FetchRowsSrv2', 'DbA', 'QH' || q, 'PH' || q, 'HANDLE' || q,
+    $2 - INTERVAL 1 DAY, 10,
+    CASE
+        WHEN q = 1 THEN (CASE WHEN s = 0 THEN NULL ELSE 9000 - s * 10 END)
+        WHEN q = 2 THEN NULL
+        WHEN q = 3 THEN (CASE WHEN s IN (1, 2) THEN 7000 ELSE 100 END)
+        ELSE 1000 * q
+    END,
+    1000000, 1000, 0, 'SELECT 1',
+    '<plan q=""' || q || '"" s=""' || (CASE WHEN q = 1 THEN s ELSE 0 END) || '""/>'
+FROM range(1, 6) AS qs(q)
+CROSS JOIN range(0, 4) AS ss(s)";
+            command.Parameters.Add(new DuckDBParameter { Value = 9_195_000_000L });
+            command.Parameters.Add(new DuckDBParameter { Value = WindowEnd });
+            command.Parameters.Add(new DuckDBParameter { Value = server });
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var expected = await ReadAsync(OldSql, server);
+        var actual = await ReadAsync(DuckDbFactCollector.PlanAdvisorySql, server);
+
+        Assert.Equal(5, expected.Count);
+        Assert.Equal(expected, actual);
+        /* Not only equal to the old statement: the order is the costliest real worker time first and the all-NULL plan last. */
+        Assert.Equal(
+            ["<plan q=\"1\" s=\"1\"/>", "<plan q=\"3\" s=\"0\"/>", "<plan q=\"5\" s=\"0\"/>", "<plan q=\"4\" s=\"0\"/>", "<plan q=\"2\" s=\"0\"/>"],
+            actual);
+    }
+
+    private async Task<List<string>> ReadAsync(string sql, int serverId = ServerId)
     {
         var rows = new List<string>();
         using var readLock = _duckDb.AcquireReadLock();
@@ -114,7 +167,7 @@ CROSS JOIN range(0, 4) AS ss(s)";
         await connection.OpenAsync();
         using var command = connection.CreateCommand();
         command.CommandText = sql;
-        command.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = WindowEnd.AddHours(-4) });
         command.Parameters.Add(new DuckDBParameter { Value = WindowEnd });
         using var reader = await command.ExecuteReaderAsync();

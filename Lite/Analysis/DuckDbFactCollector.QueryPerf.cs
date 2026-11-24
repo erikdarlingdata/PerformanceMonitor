@@ -746,29 +746,39 @@ AND   delta_execution_count > 0";
 SELECT w.query_plan_xml
 FROM
 (
-    SELECT collection_id, delta_worker_time
+    /* #9195: each plan's costliest snapshot row by one hash aggregate, not ROW_NUMBER() over the window. The window sorted every
+       row of the analysis window, so its time and memory grew with the window (a week's rows against a day's). The winner is
+       the row with the largest delta_worker_time, a NULL one only when the plan has no other, as the old ORDER BY delta_worker_time DESC
+       put NULL last, and a tie goes to the larger collection_id (the old tie was arbitrary, so this is one of its valid answers).
+       The grouping is the old PARTITION BY. Everything else is as before.
+       #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
+       row of a cached plan resolves to the same plan XML. Without one row per plan the hottest plan fills all
+       ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
+       multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
+       plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
+       a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
+       shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
+       every statement in its batch, so database_name and query_hash stay in the key. */
+    SELECT
+        g.best.collection_id AS collection_id,
+        g.best.delta_worker_time AS delta_worker_time
     FROM
     (
         SELECT
-            collection_id,
-            delta_worker_time,
-            /* #7886: one row per plan. v_query_stats holds one row per query per snapshot, and every snapshot
-               row of a cached plan resolves to the same plan XML. Without this rank the hottest plan fills all
-               ten slots and is parsed once per snapshot, so PLAN_WARNING's warning_count and critical_count
-               multiply by its snapshot count and the two facts cover one to three plans instead of ten. The
-               plan's costliest snapshot row stands for it, and the limit below counts distinct plans. A plan is
-               a statement's plan in one database: query_plan_hash is a shape hash that two statements with one
-               shape share, as does one statement in two databases, and a hashless row's plan_handle is shared by
-               every statement in its batch, so database_name and query_hash stay in the key. */
-            ROW_NUMBER() OVER (PARTITION BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle) ORDER BY delta_worker_time DESC) AS plan_rank
+            max(
+            {
+                'has_delta': delta_worker_time IS NOT NULL,
+                'delta_worker_time': delta_worker_time,
+                'collection_id': collection_id
+            }) AS best
         FROM v_query_stats
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   query_plan_xml IS NOT NULL
-    ) AS ranked
-    WHERE plan_rank = 1
-    ORDER BY delta_worker_time DESC
+        GROUP BY database_name, query_hash, COALESCE(query_plan_hash, plan_handle)
+    ) AS g
+    ORDER BY delta_worker_time DESC, collection_id DESC
     LIMIT 10
 ) AS top
 JOIN v_query_stats AS w
