@@ -61,6 +61,32 @@ public static class ProductBuildText
         return $"Version {version} (commit {commit})";
     }
 
+    /// <summary>
+    /// The commit a build was made from, in full, or null when the version carries none (#9431): the <c>+commit</c> suffix of
+    /// <c>3.10.0+0993a1441...</c>. <see cref="Format"/> shows only the first <see cref="ShortCommitLength"/> characters.
+    /// </summary>
+    public static string? Commit(string? informationalVersion)
+    {
+        if (string.IsNullOrWhiteSpace(informationalVersion))
+        {
+            return null;
+        }
+
+        var raw = informationalVersion.Trim();
+        var plus = raw.IndexOf('+', StringComparison.Ordinal);
+        if (plus < 0)
+        {
+            return null;
+        }
+
+        var commit = raw[(plus + 1)..].Trim();
+        return commit.Length == 0 ? null : commit;
+    }
+
+    /// <summary>The commit for an assembly, from its informational version (#9431). Null when the build carries none.</summary>
+    public static string? CommitForAssembly(Assembly assembly)
+        => Commit(assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion);
+
     /// <summary>The line for an assembly: its informational version, else its assembly version.</summary>
     public static string ForAssembly(Assembly assembly)
     {

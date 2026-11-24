@@ -91,7 +91,21 @@ public sealed class DarlingMcpStoreHostTools
         + "call; if that read times out or the role is refused it (any error but TimescaleDB being absent) they are "
         + "null, uncompressed_chunk_percent_of_ram is null with them, and uncompressed_unavailable_reason says why "
         + "(the SQLSTATE for a refusal); a store without TimescaleDB reports 0 chunks. The rest of the profile still "
-        + "returns (a slow fact fails alone). --check-settings reads the size live. postgres_owner says who owns the PostgreSQL "
+        + "returns (a slow fact fails alone). --check-settings reads the size live. "
+        + "store_certificate is the server certificate the store presents to TLS clients: tls is on, off, "
+        + "socket or unavailable. On, source says where it was read: managed_file (the server.crt the service wrote for a "
+        + "managed store, beside the data directory) or tls_handshake (the certificate the store presents when this "
+        + "service connects, for a store it does not manage; over TCP the handshake ends before any user name or "
+        + "password is sent), and server carries subject, issuer, "
+        + "sha256 (64 upper-case hex characters, the fingerprint of the certificate's DER bytes), not_before and not_after "
+        + "(UTC) and days_to_expiry (whole days, negative once expired, as of this response). root is the issuing "
+        + "root's subject and sha256 when the chain carries one, else null. Off means the store's ssl setting is off and "
+        + "message says so. Socket means the store is reached over a Unix socket, which has no TLS handshake to read, so "
+        + "the service reads nothing and sends nothing. Unavailable means the setting or the certificate could not be read "
+        + "(the read has its own short time limit) and message says why; the rest of the profile still returns. A managed "
+        + "store's file is read on every call. A handshake result is kept for 10 minutes per store connection, so the "
+        + "store's log does not record a failed TLS handshake on every call, and a changed certificate shows within that time. "
+        + "postgres_owner says who owns the PostgreSQL "
         + "process: owner is started_by_this_service (stopping the service stops PostgreSQL), adopted_running (it leaves PostgreSQL running), "
         + "not_managed or not_yet_known (still starting), with the sentence in on_service_stop. This "
         + "tool never writes a setting or a conf file.")]
@@ -157,6 +171,17 @@ public sealed class DarlingMcpStoreHostTools
                raw ResolveDataDirectory) so a UNC-configured managed store agrees with
                GatherSettingProfilesAsync's own refusal (Low 4) instead of silently resolving a path
                GatherSettingProfilesAsync never used. */
+            /* #9430: the certificate is read on every call, outside the profile cache, so days_to_expiry is as of this response and a
+               rotated certificate shows at once. A failure or its own short deadline here answers unavailable and never fails the profile; only the caller cancelling does. */
+            var certificate = await StoreServerCertificate.ReadBoundedAsync(
+                async token =>
+                {
+                    await using var certificateConnection = await postgres.OpenConnectionAsync(token);
+                    return await StoreServerCertificate.ReadAsync(postgresConfig, certificateConnection, token);
+                },
+                StoreServerCertificate.ReadTimeout,
+                cancellationToken);
+
             var mcpDataDirectory = postgresConfig.Managed ? DarlingStoreHostProfile.TryResolveProfileDataDirectory(postgresConfig) : null;
 
             return JsonSerializer.Serialize(new
@@ -199,6 +224,7 @@ public sealed class DarlingMcpStoreHostTools
                     started_by_this_service = profile.IsManagedStore && owner == StoreProcessOwnership.Owner.StartedByThisService,
                     on_service_stop = StoreProcessOwnership.Describe(profile.IsManagedStore, owner),
                 },
+                store_certificate = DescribeCertificate(certificate, DateTime.UtcNow),
                 store = new
                 {
                     postgres_version = profile.Store.PostgresVersion,
@@ -257,6 +283,26 @@ public sealed class DarlingMcpStoreHostTools
             return McpHelpers.FormatError("get_store_host", FailureFor(ex));
         }
     }
+
+    /// <summary>#9430: the <c>store_certificate</c> object. Times are UTC with a trailing Z, because a certificate's validity is a fixed instant.</summary>
+    internal static object DescribeCertificate(StoreServerCertificate.Report report, DateTime nowUtc) => new
+    {
+        tls = report.Tls,
+        source = report.Source,
+        message = report.Message,
+        server = report.Server is { } server
+            ? new
+            {
+                subject = server.Subject,
+                issuer = server.Issuer,
+                sha256 = server.Sha256,
+                not_before = server.NotBeforeUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
+                not_after = server.NotAfterUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
+                days_to_expiry = (int?)StoreServerCertificate.DaysToExpiry(server.NotAfterUtc, nowUtc),
+            }
+            : null,
+        root = report.Root is { } root ? new { subject = root.Subject, sha256 = root.Sha256 } : null,
+    };
 
     /// <summary>One setting's provenance as the MCP payload carries it (#9418), with every file path reduced to what a
     /// remote caller may see. Null when the setting was not visible on the connection.</summary>

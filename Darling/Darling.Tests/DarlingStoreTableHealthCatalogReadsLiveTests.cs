@@ -221,11 +221,11 @@ ANALYZE;", ct);
     /// <summary>What a store with TOAST values, an unlogged table (an index with an init fork), a vacuumed index (a free space map
     /// fork) and a hypertable with chunks adds to the #9224 seed (#9364).</summary>
     private const string ForksSeedSql = @"
-CREATE TABLE zz9224.big (id integer PRIMARY KEY, body text);
+CREATE TABLE zz9224.big (id integer PRIMARY KEY, body text) WITH (autovacuum_enabled = off, toast.autovacuum_enabled = off);
 INSERT INTO zz9224.big SELECT g, (SELECT string_agg(md5(g::text || i::text), '') FROM generate_series(1, 400) AS i) FROM generate_series(1, 200) AS g;
 CREATE INDEX big_body_len ON zz9224.big (length(body));
 DELETE FROM zz9224.big WHERE id % 2 = 0;
-CREATE UNLOGGED TABLE zz9224.ul (id integer PRIMARY KEY, v text);
+CREATE UNLOGGED TABLE zz9224.ul (id integer PRIMARY KEY, v text) WITH (autovacuum_enabled = off);
 CREATE INDEX ul_v ON zz9224.ul (v);
 INSERT INTO zz9224.ul SELECT g, md5(g::text) FROM generate_series(1, 500) AS g;";
 
@@ -295,47 +295,88 @@ INSERT INTO zz9224.ul SELECT g, md5(g::text) FROM generate_series(1, 500) AS g;"
 
         await ExecAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
 
+        await using var version = new NpgsqlCommand("SELECT current_setting('server_version_num')::int", connection);
+        var serverVersion = (int)(await version.ExecuteScalarAsync(ct))!;
+
+        // The unsized form calls the size functions inline: the original statement, and the oracle for the passes. It is read once
+        // before and once after the presized reads, and a table or index is compared only when both oracle reads agree: a size
+        // function reads the file at call time, so a write between two reads (autovacuum, TimescaleDB catalog work) moves a size
+        // without either read being wrong (#9466).
+        async Task<System.Collections.Generic.Dictionary<(string, string), (long Total, long Heap, long Index, long Toast)>> OracleTablesAsync()
+        {
+            var rows = new System.Collections.Generic.Dictionary<(string, string), (long Total, long Heap, long Index, long Toast)>();
+            await using var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildSql(timescale: true, serverVersion, presized: false), connection) { CommandTimeout = 300 };
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                rows[(reader.GetString(0), reader.GetString(1))] = (reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6));
+            }
+
+            return rows;
+        }
+
+        async Task<System.Collections.Generic.Dictionary<(string, string, string), (long Bytes, long Heap, long? Reclaimable, long? Basis)>> OracleIndexesAsync()
+        {
+            var rows = new System.Collections.Generic.Dictionary<(string, string, string), (long Bytes, long Heap, long? Reclaimable, long? Basis)>();
+            await using var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildIndexSql(timescale: true, presized: false), connection) { CommandTimeout = 300 };
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                rows[(reader.GetString(0), reader.GetString(1), reader.GetString(3))] =
+                    (reader.GetInt64(7), reader.GetInt64(8), reader.IsDBNull(18) ? null : reader.GetInt64(18), reader.IsDBNull(22) ? null : reader.GetInt64(22));
+            }
+
+            return rows;
+        }
+
+        var oracleTablesBefore = await OracleTablesAsync();
+        var oracleIndexesBefore = await OracleIndexesAsync();
+
         await using var store = NpgsqlDataSource.Create(scratch.ConnectionString);
         var tables = await DarlingStoreTableHealthReader.GetAsync(store, ct);
         var indexes = await DarlingStoreTableHealthReader.GetIndexesAsync(store, ct);
 
-        await using var version = new NpgsqlCommand("SELECT current_setting('server_version_num')::int", connection);
-        var serverVersion = (int)(await version.ExecuteScalarAsync(ct))!;
+        var oracleTablesAfter = await OracleTablesAsync();
+        var oracleIndexesAfter = await OracleIndexesAsync();
 
-        // The unsized form calls the size functions inline: the original statement, and the oracle for the passes.
-        var oracleTables = new System.Collections.Generic.Dictionary<(string, string), (long Total, long Heap, long Index, long Toast)>();
-        await using (var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildSql(timescale: true, serverVersion, presized: false), connection) { CommandTimeout = 300 })
-        await using (var reader = await command.ExecuteReaderAsync(ct))
+        // Stable: both oracle reads agree. Those are the ones a presized row has to match.
+        var stableTables = oracleTablesBefore.Where(kv => oracleTablesAfter.TryGetValue(kv.Key, out var after) && after == kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value);
+        var stableIndexes = oracleIndexesBefore.Where(kv => oracleIndexesAfter.TryGetValue(kv.Key, out var after) && after == kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value);
+
+        // The seeded tables and their indexes are the point of the test: they are always in the stable set, never skipped as moved.
+        foreach (var seeded in new[] { "big", "ul", "ht" })
         {
-            while (await reader.ReadAsync(ct))
-            {
-                oracleTables[(reader.GetString(0), reader.GetString(1))] = (reader.GetInt64(3), reader.GetInt64(4), reader.GetInt64(5), reader.GetInt64(6));
-            }
+            Assert.True(stableTables.ContainsKey(("zz9224", seeded)), $"zz9224.{seeded} moved between the unsized reads: before {Describe(oracleTablesBefore, ("zz9224", seeded))}, after {Describe(oracleTablesAfter, ("zz9224", seeded))}");
+            Assert.True(stableIndexes.Keys.Any(k => k.Item1 == "zz9224" && k.Item2 == seeded), $"no index of zz9224.{seeded} is in the stable set");
         }
 
-        var oracleIndexes = new System.Collections.Generic.Dictionary<(string, string, string), (long Bytes, long Heap, long? Reclaimable, long? Basis)>();
-        await using (var command = new NpgsqlCommand(DarlingStoreTableHealthReader.BuildIndexSql(timescale: true, presized: false), connection) { CommandTimeout = 300 })
-        await using (var reader = await command.ExecuteReaderAsync(ct))
+        // A stable table the presized read left out is a failure: the set compared is not allowed to shrink to the rows that match.
+        var tableKeys = tables.Select(t => (t.SchemaName, t.TableName)).ToHashSet();
+        foreach (var key in stableTables.Keys)
         {
-            while (await reader.ReadAsync(ct))
-            {
-                oracleIndexes[(reader.GetString(0), reader.GetString(1), reader.GetString(3))] =
-                    (reader.GetInt64(7), reader.GetInt64(8), reader.IsDBNull(18) ? null : reader.GetInt64(18), reader.IsDBNull(22) ? null : reader.GetInt64(22));
-            }
+            Assert.True(tableKeys.Contains(key), $"{key.Item1}.{key.Item2} is stable but the presized tables read has no row for it");
         }
 
-        Assert.Equal(oracleTables.Count, tables.Count);
         foreach (var t in tables)
         {
-            var o = oracleTables[(t.SchemaName, t.TableName)];
-            Assert.Equal(o, (t.TotalBytes, t.HeapBytes, t.IndexBytes, t.ToastBytes));
+            if (stableTables.TryGetValue((t.SchemaName, t.TableName), out var o))
+            {
+                Assert.True(o == (t.TotalBytes, t.HeapBytes, t.IndexBytes, t.ToastBytes), $"{t.SchemaName}.{t.TableName}: unsized {o}, presized {(t.TotalBytes, t.HeapBytes, t.IndexBytes, t.ToastBytes)}");
+            }
         }
 
-        Assert.Equal(oracleIndexes.Count, indexes.Count);
+        var indexKeys = indexes.Select(i => (i.SchemaName, i.TableName, i.IndexName)).ToHashSet();
+        foreach (var key in stableIndexes.Keys)
+        {
+            Assert.True(indexKeys.Contains(key), $"{key.Item1}.{key.Item2}.{key.Item3} is stable but the presized indexes read has no row for it");
+        }
+
         foreach (var i in indexes)
         {
-            var o = oracleIndexes[(i.SchemaName, i.TableName, i.IndexName)];
-            Assert.Equal(o, (i.Bytes, i.HeapBytes, i.EstimatedReclaimableBytes, i.EstimatedBasisBytes));
+            if (stableIndexes.TryGetValue((i.SchemaName, i.TableName, i.IndexName), out var o))
+            {
+                Assert.True(o == (i.Bytes, i.HeapBytes, i.EstimatedReclaimableBytes, i.EstimatedBasisBytes), $"{i.SchemaName}.{i.TableName}.{i.IndexName}: unsized {o}, presized {(i.Bytes, i.HeapBytes, i.EstimatedReclaimableBytes, i.EstimatedBasisBytes)}");
+            }
         }
 
         // The seed has what the passes treat differently: TOAST on a heap, indexes with forks beyond the main one, a hypertable with chunks.
@@ -348,6 +389,9 @@ INSERT INTO zz9224.ul SELECT g, md5(g::text) FROM generate_series(1, 500) AS g;"
 
         Assert.Contains(tables, t => t.TableName == "ht" && t.ChunkCount > 0);
     }
+
+    private static string Describe(System.Collections.Generic.Dictionary<(string, string), (long Total, long Heap, long Index, long Toast)> rows, (string, string) key) =>
+        rows.TryGetValue(key, out var row) ? row.ToString() : "absent";
 
     [Fact]
     public async Task AFailedExtrasPass_DoesNotStopTheIndexesRead_AndTheNextTablesReadRunsTheExtrasAgain()
