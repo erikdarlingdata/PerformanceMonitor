@@ -274,13 +274,13 @@ public sealed class DarlingUpgradeRunRecordTests
         var folder = NewFolder();
         try
         {
-            var body = "$run = New-DarlingUpgradeRun 'a' 'b' ([datetime]::UtcNow); Write-DarlingUpgradeRunFile $root $run 'NT AUTHORITY\NETWORK SERVICE' | Out-Null; "
+            var body = "$run = New-DarlingUpgradeRun 'a' 'b' ([datetime]::UtcNow); Write-DarlingUpgradeRunFile $root $run 'NT AUTHORITY\\NETWORK SERVICE' | Out-Null; "
                 + "$service = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-20'); $file = Join-Path $root 'upgrade-run.json'; "
                 + "function Get-ServiceModify { @((Get-Acl -LiteralPath $file).GetAccessRules($true, $false, [System.Security.Principal.SecurityIdentifier]) | Where-Object { $_.IdentityReference -eq $service -and ([int]$_.FileSystemRights -band 0x10000) -ne 0 }).Count -gt 0 }; "
                 + "'before=' + (Get-ServiceModify); "
-                + "$open = @(Lock-DarlingInstallTree $root 'NT AUTHORITY\NETWORK SERVICE'); 'lockRan=' + ($open.Count -ge 0); "
+                + "$open = @(Lock-DarlingInstallTree $root 'NT AUTHORITY\\NETWORK SERVICE'); 'lockRan=' + ($open.Count -ge 0); "
                 + "'afterLock=' + (Get-ServiceModify); "
-                + "Close-DarlingUpgradeRun $root $run $true 'clear' '' '' 'NT AUTHORITY\NETWORK SERVICE' | Out-Null; "
+                + "Close-DarlingUpgradeRun $root $run $true 'clear' '' '' 'NT AUTHORITY\\NETWORK SERVICE' | Out-Null; "
                 + "'afterRewrite=' + (Get-ServiceModify); "
                 + "'state=' + (Read-DarlingUpgradeRunFile $root)['state']";
             var output = Run(folder, body, ServiceWrittenListFunctions.Append("Lock-DarlingInstallTree").ToArray());
