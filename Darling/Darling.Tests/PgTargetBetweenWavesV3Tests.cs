@@ -37,21 +37,21 @@ public sealed class PgTargetBetweenWavesV3Tests
     /* ───────────────────────── item 2: memory on the served CPU read, not on the gate ───────────────────────── */
 
     /// <summary>
-    /// The served read is the second reader of the six memory columns; the two alert reads stay byte-for-byte what
-    /// they selected before V136 (the census in <c>PgDatabaseSizeStatsAndHostMemoryRungTests</c> asserts the roster;
-    /// here the reader's own shape). <c>CpuSample.Memory</c> is NOT defaulted — a null must be stated at every
+    /// The served read is the second reader of the six memory columns; the single-latest alert read stays byte-for-byte what
+    /// it selected before V136 (the census in <c>PgDatabaseSizeStatsAndHostMemoryRungTests</c> asserts the roster;
+    /// here the reader's own shape). #9501 moved the gate batch read (<c>SamplesSinceSql</c>) out of that rule: it carries the columns
+    /// too, for the "Capacity at ceiling" detail. <c>CpuSample.Memory</c> is NOT defaulted — a null must be stated at every
     /// construction site so "this read does not carry memory" is a decision, never an omission — and the tool's
     /// description names every key it now reports and says a null is "not measured".
     /// </summary>
     [Fact]
-    public void TheServedCpuRead_CarriesTheSixMemoryColumns_TheGateReadsDoNot_AndMemoryIsNeverDefaulted()
+    public void TheServedCpuRead_CarriesTheSixMemoryColumns_TheLatestReadDoesNot_AndMemoryIsNeverDefaulted()
     {
         var six = new[] { "memory_total_bytes", "memory_free_bytes", "memory_cached_bytes", "memory_buffers_bytes", "memory_active_bytes", "configured_memory_bytes" };
         foreach (var column in six)
         {
             Assert.Contains(column, DarlingPgCpuUtilizationReader.HistorySql, StringComparison.Ordinal);
             Assert.DoesNotContain(column, DarlingPgCpuUtilizationReader.LatestCpuSql, StringComparison.Ordinal);
-            Assert.DoesNotContain(column, DarlingPgCpuUtilizationReader.SamplesSinceSql, StringComparison.Ordinal);
         }
 
         var ctor = Assert.Single(typeof(DarlingPgCpuUtilizationReader.CpuSample).GetConstructors());

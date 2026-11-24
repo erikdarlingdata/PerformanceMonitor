@@ -29,6 +29,7 @@ public static class KnownPatternsEditorModel
         "Blocking Wait Time",
         "Deadlocks Detected",
         "High CPU",
+        AlertFamily.CapacityAtCeilingMetric,
         "Poison Wait",
         "Runnable Queue",
         AlertFamily.ClientTimeoutsMetric,
