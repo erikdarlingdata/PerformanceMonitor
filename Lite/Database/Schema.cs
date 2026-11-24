@@ -67,13 +67,15 @@ CREATE TABLE IF NOT EXISTS collection_log (
     /// #9423, #9424: one row per MCP tool call that took over the slow-call threshold. Not archived to Parquet: the table holds
     /// at most <c>LocalDataService.McpSlowCallMaxRows</c> rows and none older than <c>LocalDataService.McpSlowCallRetentionDays</c>
     /// days, trimmed by the write that adds a row, so it stays small. It is not in the 512 MB reset's preserved list, so a reset clears it.
-    /// Argument values are never stored: only the window (hours_back) when the call has one.
+    /// Argument values are never stored: only the window (hours_back) when the call has one, and the server name the call or its reply carries.
     /// </summary>
     public const string CreateMcpSlowCallsTable = @"
 CREATE TABLE IF NOT EXISTS mcp_slow_calls (
     call_time TIMESTAMP NOT NULL,
     tool VARCHAR NOT NULL,
     outcome VARCHAR NOT NULL,
+    server_name VARCHAR,
+    rows_returned BIGINT,
     total_ms BIGINT NOT NULL,
     lock_wait_ms BIGINT,
     hot_ms BIGINT,

@@ -28,7 +28,8 @@ public sealed class McpSlowCallTools
 
     internal const string Description =
         "Gets the monitoring tool's OWN slow MCP calls, newest first, and per-tool figures for every call since Lite started. Not a monitored server. " +
-        "slow_calls: one row per call that took 2 seconds or more: tool; call_time_utc (when it started); outcome (ok, error, exception or cancelled); " +
+        "slow_calls: one row per call that took 2 seconds or more: tool; server_name (the server the reply names, else the server_name the call carried, null when it named none); " +
+        "rows_returned (the reply's own count, else the length of the one array it holds, null when it carries neither); call_time_utc (when it started); outcome (ok, error, exception or cancelled); " +
         "total_ms (whole call); lock_wait_ms (time waiting for the local store's read lock, added up over every connection the call opened); " +
         "hot_ms and archive_ms (the part of total_ms spent outside and inside the archive span reads) and archive_files (archive files those reads opened), " +
         "which are null for a tool that keeps no phase split (only get_query_store_top does), so null means not measured, not zero; " +
@@ -79,6 +80,8 @@ public sealed class McpSlowCallTools
                     tool = r.Tool,
                     call_time_utc = r.CallTimeUtc.ToString("o"),
                     outcome = r.Outcome,
+                    server_name = r.ServerName,
+                    rows_returned = r.RowsReturned,
                     total_ms = r.TotalMs,
                     lock_wait_ms = r.LockWaitMs,
                     hot_ms = r.HotMs,

@@ -273,6 +273,7 @@ public sealed class McpHostService : BackgroundService
         /* #9423: the per-tool figures and the slow-call rows. The timing filter (AddCallToolFilters) finds this singleton on each call; a host
            that registers none passes every call straight through. */
         services.AddSingleton<McpCallTimingRecorder>(sp => sp.GetService<LocalDataService>() is { } data ? new McpCallTimingRecorder(data) : null!);
+        services.AddSingleton<McpCallTimingLive>(sp => sp.GetService<McpCallTimingRecorder>() is { } recorder ? new McpCallTimingLive(recorder) : null!);
 
         /* #5820: mcp_data_detail, read once per start. McpDataDetailFilter (AddCallToolFilters) reads this singleton on
            every call; Full passes everything through. */

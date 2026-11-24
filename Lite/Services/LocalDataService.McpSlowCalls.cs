@@ -30,6 +30,8 @@ namespace PerformanceMonitorLite.Services;
 /// <param name="PeakWorkingSetBytes">Highest process working set sampled during the call (the way tools/CompactionRepro samples one: WorkingSet64 every 75 ms, plus the first and last reading).</param>
 /// <param name="DuckDbMemoryBytes">DuckDB's duckdb_memory() total when the call ended. NULL when the store lock was busy.</param>
 /// <param name="MemorySource">Names where the two memory figures came from.</param>
+/// <param name="ServerName">The server the reply names, else the server_name the call carried. NULL when the call named none.</param>
+/// <param name="RowsReturned">Rows the reply holds, read from its count or its one array. NULL when the reply carries neither.</param>
 public sealed record McpSlowCall(
     DateTime CallTimeUtc,
     string Tool,
@@ -43,7 +45,9 @@ public sealed record McpSlowCall(
     double? HoursBack,
     long? PeakWorkingSetBytes,
     long? DuckDbMemoryBytes,
-    string? MemorySource);
+    string? MemorySource,
+    string? ServerName = null,
+    long? RowsReturned = null);
 
 public partial class LocalDataService
 {
@@ -64,8 +68,8 @@ public partial class LocalDataService
             insert.CommandText = @"
 INSERT INTO mcp_slow_calls
     (call_time, tool, outcome, total_ms, lock_wait_ms, hot_ms, archive_ms, archive_files, response_bytes, hours_back,
-     peak_working_set_bytes, duckdb_memory_bytes, memory_source)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
+     peak_working_set_bytes, duckdb_memory_bytes, memory_source, server_name, rows_returned)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)";
             insert.Parameters.Add(new DuckDBParameter { Value = UnspecifiedKind(call.CallTimeUtc) });
             insert.Parameters.Add(new DuckDBParameter { Value = call.Tool });
             insert.Parameters.Add(new DuckDBParameter { Value = call.Outcome });
@@ -79,6 +83,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)";
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.PeakWorkingSetBytes ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.DuckDbMemoryBytes ?? DBNull.Value });
             insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.MemorySource ?? DBNull.Value });
+            insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.ServerName ?? DBNull.Value });
+            insert.Parameters.Add(new DuckDBParameter { Value = (object?)call.RowsReturned ?? DBNull.Value });
             await insert.ExecuteNonQueryAsync();
         }
 
@@ -99,7 +105,7 @@ WHERE call_time < $1
         using var command = connection.CreateCommand();
         command.CommandText = @"
 SELECT call_time, tool, outcome, total_ms, lock_wait_ms, hot_ms, archive_ms, archive_files, response_bytes, hours_back,
-       peak_working_set_bytes, duckdb_memory_bytes, memory_source
+       peak_working_set_bytes, duckdb_memory_bytes, memory_source, server_name, rows_returned
 FROM   mcp_slow_calls
 WHERE  call_time >= $1
 AND    ($2 IS NULL OR tool = $2)
@@ -126,7 +132,9 @@ LIMIT  $3";
                 reader.IsDBNull(9) ? null : reader.GetDouble(9),
                 reader.IsDBNull(10) ? null : reader.GetInt64(10),
                 reader.IsDBNull(11) ? null : reader.GetInt64(11),
-                reader.IsDBNull(12) ? null : reader.GetString(12)));
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.IsDBNull(13) ? null : reader.GetString(13),
+                reader.IsDBNull(14) ? null : reader.GetInt64(14)));
         }
 
         return rows;

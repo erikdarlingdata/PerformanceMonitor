@@ -65,6 +65,18 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
             return "{\"answer\":\"" + new string('x', 100) + "\"}";
         }
 
+        [McpServerTool(Name = "timing_counted"), System.ComponentModel.Description("Test-only: a reply with a server, a count and an array.")]
+        public static string Counted([System.ComponentModel.Description("The server.")] string? server_name = null) =>
+            "{\"server\":\"Resolved Name\",\"count\":7,\"items\":[1,2]}";
+
+        [McpServerTool(Name = "timing_array"), System.ComponentModel.Description("Test-only: a reply with one array and no server or count.")]
+        public static string OneArray([System.ComponentModel.Description("The server.")] string? server_name = null) =>
+            "{\"queries\":[1,2,3]}";
+
+        [McpServerTool(Name = "timing_two_arrays"), System.ComponentModel.Description("Test-only: a reply with two arrays and no count.")]
+        public static string TwoArrays() =>
+            "{\"a\":[1],\"b\":[1,2]}";
+
         [McpServerTool(Name = "timing_throw"), System.ComponentModel.Description("Test-only: throws an McpException.")]
         public static string Throw([System.ComponentModel.Description("The message.")] string message) =>
             throw new McpException(message);
@@ -164,6 +176,33 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         Assert.True(row.HotMs + row.ArchiveMs <= row.TotalMs + 1);
     }
 
+    // ── the server and the rows ──
+
+    [Fact]
+    public async Task ASlowCall_StoresTheServerAndTheRows_FromTheReplyOrTheArgument_AndNullWhereTheReplyHasNone()
+    {
+        var recorder = new McpCallTimingRecorder(_data) { SlowThreshold = TimeSpan.Zero };
+
+        await CallAsync(recorder, "timing_counted", ("server_name", "typed partial"));
+        await CallAsync(recorder, "timing_array", ("server_name", "  typed name  "));
+        await CallAsync(recorder, "timing_two_arrays");
+        await recorder.WhenWritesDoneAsync();
+
+        var counted = Assert.Single(await _data.GetMcpSlowCallsAsync(DateTime.UtcNow.AddHours(-1), 50, "timing_counted"));
+        /* The reply's own server wins over the typed one, and its count wins over its array. */
+        Assert.Equal("Resolved Name", counted.ServerName);
+        Assert.Equal(7, counted.RowsReturned);
+
+        var array = Assert.Single(await _data.GetMcpSlowCallsAsync(DateTime.UtcNow.AddHours(-1), 50, "timing_array"));
+        Assert.Equal("typed name", array.ServerName);
+        Assert.Equal(3, array.RowsReturned);
+
+        /* Two arrays and no count: the reply does not say how many rows it holds, so the row says nothing. */
+        var two = Assert.Single(await _data.GetMcpSlowCallsAsync(DateTime.UtcNow.AddHours(-1), 50, "timing_two_arrays"));
+        Assert.Null(two.ServerName);
+        Assert.Null(two.RowsReturned);
+    }
+
     // ── a call that throws ──
 
     [Fact]
@@ -220,6 +259,8 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         using var one = JsonDocument.Parse((await CallRawAsync(recorder, "get_slow_mcp_calls", ("hours_back", 24), ("tool", "tool_a"), ("limit", 1))).Text);
         var only = Assert.Single(one.RootElement.GetProperty("slow_calls").EnumerateArray());
         Assert.Equal("tool_a", only.GetProperty("tool").GetString());
+        Assert.Equal("SeedSrv", only.GetProperty("server_name").GetString());
+        Assert.Equal(12, only.GetProperty("rows_returned").GetInt64());
         Assert.Equal(now.AddHours(-3), only.GetProperty("call_time_utc").GetDateTime().ToUniversalTime(), TimeSpan.FromSeconds(1));
     }
 
@@ -240,7 +281,7 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
     // ── plumbing ──
 
     private static McpSlowCall Row(string tool, DateTime startedUtc) =>
-        new(startedUtc, tool, "ok", 2500, 10, null, null, null, 1000, 24, 1, 1, "test");
+        new(startedUtc, tool, "ok", 2500, 10, null, null, null, 1000, 24, 1, 1, "test", "SeedSrv", 12);
 
     private async Task CallAsync(McpCallTimingRecorder recorder, string tool, params (string Key, object Value)[] args) =>
         await CallRawAsync(recorder, tool, args);
@@ -253,7 +294,7 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
         return (result, string.Concat(result.Content.OfType<TextContentBlock>().Select(b => b.Text)));
     }
 
-    private sealed class ServerHost : IAsyncDisposable
+    internal sealed class ServerHost : IAsyncDisposable
     {
         private readonly ServiceProvider _provider;
         private readonly CancellationTokenSource _stop;
@@ -278,6 +319,7 @@ public sealed class McpCallTimingTests : IClassFixture<SharedDuckDbFixture>, IAs
             services.AddSingleton(data);
             services.AddSingleton(servers);
             services.AddSingleton(recorder);
+            services.AddSingleton(new McpCallTimingLive(recorder));
             var builder = services.AddMcpServer()
                 .WithStreamServerTransport(c2s.Reader.AsStream(), s2c.Writer.AsStream())
                 .WithTools<McpQueryTools>()

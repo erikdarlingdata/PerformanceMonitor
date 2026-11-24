@@ -22,6 +22,13 @@ using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Mcp;
 
+/// <summary>
+/// Marks a host that records MCP call timings (#9423). The real host registers one, and the call filter reads it instead of the recorder
+/// itself, because a test host builds every tool's service parameters as empty, never-constructed objects, and a recorder made that way
+/// has no clock to read. A host that registers none passes every call straight through.
+/// </summary>
+internal sealed record McpCallTimingLive(McpCallTimingRecorder Recorder);
+
 /// <summary>One tool's in-memory figures since the process started (#9423): the shape of Darling's read-latency rows, per tool.</summary>
 public sealed record McpToolFigures(
     string Tool, long Count, long TotalMs, long MaxMs, long P50Ms, long P95Ms, long P99Ms, long SlowCalls, long Errors);
@@ -33,7 +40,10 @@ public sealed record McpToolFigures(
 /// <see cref="SlowThreshold"/> also writes one <c>mcp_slow_calls</c> row, after the call has finished and off the call's own path:
 /// a failed write is logged at Debug and never reaches the caller.
 ///
-/// <para>The row never holds an argument value. The one argument kept is the window (<c>hours_back</c> or <c>hours</c>), a number.</para>
+/// <para>The row never holds an argument value. The one argument kept is the window (<c>hours_back</c> or <c>hours</c>), a number. The server is
+/// read from the reply's own <c>server</c> property (the name the tool resolved), else from a <c>server_name</c> argument the call carried. The rows
+/// returned are read from the reply: a top-level number named <c>count</c>, <c>row_count</c>, <c>rows_returned</c> or <c>returned_count</c>, else the
+/// length of the one top-level array the reply holds, else NULL. Both reads parse the reply of a slow call only.</para>
 ///
 /// <para><b>Memory.</b> The process working set is polled every <see cref="SampleInterval"/> while the call runs, plus once at the start
 /// and once at the end, and the highest reading is kept, the way <c>tools/CompactionRepro</c> measures a merge's peak (it polls
@@ -146,6 +156,7 @@ public sealed class McpCallTimingRecorder
         private readonly McpCallTimingRecorder _recorder;
         private readonly string _tool;
         private readonly double? _hoursBack;
+        private readonly string? _serverArgument;
         private readonly DateTime _startedUtc;
         private readonly long _startedAt = Stopwatch.GetTimestamp();
         private readonly ReadLockWaitTally _tally;
@@ -158,6 +169,7 @@ public sealed class McpCallTimingRecorder
             _recorder = recorder;
             _tool = tool;
             _hoursBack = WindowOf(arguments);
+            _serverArgument = ServerArgumentOf(arguments);
             _startedUtc = recorder.UtcNow();
             /* The tally the read lock and the archive span reads add to. A tool that opens its own nests inside this one and passes
                its figures up when it ends. */
@@ -187,7 +199,7 @@ public sealed class McpCallTimingRecorder
         }
 
         /// <summary>Ends the timing, adds the call to the in-memory figures and, when it was slow, writes its row in the background. Never throws.</summary>
-        internal void Finish(string outcome, long responseBytes)
+        internal void Finish(string outcome, CallToolResult? result)
         {
             if (_finished) return;
             _finished = true;
@@ -211,9 +223,10 @@ public sealed class McpCallTimingRecorder
                 }
 
                 var peak = Interlocked.Read(ref _peakWorkingSet);
+                var reply = result is null ? null : ReplyOf(result);
                 _recorder.WriteInBackground(new McpSlowCall(
-                    _startedUtc, _tool, outcome, totalMs, lockWaitMs, hotMs, archiveMs, archiveFiles, responseBytes, _hoursBack,
-                    peak > 0 ? peak : null, null, MemorySourceText));
+                    _startedUtc, _tool, outcome, totalMs, lockWaitMs, hotMs, archiveMs, archiveFiles, result is null ? 0 : BytesOf(result), _hoursBack,
+                    peak > 0 ? peak : null, null, MemorySourceText, reply?.Server ?? _serverArgument, reply?.Rows));
             }
             catch (Exception ex)
             {
@@ -277,6 +290,65 @@ public sealed class McpCallTimingRecorder
         return null;
     }
 
+    /// <summary>The longest server name a row keeps, in characters. A name past it is cut.</summary>
+    internal const int ServerNameMaxChars = 200;
+
+    /// <summary>The <c>server_name</c> the call carried when it is a non-blank string. A number or an object is not a name.</summary>
+    internal static string? ServerArgumentOf(IDictionary<string, JsonElement>? arguments) =>
+        arguments is not null && arguments.TryGetValue("server_name", out var value) && value.ValueKind == JsonValueKind.String
+            ? TrimServer(value.GetString())
+            : null;
+
+    private static string? TrimServer(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        name = name.Trim();
+        return name.Length > ServerNameMaxChars ? name[..ServerNameMaxChars] : name;
+    }
+
+    private static readonly string[] s_countNames = { "count", "row_count", "rows_returned", "returned_count" };
+
+    /// <summary>The server the reply names and the rows it returns, read from the reply's JSON. Nothing in it is kept but those two.</summary>
+    internal static (string? Server, long? Rows)? ReplyOf(CallToolResult result)
+    {
+        try
+        {
+            var text = string.Concat(result.Content.OfType<TextContentBlock>().Select(t => t.Text));
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            using var document = JsonDocument.Parse(text);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
+
+            string? server = null;
+            long? count = null;
+            long? arrayLength = null;
+            var arrays = 0;
+            foreach (var property in root.EnumerateObject())
+            {
+                if (property.NameEquals("server") && property.Value.ValueKind == JsonValueKind.String)
+                {
+                    server = TrimServer(property.Value.GetString());
+                }
+                else if (count is null && Array.IndexOf(s_countNames, property.Name) >= 0
+                    && property.Value.ValueKind == JsonValueKind.Number && property.Value.TryGetInt64(out var n))
+                {
+                    count = n;
+                }
+                else if (property.Value.ValueKind == JsonValueKind.Array)
+                {
+                    arrays++;
+                    arrayLength = property.Value.GetArrayLength();
+                }
+            }
+
+            return (server, count ?? (arrays == 1 ? arrayLength : null));
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     internal static string OutcomeOf(CallToolResult result)
     {
         if (result.IsError == true) return OutcomeError;
@@ -297,14 +369,14 @@ public sealed class McpCallTimingRecorder
 
 /// <summary>
 /// The call-tool filter that times every Lite MCP call (#9423). Registered once, first in the list, so it times the whole call
-/// including the other filters. A host that registers no <see cref="McpCallTimingRecorder"/> passes every call straight through.
+/// including the other filters. A host that registers no <see cref="McpCallTimingLive"/> passes every call straight through.
 /// </summary>
 internal static class McpCallTimingFilter
 {
     internal static McpRequestFilter<CallToolRequestParams, CallToolResult> Instance =>
         next => async (request, cancellationToken) =>
         {
-            var recorder = request.Services?.GetService(typeof(McpCallTimingRecorder)) as McpCallTimingRecorder;
+            var recorder = (request.Services?.GetService(typeof(McpCallTimingLive)) as McpCallTimingLive)?.Recorder;
             var tool = request.Params?.Name;
             if (recorder is null || string.IsNullOrEmpty(tool))
             {
@@ -319,16 +391,16 @@ internal static class McpCallTimingFilter
             }
             catch (OperationCanceledException)
             {
-                call.Finish(McpCallTimingRecorder.OutcomeCancelled, 0);
+                call.Finish(McpCallTimingRecorder.OutcomeCancelled, null);
                 throw;
             }
             catch (Exception)
             {
-                call.Finish(McpCallTimingRecorder.OutcomeException, 0);
+                call.Finish(McpCallTimingRecorder.OutcomeException, null);
                 throw;
             }
 
-            call.Finish(McpCallTimingRecorder.OutcomeOf(result), McpCallTimingRecorder.BytesOf(result));
+            call.Finish(McpCallTimingRecorder.OutcomeOf(result), result);
             return result;
         };
 }
