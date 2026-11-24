@@ -29,7 +29,7 @@ namespace Darling.Tests;
    CREATE and DROP its own database through ScratchPostgres and then works entirely inside it. */
 public sealed class StoreSessionNamesTests
 {
-    private static IReadOnlyList<string> EveryStepName() =>
+    private static List<string> EveryStepName() =>
         typeof(StoreSessionNames)
             .GetFields(BindingFlags.Public | BindingFlags.Static)
             .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name != nameof(StoreSessionNames.ServicePrefix))
