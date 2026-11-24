@@ -16,6 +16,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -373,7 +374,8 @@ public sealed partial class DarlingMcpInvestigationTools
         "your existing claim_id and a renewed lease (the token's name is your agent_id; any other agent still gets already_claimed). " +
         "On the legacy token a second claim while a lease is live answers already_claimed, even for the same agent_id. " +
         "The brief is composed at claim time, masked at your data detail level, and stored; if it cannot be composed the claim is " +
-        "released (it stays counted) and the answer is status error. brief_format: omit, or 1. agent_id names your agent " +
+        "released (it stays counted) and the answer is status error, as it is when the answer cannot be built after the brief is stored. If the " +
+        "requests people made in the thread cannot be read, the claim still answers, without person_requests and with person_requests_unavailable. brief_format: omit, or 1. agent_id names your agent " +
         "in the journal: 1-64 letters, digits, '.', '_', ':' or '-'. Return your findings with submit_investigation_report under this claim_id.")]
     public static Task<string> ClaimInvestigationRequest(
         NpgsqlDataSource postgres,
@@ -384,22 +386,28 @@ public sealed partial class DarlingMcpInvestigationTools
         [Description("Omit, or 1.")] int? brief_format = null,
         DarlingMcpServedPolicy? served = null,
         DarlingAgentActionSeat? seat = null,
+        ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         ClaimAsync(Store(postgres), composer, request_id, agent_id, claim_id, brief_format, cancellationToken, served?.Policy.AgentTokenName,
-            served?.NamedAgentNames, seat?.Owner?.Read() is { } owner ? Store(owner) : null);
+            served?.NamedAgentNames, seat?.Owner?.Read() is { } owner ? Store(owner) : null, logger);
 
     /// <summary>The claim over a given store and composer, so a test can drive a composer that fails. <paramref name="tokenName"/> is
     /// the name of the named agent token the call came with (#6542), or null for the legacy token: with a name, the agent is that
     /// name, and an <paramref name="agent_id"/> that differs from it is refused. A later call under a claim_id must come from the token
     /// that claimed it. <paramref name="namedAgentNames"/> is the names of the named agent tokens the host serves: the legacy token
-    /// (<paramref name="tokenName"/> null) may not claim under one of them.</summary>
+    /// (<paramref name="tokenName"/> null) may not claim under one of them. <paramref name="logger"/> gets the ERROR line (request id and step) of a
+    /// failure after the claim row is written (#9511). <paramref name="parseBrief"/> reads the stored brief back into the answer: a test passes one that
+    /// throws, to drive the answer build's failure.</summary>
     internal static async Task<string> ClaimAsync(InvestigationRequestStore store, InvestigationBriefComposer composer,
         string request_id, string agent_id, string? claim_id, int? brief_format, CancellationToken cancellationToken, string? tokenName = null,
-        IReadOnlySet<string>? namedAgentNames = null, InvestigationRequestStore? ownerStore = null)
+        IReadOnlySet<string>? namedAgentNames = null, InvestigationRequestStore? ownerStore = null, ILogger? logger = null,
+        Func<string, JsonNode?>? parseBrief = null)
     {
         if (!Guid.TryParse(request_id, out var requestId))
             return InvestigationToolCore.Status("not_found", $"request_id '{request_id}' is not a request id.");
 
+        var step = "claim";
+        Guid? claimWritten = null;
         try
         {
             /* #6542: a named agent token is the agent's identity. An agent_id that names another agent is refused and journaled
@@ -476,7 +484,9 @@ public sealed partial class DarlingMcpInvestigationTools
                 return InvestigationToolCore.Status(InvestigationToolCore.ClaimStatus(claim.Outcome), InvestigationToolCore.ClaimMessage(claim));
 
             var claimId = claim.ClaimId!.Value;
+            claimWritten = claimId;
             string? brief;
+            step = "compose_brief";
             try
             {
                 brief = await composer.ComposeAsync(requestId, cancellationToken);
@@ -484,45 +494,90 @@ public sealed partial class DarlingMcpInvestigationTools
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* Fix-B ruling: the claim stays counted, so a brief that keeps failing cannot claim forever. */
+                logger?.LogError(ex, "claim_investigation_request {RequestId}: step {Step} failed, the claim was released", requestId, step);
                 await store.ReleaseAsync(requestId, claimId, CancellationToken.None);
                 await store.RecordRefusalAsync(requestId, agent_id, "claim", "brief_failed", null, CancellationToken.None);
                 return McpHelpers.FormatError("claim_investigation_request",
                     new InvalidOperationException("the brief could not be composed, so the claim was released: " + ex.Message, ex));
             }
 
-            if (brief is null || !await store.SetBriefAsync(requestId, claimId, InvestigationFormats.BriefFormat, brief, cancellationToken))
+            /* #9511: from here the claim row is written. A failure that leaves the claim live gives the agent an error with no
+               claim_id, and on the legacy token a re-claim answers already_claimed for the whole lease, so it is released and journaled like the
+               brief failures above. */
+            try
             {
+                step = "store_brief";
+                if (brief is null || !await store.SetBriefAsync(requestId, claimId, InvestigationFormats.BriefFormat, brief, cancellationToken))
+                {
+                    /* A null brief means no source row for the request, and a false store means the claim no longer holds it. Neither throws,
+                       so the log line and the journal row are written here, the same as the throwing paths. */
+                    if (brief is null)
+                        step = "compose_brief";
+                    logger?.LogError("claim_investigation_request {RequestId}: step {Step} failed, the claim was released", requestId, step);
+                    await store.ReleaseAsync(requestId, claimId, CancellationToken.None);
+                    await store.RecordRefusalAsync(requestId, agent_id, "claim", "brief_failed", null, CancellationToken.None);
+                    return McpHelpers.FormatError("claim_investigation_request",
+                        new InvalidOperationException("the brief could not be stored under this claim. The claim was released if it still held the request."));
+                }
+
+                step = "build_answer";
+                var answer = JsonSerializer.SerializeToNode(new
+                {
+                    status = "claimed",
+                    request_id = requestId,
+                    claim_id = claimId,
+                    lease_until = claim.LeaseUntilUtc,
+                    claim_count = claim.ClaimCount,
+                    brief_format = InvestigationFormats.BriefFormat,
+                    report_formats = InvestigationFormats.AcceptedReportFormats,
+                    brief = (parseBrief ?? (text => JsonNode.Parse(text)))(brief),
+                }, McpHelpers.JsonOptions)!.AsObject();
+
+                /* #7659: what granted people asked in the thread rides beside the brief, never inside it, read on the owner connection (the mcp login
+                   holds no SELECT on the message table). A request nobody asked in carries no key, so an alert claim answers as before.
+                   #9511: a side read. When it fails the claim still answers, with the brief and the claim_id, and says the people's requests are missing. */
+                if (ownerStore is not null)
+                {
+                    step = "person_requests";
+                    try
+                    {
+                        if (await PersonRequestsAsync(ownerStore, requestId, cancellationToken) is { Requests: { } personRequests } people)
+                        {
+                            answer["person_requests"] = personRequests;
+                            answer["person_requests_rule"] = PersonRequestsRule;
+                            if (people.Omitted > 0)
+                                answer["person_requests_omitted"] = people.Omitted;
+                        }
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger?.LogError(ex, "claim_investigation_request {RequestId}: step {Step} failed, the claim answers without person_requests", requestId, step);
+                        answer["person_requests_unavailable"] = "The requests people made in the thread could not be read, so none are listed: " + ex.Message;
+                    }
+                }
+
+                return answer.ToJsonString(McpHelpers.JsonOptions);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogError(ex, "claim_investigation_request {RequestId}: step {Step} failed, the claim is released", requestId, step);
                 await store.ReleaseAsync(requestId, claimId, CancellationToken.None);
+                await store.RecordRefusalAsync(requestId, agent_id, "claim", "answer_failed", null, CancellationToken.None);
                 return McpHelpers.FormatError("claim_investigation_request",
-                    new InvalidOperationException("the brief could not be stored under this claim, so the claim was released."));
+                    new InvalidOperationException("the claim answer could not be built, so the claim was released: " + ex.Message, ex));
             }
-
-            var answer = JsonSerializer.SerializeToNode(new
-            {
-                status = "claimed",
-                request_id = requestId,
-                claim_id = claimId,
-                lease_until = claim.LeaseUntilUtc,
-                claim_count = claim.ClaimCount,
-                brief_format = InvestigationFormats.BriefFormat,
-                report_formats = InvestigationFormats.AcceptedReportFormats,
-                brief = JsonNode.Parse(brief),
-            }, McpHelpers.JsonOptions)!.AsObject();
-
-            /* #7659: what granted people asked in the thread rides beside the brief, never inside it, read on the owner connection (the mcp login
-               holds no SELECT on the message table). A request nobody asked in carries no key, so an alert claim answers as before. */
-            if (ownerStore is not null && await PersonRequestsAsync(ownerStore, requestId, cancellationToken) is { Requests: { } personRequests } people)
-            {
-                answer["person_requests"] = personRequests;
-                answer["person_requests_rule"] = PersonRequestsRule;
-                if (people.Omitted > 0)
-                    answer["person_requests_omitted"] = people.Omitted;
-            }
-
-            return answer.ToJsonString(McpHelpers.JsonOptions);
+        }
+        catch (OperationCanceledException) when (claimWritten is not null)
+        {
+            /* #9511: the caller cancelled after the claim row was written. The claim would stay live until the lease lapses, which is the
+               lock-out this method guards against, so it is released with a token that cannot be cancelled before the cancel goes on. A cancel
+               is not a failure, so nothing is logged as an error or journaled. */
+            await store.ReleaseAsync(requestId, claimWritten.Value, CancellationToken.None);
+            throw;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            logger?.LogError(ex, "claim_investigation_request {RequestId}: step {Step} failed", requestId, step);
             return McpHelpers.FormatError("claim_investigation_request", ex);
         }
     }
