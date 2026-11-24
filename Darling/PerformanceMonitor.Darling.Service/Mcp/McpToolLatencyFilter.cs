@@ -261,8 +261,9 @@ public sealed class McpToolLatencyFilter
         {
             var result = await next(request, cancellationToken);
             var outcome = ReadScope.Resolve(ClassifyResult(result, cancellationToken), scope.Fallback);
-            Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
-            OfferSlow(scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome, ErrorSentenceOf(result)), caller);
+            var replyBytes = ReplyBytesOf(result);
+            Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller, replyBytes);
+            OfferSlow(scope, toolName, outcome, stopwatch.ElapsedMilliseconds, request, outcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(outcome, ErrorSentenceOf(result)), caller, replyBytes);
             return result;
         }
         catch (Exception ex)
@@ -352,7 +353,7 @@ public sealed class McpToolLatencyFilter
         {
             scope.Uncount();
             admission.NoteCacheHit(ReadSurface.Mcp, toolName);
-            Record(toolName, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
+            Record(toolName, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, windowBand, scope, caller, System.Text.Encoding.UTF8.GetByteCount(stored));
             return TextResult(stored);
         }
 
@@ -374,8 +375,10 @@ public sealed class McpToolLatencyFilter
                 admission.NoteCacheHit(ReadSurface.Mcp, toolName);
             }
 
-            Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller);
-            return CacheableText(shared, gcf) is { } text ? TextResult(text) : shared;
+            var sharedText = CacheableText(shared, gcf);
+            Record(toolName, outcome, stopwatch.ElapsedMilliseconds, windowBand, scope, caller,
+                sharedText is null ? ReplyBytesOf(shared) : System.Text.Encoding.UTF8.GetByteCount(sharedText));
+            return sharedText is { } text ? TextResult(text) : shared;
         }
         catch (Exception ex)
         {
@@ -399,6 +402,25 @@ public sealed class McpToolLatencyFilter
         && ReadResultCache.IsCacheableText(text.Text, gcf)
             ? text.Text
             : null;
+
+    /// <summary>#9433: the size in bytes of the reply a result carries, taken from the text the read already holds (its text
+    /// blocks, as UTF-8), so nothing is serialized a second time to measure it. Never throws.</summary>
+    internal static long ReplyBytesOf(CallToolResult result)
+    {
+        long bytes = 0;
+        if (result.Content is { } content)
+        {
+            foreach (var block in content)
+            {
+                if (block is TextContentBlock { Text: { } text })
+                {
+                    bytes += System.Text.Encoding.UTF8.GetByteCount(text);
+                }
+            }
+        }
+
+        return bytes;
+    }
 
     private static CallToolResult TextResult(string text) => new()
     {
@@ -553,7 +575,7 @@ public sealed class McpToolLatencyFilter
     /// <summary>Offers a slow or failed call to the slow-read record (#5097). The arguments are built only when the
     /// call qualifies, and nothing here can reach the request.</summary>
     private void OfferSlow(ReadScope scope, string toolName, ReadOutcome outcome, long elapsedMs,
-        ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request, string? errorClass, string caller)
+        ModelContextProtocol.Server.RequestContext<CallToolRequestParams> request, string? errorClass, string caller, long? replyBytes = null)
     {
         if (_slowReads is null || !_slowReads.ShouldRecord(outcome, elapsedMs))
         {
@@ -570,7 +592,7 @@ public sealed class McpToolLatencyFilter
             _logger?.LogDebug(ex, "Slow-read arguments for MCP tool {Tool} were not read.", toolName);
         }
 
-        _slowReads.Offer(scope, ReadSurface.Mcp, toolName, outcome, elapsedMs, arguments, errorClass, _logger, caller);
+        _slowReads.Offer(scope, ReadSurface.Mcp, toolName, outcome, elapsedMs, arguments, errorClass, _logger, caller, replyBytes);
     }
 
     /// <summary>The window band of the call (#5506): the window arguments the caller sent, else the defaults the tool
@@ -651,11 +673,11 @@ public sealed class McpToolLatencyFilter
         }
     }
 
-    private void Record(string toolName, ReadOutcome outcome, long elapsedMs, string windowBand, ReadScope scope, string caller)
+    private void Record(string toolName, ReadOutcome outcome, long elapsedMs, string windowBand, ReadScope scope, string caller, long? replyBytes = null)
     {
         try
         {
-            _readLatency.Record(ReadSurface.Mcp, toolName, outcome, elapsedMs, windowBand, scope.InFlightAtStart, scope.WaitMs, caller);
+            _readLatency.Record(ReadSurface.Mcp, toolName, outcome, elapsedMs, windowBand, scope.InFlightAtStart, scope.WaitMs, caller, replyBytes);
         }
         catch (Exception ex)
         {
