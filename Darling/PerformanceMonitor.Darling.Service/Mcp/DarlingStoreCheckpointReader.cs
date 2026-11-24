@@ -39,14 +39,18 @@ SELECT date_trunc('hour', started_at) AS hour_start,
        count(*) AS checkpoints,
        count(*) FILTER (WHERE reason = 'wal') AS started_by_wal,
        count(*) FILTER (WHERE reason = 'time') AS started_by_time,
-       count(*) FILTER (WHERE ended_at IS NULL) AS not_completed,
+       count(*) FILTER (WHERE c.ended_at IS NULL
+                        AND EXISTS (SELECT 1
+                                    FROM collect.store_checkpoints AS later
+                                    WHERE later.kind = c.kind
+                                    AND   (later.started_at, later.id) > (c.started_at, c.id))) AS not_completed,
        max(files_synced) AS max_files_synced,
        max(longest_sync_ms) AS longest_sync_ms,
        sum(write_ms)::bigint AS total_write_ms,
        sum(sync_ms)::bigint AS total_sync_ms
-FROM collect.store_checkpoints
-WHERE started_at >= $1
-AND   started_at <  $2
+FROM collect.store_checkpoints AS c
+WHERE c.started_at >= $1
+AND   c.started_at <  $2
 GROUP BY 1
 ORDER BY 1 DESC";
 
@@ -148,6 +152,13 @@ SELECT pg_catalog.to_regclass('collect.store_checkpoints') IS NOT NULL,
         [JsonPropertyName("hours")] public List<Hour> Hours { get; init; } = [];
 
         [JsonPropertyName("checkpoints")] public List<Checkpoint> Checkpoints { get; init; } = [];
+
+        /// <summary>How many rows <see cref="Checkpoints"/> holds.</summary>
+        [JsonPropertyName("checkpoints_returned")] public int CheckpointsReturned => Checkpoints.Count;
+
+        /// <summary>True when checkpoints follow the last row this answer holds, whether <c>limit</c> or the response budget left them off.
+        /// The way on is <c>offset</c> at <c>checkpoints_skipped</c> + <c>checkpoints_returned</c>.</summary>
+        [JsonPropertyName("truncated")] public bool Truncated => CheckpointsSkipped + Checkpoints.Count < CheckpointsInWindow;
 
         [JsonPropertyName("budget_truncated")] public bool BudgetTruncated { get; init; }
 

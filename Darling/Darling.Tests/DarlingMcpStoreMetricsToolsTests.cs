@@ -69,6 +69,20 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("table_activity", json.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// <c>object_kind</c> picks a kind of self-metrics object, and the table activity answer ranks the store's tables, which have no such kind.
+    /// With table_activity it is refused, not accepted and ignored, because a caller who sent it would read every table as the kind's tables.
+    /// The refusal comes before any read, so no store is needed.
+    /// </summary>
+    [Fact]
+    public async Task ObjectKind_WithTableActivity_IsRefusedBeforeAnyRead()
+    {
+        var answer = await DarlingMcpStoreMetricsTools.GetStoreMetrics(null!, object_kind: "hypertable", table_activity: true, cancellationToken: TestContext.Current.CancellationToken);
+        using var json = JsonDocument.Parse(answer);
+        Assert.Equal("invalid", json.RootElement.GetProperty("status").GetString());
+        Assert.Contains("object_kind", json.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ParamContract_DaysBackKindNameLimit_NoServerName_CeilingIsTheSweepsRetention()
     {

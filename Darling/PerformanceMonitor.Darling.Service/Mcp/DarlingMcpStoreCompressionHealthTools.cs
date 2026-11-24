@@ -28,6 +28,18 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpStoreCompressionHealthTools
 {
+    /// <summary>This tool's entries on the web read surface and in Custom Views validation, kept here and not in the shared lists (#9477).</summary>
+    internal sealed class Registration : IReadToolRegistration
+    {
+        public ReadToolRegistration Read { get; } = new(
+            "get_store_compression_health",
+            (c, pg, an) => GetStoreCompressionHealth(pg, c.RequestAborted),
+            new(
+                DarlingWebEndpoints.CatOverview,
+                "Whether the monitoring store compression is keeping up: per hypertable, the chunks past the compression delay and still uncompressed, the oldest of them, the policy delay, the newest compressed chunk, and the policy job last run, last success, next start and last error.",
+                Array.Empty<DarlingWebEndpoints.CatalogParam>()));
+    }
+
     [McpServerTool(Name = "get_store_compression_health"), Description(
         "Says whether the monitoring STORE's own compression is keeping up (not a monitored server): per hypertable, how many chunks are "
         + "past the compression delay and still uncompressed, and the policy job's last run. <<GUIDE>> No server_name. Read live from the "
