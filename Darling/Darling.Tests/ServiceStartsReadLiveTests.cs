@@ -177,6 +177,54 @@ public sealed class ServiceStartsReadLiveTests
     }
 
     [Fact]
+    public async Task AReplyOverTheResponseBudget_LeavesTheOldestStartsOffWhole_AndEachStartSaysItsOwnCuts()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (scratch, source) = await StartAsync(ct);
+        await using var _ = scratch;
+        await using var __ = source;
+        var ok = false;
+        try
+        {
+            var longLine = new string('x', ServiceStartHistory.LineLength);
+            var lines = Enumerable.Range(0, ServiceStartHistory.FirstLinesKept).Select(_ => longLine).ToList();
+            for (var i = 0; i < 12; i++)
+            {
+                var id = Guid.NewGuid();
+                var row = Start(id, "svc-a", $"3.14.{i}", 24 - i, errors: 40, warns: 40) with { FirstErrors = lines, FirstWarns = lines };
+                await ServiceStartHistory.UpsertStartAsync(source, row, ct);
+                await ServiceStartHistory.InsertRungsAsync(source,
+                    Enumerable.Range(1, 30).Select(v => new ServiceStartRung(id, v, "rung " + v, 1, Now.AddHours(-24 + i), 100 + v, MigrationRungOutcome.Failed, longLine)).ToList(), ct);
+            }
+
+            var json = await DarlingMcpServiceStartTools.GetServiceStarts(source, limit: DarlingMcpServiceStartTools.DefaultLimit, cancellationToken: ct);
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(json) <= PerformanceMonitor.Common.McpResponseBudget.DefaultBytes);
+            var reply = Parse(json);
+            var returned = reply.GetProperty("starts_returned").GetInt32();
+            Assert.InRange(returned, 1, DarlingMcpServiceStartTools.DefaultLimit - 1);
+            Assert.True(reply.GetProperty("truncated").GetBoolean());
+            Assert.True(reply.GetProperty("budget_truncated").GetBoolean());
+            Assert.NotNull(reply.GetProperty("budget_note").GetString());
+
+            /* Newest first: the starts kept are the newest, and the oldest are the ones left off. */
+            var builds = reply.GetProperty("starts").EnumerateArray().Select(s => s.GetProperty("build").GetString()).ToArray();
+            Assert.Equal(Enumerable.Range(0, returned).Select(k => $"3.14.{11 - k}"), builds);
+
+            var first = reply.GetProperty("starts")[0];
+            Assert.True(first.GetProperty("log_lines_truncated").GetBoolean());
+            Assert.True(first.GetProperty("rungs_truncated").GetBoolean());
+            Assert.Equal(DarlingMcpServiceStartTools.MaxRungsPerStart, first.GetProperty("rungs").GetArrayLength());
+            Assert.Equal(20, first.GetProperty("rungs_omitted").GetInt32());
+
+            ok = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, ok, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    [Fact]
     public async Task AStoreWithoutTheTables_AnswersPrecondition_AndAStoreWithNoStartsAnswersEmpty()
     {
         var ct = TestContext.Current.CancellationToken;
