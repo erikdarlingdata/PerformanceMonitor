@@ -56,6 +56,19 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.All(toolMethods, m => Assert.True(m.ReturnType == typeof(Task<string>), $"{m.Name} must return Task<string>"));
     }
 
+    /// <summary>
+    /// #9413: <c>as_of</c> moves only the table activity window. On a size answer it is refused, not validated and then ignored, because a caller
+    /// who sent it would read the size now as the size at their instant. The refusal comes before any read, so no store is needed.
+    /// </summary>
+    [Fact]
+    public async Task AsOf_WithoutTableActivity_IsRefusedBeforeAnyRead()
+    {
+        var answer = await DarlingMcpStoreMetricsTools.GetStoreMetrics(null!, as_of: "2026-11-20T10:00:00Z", cancellationToken: TestContext.Current.CancellationToken);
+        using var json = JsonDocument.Parse(answer);
+        Assert.Equal("invalid", json.RootElement.GetProperty("status").GetString());
+        Assert.Contains("table_activity", json.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ParamContract_DaysBackKindNameLimit_NoServerName_CeilingIsTheSweepsRetention()
     {
@@ -69,7 +82,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
            filters and the list bound; each is optional, so a caller sending only days_back — every caller before
            #3903 — gets the summary, whose lists say what bounded them. */
         /* #9413: table_activity switches to the per-table activity answer, which reads hours_back and rank_by beside object_name and limit. */
-        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit", "table_activity", "hours_back", "rank_by" }, mcpParams.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit", "table_activity", "hours_back", "rank_by", "as_of" }, mcpParams.Select(p => p.Name).ToArray());
         Assert.All(mcpParams, p => Assert.True(p.HasDefaultValue, $"{p.Name} must stay optional"));
         Assert.Equal(30, mcpParams[0].DefaultValue);
         Assert.Null(mcpParams[1].DefaultValue);
@@ -78,6 +91,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Equal(false, mcpParams[4].DefaultValue);
         Assert.Equal(24, mcpParams[5].DefaultValue);
         Assert.Null(mcpParams[6].DefaultValue);
+        Assert.Null(mcpParams[7].DefaultValue);
 
         /* The window ceiling is the series' own retention — past it there is nothing to read, and the two
            numbers drifting apart would let a caller ask for days the sweep deliberately deleted. */

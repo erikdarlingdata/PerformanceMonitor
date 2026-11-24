@@ -22,8 +22,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <summary>
 /// #9413: the per-table activity section of <c>get_store_metrics</c> (<c>table_activity = true</c>). It reads
 /// <c>collect.store_table_activity</c> (<see cref="StoreTableActivity"/>), the hourly differences of each store table's counters with
-/// chunks and compressed chunks rolled up to their hypertable. The window is the trailing <c>hours_back</c> hours, like
-/// <c>get_store_query_history</c>. A table with no row in an hour had no activity in it (rows are written only for active tables), and
+/// chunks and compressed chunks rolled up to their hypertable. The window is the <c>hours_back</c> hours ending at <c>as_of</c> (default now), with
+/// the same parse and UTC rules as <c>get_store_log</c>. A table with no row in an hour had no activity in it (rows are written only for active tables), and
 /// <c>last_capture_at</c> says whether captures are running at all.
 /// </summary>
 internal static class DarlingStoreTableActivityRead
@@ -73,17 +73,17 @@ ORDER BY metric_time DESC, table_schema, table_name";
         DateTime.SpecifyKind(naiveUtc, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// The section. <paramref name="windowEndUtc"/> is the window's end (null is now): the tool never passes one, a test does so it can read
-    /// the hours it seeded. <paramref name="responseByteBudget"/> null keeps every row.
+    /// The section. <paramref name="asOf"/> is the window's end as the caller wrote it (null or empty is now), validated by the shared window check.
+    /// <paramref name="responseByteBudget"/> null keeps every row.
     /// </summary>
     internal static async Task<string> GetAsync(
-        NpgsqlDataSource postgres, int hoursBack, string? rankBy, string? objectName, int limit, int? responseByteBudget,
-        CancellationToken cancellationToken, DateTime? windowEndUtc = null)
+        NpgsqlDataSource postgres, int hoursBack, string? asOf, string? rankBy, string? objectName, int limit, int? responseByteBudget,
+        CancellationToken cancellationToken)
     {
-        var hoursError = DarlingReadWindow.ValidateHoursBack(hoursBack, MaxHours);
-        if (hoursError != null)
+        var windowError = DarlingReadWindow.Validate(hoursBack, asOf, MaxHours, out var windowEnd);
+        if (windowError != null)
         {
-            return hoursError;
+            return windowError;
         }
 
         var rankError = McpHelpers.ValidateChoice(rankBy, RankKeys, "rank_by");
@@ -96,7 +96,7 @@ ORDER BY metric_time DESC, table_schema, table_name";
             ? RankKeys[0]
             : RankKeys.First(k => string.Equals(k, rankBy.Trim(), StringComparison.OrdinalIgnoreCase));
         var name = string.IsNullOrWhiteSpace(objectName) ? null : objectName.Trim();
-        var end = DateTime.SpecifyKind(windowEndUtc ?? DateTime.UtcNow, DateTimeKind.Unspecified);
+        var end = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified);
         var start = end.AddHours(-hoursBack);
 
         try

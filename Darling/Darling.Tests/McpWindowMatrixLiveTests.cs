@@ -429,6 +429,8 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_plan_cache_bloat"] = SnapshotSearch,
         /* #7010: not a data window by design. The window selects captures of the store's own PostgreSQL log, and every answer carries the capture
            denominator (captures against expected, bytes read and unread), which is how a window the store did not capture is told apart from a quiet one. */
+        /* #9413: only the table_activity mode windows (hours_back and as_of); the size answers have no window to anchor, refuse as_of and carry no truncation notice. */
+        ["get_store_metrics"] = "size answers have no hours window; only the table_activity mode takes hours_back and as_of (#9413)",
         ["get_store_log"] = "store-log window: the answer's capture denominator says how much of the window was captured (#7010)",
         /* #7010: not a data window by design. The window picks the fleet sweeper's own run records for the timeline, the latest sweep is read outside
            it on purpose, and no collector table backs it for a coverage probe. */
