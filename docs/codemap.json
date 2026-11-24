@@ -574,7 +574,7 @@
       ]
     }
   ],
-  "generated_from": "940c98ff8",
+  "generated_from": "15d1eb89c",
   "mcp_tools": [
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
@@ -1609,16 +1609,6 @@
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreCompressionHealthTools.cs",
       "name": "get_store_compression_health",
-      "product": "Darling"
-    },
-    {
-      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs",
-      "name": "get_store_host",
-      "product": "Darling"
-    },
-    {
-      "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs",
-      "name": "get_store_host",
       "product": "Darling"
     },
     {

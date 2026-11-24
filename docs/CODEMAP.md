@@ -15,7 +15,7 @@ The Full Dashboard and the CLI installer are frozen in a zip file. Nothing in th
 In numbers:
 
 - 23 projects (4 app, 10 library, 5 test, 4 tool).
-- 296 Darling MCP tools and 117 Lite MCP tools.
+- 294 Darling MCP tools and 117 Lite MCP tools.
 - 304 store migrations. The newest is version 305.
 - 4832 test classes in 5 test projects.
 - 19 CI workflows.
@@ -234,7 +234,7 @@ Darling's PostgreSQL store has 304 migrations. The newest is version 305. The li
 
 A tool is a method that carries the `McpServerTool` attribute. Each row names the tool and the file that declares it.
 
-### Darling MCP tools (296)
+### Darling MCP tools (294)
 
 | Tool | Declared in |
 |---|---|
@@ -445,8 +445,6 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `get_slow_reads` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSlowReadTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpSlowReadTools.cs) |
 | `get_spinlock_stats` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpLatchSpinlockTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpLatchSpinlockTools.cs) |
 | `get_store_compression_health` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreCompressionHealthTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreCompressionHealthTools.cs) |
-| `get_store_host` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs) |
-| `get_store_host` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs) |
 | `get_store_host` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreHostTools.cs) |
 | `get_store_log` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreLogTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreLogTools.cs) |
 | `get_store_maintenance_readiness` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMaintenanceReadinessTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpStoreMaintenanceReadinessTools.cs) |
@@ -695,4 +693,4 @@ A test class is a file whose name ends in `Tests.cs`.
 
 ---
 
-Generated from commit `940c98ff8`. To refresh it, run `python tools/codemap/codemap.py`.
+Generated from commit `15d1eb89c`. To refresh it, run `python tools/codemap/codemap.py`.
