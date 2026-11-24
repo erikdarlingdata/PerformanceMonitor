@@ -144,7 +144,7 @@ internal static class StoreServerCertificate
                 Timeout = (int)HandshakeTimeout.TotalSeconds,
                 CommandTimeout = (int)HandshakeTimeout.TotalSeconds,
             };
-            var dataSourceBuilder = new NpgsqlDataSourceBuilder(builder.ConnectionString);
+            var dataSourceBuilder = new NpgsqlDataSourceBuilder(PerformanceMonitor.Darling.Storage.DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
             dataSourceBuilder.UseSslClientAuthenticationOptionsCallback(options => options.RemoteCertificateValidationCallback = (_, certificate, presentedChain, _) =>
             {
                 if (certificate is not null)
