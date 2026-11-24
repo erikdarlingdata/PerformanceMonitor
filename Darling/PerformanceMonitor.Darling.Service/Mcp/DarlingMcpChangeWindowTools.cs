@@ -78,15 +78,17 @@ public sealed class DarlingMcpChangeWindowTools
         [Description("1-100. Default 20.")] int limit = DefaultLimit,
         [Description("Rows to skip. Default 0.")] int offset = 0,
         CancellationToken cancellationToken = default) =>
-        GetChangeWindowsAsync(Store(postgres), window_id, hours_back, limit, offset, cancellationToken);
+        McpHelpers.ValidateHoursBack(hours_back, MaxHoursBack) is { } badWindow
+            ? Task.FromResult(badWindow)
+            : GetChangeWindowsAsync(Store(postgres), window_id, hours_back, limit, offset, cancellationToken);
 
     internal static async Task<string> GetChangeWindowsAsync(
         InvestigationRequestStore store, long? windowId, int hoursBack, int limit, int offset, CancellationToken cancellationToken)
     {
         if (windowId is < 1)
             return McpHelpers.Refusal("window_id", $"Invalid window_id value '{windowId}'. Must be a positive integer.");
-        if (hoursBack < 1 || hoursBack > MaxHoursBack)
-            return McpHelpers.Refusal("hours_back", $"Invalid hours_back value '{hoursBack}'. Must be an integer from 1 to {MaxHoursBack}.");
+        if (McpHelpers.ValidateHoursBack(hoursBack, MaxHoursBack) is { } badWindow)
+            return badWindow;
         if (limit < 1 || limit > MaxLimit)
             return McpHelpers.Refusal("limit", $"Invalid limit value '{limit}'. Must be an integer from 1 to {MaxLimit}.");
         if (offset < 0)
