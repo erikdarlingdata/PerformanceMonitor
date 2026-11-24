@@ -303,6 +303,8 @@ public sealed class PgFactCollectorTests
             /* JOIN LATERAL (subquery) names no relation; the subquery's own FROM is scanned in its place (as the
                drill-down guard does, #5794). */
             scanSql = Regex.Replace(scanSql, @"\bLATERAL\b", " ", RegexOptions.IgnoreCase);
+            /* #9492: EXTRACT(epoch FROM col) is a function's argument syntax, so its FROM names a column, not a relation. */
+            scanSql = Regex.Replace(scanSql, @"\bEXTRACT\s*\(\s*\w+\s+FROM\b", "EXTRACT(", RegexOptions.IgnoreCase);
 
             /* CTE names defined by this query are legal FROM targets too (WITH x AS ( / , y AS (). */
             var ctes = Regex.Matches(scanSql, @"(?:WITH|,)\s*(\w+)\s+AS\s*(?:(?:NOT\s+)?MATERIALIZED\s*)?\(", RegexOptions.Singleline)
