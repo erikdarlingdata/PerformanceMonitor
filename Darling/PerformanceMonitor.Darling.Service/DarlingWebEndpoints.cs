@@ -616,7 +616,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         /* Round 2, L3: a hit runs no read, so it does not count as one in flight. */
                         readScope.Scope.Uncount();
                         admission.NoteCacheHit(ReadSurface.Web, name);
-                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                        RecordWebReadLatency(readLatencyRecorder, name, ReadOutcome.CacheHit, stopwatch.ElapsedMilliseconds, context, readScope.Scope, WebReplyBytes(stored) ?? 0);
                         return ToHttpResult(stored, DarlingWebFailureLog.RouteOf(context.Request), logger, stopwatch.ElapsedMilliseconds, context.RequestAborted, readSweepBudget);
                     }
 
@@ -648,7 +648,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                             admission.NoteCacheHit(ReadSurface.Web, name);
                         }
 
-                        RecordWebReadLatency(readLatencyRecorder, name, joinedOutcome, joinedAt.ElapsedMilliseconds, context, readScope.Scope);
+                        RecordWebReadLatency(readLatencyRecorder, name, joinedOutcome, joinedAt.ElapsedMilliseconds, context, readScope.Scope,
+                            shared.Text is { } sharedText ? WebReplyBytes(sharedText) ?? 0 : 0);
                         return shared.Text is { } text
                             ? ToHttpResult(text, DarlingWebFailureLog.RouteOf(context.Request), logger, joinedAt.ElapsedMilliseconds, callerAborted, readSweepBudget)
                             : shared.Answer;
@@ -834,9 +835,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                         ? ReadOutcomeClassifier.ClassifySentence(webSentence!, context.RequestAborted)
                         : ReadOutcome.Ok;
                     var resolvedOutcome = ReadScope.Resolve(webOutcome, readScope.Fallback);
-                    RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope);
+                    /* #9433: the size of the reply, counted from the text the read holds. It is the tool's answer, before the statement
+                       sweep: the sweep only ever shortens a body, and only when the statement filter withholds text. */
+                    var webReplyBytes = WebReplyBytes(result);
+                    RecordWebReadLatency(readLatencyRecorder, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context, readScope.Scope, webReplyBytes ?? 0);
                     OfferWebSlowRead(readLatencyRecorder, readScope.Scope, name, resolvedOutcome, stopwatch.ElapsedMilliseconds, context,
-                        resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome, webSentence));
+                        resolvedOutcome == ReadOutcome.Error ? "tool_error" : SlowReadLog.ErrorClassOf(resolvedOutcome, webSentence), webReplyBytes);
 
                     /* #5678: a tool-caught sentence for a browser that has left is not a failure either (see ThrowIfCallerGone). */
                     ThrowIfCallerGone(result, context.RequestAborted);

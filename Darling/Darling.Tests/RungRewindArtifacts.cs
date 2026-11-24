@@ -985,6 +985,9 @@ DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
         // adds them again, empty. Safe on a store that never had them.
         new(304, "hasStatementHistoryWriteCounters", @"ALTER TABLE collect.store_statement_history DROP COLUMN IF EXISTS delta_shared_blks_dirtied, DROP COLUMN IF EXISTS delta_shared_blks_written, DROP COLUMN IF EXISTS delta_wal_bytes, DROP COLUMN IF EXISTS delta_wal_fpi;
 ALTER TABLE config.store_statement_baseline DROP COLUMN IF EXISTS shared_blks_dirtied, DROP COLUMN IF EXISTS shared_blks_written, DROP COLUMN IF EXISTS wal_bytes, DROP COLUMN IF EXISTS wal_fpi;"),
+        // V305 (#9433): the reply size on the slow read record and the read latency histogram. The slow read column is the probe's newest sentinel. The rewind drops both columns, so a re-run of V305 adds them again, empty. Safe on a store that never had them.
+        new(305, "hasReadReplyBytes", @"ALTER TABLE collect.slow_reads DROP COLUMN IF EXISTS reply_bytes;
+ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS reply_bytes_total;"),
     ];
 
     /// <summary>

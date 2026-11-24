@@ -2539,6 +2539,24 @@ ALTER TABLE config.store_statement_baseline
     ADD COLUMN IF NOT EXISTS wal_fpi bigint;";
 
     /// <summary>
+    /// V305 (#9433): <c>collect.slow_reads</c> gains <c>reply_bytes</c>, the size in bytes of the reply the caller received, and
+    /// <c>collect.read_latency</c> gains <c>reply_bytes_total</c>, the sum of those sizes over the reads the row counts. Both are nullable
+    /// <c>bigint</c> with no default: a row written before this rung has no size, and a NULL says so where a 0 would claim an empty reply.
+    /// A read that sent no reply (it threw, the caller left, the store refused it busy) adds 0 to the total, so the average over a
+    /// route's reads counts only the reads this build measured (rows with a total). The tables are plain and small, so <c>ADD COLUMN</c>
+    /// holds its lock for an instant.
+    ///
+    /// <para><b>An older build ignores the columns.</b> Its writer names its own column list and its reads name theirs, so it neither fills
+    /// nor reads them.</para>
+    /// </summary>
+    private const string V305Sql = @"
+ALTER TABLE collect.slow_reads
+    ADD COLUMN IF NOT EXISTS reply_bytes bigint;
+
+ALTER TABLE collect.read_latency
+    ADD COLUMN IF NOT EXISTS reply_bytes_total bigint;";
+
+    /// <summary>
     /// V221 (#6800): <c>collect.query_store_hash_hourly</c>, the narrow hourly source of the fleet tag roll-up, its <c>(hour, server_id)</c>
     /// index, and <c>hash_built_seq</c> on <c>collect.query_store_compose_stamp_built</c>. The text, the column map and the reasoning are on
     /// <see cref="QueryStoreComposeStamp.HashHourlyCreateSql"/>. The service's hourly tick (V173's builder) fills the table in the stamp's
@@ -4070,6 +4088,7 @@ END $$;";
         /* V304 (#9410): the dirtied blocks, written blocks, WAL bytes and full-page images of each statement in the store's own statement history, on the history
            table and its baseline. Four nullable columns on each, no default, no rewrite. A row from before the rung reads NULL. An older build never names them. */
         new Migration(StoreStatementHistory.WriteCountersVersion, "store-statement-history-write-counters", V304Sql),
+        new Migration(ReadReplyBytes.Version, "read-reply-bytes", V305Sql),
     };
 
     /// <summary>

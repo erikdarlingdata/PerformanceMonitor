@@ -52,6 +52,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "max_in_flight is the most other reads running when one started. "
         + "wait_total_ms is the summed wait for a store connection. "
         + "distinct_callers is the most different callers in one hour; no personal data. "
+        + "reply_bytes_total is the summed reply size in bytes of the reads that ran, mean_reply_bytes its average (null when no row has a size). "
         + "Sorted p95 desc. Optional surface (web/compose/mcp) and route filter. Empty means no read in the window, not a failure. "
         + "<<GUIDE>> "
         + "Gets the monitoring tool's OWN read-latency history: how long the web dashboard's `/api/read/*` "
@@ -86,6 +87,9 @@ public sealed class DarlingMcpReadLatencyTools
         + "When the host admits long reads, admission is this service process's live state since it started (never stored): limit, "
         + "running, queued, and per route the reads admitted, queued, rejected, answered from the cache and missed by it. "
         + "Older rows read as band none with 0 for both. "
+        + "reply_bytes_total is the summed size in bytes of the replies the reads that ran sent (an MCP read's text, a web read's answer text, counted as UTF-8 once "
+        + "the read finished), and mean_reply_bytes is that sum over the reads whose hours carry a size, null when none does: hours stored before this column existed have no size, "
+        + "and they are left out of the average rather than counted as empty replies. A read that sent no reply, or a web read answered with the service's fixed failure body, adds 0. "
         + "distinct_callers is the most different callers (MCP clients by name and version, web sessions by a salted hash that "
         + "holds no personal data) that read the route in any one hour of the window, 0 on older rows. At most 1,000 are counted per hour; 1,000 means at least that many. Pass surface to scope to one of web/compose/mcp, or route to scope to one read/panel name; "
         + "both are optional and compose (AND) when both are given. Empty means no read was recorded for the "
@@ -187,6 +191,8 @@ public sealed class DarlingMcpReadLatencyTools
                 rejected = x.Row.Rejected,
                 cache_hits = x.Row.CacheHits,
                 cancelled = x.Row.Cancelled,
+                reply_bytes_total = x.Row.ReplyBytesTotal,
+                mean_reply_bytes = x.Row.MeanReplyBytes,
             }).ToArray();
 
             return BuildResponse(hours, surface, route, shaped, limit, McpResponseBudget.DefaultBytes, AdmissionObject(admission));

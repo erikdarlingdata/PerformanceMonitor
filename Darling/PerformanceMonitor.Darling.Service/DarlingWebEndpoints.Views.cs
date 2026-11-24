@@ -407,7 +407,7 @@ public static partial class DarlingWebEndpoints
     /// name="name"/> is already a bounded-cardinality route label (the dispatch table's own tool name, never
     /// caller-supplied text). Never throws into the request: swallowed and logged at Debug, exactly like the
     /// compose path's own recording.</summary>
-    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, ReadScope scope)
+    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, ReadScope scope, long replyBytes = 0)
     {
         try
         {
@@ -415,7 +415,7 @@ public static partial class DarlingWebEndpoints
                request that sends none reads the read's own default window, which the catalog row declares (PHours(def),
                PInt("days_back", def)), so it records that window's band; only a read that takes no window records none. */
             var band = WebWindowBand(name, key => First(context, key));
-            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs, WebReadCaller(context));
+            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs, WebReadCaller(context), replyBytes);
         }
         catch (Exception ex)
         {
@@ -510,9 +510,18 @@ public static partial class DarlingWebEndpoints
         return route.Length > 120 ? route[..120] : route;
     }
 
+    /// <summary>#9433: the size in bytes of the reply a read's answer text is written as, taken from the text the read already holds (a UTF-8 count,
+    /// no second serialization). Only a payload or a refusal is written as that text. A tool failure is answered with a fixed body and a plain
+    /// sentence is wrapped in a JSON object, so neither is the size of the text, and those answers return null.</summary>
+    internal static long? WebReplyBytes(string result) =>
+        ClassifyToolResponse(result) is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
+            ? System.Text.Encoding.UTF8.GetByteCount(result)
+            : null;
+
     /// <summary>Offers a slow or failed <c>/api/read/*</c> call to the slow-read record (#5097): the query string, as sent,
     /// becomes the arguments. Never throws into the request.</summary>
-    private static void OfferWebSlowRead(ReadLatencyRecorder recorder, ReadScope scope, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, string? errorClass)
+    private static void OfferWebSlowRead(ReadLatencyRecorder recorder, ReadScope scope, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, string? errorClass,
+        long? replyBytes = null)
     {
         if (recorder.SlowReads is null || !recorder.SlowReads.ShouldRecord(outcome, elapsedMs))
         {
@@ -527,7 +536,7 @@ public static partial class DarlingWebEndpoints
                 ? q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))
                 : [new KeyValuePair<string, string?>(q.Key, null)]));
 
-            recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger, WebReadCaller(context));
+            recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger, WebReadCaller(context), replyBytes);
         }
         catch (Exception ex)
         {

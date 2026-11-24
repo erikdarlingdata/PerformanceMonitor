@@ -71,10 +71,16 @@ internal static class DarlingReadLatencyReader
         long[]? QueueWaitBucketCounts = null,
         long Rejected = 0,
         long CacheHits = 0,
-        long Cancelled = 0)
+        long Cancelled = 0,
+        long ReplyBytesTotal = 0,
+        long ReplyBytesRuns = 0)
     {
         /// <summary>Zero when nothing ran, matching how <c>get_collector_cost</c> reports its average.</summary>
         public long MeanMs => RunCount > 0 ? TotalMs / RunCount : 0;
+
+        /// <summary>#9433: the average reply size in bytes over the reads whose hour row carries a reply total, null when none does (rows from
+        /// before the column hold no size, and a 0 would claim an empty reply).</summary>
+        public long? MeanReplyBytes => ReplyBytesRuns > 0 ? ReplyBytesTotal / ReplyBytesRuns : null;
     }
 
     /// <summary>#5506 part 3: the stored outcomes that are not a read running, kept out of the run count, the
@@ -98,7 +104,7 @@ internal static class DarlingReadLatencyReader
         var sql = $@"
 WITH windowed AS
 (
-    SELECT surface, route, window_band, outcome, run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers,
+    SELECT surface, route, window_band, outcome, run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers, reply_bytes_total,
            outcome IN ({nonRunList}) AS is_admission
     FROM collect.read_latency
     WHERE metric_time >= $1{surfaceFilter}{routeFilter}
@@ -123,7 +129,9 @@ totals AS
         coalesce(max(max_ms) FILTER (WHERE outcome = 'queue_wait'), 0) AS queue_wait_max_ms,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'busy'), 0) AS rejected,
         coalesce(sum(run_count) FILTER (WHERE outcome = 'cache_hit'), 0) AS cache_hits,
-        coalesce(sum(run_count) FILTER (WHERE outcome = 'cancelled'), 0) AS cancelled
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'cancelled'), 0) AS cancelled,
+        coalesce(sum(reply_bytes_total) FILTER (WHERE NOT is_admission), 0)::bigint AS reply_bytes_total,
+        coalesce(sum(run_count) FILTER (WHERE NOT is_admission AND reply_bytes_total IS NOT NULL), 0) AS reply_bytes_runs
     FROM windowed
     GROUP BY surface, route, window_band
 ),
@@ -146,7 +154,8 @@ bucket_arrays AS
 )
 SELECT t.surface, t.route, t.run_count, t.total_ms, t.max_ms, ba.bucket_counts, t.timeouts, t.fallbacks, t.gate_failures,
        t.window_band, t.max_in_flight, t.wait_total_ms::bigint, t.distinct_callers,
-       t.queued, t.queue_wait_ms, t.queue_wait_max_ms, ba.queue_bucket_counts, t.rejected, t.cache_hits, t.cancelled
+       t.queued, t.queue_wait_ms, t.queue_wait_max_ms, ba.queue_bucket_counts, t.rejected, t.cache_hits, t.cancelled,
+       t.reply_bytes_total, t.reply_bytes_runs
 FROM totals AS t
 JOIN bucket_arrays AS ba ON ba.surface = t.surface AND ba.route = t.route AND ba.window_band = t.window_band
 ORDER BY t.surface, t.route, t.window_band";
@@ -187,7 +196,9 @@ ORDER BY t.surface, t.route, t.window_band";
                 (long[])reader.GetValue(16),
                 reader.GetInt64(17),
                 reader.GetInt64(18),
-                reader.GetInt64(19)));
+                reader.GetInt64(19),
+                reader.GetInt64(20),
+                reader.GetInt64(21)));
         }
 
         return rows;
