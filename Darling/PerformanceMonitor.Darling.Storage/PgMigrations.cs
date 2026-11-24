@@ -4085,7 +4085,13 @@ END $$;";
            from (collect.store_table_activity_baseline). Two plain tables created empty: no data moves, and the service fills them from the hourly self-metrics sweep.
            An older build ignores them. */
         new Migration(StoreTableActivity.Version, "store-table-activity", StoreTableActivity.CreateSql),
-        /* V309 (#9438): what each migration rung created, changed or dropped (collect.service_start_rung_objects): one row per object, a child of the rung
+        /* V309 (#9414): one row per checkpoint of the store's own PostgreSQL server (collect.store_checkpoints), read from its log. One plain table created
+           empty: no data moves. An older build never reads it. */
+        new Migration(StoreCheckpoints.Version, "store-checkpoints", StoreCheckpoints.CreateSql),
+        /* V310 (#9452): the partial index of the oversized-plan backlog's pending rows, on (server_id), for the sightings statement's per-cycle pending count.
+           An older build never reads it, and keeps writing rows that the index follows. */
+        new Migration(OversizedPlanBacklog.PendingIndexVersion, "oversized-plan-backlog-pending-index", OversizedPlanBacklog.CreatePendingIndexSql),
+        /* V311 (#9438): what each migration rung created, changed or dropped (collect.service_start_rung_objects): one row per object, a child of the rung
            row V307 made. One plain table and its by-rung index created empty: no data moves. An older build ignores it and records no object rows. */
         new Migration(ServiceStartRungObjects.Version, "service-start-rung-objects", ServiceStartRungObjects.CreateSql),
     };

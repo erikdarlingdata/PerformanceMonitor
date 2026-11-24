@@ -34,7 +34,7 @@ public sealed record ServiceStartRungObjectList(
     Guid StartId, string ServiceHost, string ProductVersion, DateTime StartedUtc, string RungName, int Attempt, IReadOnlyList<ServiceStartRungObject> Objects);
 
 /// <summary>
-/// What each migration rung created, changed or dropped (V309, #9438): one row per object in <c>collect.service_start_rung_objects</c>, a child of the
+/// What each migration rung created, changed or dropped (V311, #9438): one row per object in <c>collect.service_start_rung_objects</c>, a child of the
 /// rung row in <c>collect.service_start_rungs</c> (#9415) keyed by start, rung version and attempt. The runner takes a catalog snapshot before and after
 /// each rung and diffs them (<see cref="MigrationCatalogSnapshot"/>), and the service writes the rows with the rung rows once the tables exist.
 ///
@@ -48,7 +48,7 @@ public sealed record ServiceStartRungObjectList(
 public static class ServiceStartRungObjects
 {
     /// <summary>The migration that creates the table. One constant, so a renumber is one edit.</summary>
-    public const int Version = 309;
+    public const int Version = 311;
 
     /// <summary>The rung number of the fresh-install marker row. No real rung has it.</summary>
     public const int MarkerRung = 0;

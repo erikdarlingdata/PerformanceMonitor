@@ -37,7 +37,7 @@ public sealed class DarlingMcpServiceStartTools
     /// <summary>The most starts one answer lists.</summary>
     public const int MaxLimit = 100;
 
-    /// <summary>Whether the three start tables exist: a store below the rung that creates them lacks them (V307 made two, V309 the object table).</summary>
+    /// <summary>Whether the three start tables exist: a store below the rung that creates them lacks them (V307 made two, V311 the object table).</summary>
     public const string ShapeSql = @"
 SELECT to_regclass('collect.service_starts') IS NOT NULL
    AND to_regclass('collect.service_start_rungs') IS NOT NULL

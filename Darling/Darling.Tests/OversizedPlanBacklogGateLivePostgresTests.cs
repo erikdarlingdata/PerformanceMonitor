@@ -38,16 +38,16 @@ public sealed class OversizedPlanBacklogGateLivePostgresTests
     private const string Database = "gate_db";
 
     /// <summary>
-    /// The gate's second test counts the pending rows seen at or after the sighting time. Counting all of them instead makes it the
-    /// first test again, so the statement ranks on every cycle over the cap, as it did before the gate.
+    /// The gate's second test counts the pending rows seen at or after the sighting time. Counting all of them instead (the filter
+    /// made true) makes it the first test again, so the statement ranks on every cycle over the cap, as it did before the gate.
     /// </summary>
     private static readonly string UngatedSql = Ungated();
 
     private static string Ungated()
     {
-        const string gated = "count(*) FILTER (WHERE last_seen_at >= $10) AS recent_rows";
+        const string gated = OversizedPlanBacklog.RecentPendingFilter;
         Assert.Contains(gated, OversizedPlanBacklog.RecordSightingsSql, StringComparison.Ordinal);
-        return OversizedPlanBacklog.RecordSightingsSql.Replace(gated, "count(*) AS recent_rows", StringComparison.Ordinal);
+        return OversizedPlanBacklog.RecordSightingsSql.Replace(gated, "true", StringComparison.Ordinal);
     }
 
     /// <summary>One shape: how the server's pending rows and one cycle's sightings are laid out.</summary>
