@@ -66,7 +66,7 @@ public sealed class DarlingMcpStoreHostTools
         + "settings never caught up with), operator_override (postgresql.auto.conf, or a hand-edited line after "
         + "every managed block, is what is actually in force), or not_managed (a bring-your-own store; nothing "
         + "here ever wrote a block to compare against, so pg_settings.source is reported as-is). Each settings row also "
-        + "carries provenance (#9418): value (the running value the way SHOW prints it, such as 2GB), file_value (the text the winning line carries, such as 77MB), source (pg_settings.source), source_file and source_line (null when the "
+        + "carries provenance: value (the running value the way SHOW prints it, such as 2GB), file_value (the text the winning line carries, such as 77MB), source (pg_settings.source), source_file and source_line (null when the "
         + "role cannot read them), pending_restart (a restart-only setting whose file line the server could not apply yet; false when the role cannot read pg_file_settings), not_applied (every pg_file_settings line for the setting that is not the value "
         + "in force, with file, line and value, so a managed line hidden by ALTER SYSTEM shows) and summary, one sentence naming them. "
         + "provenance_unreadable is one sentence with the grant that fixes it when the role cannot read the source columns or "

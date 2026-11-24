@@ -273,6 +273,8 @@ public static partial class DarlingWebEndpoints
         "set_collector_databases",
         "reset_collector_schedules",
         "get_collector_schedules",
+        /* #9417: the install check, whose reader is an operator or agent after a restart; no page read mirrors it. */
+        "get_collector_readiness",
         /* #6398: the known-pattern writes are MCP-only; the web editor has its own routes (POST/PUT/DELETE /api/known-patterns, see DarlingKnownPatternRoutes). */
         "create_known_pattern",
         "update_known_pattern",
