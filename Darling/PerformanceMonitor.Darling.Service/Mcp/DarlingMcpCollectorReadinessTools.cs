@@ -55,7 +55,7 @@ public sealed class DarlingMcpCollectorReadinessTools
         + "verdict says either that every due collector has a good cycle since the start, or how many have not and the longest wait. "
         + "waiting lists each (server, collector) due with no good cycle since the start: waiting_since is when it came due (the start, or later for a collector that ran just before the restart and waits out its interval), plus errors_since_start, skips_since_start and the newest error. "
         + "not_yet_due counts collectors that ran just before the restart and are not due again yet, and collectors that run at a fixed time of day: neither is waiting. "
-        + "done lists the collectors with a good cycle since the start: first_good_at, errors_since_start and skips_since_start for one server, one summary row per server for the fleet. "
+        + "done lists the collectors with a good cycle since the start: first_good_at, errors_since_start and skips_since_start for one server, one summary row per server (counts of collectors, no error counts) for the fleet. "
         + "first_full_cycle is the first moment every collector that was due at the start had a good cycle on every enrolled server: status reached with at, or not yet with at null. "
         + "A good cycle is a SUCCESS run. An error is ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING or ABANDONED. A skip is any other status, such as SKIPPED or YIELDED. "
         + "The start is the process start, so a restart resets the read. waiting is cut at 200 rows, oldest wait first; waiting_count is the total.")]
@@ -144,10 +144,12 @@ public sealed class DarlingMcpCollectorReadinessTools
                 }
             }
 
-            var since = await ReadSinceStartAsync(postgres, onlyServerId, startUtc, nowUtc, cancellationToken);
+            var firstGood = await ReadFirstGoodAsync(postgres, pairs, startUtc, nowUtc, cancellationToken);
             var before = await ReadLastRunBeforeStartAsync(postgres, pairs, startUtc, cancellationToken);
 
-            return Compose(servers, pairs, since, before, startUtc, nowUtc, notCollected, disabled, onlyServerId is not null);
+            return await ComposeAsync(
+                servers, pairs, firstGood, before, startUtc, nowUtc, notCollected, disabled, onlyServerId is not null,
+                shown => ReadDetailAsync(postgres, shown, startUtc, nowUtc, cancellationToken));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -155,9 +157,9 @@ public sealed class DarlingMcpCollectorReadinessTools
         }
     }
 
-    private sealed record Pair(int ServerId, string Collector, int IntervalMinutes, bool RunsAtFixedTime);
+    internal sealed record Pair(int ServerId, string Collector, int IntervalMinutes, bool RunsAtFixedTime);
 
-    private sealed record SinceStart(DateTime? FirstGood, long Errors, long Skips, string? LastError, DateTime? LastErrorAt);
+    internal sealed record Detail(long Errors, long Skips, string? LastError, DateTime? LastErrorAt);
 
     private static async Task<List<CollectorFleetLiveness.ServerFacts>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -180,46 +182,103 @@ public sealed class DarlingMcpCollectorReadinessTools
     }
 
     /// <summary>
-    /// One scan of the log from the start: per (server, collector), the first SUCCESS that did not abandon its work, the errors, the other
-    /// non-success runs, and the newest error with its text. The abandoned-by-note rule is the one collection health uses, made NULL-safe here
-    /// because a row with a NULL <c>rows_collected</c> must count as a run that did not abandon, never drop out of the SUCCESS count.
+    /// The first good cycle of each pair since the start, by one keyed index probe per pair (oldest first on <c>idx_collection_log_watermark</c>),
+    /// so the cost follows the number of pairs and not how long the service has been up (#9417). A good cycle is a SUCCESS that did not abandon
+    /// its work. The abandoned-by-note rule is the one collection health uses, made NULL-safe here because a row with a NULL
+    /// <c>rows_collected</c> must count as a run that did not abandon, never drop out of the SUCCESS count. A pair with no good cycle has no row.
     /// </summary>
-    internal static readonly string SinceStartSql = $@"
-SELECT server_id, collector_name,
-       MIN(collection_time) FILTER (WHERE status = 'SUCCESS' AND NOT COALESCE({EnumeratedCollectorDriver.AbandonedByNotePredicateSql}, false)) AS first_good,
-       COUNT(*) FILTER (WHERE status IN ({CollectorFleetLiveness.FailureStatusSqlList})
-                        OR (status = 'SUCCESS' AND COALESCE({EnumeratedCollectorDriver.AbandonedByNotePredicateSql}, false))) AS errors,
-       COUNT(*) FILTER (WHERE status IS NULL OR status NOT IN ('SUCCESS', {CollectorFleetLiveness.FailureStatusSqlList})) AS skips,
-       MAX(collection_time) FILTER (WHERE status IN ({CollectorFleetLiveness.FailureStatusSqlList})) AS last_error_at,
-       (array_agg(left(error_message, {CollectorFleetLiveness.MaxMessageChars}) ORDER BY collection_time DESC)
-            FILTER (WHERE status IN ({CollectorFleetLiveness.FailureStatusSqlList})))[1] AS last_error
-FROM collection_log
-WHERE collection_time >= $1
-AND   collection_time <= $2
-AND   ($3::int IS NULL OR server_id = $3::int)
-GROUP BY server_id, collector_name";
+    internal static readonly string FirstGoodSql = $@"
+SELECT p.server_id, p.collector_name, g.collection_time
+FROM unnest($1::int[], $2::text[]) AS p(server_id, collector_name)
+CROSS JOIN LATERAL (
+    SELECT x.collection_time
+    FROM collection_log x
+    WHERE x.server_id = p.server_id
+    AND   x.collector_name = p.collector_name
+    AND   x.collection_time >= $3
+    AND   x.collection_time <= $4
+    AND   x.status = 'SUCCESS'
+    AND   NOT COALESCE({EnumeratedCollectorDriver.AbandonedByNotePredicateSql}, false)
+    ORDER BY x.collection_time
+    LIMIT 1
+) g";
 
-    private static async Task<Dictionary<(int ServerId, string Collector), SinceStart>> ReadSinceStartAsync(
-        NpgsqlDataSource postgres, int? serverId, DateTime startUtc, DateTime nowUtc, CancellationToken cancellationToken)
+    /// <summary>
+    /// The errors, the other non-success runs and the newest error with its text since the start, per pair, one keyed range read each. The caller
+    /// names only the pairs it will show (the waiting rows, or every pair of the one server asked about), so this never scans the fleet's rows
+    /// since the start (#9417). An error is a failure status or a SUCCESS that abandoned its work.
+    /// </summary>
+    internal static readonly string DetailSql = $@"
+SELECT p.server_id, p.collector_name, d.errors, d.skips, d.last_error_at, d.last_error
+FROM unnest($1::int[], $2::text[]) AS p(server_id, collector_name)
+CROSS JOIN LATERAL (
+    SELECT COUNT(*) FILTER (WHERE status IN ({CollectorFleetLiveness.FailureStatusSqlList})
+                            OR (status = 'SUCCESS' AND COALESCE({EnumeratedCollectorDriver.AbandonedByNotePredicateSql}, false))) AS errors,
+           COUNT(*) FILTER (WHERE status IS NULL OR status NOT IN ('SUCCESS', {CollectorFleetLiveness.FailureStatusSqlList})) AS skips,
+           MAX(collection_time) FILTER (WHERE status IN ({CollectorFleetLiveness.FailureStatusSqlList})) AS last_error_at,
+           (array_agg(left(error_message, {CollectorFleetLiveness.MaxMessageChars}) ORDER BY collection_time DESC)
+                FILTER (WHERE status IN ({CollectorFleetLiveness.FailureStatusSqlList})))[1] AS last_error
+    FROM collection_log x
+    WHERE x.server_id = p.server_id
+    AND   x.collector_name = p.collector_name
+    AND   x.collection_time >= $3
+    AND   x.collection_time <= $4
+) d";
+
+    internal static async Task<Dictionary<(int ServerId, string Collector), DateTime>> ReadFirstGoodAsync(
+        NpgsqlDataSource postgres, List<Pair> pairs, DateTime startUtc, DateTime nowUtc, CancellationToken cancellationToken)
     {
-        var rows = new Dictionary<(int, string), SinceStart>();
-        await using var command = postgres.CreateCommand(SinceStartSql);
+        var rows = new Dictionary<(int, string), DateTime>();
+        if (pairs.Count == 0)
+        {
+            return rows;
+        }
+
+        await using var command = postgres.CreateCommand(FirstGoodSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddPairParameters(command, pairs);
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, nowUtc);
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId is int id ? id : DBNull.Value });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows[(reader.GetInt32(0), reader.GetString(1))] = new SinceStart(
-                reader.IsDBNull(2) ? null : reader.GetDateTime(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(5) ? null : reader.GetDateTime(5));
+            rows[(reader.GetInt32(0), reader.GetString(1))] = reader.GetDateTime(2);
         }
 
         return rows;
+    }
+
+    internal static async Task<Dictionary<(int ServerId, string Collector), Detail>> ReadDetailAsync(
+        NpgsqlDataSource postgres, List<Pair> pairs, DateTime startUtc, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var rows = new Dictionary<(int, string), Detail>();
+        if (pairs.Count == 0)
+        {
+            return rows;
+        }
+
+        await using var command = postgres.CreateCommand(DetailSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddPairParameters(command, pairs);
+        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, nowUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows[(reader.GetInt32(0), reader.GetString(1))] = new Detail(
+                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4));
+        }
+
+        return rows;
+    }
+
+    private static void AddPairParameters(NpgsqlCommand command, List<Pair> pairs)
+    {
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = pairs.Select(p => p.ServerId).ToArray() });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = pairs.Select(p => p.Collector).ToArray() });
     }
 
     /// <summary>The newest run of each pair before the start, by one keyed index seek per pair. A pair with no run in the log has no entry.</summary>
@@ -301,16 +360,22 @@ CROSS JOIN LATERAL (
 
     private static string Name(CollectorFleetLiveness.ServerFacts s) => string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName;
 
-    private static string Compose(
+    /// <summary>
+    /// Builds the answer. <paramref name="readDetail"/> reads the errors, skips and newest error for the pairs it is given: the waiting rows that
+    /// will be shown, or every pair when one server was asked about. The fleet answer's per-server done rows carry no error counts, because those
+    /// would need every pair's rows since the start (#9417).
+    /// </summary>
+    internal static async Task<string> ComposeAsync(
         List<CollectorFleetLiveness.ServerFacts> servers,
         List<Pair> pairs,
-        Dictionary<(int ServerId, string Collector), SinceStart> since,
+        Dictionary<(int ServerId, string Collector), DateTime> firstGood,
         Dictionary<(int ServerId, string Collector), DateTime> before,
-        DateTime startUtc, DateTime nowUtc, int notCollected, int disabled, bool singleServer)
+        DateTime startUtc, DateTime nowUtc, int notCollected, int disabled, bool singleServer,
+        Func<List<Pair>, Task<Dictionary<(int ServerId, string Collector), Detail>>> readDetail)
     {
         var byServer = servers.ToDictionary(s => s.ServerId);
-        var waiting = new List<(CollectorFleetLiveness.ServerFacts Server, string Collector, DateTime DueAt, SinceStart? Since)>();
-        var doneRows = new List<(CollectorFleetLiveness.ServerFacts Server, string Collector, DateTime FirstGood, SinceStart Since)>();
+        var waiting = new List<(CollectorFleetLiveness.ServerFacts Server, Pair Pair, DateTime DueAt)>();
+        var doneRows = new List<(CollectorFleetLiveness.ServerFacts Server, string Collector, DateTime FirstGood)>();
         var notYetDue = 0;
         var fixedTime = 0;
         var dueAtStartTotal = 0;
@@ -321,13 +386,11 @@ CROSS JOIN LATERAL (
         foreach (var pair in pairs)
         {
             var server = byServer[pair.ServerId];
-            since.TryGetValue((pair.ServerId, pair.Collector), out var s);
+            DateTime? good = firstGood.TryGetValue((pair.ServerId, pair.Collector), out var g0) ? g0 : null;
             DateTime? last = before.TryGetValue((pair.ServerId, pair.Collector), out var ran) ? ran : null;
             var (state, dueAt, dueAtStart) = Classify(
-                s?.FirstGood, last, pair.IntervalMinutes, pair.RunsAtFixedTime, startUtc, nowUtc);
+                good, last, pair.IntervalMinutes, pair.RunsAtFixedTime, startUtc, nowUtc);
             var tally = perServer[pair.ServerId];
-            tally.Errors += s?.Errors ?? 0;
-            tally.Skips += s?.Skips ?? 0;
             if (dueAtStart)
             {
                 dueAtStartTotal++;
@@ -337,19 +400,19 @@ CROSS JOIN LATERAL (
             switch (state)
             {
                 case PairState.Done:
-                    doneRows.Add((server, pair.Collector, s!.FirstGood!.Value, s));
+                    doneRows.Add((server, pair.Collector, good!.Value));
                     tally.Done++;
                     if (dueAtStart)
                     {
                         dueAtStartDone++;
                         tally.DueAtStartDone++;
-                        lastFirstGood = lastFirstGood is null || s.FirstGood > lastFirstGood ? s.FirstGood : lastFirstGood;
-                        tally.LastDueAtStartGood = tally.LastDueAtStartGood is null || s.FirstGood > tally.LastDueAtStartGood ? s.FirstGood : tally.LastDueAtStartGood;
+                        lastFirstGood = lastFirstGood is null || good > lastFirstGood ? good : lastFirstGood;
+                        tally.LastDueAtStartGood = tally.LastDueAtStartGood is null || good > tally.LastDueAtStartGood ? good : tally.LastDueAtStartGood;
                     }
 
                     break;
                 case PairState.Waiting:
-                    waiting.Add((server, pair.Collector, dueAt!.Value, s));
+                    waiting.Add((server, pair, dueAt!.Value));
                     tally.Waiting++;
                     break;
                 case PairState.NotYetDue:
@@ -366,7 +429,7 @@ CROSS JOIN LATERAL (
         var ordered = waiting
             .OrderBy(w => w.DueAt)
             .ThenBy(w => Name(w.Server), StringComparer.OrdinalIgnoreCase)
-            .ThenBy(w => w.Collector, StringComparer.Ordinal)
+            .ThenBy(w => w.Pair.Collector, StringComparer.Ordinal)
             .ToList();
         var waitingServers = ordered.Select(w => w.Server.ServerId).Distinct().Count();
 
@@ -398,18 +461,26 @@ CROSS JOIN LATERAL (
         {
             var longest = ordered[0];
             verdict = $"{ordered.Count} of {dueTotal} due collector(s) on {waitingServers} server(s) have no good cycle since the service started at {Stamp(startUtc)}. "
-                + $"Longest wait: {longest.Collector} on {Name(longest.Server)} since {Stamp(longest.DueAt)}. First full cycle: not yet.";
+                + $"Longest wait: {longest.Pair.Collector} on {Name(longest.Server)} since {Stamp(longest.DueAt)}. First full cycle: not yet.";
         }
 
-        var shownWaiting = ordered.Take(MaxWaitingRows).Select(w => new
+        var shown = ordered.Take(MaxWaitingRows).ToList();
+        var detail = await readDetail(singleServer ? pairs : shown.Select(w => w.Pair).ToList());
+        Detail? DetailOf(string collector, int serverId) => detail.TryGetValue((serverId, collector), out var d) ? d : null;
+
+        var shownWaiting = shown.Select(w =>
         {
-            server = Name(w.Server),
-            collector = w.Collector,
-            waiting_since = Stamp(w.DueAt),
-            errors_since_start = w.Since?.Errors ?? 0,
-            skips_since_start = w.Since?.Skips ?? 0,
-            last_error = w.Since?.LastError,
-            last_error_at = w.Since?.LastErrorAt is DateTime at ? Stamp(at) : null,
+            var d = DetailOf(w.Pair.Collector, w.Pair.ServerId);
+            return new
+            {
+                server = Name(w.Server),
+                collector = w.Pair.Collector,
+                waiting_since = Stamp(w.DueAt),
+                errors_since_start = d?.Errors ?? 0,
+                skips_since_start = d?.Skips ?? 0,
+                last_error = d?.LastError,
+                last_error_at = d?.LastErrorAt is DateTime at ? Stamp(at) : null,
+            };
         }).ToList();
 
         object done = singleServer
@@ -420,8 +491,8 @@ CROSS JOIN LATERAL (
                 {
                     collector = d.Collector,
                     first_good_at = Stamp(d.FirstGood),
-                    errors_since_start = d.Since.Errors,
-                    skips_since_start = d.Since.Skips,
+                    errors_since_start = DetailOf(d.Collector, d.Server.ServerId)?.Errors ?? 0,
+                    skips_since_start = DetailOf(d.Collector, d.Server.ServerId)?.Skips ?? 0,
                 }).ToList()
             : servers
                 .OrderBy(s => Name(s), StringComparer.OrdinalIgnoreCase)
@@ -434,8 +505,6 @@ CROSS JOIN LATERAL (
                         collectors_done = t.Done,
                         collectors_waiting = t.Waiting,
                         collectors_not_yet_due = t.NotYetDue,
-                        errors_since_start = t.Errors,
-                        skips_since_start = t.Skips,
                         first_full_cycle_at = t.Waiting == 0 && t.DueAtStart > 0 && t.DueAtStartDone == t.DueAtStart && t.LastDueAtStartGood is DateTime g ? Stamp(g) : null,
                     };
                 }).ToList();
@@ -475,8 +544,6 @@ CROSS JOIN LATERAL (
         public int NotYetDue;
         public int DueAtStart;
         public int DueAtStartDone;
-        public long Errors;
-        public long Skips;
         public DateTime? LastDueAtStartGood;
     }
 }
