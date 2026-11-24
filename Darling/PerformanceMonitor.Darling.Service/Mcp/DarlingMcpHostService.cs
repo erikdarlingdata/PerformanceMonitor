@@ -1821,6 +1821,9 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
                surface beside get_store_metrics. */
             .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
+            /* #9415 get_service_starts - the service's own start history: the build, schema change, migration rung timings and
+               error and warning counts of each start. Darling-only: Lite has no service host or store to record a start in. */
+            .WithGeminiCompatibleTools<DarlingMcpServiceStartTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreTableHealthTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreTableMeasureTools>()
             .WithGeminiCompatibleTools<DarlingMcpStoreMaintenanceReadinessTools>()

@@ -69,6 +69,13 @@ public sealed record ServiceStartRung(
 /// <summary>A start row with its rungs, as <see cref="ServiceStartHistory.ReadAsync"/> returns it. <paramref name="Current"/> is true for the newest start of its host.</summary>
 public sealed record ServiceStartRecord(ServiceStartRow Start, IReadOnlyList<ServiceStartRung> Rungs, bool Current);
 
+/// <summary>A start whose build differs from the same host's previous start (#9415): the point on a trend where the build changed.</summary>
+/// <param name="ServiceHost">The service host that restarted on another build.</param>
+/// <param name="StartedUtc">When the process of the new build started.</param>
+/// <param name="FromBuild">The build string of the host's previous start.</param>
+/// <param name="ToBuild">The build string of this start.</param>
+public sealed record ServiceBuildChange(string ServiceHost, DateTime StartedUtc, string FromBuild, string ToBuild);
+
 /// <summary>
 /// The store's record of each service start (V304, #9415): one row per start in <c>collect.service_starts</c>, one row per migration rung that
 /// start tried in <c>collect.service_start_rungs</c>. <c>config.service_version</c> (V174) stays as it is: it holds the version each host last
@@ -196,6 +203,23 @@ FROM collect.service_starts AS s
 WHERE ($2::text IS NULL OR s.service_host = $2::text)
 ORDER BY s.process_started_at DESC, s.start_id
 LIMIT $1;";
+
+    /// <summary>
+    /// The starts since $1 (naive UTC) whose build differs from the same host's previous start, oldest first. The previous start is found among all
+    /// starts, so the first start inside the window is compared with the one before the window. A host's very first start has none and is not a change.
+    /// </summary>
+    public const string SelectBuildChangesSql = @"
+SELECT service_host, process_started_at, previous_build, product_version
+FROM
+(
+    SELECT s.service_host, s.process_started_at, s.product_version,
+           lag(s.product_version) OVER (PARTITION BY s.service_host ORDER BY s.process_started_at, s.start_id) AS previous_build
+    FROM collect.service_starts AS s
+) AS x
+WHERE x.previous_build IS NOT NULL
+AND   x.previous_build <> x.product_version
+AND   x.process_started_at >= $1
+ORDER BY x.process_started_at, x.service_host;";
 
     /// <summary>The rungs of the given starts, in the order they ran. $1 start ids.</summary>
     public const string SelectRungsSql = @"
@@ -333,6 +357,28 @@ ORDER BY start_id, attempt, started_at, rung_version;";
                 rungsByStart.TryGetValue(s.Row.StartId, out var rungs) ? rungs : new List<ServiceStartRung>(),
                 s.Current))
             .ToList();
+    }
+
+    /// <summary>
+    /// The points since <paramref name="sinceUtc"/> where a host's build changed, oldest first (<see cref="SelectBuildChangesSql"/>). A store without
+    /// the tables throws <see cref="PostgresException"/> with <see cref="PostgresErrorCodes.UndefinedTable"/>, so the caller can say why.
+    /// </summary>
+    public static async Task<IReadOnlyList<ServiceBuildChange>> ReadBuildChangesAsync(
+        NpgsqlDataSource dataSource, DateTime sinceUtc, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+
+        var changes = new List<ServiceBuildChange>();
+        await using var command = dataSource.CreateCommand(SelectBuildChangesSql);
+        command.CommandTimeout = CommandTimeoutSeconds;
+        command.Parameters.Add(Instant(sinceUtc));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            changes.Add(new ServiceBuildChange(reader.GetString(0), Utc(reader.GetDateTime(1)), reader.GetString(2), reader.GetString(3)));
+        }
+
+        return changes;
     }
 
     /// <summary>The instant as the store keeps it: naive UTC, cut to whole microseconds so the value written is the value read back.</summary>
