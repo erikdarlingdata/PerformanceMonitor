@@ -71,6 +71,20 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     /// <summary>One kept ring-buffer event: the detail of an attention, attention_count 0, never summed into a count.</summary>
     public const string KindSample = "sample";
 
+    /// <summary>
+    /// #9507: one sampled call that ended aborted, from an <c>rpc_completed</c> or <c>sql_batch_completed</c> event whose result is
+    /// Abort: the client cancelled it while it ran. <c>interrupt_duration_us</c> is the call's elapsed time (not the attention's),
+    /// and <c>statement_text</c> is the object name, a colon and the statement for an RPC, or the batch text for a batch.
+    /// </summary>
+    public const string KindAborted = "aborted";
+
+    /// <summary>
+    /// #9507: a run's exact count of aborted completed events, written on EVERY run where the session carries the two events,
+    /// including 0, once a prior run's counter is known. <c>attention_count</c> is the count, as a <see cref="KindCount"/> row's
+    /// is. The row's presence in a window is what says the capture is active for that server. event_time NULL.
+    /// </summary>
+    public const string KindAbortedCount = "aborted_count";
+
     /// <summary>The stored statement text is cut here (after the statement filter).</summary>
     public const int MaxStatementTextLength = 4000;
 
@@ -79,6 +93,12 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
 
     public static string CountKeyFor(string? databaseName) =>
         databaseName is null ? CountStateKey : CountStateKey + ":" + databaseName;
+
+    /// <summary>State key: the aborted completed events the counter held at the prior run (#9507). Per database on Azure SQL DB, via <see cref="AbortedCountKeyFor"/>.</summary>
+    public const string AbortedCountStateKey = "attention_aborted_event_count";
+
+    public static string AbortedCountKeyFor(string? databaseName) =>
+        databaseName is null ? AbortedCountStateKey : AbortedCountStateKey + ":" + databaseName;
 
     /// <summary>1 when this cycle's gate skipped the cast+shred, else 0.</summary>
     public const string ShredGatedMeasurement = "shred_gated";
@@ -139,7 +159,7 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
 
     public override string? PerDatabaseWatermarkColumn => "database_name";
 
-    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, CountStateKey };
+    public override IReadOnlyList<string> StateKeys { get; } = new[] { XeShredGate.StateKey, CountStateKey, AbortedCountStateKey };
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -172,8 +192,18 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
         "CONVERT(bigint, @target_data.value('sum(/CounterTarget/Packages/Package/Event[@name=\"attention\"]/@count)', 'float'))";
 
     /// <summary>
+    /// #9507: the aborted completed events the counter holds, as a bigint: the <c>rpc_completed</c> and <c>sql_batch_completed</c>
+    /// counts added. NULL when <c>@target_data</c> is NULL or lists neither event, which is a session without them (an older
+    /// definition), so no <c>aborted_count</c> row and no capture. Read as <c>float</c> and converted, for the reason
+    /// <see cref="EventCountExpression"/> gives.
+    /// </summary>
+    public const string AbortedCountExpression =
+        "CASE WHEN @target_data.exist('/CounterTarget/Packages/Package/Event[@name=\"rpc_completed\" or @name=\"sql_batch_completed\"]') = 1 "
+        + "THEN CONVERT(bigint, @target_data.value('sum(/CounterTarget/Packages/Package/Event[@name=\"rpc_completed\" or @name=\"sql_batch_completed\"]/@count)', 'float')) END";
+
+    /// <summary>
     /// The batch. <c>{0}</c> = the session name, <c>{1}</c> = the sessions DMV, <c>{2}</c> = the targets DMV, <c>{3}</c> =
-    /// <see cref="EventCountExpression"/>. Server-scoped and database-scoped sessions differ only in those two DMVs.
+    /// <see cref="EventCountExpression"/>, <c>{6}</c> = <see cref="AbortedCountExpression"/>. Server-scoped and database-scoped sessions differ only in those two DMVs.
     /// </summary>
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -181,6 +211,7 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 DECLARE
     @execution_count bigint,
     @event_count bigint,
+    @aborted_event_count bigint,
     @shred_needed bit,
     @target_data xml;
 
@@ -221,7 +252,8 @@ AND   xet.target_name = N'event_counter'
 OPTION(RECOMPILE);
 
 SELECT
-    @event_count = {3};
+    @event_count = {3},
+    @aborted_event_count = {6};
 
 SET @shred_needed =
     CASE
@@ -231,6 +263,8 @@ SET @shred_needed =
         WHEN @event_count IS NULL THEN 1
         WHEN @last_event_count IS NULL THEN 1
         WHEN @event_count <> @last_event_count THEN 1
+        WHEN @aborted_event_count IS NOT NULL AND @last_aborted_event_count IS NULL THEN 1
+        WHEN @aborted_event_count <> @last_aborted_event_count THEN 1
         ELSE 0
     END;
 
@@ -268,18 +302,44 @@ SELECT
     session_id = evt.value('(action[@name=""session_id""]/value)[1]', 'integer'),
     request_id = evt.value('(data[@name=""request_id""]/value)[1]', 'integer'),
     interrupt_duration_us = evt.value('(data[@name=""duration""]/value)[1]', 'bigint'),
-    statement_text = evt.value('(action[@name=""sql_text""]/value)[1]', 'nvarchar(max)')
+    statement_text = evt.value('(action[@name=""sql_text""]/value)[1]', 'nvarchar(max)'),
+    event_kind = CONVERT(varchar(20), '{7}'),
+    object_name = CONVERT(nvarchar(512), NULL)
 FROM @PerformanceMonitor_Attention AS pma
 CROSS APPLY pma.ring_buffer.nodes('RingBufferTarget/event[@name=""attention""]') AS e(evt)
 WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
+
+UNION ALL
+
+SELECT
+    event_time = evt.value('(@timestamp)[1]', 'datetime2'),
+    database_name = evt.value('(action[@name=""database_name""]/value)[1]', 'nvarchar(128)'),
+    client_app_name = evt.value('(action[@name=""client_app_name""]/value)[1]', 'nvarchar(256)'),
+    client_hostname = evt.value('(action[@name=""client_hostname""]/value)[1]', 'nvarchar(256)'),
+    session_id = evt.value('(action[@name=""session_id""]/value)[1]', 'integer'),
+    request_id = evt.value('(data[@name=""request_id""]/value)[1]', 'integer'),
+    interrupt_duration_us = evt.value('(data[@name=""duration""]/value)[1]', 'bigint'),
+    statement_text =
+        COALESCE
+        (
+            evt.value('(data[@name=""statement""]/value)[1]', 'nvarchar(max)'),
+            evt.value('(data[@name=""batch_text""]/value)[1]', 'nvarchar(max)'),
+            evt.value('(action[@name=""sql_text""]/value)[1]', 'nvarchar(max)')
+        ),
+    event_kind = CONVERT(varchar(20), '{8}'),
+    object_name = evt.value('(data[@name=""object_name""]/value)[1]', 'nvarchar(512)')
+FROM @PerformanceMonitor_Attention AS pma
+CROSS APPLY pma.ring_buffer.nodes('RingBufferTarget/event[@name=""rpc_completed"" or @name=""sql_batch_completed""]') AS e(evt)
+WHERE evt.exist('@timestamp[. > sql:variable(""@cutoff_time"")]') = 1
 ORDER BY
-    evt.value('(@timestamp)[1]', 'datetime2')
+    event_time
 OPTION(RECOMPILE);
 
 SELECT
     execution_count = @execution_count,
     event_count = @event_count,
-    shred_gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END;";
+    shred_gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
+    aborted_event_count = @aborted_event_count;";
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
@@ -294,6 +354,7 @@ SELECT
             new("@cutoff_time", cutoff, CollectorParameterType.DateTime2),
             new("@last_execution_count", XeShredGate.ReadLast(context.State, context.CurrentDatabaseName), CollectorParameterType.BigInt),
             new("@last_event_count", ReadLastCount(context.State, context.CurrentDatabaseName), CollectorParameterType.BigInt),
+            new("@last_aborted_event_count", ReadLastAbortedCount(context.State, context.CurrentDatabaseName), CollectorParameterType.BigInt),
         };
 
         return new CollectorQuery(text, parameters);
@@ -307,11 +368,21 @@ SELECT
             .Replace("{2}", isAzureSqlDb ? "sys.dm_xe_database_session_targets" : "sys.dm_xe_session_targets", StringComparison.Ordinal)
             .Replace("{3}", EventCountExpression, StringComparison.Ordinal)
             .Replace("{4}", RingBufferXml.DeclareSql, StringComparison.Ordinal)
-            .Replace("{5}", RingBufferXml.ParseSql, StringComparison.Ordinal);
+            .Replace("{5}", RingBufferXml.ParseSql, StringComparison.Ordinal)
+            .Replace("{6}", AbortedCountExpression, StringComparison.Ordinal)
+            .Replace("{7}", KindSample, StringComparison.Ordinal)
+            .Replace("{8}", KindAborted, StringComparison.Ordinal);
 
     /// <summary>The stored prior event_counter count, or null on a first run, a restarted host or an unreadable value.</summary>
     public static long? ReadLastCount(IReadOnlyDictionary<string, string> state, string? databaseName) =>
         state.TryGetValue(CountKeyFor(databaseName), out var raw)
+        && long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            ? value
+            : null;
+
+    /// <summary>The stored prior aborted-completed-events count (#9507), or null on a first run, a restarted host or an unreadable value.</summary>
+    public static long? ReadLastAbortedCount(IReadOnlyDictionary<string, string> state, string? databaseName) =>
+        state.TryGetValue(AbortedCountKeyFor(databaseName), out var raw)
         && long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
             ? value
             : null;
@@ -341,10 +412,17 @@ SELECT
         while (await reader.ReadAsync(cancellationToken))
         {
             var filtered = scrub.Text(reader.IsDBNull(7) ? null : reader.GetString(7));
+            var aborted = !reader.IsDBNull(8) && string.Equals(reader.GetString(8), KindAborted, StringComparison.Ordinal);
+            if (aborted && !reader.IsDBNull(9) && filtered is not null)
+            {
+                /* An RPC names its object: "dbo.proc: <statement>". A batch has no object name. */
+                filtered = reader.GetString(9) + ": " + filtered;
+            }
+
             rows.Add(new Row
             {
                 EventTime = reader.IsDBNull(0) ? null : reader.GetDateTime(0),
-                EventKind = KindSample,
+                EventKind = aborted ? KindAborted : KindSample,
                 AttentionCount = 0,
                 /* A database-scoped session captures its own database, which the action may also name. */
                 DatabaseName = context.CurrentDatabaseName ?? (reader.IsDBNull(1) ? null : reader.GetString(1)),
@@ -363,6 +441,7 @@ SELECT
         {
             var executionCount = reader.IsDBNull(0) ? (long?)null : reader.GetInt64(0);
             var eventCount = reader.IsDBNull(1) ? (long?)null : reader.GetInt64(1);
+            var abortedCount = reader.FieldCount > 3 && !reader.IsDBNull(3) ? reader.GetInt64(3) : (long?)null;
 
             /* A count row only when the delta is above zero: a quiet run, an unreadable counter and the first run (no prior) write
                none, and the prior is still staged below. event_time stays NULL so it never moves the samples' watermark;
@@ -377,6 +456,19 @@ SELECT
                 });
             }
 
+            /* #9507: an aborted_count row on EVERY run where the session carries the two completed events, 0 included: its presence
+               in a window says the capture is active, and a 0 is a real "nothing aborted", not a gap. The first run (no prior)
+               and a session without the events write none. A counter below its prior is a restarted session, as for the count. */
+            if (CountDelta(abortedCount, ReadLastAbortedCount(context.State, context.CurrentDatabaseName)) is { } abortedDelta)
+            {
+                rows.Add(new Row
+                {
+                    EventKind = KindAbortedCount,
+                    AttentionCount = abortedDelta,
+                    DatabaseName = context.CurrentDatabaseName,
+                });
+            }
+
             /* Staged, not pending: a count saved ahead of a failed write would drop that run's events from every later delta. */
             if (executionCount is { } ec)
             {
@@ -386,6 +478,11 @@ SELECT
             if (eventCount is { } cc)
             {
                 context.StagedItemState[CountKeyFor(context.CurrentDatabaseName)] = cc.ToString(CultureInfo.InvariantCulture);
+            }
+
+            if (abortedCount is { } ac)
+            {
+                context.StagedItemState[AbortedCountKeyFor(context.CurrentDatabaseName)] = ac.ToString(CultureInfo.InvariantCulture);
             }
 
             context.Measure(ShredGatedMeasurement, !reader.IsDBNull(2) && reader.GetBoolean(2) ? 1 : 0);
