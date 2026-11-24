@@ -25,7 +25,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// files than the rest, or whether time or WAL started them, and a checkpoint settings trial needs those figures for every
 /// checkpoint in its window.
 ///
-/// <para><b>Shape (V304).</b> <c>collect.store_checkpoints</c>: one row per checkpoint. The start line gives the reason and
+/// <para><b>Shape (V309).</b> <c>collect.store_checkpoints</c>: one row per checkpoint. The start line gives the reason and
 /// the flags and opens the row, the complete line closes it and gives the figures. A complete line whose start line was
 /// never seen (logging was off, or the start line was in a file the ring has since overwritten) still gets a row, with no
 /// reason and a start time worked out from its end time and total time. A start line with no complete line (a crash) stays
@@ -49,9 +49,9 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class StoreCheckpoints
 {
     /// <summary>The store schema version that adds the table. One constant, so a renumber is one edit.</summary>
-    public const int Version = 304;
+    public const int Version = 309;
 
-    /// <summary>The rung (V304): one empty plain table and its indexes, no data moves. An older build never reads it.</summary>
+    /// <summary>The rung (V309): one empty plain table and its indexes, no data moves. An older build never reads it.</summary>
     public const string CreateSql = @"
 CREATE TABLE IF NOT EXISTS collect.store_checkpoints
 (
