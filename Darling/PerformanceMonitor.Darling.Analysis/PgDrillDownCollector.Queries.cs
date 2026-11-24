@@ -431,8 +431,8 @@ ORDER BY o.worker_ratio DESC";
     /// The inline statement text of the parameter-sensitive plans the reader keeps (#5361), whole: the text
     /// <see cref="ParameterSensitiveSql"/> flags with <c>has_inline_text</c> but does not carry, because it runs
     /// before the reader's cap. Each plan's row is the one that read ranked: the newest row of the window with
-    /// <c>delta_execution_count &gt; 0</c> (its <c>rn = 1</c>), so a kept plan prints the text it printed when the ranking
-    /// read carried it. <c>$1</c> to <c>$3</c> are the server and the window, <c>$4</c> to <c>$6</c> the kept plans'
+    /// <c>delta_execution_count &gt; 0</c>, the newest by (collection_time, collection_id), the same row the ranking keeps,
+    /// so a kept plan prints the text of the row it was ranked on, also when two rows share the newest time. <c>$1</c> to <c>$3</c> are the server and the window, <c>$4</c> to <c>$6</c> the kept plans'
     /// database, query hash and plan hash as three parallel arrays; a NULL part matches a NULL part, as the ranking's
     /// <c>PARTITION BY</c> groups it. The hash comparison also states <c>= ANY</c> so the (server_id, query_hash,
     /// collection_time) index serves the read. The text is the view's own <c>COALESCE</c> (#1767): the row's inline text, else
@@ -456,7 +456,7 @@ AND   q.collection_time >= $2
 AND   q.collection_time <= $3
 AND   q.delta_execution_count > 0
 AND   (q.query_hash = ANY($5::text[]) OR q.query_hash IS NULL)
-ORDER BY q.database_name, q.query_hash, q.query_plan_hash, q.collection_time DESC";
+ORDER BY q.database_name, q.query_hash, q.query_plan_hash, q.collection_time DESC, q.collection_id DESC";
 
     /// <summary>
     /// The statement text of the parameter-sensitive plans the reader keeps, by digest (#3902, #4821): one

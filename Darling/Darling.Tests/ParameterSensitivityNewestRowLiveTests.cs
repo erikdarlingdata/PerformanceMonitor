@@ -44,6 +44,7 @@ public sealed class ParameterSensitivityNewestRowLiveTests
     private const string NullNewestQueryHash = "0xQH_9492_NULLNEWEST";
     private const string NewestQuietQueryHash = "0xQH_9492_NEWESTQUIET";
     private const string OlderQueryHash = "0xQH_9492_OLDER";
+    private const string InlineTieQueryHash = "0xQH_9492_INLINETIE";
 
     private static readonly byte[] DigestTieLoser = [0x94, 0x92, 0x01];
     private static readonly byte[] DigestTieWinner = [0x94, 0x92, 0x02];
@@ -96,6 +97,34 @@ public sealed class ParameterSensitivityNewestRowLiveTests
         AssertNewestRows(seen, isDrillDown: true);
     }
 
+    [Fact]
+    public async Task TheDrillDownInlineText_OnATiedTime_ComesFromTheLargerCollectionId_AgainstDevPostgres()
+    {
+        /* Both rows of the key carry inline text and the texts differ. The key's ratio is 2, so the ranking does not report it:
+           the inline-text read takes its keys as arrays, so it is asked for this plan directly. */
+        var texts = await WithSeededStoreAsync(async (connection, windowStart, windowEnd, ct) =>
+        {
+            await using var cmd = new NpgsqlCommand(PgDrillDownCollector.ParameterSensitiveInlineTextSql, connection) { CommandTimeout = LiveTimeoutSeconds };
+            cmd.Parameters.AddWithValue(TestServerId);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue(new[] { TieDb });
+            cmd.Parameters.AddWithValue(new[] { InlineTieQueryHash });
+            cmd.Parameters.AddWithValue(new[] { TiePlanHash });
+
+            var found = new List<string?>();
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                found.Add(reader.IsDBNull(3) ? null : reader.GetString(3));
+            }
+
+            return found;
+        });
+
+        Assert.Equal("inline text of the larger id", Assert.Single(texts));
+    }
+
     private static void AssertNewestRows(Dictionary<string, Seen> seen, bool isDrillDown)
     {
         /* Two rows at the newest time: the larger collection_id wins and every figure is its own. The older row (the
@@ -141,7 +170,42 @@ public sealed class ParameterSensitivityNewestRowLiveTests
 
     private static (DateTime Start, DateTime End) Window() => (WindowEnd.AddHours(-4), WindowEnd);
 
-    private static async Task<Dictionary<string, Seen>> RunReadAsync(string sql, int keyOrdinal, bool isDrillDown)
+    private static async Task<Dictionary<string, Seen>> RunReadAsync(string sql, int keyOrdinal, bool isDrillDown) =>
+        await WithSeededStoreAsync(async (connection, windowStart, windowEnd, ct) =>
+        {
+            var seen = new Dictionary<string, Seen>();
+            await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = LiveTimeoutSeconds };
+            cmd.Parameters.AddWithValue(TestServerId);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified));
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var key = Key(
+                    reader.IsDBNull(keyOrdinal) ? null : reader.GetString(keyOrdinal),
+                    reader.IsDBNull(keyOrdinal + 1) ? null : reader.GetString(keyOrdinal + 1),
+                    reader.IsDBNull(keyOrdinal + 2) ? null : reader.GetString(keyOrdinal + 2));
+
+                /* The fact's columns: worker ratio 2, grant ratio 3, spill 4, creation time 5. The drill-down's: execution
+                   count 3, worker ratio 6, grant ratio 7, spill 8, has inline text 9, creation time 10, digest 13. */
+                var workerOrdinal = isDrillDown ? 6 : 2;
+                var creationOrdinal = isDrillDown ? 10 : 5;
+                seen.Add(key, new Seen(
+                    reader.GetDouble(workerOrdinal),
+                    reader.IsDBNull(workerOrdinal + 1) ? null : reader.GetDouble(workerOrdinal + 1),
+                    Convert.ToInt32(reader.GetValue(workerOrdinal + 2), CultureInfo.InvariantCulture),
+                    reader.IsDBNull(creationOrdinal) ? null : reader.GetDateTime(creationOrdinal),
+                    isDrillDown ? reader.GetInt64(3) : null,
+                    isDrillDown ? reader.GetBoolean(9) : null,
+                    isDrillDown && !reader.IsDBNull(13) ? reader.GetFieldValue<byte[]>(13) : null));
+            }
+
+            return seen;
+        });
+
+    /// <summary>Migrates, seeds the window's rows, runs one read on its own connection, and cleans up.</summary>
+    private static async Task<T> WithSeededStoreAsync<T>(Func<NpgsqlConnection, DateTime, DateTime, CancellationToken, Task<T>> read)
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
@@ -173,39 +237,14 @@ public sealed class ParameterSensitivityNewestRowLiveTests
                 }
             }
 
-            var seen = new Dictionary<string, Seen>();
+            T result;
             await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
             {
-                await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = LiveTimeoutSeconds };
-                cmd.Parameters.AddWithValue(TestServerId);
-                cmd.Parameters.AddWithValue(DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified));
-                cmd.Parameters.AddWithValue(DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified));
-
-                await using var reader = await cmd.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
-                {
-                    var key = Key(
-                        reader.IsDBNull(keyOrdinal) ? null : reader.GetString(keyOrdinal),
-                        reader.IsDBNull(keyOrdinal + 1) ? null : reader.GetString(keyOrdinal + 1),
-                        reader.IsDBNull(keyOrdinal + 2) ? null : reader.GetString(keyOrdinal + 2));
-
-                    /* The fact's columns: worker ratio 2, grant ratio 3, spill 4, creation time 5. The drill-down's: execution
-                       count 3, worker ratio 6, grant ratio 7, spill 8, has inline text 9, creation time 10, digest 13. */
-                    var workerOrdinal = isDrillDown ? 6 : 2;
-                    var creationOrdinal = isDrillDown ? 10 : 5;
-                    seen.Add(key, new Seen(
-                        reader.GetDouble(workerOrdinal),
-                        reader.IsDBNull(workerOrdinal + 1) ? null : reader.GetDouble(workerOrdinal + 1),
-                        Convert.ToInt32(reader.GetValue(workerOrdinal + 2), CultureInfo.InvariantCulture),
-                        reader.IsDBNull(creationOrdinal) ? null : reader.GetDateTime(creationOrdinal),
-                        isDrillDown ? reader.GetInt64(3) : null,
-                        isDrillDown ? reader.GetBoolean(9) : null,
-                        isDrillDown && !reader.IsDBNull(13) ? reader.GetFieldValue<byte[]>(13) : null));
-                }
+                result = await read(connection, windowStart, windowEnd, ct);
             }
 
             bodySucceeded = true;
-            return seen;
+            return result;
         }
         finally
         {
@@ -242,6 +281,11 @@ public sealed class ParameterSensitivityNewestRowLiveTests
         /* An older row that passes the filter under a newest row that does not (a ratio of 2). */
         yield return new Row(TieDb, NewestQuietQueryHash, TiePlanHash, hourBefore, -94_920_100, 500, 20_000, 2_000_000, 1_024, 2_048, 0, 0, null, null, OtherCreation);
         yield return new Row(TieDb, NewestQuietQueryHash, TiePlanHash, newest, -94_920_110, 500, 20_000, 40_000, 1_024, 2_048, 0, 0, null, null, OtherCreation);
+
+        /* Two rows at the newest time that both carry inline text, the larger id inserted last. A ratio of 2, so the ranking does not
+           report the key and the other reads are unchanged. */
+        yield return new Row(TieDb, InlineTieQueryHash, TiePlanHash, newest, -94_920_150, 500, 20_000, 40_000, 1_024, 2_048, 0, 0, "inline text of the smaller id", null, OtherCreation);
+        yield return new Row(TieDb, InlineTieQueryHash, TiePlanHash, newest, -94_920_140, 500, 20_000, 40_000, 1_024, 2_048, 0, 0, "inline text of the larger id", null, OtherCreation);
 
         /* NULL database, query hash and plan hash: one group, two rows, the newest wins. */
         yield return new Row(null, null, null, hourBefore, -94_920_120, 500, 20_000, 2_000_000, 1_024, 2_048, 0, 0, null, null, OtherCreation);
