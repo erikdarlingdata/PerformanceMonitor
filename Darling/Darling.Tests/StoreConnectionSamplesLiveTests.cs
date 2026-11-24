@@ -90,7 +90,7 @@ public sealed class StoreConnectionSamplesLiveTests
             sessions.Add(waiter);
             var waiting = Task.Run(async () =>
             {
-                await using var lockCommand = new NpgsqlCommand("LOCK TABLE public.conn_probe_lock IN ACCESS EXCLUSIVE MODE", waiter);
+                await using var lockCommand = new NpgsqlCommand("BEGIN; LOCK TABLE public.conn_probe_lock IN ACCESS EXCLUSIVE MODE; ROLLBACK", waiter);
                 await lockCommand.ExecuteNonQueryAsync(CancellationToken.None);
             }, ct);
             for (var attempt = 0; attempt < 100 && await ScalarAsync(admin, "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'conn-probe-waiter' AND wait_event_type = 'Lock'", ct) == 0; attempt++)
