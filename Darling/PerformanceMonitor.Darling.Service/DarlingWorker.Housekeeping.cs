@@ -1165,6 +1165,7 @@ AND   j.hypertable_name = '{relation}'", connection))
     private async Task ConvergeStoreObjectsAsync(CancellationToken cancellationToken, bool timescaleAvailable = true)
     {
         var passClock = Stopwatch.StartNew();
+        var convergenceStarted = DateTime.UtcNow;
         var tally = new StoreObjectConvergenceTally();
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(s_storeObjectConvergenceBudget);
@@ -1198,6 +1199,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
 
             LogStoreObjectConvergence(tally, passClock.ElapsedMilliseconds, startup: false);
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "store_object_convergence", convergenceStarted, passClock.Elapsed,
+                new StorePassSteps.StepCounts(
+                    Built: tally.Steps, Failed: tally.Failed.Count,
+                    Detail: tally.Changed.Count == 0 ? "nothing changed" : "changed: " + string.Join(", ", tally.Changed)));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1205,12 +1211,18 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
         catch (OperationCanceledException) when (budget.IsCancellationRequested)
         {
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "store_object_convergence", convergenceStarted, passClock.Elapsed,
+                new StorePassSteps.StepCounts(Built: tally.Steps, Failed: tally.Failed.Count), "cut short by its time budget");
             _logger.LogWarning(
                 "Store object convergence exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short — {Steps} step(s) ran, {Changed} changed, and the steps it had not reached are exactly as they were and are retried next hour (and at the next start). Every step is idempotent, so the next pass resumes at the one this pass was inside rather than redoing the ones behind it. A CONVERGED store answers this pass in well under a second; a store that spends five minutes in it is either building something real for the first time — a first hypertable conversion or a first aggregate on an adopted store — or is too slow to answer its own catalog, and which one it is shows in the per-object lines above.",
                 (long)s_storeObjectConvergenceBudget.TotalSeconds, passClock.ElapsedMilliseconds, tally.Steps, tally.Changed.Count);
         }
         catch (Exception ex)
         {
+            await PassSteps.RecordAsync(
+                StorePassSteps.StoreMaintenancePass, "store_object_convergence", convergenceStarted, passClock.Elapsed,
+                new StorePassSteps.StepCounts(Built: tally.Steps, Failed: tally.Failed.Count), ex.Message);
             _logger.LogWarning(
                 "Store object convergence could not run after {ElapsedMs} ms — every store object stays exactly as it is (a missing rollup family stays missing, a missing baseline relation keeps returning nothing) until the next hour retries or the service restarts: {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
@@ -1542,8 +1554,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                usable, which is what the two passes after it need. */
             try
             {
-                await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger,
-                    checkpointLongestSync?.SyncMs, checkpointLongestSync?.SampledUtc, budget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "store_metrics_sweep", async () =>
+                {
+                    var rows = await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger,
+                        checkpointLongestSync?.SyncMs, checkpointLongestSync?.SampledUtc, budget.Token);
+                    return new StorePassSteps.StepCounts(Built: rows);
+                });
             }
             catch (PostgresException ex) when (!PgBaselineProvider.IsCommandTimeout(ex)
                                                && connection.State == ConnectionState.Open)
@@ -1573,7 +1589,11 @@ AND   j.hypertable_name = '{relation}'", connection))
                not_collected and names the privilege. */
             try
             {
-                await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "store_log_capture", async () =>
+                {
+                    var captures = await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+                    return new StorePassSteps.StepCounts(Built: captures.Count);
+                });
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1723,7 +1743,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             historyBudget.CancelAfter(StoreStatementHistory.SliceBudget);
             try
             {
-                await StoreStatementHistory.SnapshotAsync(connection, DateTime.UtcNow, _logger, historyBudget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "store_statement_history", async () =>
+                {
+                    var snapshot = await StoreStatementHistory.SnapshotAsync(connection, DateTime.UtcNow, _logger, historyBudget.Token);
+                    return new StorePassSteps.StepCounts(Built: snapshot.StatementsKept, Detail: snapshot.Outcome);
+                });
                 _storeStatementHistoryWarned = false;
             }
             catch (Exception ex) when (ex is not OperationCanceledException
@@ -1752,7 +1776,11 @@ AND   j.hypertable_name = '{relation}'", connection))
 
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)
                for the window, plus the accumulator's own bounded retention DELETE. */
-            await _collectorCost.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+            await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "collector_cost_flush", async () =>
+            {
+                await _collectorCost.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+                return default(StorePassSteps.StepCounts);
+            });
 
             /* #4442 scope 2: the read-latency flush runs on the SAME tick, isolated from collector_cost's own
                failure — a bad read-latency flush must not cost the collector_cost series its hourly row, and
@@ -1794,7 +1822,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             hourlyBudget.CancelAfter(CollectionLogHourly.PassSliceBudget);
             try
             {
-                await CollectionLogHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, hourlyBudget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "collection_log_hourly", async () =>
+                {
+                    var rows = await CollectionLogHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, hourlyBudget.Token);
+                    return new StorePassSteps.StepCounts(Built: rows);
+                });
             }
             catch (Exception ex) when (ex is not OperationCanceledException
                 || (hourlyBudget.IsCancellationRequested && !budget.IsCancellationRequested))
@@ -1818,7 +1850,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             categoryBudget.CancelAfter(JobHistoryCategoryHourly.PassSliceBudget);
             try
             {
-                await JobHistoryCategoryHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, categoryBudget.Token);
+                await PassSteps.StepAsync(StorePassSteps.StoreSelfMetricsPass, "job_history_category_hourly", async () =>
+                {
+                    var rows = await JobHistoryCategoryHourly.RollUpAsync(connection, DateTime.UtcNow, _logger, categoryBudget.Token);
+                    return new StorePassSteps.StepCounts(Built: rows);
+                });
             }
             catch (Exception ex) when (ex is not OperationCanceledException
                 || (categoryBudget.IsCancellationRequested && !budget.IsCancellationRequested))
