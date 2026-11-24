@@ -568,7 +568,7 @@ AND   day = $2::date;";
     /// Builds one (server, day): makes sure the built row exists, then in ONE transaction takes the server's advisory lock
     /// (false: another builder has it, nothing is written and the result is null), reads <c>late_seq</c> as s0, and either adds
     /// the new hours to the day's totals (<see cref="BuildSliceSql"/>, #9458: only for a valid partial day whose watermark
-    /// advances) or deletes the day's totals and inserts them again, then stamps <c>built_seq = s0</c>. A late apply that bumps <c>late_seq</c> after s0 was read
+    /// advances and is still inside the day) or deletes the day's totals and inserts them again, then stamps <c>built_seq = s0</c>. A late apply that bumps <c>late_seq</c> after s0 was read
     /// leaves the day invalid for a reader (<c>built_seq &lt;&gt; late_seq</c>) and due again, so a race costs one more build,
     /// never a wrong total. Returns the rows in the day's totals (the day's stored count plus the plans a slice inserted, for a slice), or null when the lock was not free.
     /// </summary>
@@ -637,8 +637,10 @@ AND   day = $2::date;";
            totals cover every row below that watermark and no write to such a row can have landed without moving late_seq
            (BuildSliceSql), which is the equality SeqSql just read in this transaction, so a day invalidated after it was
            planned takes the whole build below. Every other day, the first build, a late-marked or closing day, is deleted and
-           built from scratch. */
-        if (validPartial && storedThrough is { } sliceFrom && sliceFrom < builtThrough)
+           built from scratch. The closing tick (the watermark reaches the next midnight) is whole on purpose (#9458): the
+           day's permanent totals are built from the source once, so drift from a write the trigger does not see (a DELETE)
+           cannot outlive the open day. */
+        if (validPartial && storedThrough is { } sliceFrom && sliceFrom < builtThrough && builtThrough < dayStart.AddDays(1))
         {
             await using var slice = new NpgsqlCommand(BuildSliceSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
             AddBuildBounds(slice, serverId, day, dayStart, builtThrough);
