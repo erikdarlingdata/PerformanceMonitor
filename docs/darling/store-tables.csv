@@ -210,6 +210,7 @@ session_stats_baseline,derived,derived,rollup view
 session_summary_stats,collected,yes,
 slow_reads,internal,no,slow read telemetry
 spinlock_stats,collected,yes,
+store_checkpoints,internal,no,one row per checkpoint of the store's own server
 store_log_captures,internal,no,store log capture progress
 store_log_events,internal,no,store log events
 store_metrics,internal,no,store size telemetry

@@ -397,6 +397,7 @@ public static partial class DarlingWebEndpoints
             ["measure_store_table"] = (c, pg, an) => DarlingMcpStoreTableMeasureTools.MeasureStoreTable(pg, Str(c, "table"), c.RequestAborted),
             ["get_store_maintenance_readiness"] = (c, pg, an) => DarlingMcpStoreMaintenanceReadinessTools.GetStoreMaintenanceReadiness(pg, c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, responseByteBudget: null, c.RequestAborted),
+            ["get_store_checkpoints"] = (c, pg, an) => DarlingMcpStoreCheckpointTools.GetStoreCheckpoints(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreCheckpointTools.DefaultLimit), AsOf(c), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["get_store_query_history"] = (c, pg, an) => DarlingMcpStoreQueryHistoryTools.GetStoreQueryHistory(pg, Str(c, "query_id"), Str(c, "role"), Hours(c, DarlingMcpStoreQueryHistoryTools.DefaultHours), Rows(c, "top", DarlingMcpStoreQueryHistoryTools.DefaultTop), logger: logger, cancellationToken: c.RequestAborted),
             ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
             /* #4214 part 2: postgresConfig rides by closure (this method's own doc comment), the same way

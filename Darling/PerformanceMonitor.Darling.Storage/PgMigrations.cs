@@ -4039,6 +4039,9 @@ END $$;";
            after midnight and not wait for the grid's close. One plain table created empty: no data moves. An older build ignores it and serves a clutter day
            only from the grid's own stamp, so a day built from its hours is read from the hourly or raw rows there. */
         new Migration(QueryStoreClutterDayFold.Version, "query-store-clutter-day-built", QueryStoreClutterDayFold.CreateSql),
+        /* V304 (#9414): one row per checkpoint of the store's own PostgreSQL server (collect.store_checkpoints), read from its log. One plain table created
+           empty: no data moves. An older build never reads it. */
+        new Migration(StoreCheckpoints.Version, "store-checkpoints", StoreCheckpoints.CreateSql),
     };
 
     /// <summary>
