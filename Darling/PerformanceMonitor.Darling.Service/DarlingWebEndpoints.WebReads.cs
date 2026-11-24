@@ -64,6 +64,7 @@ public static partial class DarlingWebEndpoints
     {
         var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
+            // New tools do NOT add entries here: register them in the tool's own file (an IReadToolRegistration, #9477).
             /* ── analysis reads (take the DarlingAnalysisService) ── */
             ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c), c.RequestAborted),
             ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryNullableInt(c, "baseline_hours_back"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -395,7 +396,6 @@ public static partial class DarlingWebEndpoints
             ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), QueryInt(c, "wal_hours_back", null, DarlingStoreWalReader.DefaultHoursBack), c.RequestAborted),
             ["get_store_table_health"] = (c, pg, an) => DarlingMcpStoreTableHealthTools.GetStoreTableHealth(pg, Rows(c, "top", DarlingMcpStoreTableHealthTools.DefaultTop), QueryBool(c, "candidates_only", false), First(c, "section"), offset: 0, responseByteBudget: null, c.RequestAborted),
             ["measure_store_table"] = (c, pg, an) => DarlingMcpStoreTableMeasureTools.MeasureStoreTable(pg, Str(c, "table"), c.RequestAborted),
-            ["get_store_maintenance_readiness"] = (c, pg, an) => DarlingMcpStoreMaintenanceReadinessTools.GetStoreMaintenanceReadiness(pg, c.RequestAborted),
             ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), full_text: true, offset: 0, query_id: Str(c, "query_id"), responseByteBudget: null, c.RequestAborted),
             ["get_service_starts"] = (c, pg, an) => DarlingMcpServiceStartTools.GetServiceStarts(pg, Rows(c, "limit", DarlingMcpServiceStartTools.DefaultLimit), Str(c, "service_host"), c.RequestAborted),
             ["get_store_pass_steps"] = (c, pg, an) => DarlingMcpStorePassStepsTools.GetStorePassSteps(pg, Hours(c, 24), Str(c, "pass"), Str(c, "step"), Rows(c, "limit", DarlingMcpStorePassStepsTools.DefaultLimit), AsOf(c), responseByteBudget: null, c.RequestAborted),
@@ -567,6 +567,9 @@ public static partial class DarlingWebEndpoints
             ["get_finops"] = (c, pg, an) => DarlingMcpFinOpsTools.GetFinOps(pg, First(c, "view") ?? "", Server(c), Hours(c, 24), QueryInt(c, "limit", null, 10), Str(c, "database_name"), QueryBool(c, "full_text", false), Str(c, "object_name"), logger, c.RequestAborted),
             // FinOps web parity (#4843), set B ends.
         };
+
+        // Every tool's own registration joins the shared list above (#9477). A name in both throws here, naming the tool.
+        ReadToolRegistrations.AddTo(dispatch, ReadToolRegistrations.All, r => r.Handler);
 
         /* #4442: the test-only extra entry, added ONLY when a test set it -- never in a production
            run, since TestOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. #4782: it is

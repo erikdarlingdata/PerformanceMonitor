@@ -772,12 +772,18 @@ public static partial class DarlingWebEndpoints
             : null;
 
     /// <summary>Validates a stored definition; the body lives in <see cref="CustomViewValidation.ValidateDefinition"/>.</summary>
-    internal static CustomViewValidation.DefinitionValidation ValidateDefinition(string? definitionJson) =>
-        CustomViewValidation.ValidateDefinition(definitionJson, ReadPanelParams);
+    internal static CustomViewValidation.DefinitionValidation ValidateDefinition(string? definitionJson)
+    {
+        ReadToolRegistrations.EnsureRegistered(); // Storage must know the registered reads before it checks a panel's read name (#9477).
+        return CustomViewValidation.ValidateDefinition(definitionJson, ReadPanelParams);
+    }
 
     /// <summary>Validates a notebook definition; the body lives in <see cref="CustomViewValidation.ValidateNotebookDefinition"/>.</summary>
-    internal static CustomViewValidation.DefinitionValidation ValidateNotebookDefinition(JsonObject rootObject) =>
-        CustomViewValidation.ValidateNotebookDefinition(rootObject, ReadPanelParams);
+    internal static CustomViewValidation.DefinitionValidation ValidateNotebookDefinition(JsonObject rootObject)
+    {
+        ReadToolRegistrations.EnsureRegistered();
+        return CustomViewValidation.ValidateNotebookDefinition(rootObject, ReadPanelParams);
+    }
 
     /// <summary>#7565: adds the validator's warnings to a saved view's reply as <c>warnings</c> (a list of text), only when it
     /// has some, so the builder shows what the validator said rather than judging the definition a second time.</summary>
@@ -826,7 +832,7 @@ public static partial class DarlingWebEndpoints
     private const string CatConfig = "Configuration";
     private const string CatData = "Data";
     private const string CatTrends = "Trends";
-    private const string CatOverview = "Overview";
+    internal const string CatOverview = "Overview";
     private const string CatLatch = "Latch & Spinlock";
     private const string CatMemoryGrants = "Memory Grants";
     private const string CatObjects = "Objects & Indexes";
@@ -902,9 +908,10 @@ public static partial class DarlingWebEndpoints
     /// <see cref="BuildReadDispatch"/> lambda reads. A test pins <c>CatalogDescriptors.Keys ==
     /// BuildReadDispatch().Keys</c>, so a new read forces a catalog entry (it cannot silently ship key-less).
     /// </summary>
-    internal static readonly IReadOnlyDictionary<string, CatalogRead> CatalogDescriptors =
+    private static readonly IReadOnlyDictionary<string, CatalogRead> SharedCatalogDescriptors =
         new Dictionary<string, CatalogRead>(StringComparer.Ordinal)
         {
+            // New tools do NOT add entries here: register them in the tool's own file (an IReadToolRegistration, #9477).
             /* ── analysis reads (AuditConfig/CompareAnalysis/GetAnalysisFacts/GetAnalysisFindings) ── */
             ["audit_config"] = R(CatAnalysis, "Configuration-audit findings for a server.", PServer()),
             ["compare_analysis"] = R(CatAnalysis, "Compare a window's analysis facts against an earlier baseline.", PServer(), PHours(4), PInt("baseline_hours_back"), PAsOf()),
@@ -1060,7 +1067,6 @@ public static partial class DarlingWebEndpoints
             ["get_store_metrics"] = R(CatOverview, "The monitoring store's own size/compression/growth (self-metrics): a summary by default, object_kind to list one kind, an exact object_name for one object's daily series.", PInt("days_back", 30), PText("object_kind"), PText("object_name"), PLimit(DarlingMcpStoreMetricsTools.DefaultLimit), PInt("wal_hours_back", DarlingStoreWalReader.DefaultHoursBack)),
             ["get_store_table_health"] = R(CatOverview, "The health of the monitoring store's OWN tables: size split, estimated empty space from table statistics (an estimate, null with a reason when statistics are missing or stale), dead rows, last vacuum and analyze, autovacuum off, 7-day growth, and which tables are rewrite candidates.", PTop(DarlingMcpStoreTableHealthTools.DefaultTop), PBool("candidates_only", false), PText("section")),
             ["measure_store_table"] = R(CatOverview, "MEASURES the empty space of ONE store table (which file pages hold a live row): total and empty pages, rows per used page, the occupancy histogram, and a verdict (dense, only a rewrite returns the space, or VACUUM can truncate the tail). table is schema-qualified.", PText("table")),
-            ["get_store_maintenance_readiness"] = R(CatOverview, "Whether the monitoring store is safe for maintenance now: one verdict line, then strong locks on product tables, long transactions, running vacuums, replication slots holding WAL (every slot on the server, not only this database) and crashing background jobs."),
             ["get_store_log"] = R(CatOverview, "What the monitoring store's OWN PostgreSQL server log recorded - a per-class census with the capture denominator beside it, not the lines. Deliberately unbanded. Pass query_id (from get_store_query_history) for that one statement's slow plan.", PHours(24), PLimit(DarlingMcpStoreLogTools.DefaultRetainedLimit), PAsOf(), PText("query_id")),
             ["get_service_starts"] = R(CatOverview, "The monitoring service's own starts, newest first: the build each ran, the schema version before and after, the migration rungs with their timings, and the ERROR and WARN counts since the start. service_host keeps one host's starts.", PLimit(DarlingMcpServiceStartTools.DefaultLimit), PText("service_host")),
             ["get_store_pass_steps"] = R(CatOverview, "What the monitoring store's own background passes did, step by step, newest first: when each step of the hourly store maintenance, 15-minute Query Store compose and hourly self-metrics passes started, how long it took, whether it worked, and the counts it reported.", PHours(24), PText("pass"), PText("step"), PLimit(DarlingMcpStorePassStepsTools.DefaultLimit), PAsOf()),
@@ -1139,6 +1145,17 @@ public static partial class DarlingWebEndpoints
             ["get_finops"] = R(CatFinOps, "FinOps views for one server, picked by view. view is one of a closed set (today: " + DarlingMcpFinOpsTools.SetAValid + DarlingMcpFinOpsTools.SetBValid + "); an unknown view is refused with the valid list. Windowed over hours; limit caps rows per list.", PServer(), PText("view"), PHours(24), PInt("limit", 10), PText("database_name"), PBool("full_text", false), PText("object_name")),
             // FinOps web parity (#4843), set B ends.
         };
+
+    /// <summary>The shared list plus every tool's own registration (#9477). Declared after the shared list on purpose: static
+    /// initializers run in textual order. A name in both throws when this is built.</summary>
+    internal static readonly IReadOnlyDictionary<string, CatalogRead> CatalogDescriptors = BuildCatalogDescriptors();
+
+    private static IReadOnlyDictionary<string, CatalogRead> BuildCatalogDescriptors()
+    {
+        var descriptors = new Dictionary<string, CatalogRead>(SharedCatalogDescriptors, StringComparer.Ordinal);
+        ReadToolRegistrations.AddTo(descriptors, ReadToolRegistrations.All, r => r.Catalog);
+        return descriptors;
+    }
 
     /// <summary>Builds the <c>/api/catalog</c> body: the reads (names taken from <see cref="BuildReadDispatch"/>,
     /// each enriched with its <see cref="CatalogDescriptors"/> metadata) and the viz vocabulary. Iterating the

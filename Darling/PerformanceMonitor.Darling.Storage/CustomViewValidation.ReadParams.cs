@@ -19,9 +19,10 @@ public static partial class CustomViewValidation
     /// against its catalog through the <c>readParams</c> delegate; the Viewer has no catalog, so it validates against this table, and
     /// a test pins every entry equal to the catalog's, so both surfaces give one refusal text.
     /// </summary>
-    public static readonly IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> KnownReadParams =
+    private static readonly IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> SharedReadParams =
         new Dictionary<string, IReadOnlyList<ReadPanelParam>>(StringComparer.Ordinal)
         {
+            // New tools do NOT add entries here: register them in the tool's own file (an IReadToolRegistration in the Service, #9477).
             ["audit_config"] = new ReadPanelParam[] { new("server", false) },
             ["compare_analysis"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("baseline_hours_back", false), new("as_of", false) },
             ["get_analysis_facts"] = new ReadPanelParam[] { new("server", false), new("hours", false), new("source", false), new("min_severity", false), new("as_of", false) },
@@ -146,7 +147,6 @@ public static partial class CustomViewValidation
             ["get_store_metrics"] = new ReadPanelParam[] { new("days_back", false), new("object_kind", false), new("object_name", false), new("limit", false), new("wal_hours_back", false) },
             ["get_store_table_health"] = new ReadPanelParam[] { new("top", false), new("candidates_only", false), new("section", false) },
             ["measure_store_table"] = new ReadPanelParam[] { new("table", false) },
-            ["get_store_maintenance_readiness"] = Array.Empty<ReadPanelParam>(),
             ["get_store_log"] = new ReadPanelParam[] { new("hours", false), new("limit", false), new("as_of", false), new("query_id", false) },
             ["get_service_starts"] = new ReadPanelParam[] { new("limit", false), new("service_host", false) },
             ["get_store_pass_steps"] = new ReadPanelParam[] { new("hours", false), new("pass", false), new("step", false), new("limit", false), new("as_of", false) },
@@ -197,7 +197,62 @@ public static partial class CustomViewValidation
             ["get_finops"] = new ReadPanelParam[] { new("server", false), new("view", false), new("hours", false), new("limit", false), new("database_name", false), new("full_text", false), new("object_name", false) },
         };
 
+    /// <summary>The declared parameters of every read a v1 read panel may name: the shared list above plus the reads the Service
+    /// registered through <see cref="RegisterReads"/>.</summary>
+    public static IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> KnownReadParams => Reads.Params;
+
     /// <summary>The declared parameters of one read from <see cref="KnownReadParams"/>, null when the name is not a known read.</summary>
     public static IReadOnlyList<ReadPanelParam>? ReadParams(string read) =>
         KnownReadParams.TryGetValue(read, out var declared) ? declared : null;
+
+    /// <summary>
+    /// One consistent view of the known reads: the shared lists plus the registered ones. <see cref="RegisterReads"/> swaps the whole
+    /// object, so a validation never sees a name in one view and its parameters missing from another.
+    /// </summary>
+    private sealed class ReadSet
+    {
+        public ReadSet(IReadOnlyList<string> names, IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> parameters)
+        {
+            Names = names;
+            Set = new HashSet<string>(names, StringComparer.Ordinal);
+            Params = parameters;
+        }
+
+        public IReadOnlyList<string> Names { get; }
+
+        public HashSet<string> Set { get; }
+
+        public IReadOnlyDictionary<string, IReadOnlyList<ReadPanelParam>> Params { get; }
+    }
+
+    // Lazy, because the shared lists live in two partial files and C# gives no order between their static initializers.
+    private static readonly Lazy<ReadSet> SharedReads = new(() => new ReadSet(SharedReadNames, SharedReadParams));
+
+    private static volatile ReadSet? _registeredReads;
+
+    private static ReadSet Reads => _registeredReads ?? SharedReads.Value;
+
+    /// <summary>
+    /// The Service's tools each register their read here from their own file (#9477), so the shared lists stay a place nobody adds to.
+    /// <paramref name="registered"/> is the whole set of registered reads: each call replaces the last, so calling it again with the same
+    /// set changes nothing. The Service calls it once, before the first validation. A name that is in the shared lists, or that appears
+    /// twice in <paramref name="registered"/>, throws and names the read; the previous set stays in force.
+    /// </summary>
+    public static void RegisterReads(IEnumerable<KeyValuePair<string, IReadOnlyList<ReadPanelParam>>> registered)
+    {
+        ArgumentNullException.ThrowIfNull(registered);
+        var names = new List<string>(SharedReadNames);
+        var parameters = new Dictionary<string, IReadOnlyList<ReadPanelParam>>(SharedReadParams, StringComparer.Ordinal);
+        foreach (var (name, declared) in registered)
+        {
+            if (!parameters.TryAdd(name, declared))
+            {
+                throw new InvalidOperationException($"The read '{name}' is registered twice, or is also in the shared read lists.");
+            }
+
+            names.Add(name);
+        }
+
+        _registeredReads = new ReadSet(names, parameters);
+    }
 }
