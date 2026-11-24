@@ -133,7 +133,7 @@ public sealed class McpInvestigationToolsTests : IDisposable
         Assert.Contains("released", failed.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
         Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:brief_failed'"));
-        Assert.Contains("step store_brief", Assert.Single(ErrorLines(openedId).Where(l => l.Contains("step store_brief", StringComparison.Ordinal))), StringComparison.Ordinal);
+        Assert.Single(ErrorLines(openedId), l => l.Contains("step store_brief", StringComparison.Ordinal));
 
         var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
         Assert.Equal("claimed", again.GetProperty("status").GetString());
@@ -152,7 +152,7 @@ public sealed class McpInvestigationToolsTests : IDisposable
         Assert.Contains("released", failed.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
         Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:answer_failed'"));
-        Assert.Contains("step build_answer", Assert.Single(ErrorLines(openedId).Where(l => l.Contains("step build_answer", StringComparison.Ordinal))), StringComparison.Ordinal);
+        Assert.Single(ErrorLines(openedId), l => l.Contains("step build_answer", StringComparison.Ordinal));
 
         var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
         Assert.Equal("claimed", again.GetProperty("status").GetString());
