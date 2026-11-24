@@ -1908,10 +1908,8 @@ ORDER BY setting_name";
             logger?.LogWarning(
                 "{Count} owned setting(s) overridden (ALTER SYSTEM, or a line placed after the managed blocks): {Keys}.{Details}{Unreadable}",
                 overriddenKeys.Count, string.Join(", ", overriddenKeys),
-                string.Concat(overrideDetails.Select(d => "
-  " + d)),
-                unreadable is null ? string.Empty : "
-  " + unreadable);
+                string.Concat(overrideDetails.Select(d => "\n  " + d)),
+                unreadable is null ? string.Empty : "\n  " + unreadable);
         }
 
         await StoreManagedConfVerdictsAsync(connection, rows.Values.ToList(), cancellationToken);
