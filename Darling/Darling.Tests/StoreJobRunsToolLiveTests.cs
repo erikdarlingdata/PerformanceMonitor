@@ -181,6 +181,8 @@ public sealed class StoreJobRunsToolLiveTests
             var job = await FailingJobAsync(connection, ct);
             await Assert.ThrowsAsync<PostgresException>(() => RunJobAsync(connection, job, ct));
 
+            var direct = await ScalarAsync<string>(connection, "SELECT coalesce(string_agg(h.id || '/' || h.job_id || '/' || h.proc_name || '/' || h.start_time::text || '/' || coalesce(h.succeeded::text, 'null'), '; '), 'none') || ' now=' || now()::text || ' me=' || current_user || ' jobs=' || (SELECT count(*) FROM timescaledb_information.jobs) FROM timescaledb_information.job_history AS h", ct);
+            Assert.True(direct.Contains("jr9440_boom", StringComparison.Ordinal), "history rows: " + direct);
             var asOwner = await ReadAsync(cs, ct, kind: "jr9440_boom");
             var run = Assert.Single(Runs(asOwner));
             Assert.Equal("failed", run.GetProperty("outcome").GetString());
