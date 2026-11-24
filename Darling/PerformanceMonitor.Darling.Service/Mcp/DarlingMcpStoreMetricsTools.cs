@@ -93,7 +93,7 @@ public sealed class DarlingMcpStoreMetricsTools
         [Description("true returns the per-table activity of the store (hourly differences of each store table's counters) instead of sizes. Uses hours_back, as_of, rank_by, object_name and limit. Default false.")] bool table_activity = false,
         [Description("With table_activity: hours of activity to cover, ending at as_of (default now). Default 24; max 168.")] int hours_back = DarlingStoreTableActivityRead.DefaultHours,
         [Description("With table_activity: rank the tables by rows_written (default), blocks_read or blocks_hit.")] string? rank_by = null,
-        [Description("With table_activity: the END of the hours_back window. ISO-8601 UTC (2026-08-18T14:30:00Z; 2026-08-18 = 00:00 UTC), default now. For a past hour set as_of to its end and hours_back to 1. Refused without table_activity: the size answers have no anchor.")] string? as_of = null,
+        [Description("With table_activity: the END of the hours_back window, ISO-8601 UTC (2026-08-18T14:30:00Z), default now. For a past hour set it to that hour's end and hours_back to 1. Refused without table_activity.")] string? as_of = null,
         CancellationToken cancellationToken = default)
     {
         if (!table_activity && !string.IsNullOrWhiteSpace(as_of))

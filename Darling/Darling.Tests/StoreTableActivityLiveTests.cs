@@ -58,7 +58,7 @@ ANALYZE;";
     /// <summary>A whole hour three days back: far enough that an as_of at it is never in the future.</summary>
     private static DateTime HourThreeDaysBack()
     {
-        var back = DateTime.UtcNow.AddDays(-3);
+        var back = LiveClock.Now().AddDays(-3);
         return new DateTime(back.Year, back.Month, back.Day, back.Hour, 0, 0, DateTimeKind.Utc);
     }
 
@@ -310,11 +310,11 @@ ANALYZE;";
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), SkipMessage);
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        var role = "zz9413_" + Guid.NewGuid().ToString("N")[..8];
+        const string password = "zz9413-reader-pw";
         var bodySucceeded = false;
         try
         {
-            const string role = "zz9413_reader";
-            const string password = "zz9413-reader-pw";
             await using var owner = NpgsqlDataSource.Create(scratch.ConnectionString);
             await ExecAsync(owner, $"CREATE ROLE {role} LOGIN NOSUPERUSER PASSWORD '{password}'; GRANT USAGE ON SCHEMA collect TO {role}", ct);
             var asReader = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { Username = role, Password = password, Pooling = false }.ConnectionString;
@@ -340,7 +340,7 @@ ANALYZE;";
             // The role belongs to the cluster, not the scratch database, so it goes here and not with the database.
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (connection, token) =>
             {
-                await using var drop = new NpgsqlCommand("DROP OWNED BY zz9413_reader; DROP ROLE IF EXISTS zz9413_reader", connection);
+                await using var drop = new NpgsqlCommand($"DROP OWNED BY {role}; DROP ROLE IF EXISTS {role}", connection);
                 await drop.ExecuteNonQueryAsync(token);
             });
         }
