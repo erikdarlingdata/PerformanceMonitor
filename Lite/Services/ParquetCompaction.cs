@@ -652,16 +652,23 @@ public static class ParquetCompaction
        allocations the parquet writer makes outside DuckDB's buffer manager are not in the figure (see the memory_limit note on
        MergeBatchToFile). The process working set sampled beside it is the figure that sees those. Best effort: a sampler that
        cannot start or read reports nothing and never fails the merge. */
-    private sealed class DuckDbMemorySampler : IDisposable
+    internal sealed class DuckDbMemorySampler : IDisposable
     {
         public const int SampleMilliseconds = 50;
 
         private readonly System.Threading.ManualResetEventSlim _stop = new(false);
         private readonly DuckDBConnection? _probe;
         private readonly System.Threading.Thread? _thread;
+        private readonly TimeSpan _joinTimeout;
+        private int _handoff;
 
-        public DuckDbMemorySampler(DuckDBConnection merge, Action<long> onSample)
+        /* Tests only (#9421): true once the probe connection and the stop event are disposed. */
+        internal bool ResourcesDisposedForTests => System.Threading.Volatile.Read(ref _resourcesDisposed) == 1;
+        private int _resourcesDisposed;
+
+        public DuckDbMemorySampler(DuckDBConnection merge, Action<long> onSample, TimeSpan? joinTimeout = null)
         {
+            _joinTimeout = joinTimeout ?? TimeSpan.FromSeconds(2);
             try
             {
                 _probe = merge.Duplicate();
@@ -691,6 +698,15 @@ public static class ParquetCompaction
                 {
                     /* A merge that finishes under the sampler, or a read that fails, ends the sampling. */
                 }
+                finally
+                {
+                    /* Whoever of this thread and Dispose arrives second disposes the probe: Dispose when the thread has already
+                       gone, this thread when Dispose gave up waiting for it (#9421). */
+                    if (System.Threading.Interlocked.Exchange(ref _handoff, 1) == 1)
+                    {
+                        DisposeResources();
+                    }
+                }
             }) { IsBackground = true, Name = "CompactionDuckDbMemory" };
             _thread.Start();
         }
@@ -698,9 +714,27 @@ public static class ParquetCompaction
         public void Dispose()
         {
             _stop.Set();
-            _thread?.Join(TimeSpan.FromSeconds(2));
+            if (_thread is null || System.Threading.Interlocked.Exchange(ref _handoff, 1) == 1)
+            {
+                DisposeResources();
+                return;
+            }
+
+            /* The sampler may be inside ExecuteScalar on the native handle, so a probe disposed under it is a use after free.
+               On a timeout the thread disposes the probe on its way out instead. */
+            if (_thread.Join(_joinTimeout))
+            {
+                return;
+            }
+
+            AppLogger.Debug("Compaction", $"The DuckDB memory sampler did not stop within {_joinTimeout.TotalSeconds:0.#} s. It disposes its own connection when it ends.");
+        }
+
+        private void DisposeResources()
+        {
             _probe?.Dispose();
             _stop.Dispose();
+            System.Threading.Volatile.Write(ref _resourcesDisposed, 1);
         }
     }
 
