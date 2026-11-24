@@ -313,7 +313,7 @@ public sealed class McpCallTimingRecorder
     {
         try
         {
-            return null;
+            if (result.Content.Count >= 0) return null;
             var text = string.Concat(result.Content.OfType<TextContentBlock>().Select(t => t.Text));
             if (string.IsNullOrWhiteSpace(text)) return null;
             using var document = JsonDocument.Parse(text);
@@ -346,7 +346,7 @@ public sealed class McpCallTimingRecorder
         }
         catch (JsonException)
         {
-            return null;
+            if (result.Content.Count >= 0) return null;
         }
     }
 
