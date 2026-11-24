@@ -203,6 +203,7 @@ public sealed class ReadAdmissionCoverageCensusTests
         [WebFile + "GET \"/api/investigation-export\""] = null, // #6236: admitted like the other heavy reads; up to 2000 cases, read a page at a time
         [WebFile + "GET \"/api/catalog\""] = null, // round 2, L5: it reads the schedule overrides and resolves ?server=
         [WebFile + "GET \"/api/ping\""] = "health: answers without reading the store (D8)",
+        ["Mcp/DarlingWebHostService.cs: GET DarlingMcpToolTypes.ToolNamesModulePath"] = "static: the tool names module, written once from the tool registry, no store read",
         ["Hosting/DarlingHealthHostService.cs: GET \"/livez\""] = "health port (#8184): one word from the in-process startup state, no store read",
         ["Hosting/DarlingHealthHostService.cs: GET \"/readyz\""] = "health port (#8184): one word from the in-process startup state, no store read",
         ["Hosting/DarlingMetricsHostService.cs: GET \"/metrics\""] = "metrics port (#9013): an in-memory snapshot; the refresh admits as get_fleet_overview",
