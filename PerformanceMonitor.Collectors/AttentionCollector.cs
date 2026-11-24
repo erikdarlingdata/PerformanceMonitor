@@ -184,8 +184,10 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
         "CONVERT(bigint, @target_data.value('sum(/CounterTarget/Packages/Package/Event[@name=\"attention\"]/@count)', 'float'))";
 
     /// <summary>
-    /// The batch. <c>{0}</c> = the session name, <c>{1}</c> = the sessions DMV, <c>{2}</c> = the targets DMV, <c>{3}</c> =
-    /// <see cref="EventCountExpression"/>. Server-scoped and database-scoped sessions differ only in those two DMVs.
+    /// The batch. <c>{0}</c> = the session name, <c>{1}</c> = <see cref="RingBufferXml.ResolveAddressSql"/>, <c>{2}</c> and
+    /// <c>{8}</c> = <see cref="RingBufferXml.TargetFromSql"/> for the ring_buffer and event_counter targets, <c>{3}</c> =
+    /// <see cref="EventCountExpression"/>. The session is found once (#9517) and all three target reads use its address.
+    /// Server-scoped and database-scoped sessions differ only in the DMVs those fragments name.
     /// </summary>
     private const string QueryTemplate = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -202,34 +204,22 @@ DECLARE
     ring_buffer xml NOT NULL
 );
 
+{1}
+
 /* A missing session must not read as zero rows and SUCCESS: the host maps ""XE session"" to SESSION_MISSING. */
-IF NOT EXISTS
-(
-    SELECT
-        1
-    FROM {1} AS xes
-    WHERE xes.name = N'{0}'
-)
+IF @xe_address IS NULL
 BEGIN
     THROW 50000, N'XE session [{0}] is not running', 1;
 END;
 
 SELECT
     @execution_count = xet.execution_count
-FROM {2} AS xet
-JOIN {1} AS xes
-  ON xes.address = xet.event_session_address
-WHERE xes.name = N'{0}'
-AND   xet.target_name = N'ring_buffer'
+{2}
 OPTION(RECOMPILE);
 
 SELECT
     @target_data = TRY_CAST(xet.target_data AS xml)
-FROM {2} AS xet
-JOIN {1} AS xes
-  ON xes.address = xet.event_session_address
-WHERE xes.name = N'{0}'
-AND   xet.target_name = N'event_counter'
+{8}
 OPTION(RECOMPILE);
 
 SELECT
@@ -252,12 +242,8 @@ BEGIN
 
     SELECT /* PerformanceMonitorLite */
         @ring_text = CONVERT(nvarchar(max), xet.target_data),
-        @ring_session = xes.name
-    FROM {2} AS xet
-    JOIN {1} AS xes
-      ON xes.address = xet.event_session_address
-    WHERE xes.name = N'{0}'
-    AND   xet.target_name = N'ring_buffer'
+        @ring_session = @xe_name
+    {2}
     OPTION(RECOMPILE);
 
     {5}
@@ -340,8 +326,9 @@ SELECT
     public static string BuildText(string sessionName, bool isAzureSqlDb) =>
         QueryTemplate
             .Replace("{0}", sessionName.Replace("'", "''", StringComparison.Ordinal), StringComparison.Ordinal)
-            .Replace("{1}", isAzureSqlDb ? "sys.dm_xe_database_sessions" : "sys.dm_xe_sessions", StringComparison.Ordinal)
-            .Replace("{2}", isAzureSqlDb ? "sys.dm_xe_database_session_targets" : "sys.dm_xe_session_targets", StringComparison.Ordinal)
+            .Replace("{1}", RingBufferXml.ResolveAddressSql(isAzureSqlDb, sessionName.Replace("'", "''", StringComparison.Ordinal)), StringComparison.Ordinal)
+            .Replace("{2}", RingBufferXml.TargetFromSql(isAzureSqlDb, "ring_buffer"), StringComparison.Ordinal)
+            .Replace("{8}", RingBufferXml.TargetFromSql(isAzureSqlDb, "event_counter"), StringComparison.Ordinal)
             .Replace("{3}", EventCountExpression, StringComparison.Ordinal)
             .Replace("{4}", RingBufferXml.DeclareSql, StringComparison.Ordinal)
             .Replace("{5}", RingBufferXml.ParseSql, StringComparison.Ordinal)

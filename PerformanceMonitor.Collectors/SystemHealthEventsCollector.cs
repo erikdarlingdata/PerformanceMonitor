@@ -330,13 +330,13 @@ DECLARE
 
 {RingBufferXml.DeclareSql}
 
+/* #9517: system_health is found by name once, and its event_file and ring_buffer targets are read by that address, so neither
+   read builds every other running session's target rows. */
+{RingBufferXml.ResolveAddressSql(false, "system_health")}
+
 SELECT
     @event_file_name = TRY_CAST(xet.target_data AS xml).value('(EventFileTarget/File/@name)[1]', 'nvarchar(260)')
-FROM sys.dm_xe_session_targets AS xet
-JOIN sys.dm_xe_sessions AS xes
-  ON xes.address = xet.event_session_address
-WHERE xes.name = N'system_health'
-AND   xet.target_name = N'event_file'
+{RingBufferXml.TargetFromSql(false, "event_file")}
 OPTION(RECOMPILE);
 
 /* The target names the file it is writing, <directory>system_health_0_<FILETIME>.xel. Everything the read needs comes
@@ -555,12 +555,8 @@ END;
 
 SELECT /* PerformanceMonitorLite */
     @ring_text = CONVERT(nvarchar(max), xet.target_data),
-    @ring_session = xes.name
-FROM sys.dm_xe_session_targets AS xet
-JOIN sys.dm_xe_sessions AS xes
-  ON xes.address = xet.event_session_address
-WHERE xes.name = N'system_health'
-AND   xet.target_name = N'ring_buffer'
+    @ring_session = @xe_name
+{RingBufferXml.TargetFromSql(false, "ring_buffer")}
 AND   @event_file_ok = 0
 OPTION(RECOMPILE);
 
