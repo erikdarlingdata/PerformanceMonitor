@@ -194,16 +194,8 @@ public sealed class McpToolsListBudgetTests
     /// registers.</summary>
     internal static (List<McpServerTool> Tools, List<Type> Types, IServiceProviderIsService IsService) BuildServedTools()
     {
-        var registered = Regex
-            .Matches(File.ReadAllText(RepoPath("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs")),
-                @"WithGeminiCompatibleTools<(\w+)>")
-            .Select(m => m.Groups[1].Value)
-            .ToHashSet(StringComparer.Ordinal);
-        var types = typeof(DarlingMcpHostService).Assembly.GetTypes()
-            .Where(t => registered.Contains(t.Name))
-            .OrderBy(t => t.FullName, StringComparer.Ordinal)
-            .ToList();
-        Assert.Equal(registered.Count, types.Count);
+        /* The host registers exactly these classes (DarlingMcpToolTypes.WithDarlingTools). */
+        var types = DarlingMcpToolTypes.All.ToList();
 
         var services = new ServiceCollection();
         foreach (var serviceType in ToolServiceParameterTypes(types))
@@ -212,11 +204,7 @@ public sealed class McpToolsListBudgetTests
         }
 
         var builder = services.AddMcpServer();
-        var register = typeof(McpSchemaCompat).GetMethod(nameof(McpSchemaCompat.WithGeminiCompatibleTools), BindingFlags.Public | BindingFlags.Static)!;
-        foreach (var type in types)
-        {
-            register.MakeGenericMethod(type).Invoke(null, new object?[] { builder });
-        }
+        builder.WithDarlingTools();
 
         var provider = services.BuildServiceProvider();
         var isService = provider.GetRequiredService<IServiceProviderIsService>();
@@ -235,11 +223,6 @@ public sealed class McpToolsListBudgetTests
         .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
         .Distinct()
         .ToList();
-
-    private static string RepoPath(params string[] segments) => Path.Combine(new[] { RepoRoot() }.Concat(segments).ToArray());
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", ".."));
 }
 
 /// <summary>

@@ -565,9 +565,9 @@ public sealed class DarlingMcpServerTagToolsTests
     [Fact]
     public void TheHost_RegistersTheClass_RightAfterTheCustomAlertTools()
     {
-        var source = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "DarlingMcpHostService.cs"));
-        var alert = source.IndexOf("WithGeminiCompatibleTools<DarlingMcpCustomAlertTools>()", StringComparison.Ordinal);
-        var tags = source.IndexOf("WithGeminiCompatibleTools<DarlingMcpServerTagTools>()", StringComparison.Ordinal);
-        Assert.True(alert > 0 && tags > alert, "DarlingMcpServerTagTools must be registered after DarlingMcpCustomAlertTools.");
+        var registered = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All.ToList();
+        var alert = registered.IndexOf(typeof(DarlingMcpCustomAlertTools));
+        var tags = registered.IndexOf(typeof(DarlingMcpServerTagTools));
+        Assert.True(alert >= 0 && tags > alert, "DarlingMcpServerTagTools must be registered after DarlingMcpCustomAlertTools.");
     }
 }
