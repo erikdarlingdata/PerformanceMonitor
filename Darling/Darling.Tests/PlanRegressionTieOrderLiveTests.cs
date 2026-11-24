@@ -56,6 +56,9 @@ public sealed class PlanRegressionTieOrderLiveTests
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         var (floor, built) = await SeedFactAsync(connection, ct);
+        /* On a store this small the grouped rows arrive already in the key's order, which hides a missing tail. With sorts off the groups are
+           hashed, so the rows arrive in hash order, as they do on a store large enough to hash them. */
+        await ExecAsync(connection, "SET enable_sort = off");
 
         /* The key's order: database, query, then PRIMARY before the NULL role. Even queries are in "tiea", odd ones in "tieb". */
         var universe = new List<string>();
@@ -115,7 +118,8 @@ public sealed class PlanRegressionTieOrderLiveTests
             Key("tiea", 1, "PRIMARY"), Key("tiea", 1, ""), Key("tiea", 2, ""), Key("tiea", 3, ""), Key("tieb", 1, ""),
         };
 
-        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        /* Sorts off for the reads, as in the fact's test: the rows then arrive in hash order, not the key's. */
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString + ";Options=-c enable_sort=off");
         async Task<List<string>> ReadAsync()
         {
             var context = new AnalysisContext
