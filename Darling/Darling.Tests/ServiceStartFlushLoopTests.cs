@@ -48,7 +48,7 @@ public sealed class ServiceStartFlushLoopTests
     private static ServiceStartRecorder NewRecorder(Guid startId) =>
         new(new ServiceLogTally(), startId, "host-a", "3.14.0-test.1", "0123abc", T0, () => T0.AddMinutes(1));
 
-    private static async Task<List<Exception>> LeaveByCancellationAsync(string connectionString, Guid startId, ServiceStartRecorder? recorder = null)
+    private static async Task<List<Exception>> LeaveByCancellationAsync(string connectionString, ServiceStartRecorder recorder)
     {
         var unobserved = new List<Exception>();
         var loopTasks = new List<Task>();
@@ -69,7 +69,7 @@ public sealed class ServiceStartFlushLoopTests
             using var stopping = new CancellationTokenSource();
             stopping.CancelAfter(TimeSpan.FromMilliseconds(250));
             await Assert.ThrowsAnyAsync<OperationCanceledException>(
-                () => RunLikeTheWorkerAsync(connectionString, recorder ?? NewRecorder(startId), stopping.Token, loopTasks));
+                () => RunLikeTheWorkerAsync(connectionString, recorder, stopping.Token, loopTasks));
 
             /* The scope has been left: the loop is over, so its last flush already ran and nothing is left to fault later. */
             Assert.True(Assert.Single(loopTasks).IsCompletedSuccessfully, "leaving the scope must wait for the flush loop to end");
@@ -95,7 +95,7 @@ public sealed class ServiceStartFlushLoopTests
         var recorder = NewRecorder(Guid.NewGuid());
         recorder.RungFinished(1, "make-history-tables", T0, 5, MigrationRungOutcome.Applied, null);
 
-        var unobserved = await LeaveByCancellationAsync(deadStore, Guid.Empty, recorder);
+        var unobserved = await LeaveByCancellationAsync(deadStore, recorder);
 
         Assert.Empty(unobserved);
     }
@@ -122,7 +122,7 @@ public sealed class ServiceStartFlushLoopTests
             var recorder = NewRecorder(startId);
             recorder.RungFinished(1, "make-history-tables", T0, 5, MigrationRungOutcome.Applied, null);
 
-            var unobserved = await LeaveByCancellationAsync(scratch.ConnectionString, startId, recorder);
+            var unobserved = await LeaveByCancellationAsync(scratch.ConnectionString, recorder);
 
             Assert.Empty(unobserved);
             await using var read = NpgsqlDataSource.Create(scratch.ConnectionString);
