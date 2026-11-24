@@ -581,16 +581,21 @@ public sealed partial class ViewerDataService : IAsyncDisposable
            from disagreeing. */
         ViewerStorePool.Publish(effectiveConnectionString);
 
-        /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.ApplicationName,
-           set on the builder there); this is the BYO connection string's turn — set-if-absent, so an
+        /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.BuiltApplicationName,
+           set on the builder there, #9436); this is the BYO connection string's turn — set-if-absent, so an
            operator's own ApplicationName on a bring-your-own store wins. */
         _dataSource = NpgsqlDataSource.Create(
-            DarlingStoreConnection.PinSessionTimeZoneUtc(
-                DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)));
+            DarlingStoreConnection.PinSessionTimeZoneUtc(NameStoreConnection(effectiveConnectionString)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
         StoreConnectionIdentity = ViewerPasswordKey.StoreIdentityOf(connectionString);
         _alertClocks = new ServerClockCache(ct => GetServerClocksAsync(serverId: null, ct), AlertClockLifetime);
     }
+
+    /// <summary>
+    /// The viewer's name with its build (#4479, #9436), set on the string only when it has no <c>ApplicationName</c> of its own.
+    /// </summary>
+    internal static string NameStoreConnection(string effectiveConnectionString) =>
+        DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.BuiltApplicationName);
 
     /// <summary>
     /// Builds the data service, or says why the store connection string cannot be used. The constructor
@@ -1944,9 +1949,6 @@ SELECT
         /* V301 (#9374): the last measured relation sizes and their measured time, created on every store and never dropped. Relation-existence
            sentinel, newest-first, and the TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling
            through to 300 and showing a spurious upgrade banner on a store that is current. */
-        /* V302 (#8570): the partial index of failed Agent job outcomes on job_history, never dropped. Index-existence sentinel, newest-first, and the
-           TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 301 and showing a
-           spurious upgrade banner on a store that is current. */
         /* V309 (#9414): the store checkpoint rows, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
            so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 308 and showing a spurious upgrade
            banner on a store that is current. */
@@ -1975,9 +1977,6 @@ SELECT
         {
             return 306;
         }
-        /* V303 (#9384): the clutter-day stamp, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
-           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 302 and showing a spurious upgrade
-           banner on a store that is current. */
         /* V305 (#9419): the WAL columns on collect.store_metrics, never dropped. Column-existence sentinel, newest-first, and the TOP rung, so a
            fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 304 and showing a spurious upgrade
            banner on a store that is current. */
@@ -1992,10 +1991,16 @@ SELECT
         {
             return StoreStatementHistory.WriteCountersVersion;
         }
+        /* V303 (#9384): the clutter-day stamp, created on every store and never dropped. Relation-existence sentinel, newest-first, and the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 302 and showing a spurious upgrade
+           banner on a store that is current. */
         if (hasClutterDayBuilt)
         {
             return 303;
         }
+        /* V302 (#8570): the partial index of failed Agent job outcomes on job_history, never dropped. Index-existence sentinel, newest-first, and the
+           TOP rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling through to 301 and showing a
+           spurious upgrade banner on a store that is current. */
         if (hasJobHistoryFailedIndex)
         {
             return 302;

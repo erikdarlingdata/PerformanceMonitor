@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -74,7 +75,7 @@ GROUP BY lower(database_name)";
 
     private async Task CollectConfigIssues(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(ConfigIssuesSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);

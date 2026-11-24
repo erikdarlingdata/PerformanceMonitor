@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -242,7 +243,7 @@ ORDER BY server_id, queryid, database_id, user_id, toplevel, collection_time DES
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.DeltaCalculator, cancellationToken);
 
             /* One cutoff for the fifteen-minute reads, so they describe the same instant. query_stats and the two PostgreSQL
                families read the gap policy's hour instead (#7156, #7252): they write only keys that moved. */

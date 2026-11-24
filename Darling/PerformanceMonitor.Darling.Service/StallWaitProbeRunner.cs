@@ -17,6 +17,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Targets;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -226,7 +227,7 @@ DELETE FROM collect.collector_stall_probes WHERE probe_time < $1;";
         {
             /* CancellationToken.None: the target query is already paid for, so a shutdown arriving between
                the sample and the write would throw away a measurement that cannot be retaken. */
-            await using var connection = await postgres.OpenConnectionAsync(CancellationToken.None).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.StallProbe, CancellationToken.None).ConfigureAwait(false);
 
             await using (var command = new NpgsqlCommand(InsertSql, connection))
             {

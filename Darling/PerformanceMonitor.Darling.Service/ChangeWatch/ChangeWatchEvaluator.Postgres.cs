@@ -57,7 +57,8 @@ public sealed partial class ChangeWatchEvaluator
 
     private async Task<long> CountRowsAsync(string sql, int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
-        await using var command = _dataSource.CreateCommand(sql);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter { Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(Open(start)) });
@@ -129,7 +130,8 @@ FROM d";
     private async Task<(double First, double Second, long Rows)> ReadCoverageAsync(
         string sql, int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
-        await using var command = _dataSource.CreateCommand(sql);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter { Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(Open(start)) });

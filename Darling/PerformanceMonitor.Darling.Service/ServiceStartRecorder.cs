@@ -225,6 +225,49 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
         }
     }
 
+    /// <summary>Starts <see cref="RunAsync"/> and returns the handle that owns it: stopping or disposing the handle ends the loop, runs its last flush and waits for it.</summary>
+    internal FlushLoop StartFlushLoop(NpgsqlDataSource postgres, ILogger logger, CancellationToken stoppingToken, TimeSpan? interval = null) =>
+        new(this, postgres, logger, interval, stoppingToken);
+
+    /// <summary>
+    /// A running flush loop and the means to end it. Declare it with <c>await using</c> AFTER the recorder and the data source the loop uses: every way out
+    /// of the scope then ends the loop and awaits its last flush before those two are disposed, so the loop never touches a released gate or data source
+    /// and its task never faults unobserved.
+    /// </summary>
+    internal sealed class FlushLoop : IAsyncDisposable
+    {
+        private readonly CancellationTokenSource _stop;
+        private int _disposed;
+
+        internal FlushLoop(ServiceStartRecorder recorder, NpgsqlDataSource postgres, ILogger logger, TimeSpan? interval, CancellationToken stoppingToken)
+        {
+            _stop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            Completion = recorder.RunAsync(postgres, logger, _stop.Token, interval);
+        }
+
+        /// <summary>The loop's task. It ends after the last flush and never throws.</summary>
+        internal Task Completion { get; }
+
+        /// <summary>Ends the loop and waits for its last flush (bounded at <see cref="FinalFlushBudget"/>).</summary>
+        internal async Task StopAsync()
+        {
+            await _stop.CancelAsync().ConfigureAwait(false);
+            await Completion.ConfigureAwait(false);
+        }
+
+        /// <inheritdoc />
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            await StopAsync().ConfigureAwait(false);
+            _stop.Dispose();
+        }
+    }
+
     /// <summary>
     /// The flush loop: every <paramref name="interval"/> until <paramref name="stoppingToken"/> is cancelled, then one last flush bounded by
     /// <see cref="FinalFlushBudget"/>. Never throws.

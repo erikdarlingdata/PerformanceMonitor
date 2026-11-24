@@ -298,7 +298,7 @@ WHERE day < $1;";
         ArgumentNullException.ThrowIfNull(dataSource);
         ArgumentNullException.ThrowIfNull(logger);
 
-        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.ObjectExecutionsDaily, cancellationToken);
 
         int configuredDays;
         await using (var retention = new NpgsqlCommand(RetentionDaysSql, connection) { CommandTimeout = CommandTimeoutSeconds })

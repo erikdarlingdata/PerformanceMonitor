@@ -639,7 +639,7 @@ WHERE tqp.query_plan IS NOT NULL;";
     {
         var claimed = new List<OversizedPlanBacklog.PendingPlan>(MaxPlansPerServerPerTick);
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.OversizedPlanIntake, cancellationToken).ConfigureAwait(false);
 
         await TrimAsync(connection, serverId, DateTime.UtcNow, tally, logger, cancellationToken).ConfigureAwait(false);
 
@@ -980,7 +980,7 @@ WHERE tqp.query_plan IS NOT NULL;";
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(CancellationToken.None).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.OversizedPlanIntake, CancellationToken.None).ConfigureAwait(false);
             await using var command = new NpgsqlCommand(sql, connection)
             {
                 CommandTimeout = OversizedPlanBacklog.CommandTimeoutSeconds,

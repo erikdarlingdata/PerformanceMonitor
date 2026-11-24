@@ -40,12 +40,14 @@ internal sealed class PgStoreScope : IAsyncDisposable
 
     /// <summary>Opens the scope: the ambient connection when one is given, else a new connection (with a transaction when <paramref name="transactional"/>).</summary>
     internal static async Task<PgStoreScope> OpenAsync(NpgsqlDataSource? dataSource, NpgsqlConnection? ambientConnection,
-        NpgsqlTransaction? ambientTransaction, bool transactional, CancellationToken cancellationToken = default)
+        NpgsqlTransaction? ambientTransaction, bool transactional, string? applicationName = null, CancellationToken cancellationToken = default)
     {
         if (ambientConnection is not null)
             return new PgStoreScope(ambientConnection, ambientTransaction, null, null);
 
-        var connection = await dataSource!.OpenConnectionAsync(cancellationToken);
+        var connection = applicationName is null
+            ? await dataSource!.OpenConnectionAsync(cancellationToken)
+            : await dataSource!.OpenConnectionAsync(applicationName, cancellationToken);
         if (!transactional)
             return new PgStoreScope(connection, null, connection, null);
         var transaction = await connection.BeginTransactionAsync(cancellationToken);

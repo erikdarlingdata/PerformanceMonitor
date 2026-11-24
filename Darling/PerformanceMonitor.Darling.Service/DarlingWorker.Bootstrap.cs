@@ -45,10 +45,10 @@ public sealed partial class DarlingWorker
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _stoppingToken = stoppingToken;
         /* A file: secret whose target ordinary users can read is reported through the service log; the resolver
            itself has no logger. Set before the first config read, which is the first resolve. */
         DarlingSecretSource.ReportFileAccessTo(message => _logger.LogWarning("{Warning}", message));
+        _stoppingToken = stoppingToken;
 
         _executeStartedUtc = DateTime.UtcNow;
         /* #7681: the statements the service sends to a PostgreSQL target, known before any collector has run, so the first
@@ -845,7 +845,7 @@ public sealed partial class DarlingWorker
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(budget.Token);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, budget.Token);
             var profile = await DarlingStoreHostProfile.GatherStartupProfileAsync(config.Postgres, connection, budget.Token);
 
             _logger.LogInformation("Store host profile:\n{Profile}", DarlingStoreHostProfile.FormatStartupProfileText(profile));

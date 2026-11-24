@@ -53,10 +53,10 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
         "process_started_at, store_ready_at (null when the start never reached the store), previous_stop_at (the host's previous start's last " +
         "flush: the stop after a clean stop, within a minute of it after a crash), last_flush_at (the running start flushes about every minute), " +
         "schema_version_before and schema_version_after (equal when no rung ran), error_count and warn_count, first_errors and first_warns (the " +
-        "first 10 lines each, secrets masked, cut at 500 characters), at_10_minutes and at_30_minutes (the counts at start + 10 and + 30 minutes, " +
+        "first 5 lines each, secrets masked, cut at 160 characters, log_lines_truncated true when a line was dropped or cut), at_10_minutes and at_30_minutes (the counts at start + 10 and + 30 minutes, " +
         "null until then), and rungs. A rung: version, name, attempt (a rung that failed and then applied has two rows), started_at, elapsed_ms, " +
-        "outcome (applied or failed) and error_text for a failure. Counts cover the service's own log lines from the start of the process. " +
-        "limit is the number of starts (default 10, max 100); service_host keeps one host's starts. status precondition means the store predates " +
+        "outcome (applied or failed) and error_text for a failure (cut at 160 characters). A start lists at most 10 rungs, the failed ones first and then the slowest, with rungs_total and rungs_omitted saying how many it tried and how many are not listed, and rungs_truncated true when any rung was left out or its text cut. Counts cover the service's own log lines from the start of the process. " +
+        "limit is the number of starts (default 10, max 100), and a reply too big for the response budget leaves the oldest starts off whole (truncated and budget_truncated true); service_host keeps one host's starts. status precondition means the store predates " +
         "the start tables; empty means no start is recorded for the filter.")]
     public static async Task<string> GetServiceStarts(
         NpgsqlDataSource postgres,
@@ -94,14 +94,24 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
             }
 
             var (page, truncated) = McpHelpers.BoundPage(fetched, limit);
-            return JsonSerializer.Serialize(new
+
+            /* The newest starts that fit the response budget: starts are left off the end whole, so `truncated` is true for the limit or the
+               budget, and budget_truncated is the budget alone. Each start is also cut inside (rungs and log lines), and says so on its own row. */
+            string Reply(int kept) => JsonSerializer.Serialize(new
             {
                 limit,
                 service_host = host,
-                starts_returned = page.Count,
-                truncated,
-                starts = page.Select(Shape),
+                starts_returned = kept,
+                truncated = truncated || kept < page.Count,
+                budget_truncated = kept < page.Count,
+                budget_note = kept < page.Count
+                    ? McpResponseBudget.PageCutNote(page.Count, kept, "newest first", "service starts",
+                        "Pass a smaller limit, or service_host to read one host's starts.")
+                    : null,
+                starts = page.Take(kept).Select(Shape),
             }, McpHelpers.JsonOptions);
+
+            return McpResponseBudget.FitPrefix(page.Count, Reply).Json;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -159,9 +169,13 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
             warn_count = s.WarnCount,
             at_10_minutes = new { error_count = s.Errors10Minutes, warn_count = s.Warns10Minutes },
             at_30_minutes = new { error_count = s.Errors30Minutes, warn_count = s.Warns30Minutes },
-            first_errors = s.FirstErrors,
-            first_warns = s.FirstWarns,
-            rungs = record.Rungs.Select(r => new
+            first_errors = ShownLines(s.FirstErrors),
+            first_warns = ShownLines(s.FirstWarns),
+            log_lines_truncated = LinesCut(s.FirstErrors) || LinesCut(s.FirstWarns),
+            rungs_total = record.Rungs.Count,
+            rungs_omitted = record.Rungs.Count - ShownRungs(record.Rungs).Count,
+            rungs_truncated = record.Rungs.Count > MaxRungsPerStart || ShownRungs(record.Rungs).Any(r => r.ErrorText is { Length: > MaxLineChars }),
+            rungs = ShownRungs(record.Rungs).Select(r => new
             {
                 version = r.Version,
                 name = r.Name,
@@ -169,10 +183,42 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
                 started_at = Iso(r.StartedUtc),
                 elapsed_ms = r.ElapsedMilliseconds,
                 outcome = r.Outcome,
-                error_text = r.ErrorText,
+                error_text = r.ErrorText is { Length: > MaxLineChars } ? r.ErrorText[..MaxLineChars] : r.ErrorText,
             }),
         };
     }
+
+    /// <summary>The most rungs one start lists. A start on a fresh store tries every rung of the ladder, which alone would put one answer over the response budget.</summary>
+    internal const int MaxRungsPerStart = 10;
+
+    /// <summary>The rungs a start lists, in their stored order: the failed rungs first in line for a place, then the slowest of the rest, up to <see cref="MaxRungsPerStart"/>.</summary>
+    private static IReadOnlyList<ServiceStartRung> ShownRungs(IReadOnlyList<ServiceStartRung> rungs)
+    {
+        if (rungs.Count <= MaxRungsPerStart)
+        {
+            return rungs;
+        }
+
+        var keep = rungs
+            .Select((r, i) => (Rung: r, Index: i))
+            .OrderBy(x => x.Rung.Outcome == MigrationRungOutcome.Failed ? 0 : 1)
+            .ThenByDescending(x => x.Rung.ElapsedMilliseconds)
+            .Take(MaxRungsPerStart)
+            .Select(x => x.Index)
+            .ToHashSet();
+        return rungs.Where((_, i) => keep.Contains(i)).ToList();
+    }
+
+    /// <summary>The most kept log lines one start lists for each of errors and warnings, and the longest each is shown. The store keeps 10 lines of 500 characters, which for ten starts alone passes the response budget.</summary>
+    internal const int MaxLinesShown = 5;
+
+    internal const int MaxLineChars = 160;
+
+    /// <summary>Whether listing these lines drops a line or shortens one.</summary>
+    private static bool LinesCut(IReadOnlyList<string> lines) => lines.Count > MaxLinesShown || lines.Any(l => l.Length > MaxLineChars);
+
+    private static List<string> ShownLines(IReadOnlyList<string> lines) =>
+        lines.Take(MaxLinesShown).Select(l => l.Length <= MaxLineChars ? l : l[..MaxLineChars]).ToList();
 
     private static string? Iso(DateTime? value) => value?.ToString("O", CultureInfo.InvariantCulture);
 }
