@@ -27,10 +27,12 @@ namespace Darling.Tests;
 /// job kind and hypertable filters cutting before the cap, the cap's own truncation flag, an empty window that names how far back history
 /// reaches, a role that cannot read the history, the function that lets the store's read roles see it, and a store with no TimescaleDB.
 ///
+/// <para>The class runs in the <c>pg-cluster-roles</c> collection, which runs alone, because ALTER SYSTEM changes the whole cluster and no other class may see the setting change.</para>
+///
 /// <para>TimescaleDB records a successful run only while <c>timescaledb.enable_job_execution_logging</c> is on (a failed run is always
 /// recorded), and the setting is a server-level one, so a fact that needs a success turns it on for the run and puts it back.</para>
 /// </summary>
-[Collection("live-postgres")]
+[Collection("pg-cluster-roles")]
 public sealed class StoreJobRunsToolLiveTests
 {
     private const string LoggingSetting = "timescaledb.enable_job_execution_logging";
