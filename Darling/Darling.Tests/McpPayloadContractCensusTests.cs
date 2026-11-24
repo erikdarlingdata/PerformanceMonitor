@@ -1596,6 +1596,8 @@ public sealed class McpPayloadContractCensusTests
             "#9415: get_service_starts lists at most 5 kept ERROR and WARN lines of 160 characters per start, and each start says on its own row when a line was dropped or cut, beside the page's truncated: two bounds in one payload, the second spelled <bound>_truncated"),
         ("rungs_truncated", ["DarlingMcpServiceStartTools.cs"],
             "#9415: get_service_starts lists at most 10 migration rungs per start and cuts each rung's error text at 160 characters, and each start says on its own row when a rung was left out or its text cut (rungs_total and rungs_omitted give the count), beside the page's truncated: two bounds in one payload, the second spelled <bound>_truncated"),
+        ("objects_truncated", ["DarlingMcpServiceStartTools.cs"],
+            "#9438: get_service_starts with rung lists at most 40 objects per start, and each start says on its own row when objects were left out (objects_total and objects_omitted give the count), beside the page's truncated: two bounds in one payload, the second spelled <bound>_truncated"),
         ("findings_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: get_analysis_findings' GROUP PAGE cut — limit caps the collapsed per-chain groups returned (default 18), independent of the pre-existing truncated above (the raw WindowCoveringLimit occurrence read, beside truncation_note): truncated warns occurrence stats may under-report, findings_truncated warns other diagnostic chains exist but are not on this page at all"),
     ];

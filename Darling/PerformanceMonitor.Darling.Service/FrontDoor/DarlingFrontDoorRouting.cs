@@ -118,6 +118,8 @@ internal static class DarlingFrontDoorRouting
         "get_service_starts",
         "get_store_host",
         "get_store_log",
+        "get_store_lock_waits",
+        "get_store_connections",
         "get_store_checkpoints",
         "get_store_metrics",
         "get_store_pass_steps",
@@ -126,6 +128,8 @@ internal static class DarlingFrontDoorRouting
         "get_store_maintenance_readiness",
         "get_store_query_history",
         "get_store_query_stats",
+        /* #9427: the store's own setting changes, read from the central store like the get_store_* family. */
+        "get_store_setting_changes",
         "get_sweep_reports",
         "list_custom_alert_rules",
         "list_custom_views",

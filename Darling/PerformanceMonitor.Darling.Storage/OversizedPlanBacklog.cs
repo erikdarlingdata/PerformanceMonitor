@@ -61,6 +61,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// index chosen for an ORDER BY nobody has measured would be a guess; the ORDER BYs below name the index to add if
 /// it ever stops being one.</para>
 ///
+/// <para><b>One more index, for the sightings count (#9452).</b> <see cref="PendingIndexName"/> (V310) is partial to the pending rows, on
+/// <c>(server_id)</c> alone, so the upsert's per-cycle pending count reads it without the heap. See <see cref="PendingIndexName"/>
+/// for why it names no <c>last_seen_at</c>.</para>
+///
 /// <para><b>Not a collector table.</b> It is absent from <see cref="CollectorCatalog"/>, so
 /// <see cref="TimescaleSupport"/>'s catalog-driven hypertable conversion and
 /// <c>DarlingRetention</c>'s catalog purge never reach it — the <c>collect.store_metrics</c> precedent. It
@@ -259,48 +263,13 @@ AND   statement_end_offset = $6";
     private static string SameKey(string alias) => SameKeyAs.Replace("{0}", alias, StringComparison.Ordinal);
 
     /// <summary>
-    /// The sightings of one collection cycle for one server, as ONE statement and so one transaction. $1 is the server, $2 the
-    /// collector, $3 to $9 the sightings as parallel arrays (plan handle, sql handle, start offset, end offset, database,
-    /// query hash, observed bytes), $10 the sighting time, $11 the pending cap and $12 the most rows a trim drops in one pass
-    /// (<c>OversizedPlanBacklogSweep.PendingRowsPerServerCap</c> and <c>MaxRowsDroppedPerServerPerTick</c>). It returns how many
-    /// new rows it did not insert, see below.
-    ///
-    /// <para><b>One upsert, as before.</b> <c>first_seen_at</c> and <c>last_seen_at</c> both take $10 on the insert, so a first
-    /// sighting reads as seen-once rather than as a row with an unknown age. A key given twice in one batch ends as the two
-    /// statements it used to be: the later observed bytes, and the later database and query hash that is not null.</para>
-    ///
-    /// <para><b><c>expired_at</c> is CLEARED on a re-sighting, and that is load-bearing.</b> A collector only
-    /// sees a row while its plan is in cache, so a fresh sighting is positive evidence the handle resolves —
-    /// which retires whatever made the previous fetch come back empty. Without the clear, one transient miss
-    /// would retire the row permanently, recreating the blind spot this table exists to close.</para>
-    ///
-    /// <para><c>captured_at</c> and <c>plan_xml</c> are deliberately left alone: the key pins the handle AND
-    /// the offsets, so a row already captured describes the same document and there is nothing to go back
-    /// for.</para>
-    ///
-    /// <para><b>A new row the trim would drop in the same pass is not inserted (#8789).</b> The statement runs the trim's two
-    /// rules (<see cref="SupersedeSql"/>, then <see cref="DropOverCapSql"/>) over the rows the table would hold after this
-    /// write, and leaves out the new rows the cap would drop. Inserting them only to have the next trim delete them
-    /// is what churned the table. The statement leaves a row in, and the trim
-    /// handles it as it always did, when leaving it out could change what the trim does to another row: when the
-    /// supersede or the cap would stop at the pass's drop limit, and when the row is the newest sighting of a query
-    /// whose older rows only it supersedes. It does none of this unless the server's pending rows plus the new ones are
-    /// past the cap, so a server under the cap pays one count. It also skips it when no new row can rank past the cap (the gate CTE):
-    /// a new row ranks behind every pending row seen at or after the sighting time, so when those plus this cycle's rows are within
-    /// the cap, none is left out. In normal running every pending row was seen before this cycle, so the ranking runs only when one
-    /// cycle sees more rows than the cap, or rows carry a later sighting time.</para>
-    ///
-    /// <para><b>How many it left out is recorded, not counted.</b> The trim counted an over-cap plan once per sweep pass. A
-    /// collector cycle runs far more often than a pass (every minute on the Balanced preset, a pass every 15 minutes), and the
-    /// same plans are left out again each cycle, so adding to <c>collect.oversized_plan_backlog_drops</c> here would read about
-    /// 15 times too high, and the drops would never reach the sweep's run record. This statement instead overwrites one number
-    /// per server and collector in <c>collect.collector_state</c> (<see cref="LeftOutStateOwner"/>, state key the collector): the
-    /// rows it left out on its LATEST cycle. It writes 0 when a cycle leaves none out and the number was not 0, so a server
-    /// that drops back under the cap does not leave a stale number. The sweep takes the number once per pass
-    /// (<see cref="TakeLeftOutSql"/>).</para>
+    /// The pending rows seen at or after the sighting time ($10): the rows that can rank ahead of a new row. The second test of the
+    /// gate of <see cref="RecordSightingsSql"/> counts them.
     /// </summary>
-    public static readonly string RecordSightingsSql = @"
-WITH incoming AS
+    public const string RecentPendingFilter = "last_seen_at >= $10";
+
+    /// <summary>The <c>incoming</c> and <c>existing</c> CTEs of <see cref="RecordSightingsSql"/>, without the leading WITH.</summary>
+    private static readonly string IncomingCtes = @"incoming AS
 (
     SELECT
         u.plan_handle,
@@ -327,12 +296,12 @@ existing AS
       ON  b.server_id = $1
       AND b.collector_name = $2
       AND " + SameKey("b") + @"
-),
-pending_counts AS
+)";
+
+    /// <summary>The <c>pending_counts</c> and <c>gate</c> CTEs of <see cref="RecordSightingsSql"/>, which read <c>incoming</c> and <c>existing</c>.</summary>
+    private static readonly string GateCtes = @"pending_counts AS
 (
-    SELECT
-        count(*) AS pending_rows,
-        count(*) FILTER (WHERE last_seen_at >= $10) AS recent_rows
+    SELECT count(*) AS pending_rows
     FROM collect.oversized_plan_backlog
     WHERE server_id = $1
     AND   " + NeverTriedPendingPredicate + @"
@@ -343,30 +312,90 @@ gate AS
        the order starts last_seen_at DESC, so only rows seen at or after $10 can rank ahead of it. Its rank is at most the table's
        pending rows seen at or after $10 plus every incoming row (an over-count: it can only send a cycle down the full path).
        At or under the cap no new row can be left out, so the ranking is skipped. In normal running every pending row was seen
-       before this cycle, so this holds on every cycle. */
+       before this cycle, so this holds on every cycle.
+
+       #9452: the first test reads the pending count from the partial index alone. The second test needs last_seen_at, which no index
+       holds (one would end the heap-only update of a re-sighting), so it reads the heap. CASE is the one construct that evaluates its
+       branches in order, so the heap is read only when the first test is already over the cap, and the decision is the AND it was. */
     SELECT
-        (
+        CASE
+            WHEN
             (
-                SELECT p.pending_rows
-                FROM pending_counts AS p
-            )
-            +
+                (
+                    SELECT p.pending_rows
+                    FROM pending_counts AS p
+                )
+                +
+                (
+                    SELECT count(*)
+                    FROM incoming AS i
+                    WHERE NOT EXISTS (SELECT 1 FROM existing AS e WHERE " + SameKey("e") + @")
+                )
+            ) > $11
+            THEN
             (
-                SELECT count(*)
-                FROM incoming AS i
-                WHERE NOT EXISTS (SELECT 1 FROM existing AS e WHERE " + SameKey("e") + @")
-            )
-        ) > $11
-        AND
-        (
-            (
-                SELECT p.recent_rows
-                FROM pending_counts AS p
-            )
-            +
-            (SELECT count(*) FROM incoming)
-        ) > $11 AS over_cap
-),
+                (
+                    SELECT count(*)
+                    FROM collect.oversized_plan_backlog
+                    WHERE server_id = $1
+                    AND   " + NeverTriedPendingPredicate + @"
+                    AND   " + RecentPendingFilter + @"
+                )
+                +
+                (SELECT count(*) FROM incoming)
+            ) > $11
+            ELSE false
+        END AS over_cap
+)";
+
+    /// <summary>
+    /// #9452: the gate's decision alone, one row with <c>over_cap</c>, on the parameters of <see cref="RecordSightingsSql"/> ($12 unused).
+    /// It is the very CTEs the sightings statement runs, so a test can drive the gate across its thresholds without the ranking.
+    /// </summary>
+    public static readonly string GateDecisionSql = "WITH " + IncomingCtes + ",\n" + GateCtes + "\nSELECT g.over_cap FROM gate AS g;";
+
+    /// <summary>
+    /// The sightings of one collection cycle for one server, as ONE statement and so one transaction. $1 is the server, $2 the
+    /// collector, $3 to $9 the sightings as parallel arrays (plan handle, sql handle, start offset, end offset, database,
+    /// query hash, observed bytes), $10 the sighting time, $11 the pending cap and $12 the most rows a trim drops in one pass
+    /// (<c>OversizedPlanBacklogSweep.PendingRowsPerServerCap</c> and <c>MaxRowsDroppedPerServerPerTick</c>). It returns how many
+    /// new rows it did not insert, see below.
+    ///
+    /// <para><b>One upsert, as before.</b> <c>first_seen_at</c> and <c>last_seen_at</c> both take $10 on the insert, so a first
+    /// sighting reads as seen-once rather than as a row with an unknown age. A key given twice in one batch ends as the two
+    /// statements it used to be: the later observed bytes, and the later database and query hash that is not null.</para>
+    ///
+    /// <para><b><c>expired_at</c> is CLEARED on a re-sighting, and that is load-bearing.</b> A collector only
+    /// sees a row while its plan is in cache, so a fresh sighting is positive evidence the handle resolves —
+    /// which retires whatever made the previous fetch come back empty. Without the clear, one transient miss
+    /// would retire the row permanently, recreating the blind spot this table exists to close.</para>
+    ///
+    /// <para><c>captured_at</c> and <c>plan_xml</c> are deliberately left alone: the key pins the handle AND
+    /// the offsets, so a row already captured describes the same document and there is nothing to go back
+    /// for.</para>
+    ///
+    /// <para><b>A new row the trim would drop in the same pass is not inserted (#8789).</b> The statement runs the trim's two
+    /// rules (<see cref="SupersedeSql"/>, then <see cref="DropOverCapSql"/>) over the rows the table would hold after this
+    /// write, and leaves out the new rows the cap would drop. Inserting them only to have the next trim delete them
+    /// is what churned the table. The statement leaves a row in, and the trim
+    /// handles it as it always did, when leaving it out could change what the trim does to another row: when the
+    /// supersede or the cap would stop at the pass's drop limit, and when the row is the newest sighting of a query
+    /// whose older rows only it supersedes. It does none of this unless the server's pending rows plus the new ones are
+    /// past the cap, so a server under the cap pays one count (#9452: an index-only scan of <see cref="PendingIndexName"/>). It also skips it when no new row can rank past the cap (the gate CTE):
+    /// a new row ranks behind every pending row seen at or after the sighting time, so when those plus this cycle's rows are within
+    /// the cap, none is left out. In normal running every pending row was seen before this cycle, so the ranking runs only when one
+    /// cycle sees more rows than the cap, or rows carry a later sighting time.</para>
+    ///
+    /// <para><b>How many it left out is recorded, not counted.</b> The trim counted an over-cap plan once per sweep pass. A
+    /// collector cycle runs far more often than a pass (every minute on the Balanced preset, a pass every 15 minutes), and the
+    /// same plans are left out again each cycle, so adding to <c>collect.oversized_plan_backlog_drops</c> here would read about
+    /// 15 times too high, and the drops would never reach the sweep's run record. This statement instead overwrites one number
+    /// per server and collector in <c>collect.collector_state</c> (<see cref="LeftOutStateOwner"/>, state key the collector): the
+    /// rows it left out on its LATEST cycle. It writes 0 when a cycle leaves none out and the number was not 0, so a server
+    /// that drops back under the cap does not leave a stale number. The sweep takes the number once per pass
+    /// (<see cref="TakeLeftOutSql"/>).</para>
+    /// </summary>
+    public static readonly string RecordSightingsSql = "WITH " + IncomingCtes + ",\n" + GateCtes + @",
 pending_after AS
 (
     SELECT
@@ -722,12 +751,41 @@ SET last_attempt_at = $7,
         AND   expired_at IS NULL
         AND   last_attempt_at IS NULL";
 
+    /// <summary>The store schema version of the rung that adds <see cref="PendingIndexName"/> (#9452).</summary>
+    public const int PendingIndexVersion = 310;
+
+    /// <summary>
+    /// #9452: the partial index of the rows <see cref="NeverTriedPendingPredicate"/> names, on <c>(server_id)</c> and nothing else.
+    /// <see cref="RecordSightingsSql"/> counts a server's pending rows on every collection cycle. Through
+    /// <c>idx_oversized_plan_backlog_server_bytes</c> that count fetched the heap row of every row the server has to test the three
+    /// columns, tens of thousands of rows and about 20,000 buffers a call, and almost all of them are pending. This index holds exactly
+    /// those rows, so the count is an index-only scan of it. It is built from the same predicate text the statements use, so the planner
+    /// can match them, and it carries no <c>last_seen_at</c>, as a key, an INCLUDE column or in the WHERE: a re-sighting writes that
+    /// column on every cycle, and an index on it would end the heap-only update the upsert gets today. None of the predicate's three
+    /// columns changes on a re-sighting of a waiting row (it clears an <c>expired_at</c> that is already null), so the update stays
+    /// heap-only. Only a row that enters or leaves the pending set writes an entry.
+    /// </summary>
+    public const string PendingIndexName = "idx_oversized_plan_backlog_pending";
+
+    /// <summary>The statement of the rung (<see cref="PendingIndexVersion"/>). Idempotent.</summary>
+    public const string CreatePendingIndexSql =
+        "CREATE INDEX IF NOT EXISTS " + PendingIndexName + " ON collect.oversized_plan_backlog (server_id) WHERE " + NeverTriedPendingPredicate + ";";
+
     /// <summary>
     /// #8691: the head of both trim statements: the rows they drop are deleted, and the statement goes on to count them
     /// (<see cref="DeleteAndCountDroppedRows"/>). Until #8691 a drop stamped <c>expired_at</c> and the row stayed a day so the read
     /// could count it. A held row never kept a plan from coming back: a re-sighting cleared the stamp and the row waited again, so
     /// a deleted row's re-sighting inserts it again as a new pending row and the backlog ends the same, except that the row's first
     /// sighting is the new one.
+    ///
+    /// <para><b>The rows are joined by <c>ctid</c>, not by key (#9452).</b> The statement used to join the table to the limited
+    /// subquery on the six key columns. On a table the planner has no statistics for, or none that match its pending rows, it
+    /// estimates one pending row, and with that estimate the new <see cref="PendingIndexName"/> made the cheapest join the one that
+    /// reads every pending row of the server and re-runs the whole window subquery for each of them. A 68,000-row backlog ran past
+    /// <see cref="CommandTimeoutSeconds"/> where the key join without that index took 0.3 seconds. Joined on <c>ctid</c> the cheapest
+    /// plan under any estimate is the subquery first and one TID fetch per row it names, and with real statistics a hash join.
+    /// A row a collector re-sighted between the subquery and the delete has a new ctid and is left alone, which is what the
+    /// still-waiting conditions of <see cref="DeleteAndCountDroppedRows"/> already ask for.</para>
     /// </summary>
     private const string DeleteDroppedRowsHead = @"
 WITH gone AS
@@ -746,12 +804,8 @@ USING
     /// rows it dropped.
     /// </summary>
     private const string DeleteAndCountDroppedRows = @") AS dropped
-WHERE b.server_id = $1
-AND   b.collector_name = dropped.collector_name
-AND   b.plan_handle = dropped.plan_handle
-AND   b.sql_handle = dropped.sql_handle
-AND   b.statement_start_offset = dropped.statement_start_offset
-AND   b.statement_end_offset = dropped.statement_end_offset
+WHERE b.ctid = dropped.row_id
+AND   b.server_id = $1
 AND   b.captured_at IS NULL
 AND   b.expired_at IS NULL
 AND   b.last_attempt_at IS NULL
@@ -824,10 +878,11 @@ FROM gone;";
     /// </summary>
     public const string SupersedeSql = DeleteDroppedRowsHead + @"
     SELECT
-        " + RowKeyColumns + @"
+        row_id
     FROM
     (
         SELECT
+            ctid AS row_id,
             " + RowKeyColumns + @",
             last_seen_at,
             max(last_seen_at) OVER
@@ -859,10 +914,11 @@ FROM gone;";
     /// </summary>
     public const string DropOverCapSql = DeleteDroppedRowsHead + @"
     SELECT
-        " + RowKeyColumns + @"
+        row_id
     FROM
     (
         SELECT
+            ctid AS row_id,
             " + RowKeyColumns + @",
             row_number() OVER
             (

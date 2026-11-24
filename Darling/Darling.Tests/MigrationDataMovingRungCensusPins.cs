@@ -554,6 +554,21 @@ public sealed class MigrationDataMovingRungCensusPins
         new(
             310,
             SetsTheFloor: false,
+            "#9452: one CREATE INDEX IF NOT EXISTS over the populated collect.oversized_plan_backlog (created V121), a plain table: "
+            + "idx_oversized_plan_backlog_pending (server_id), partial to the pending rows (never captured, never expired, never tried). "
+            + "The build reads the heap once and keeps the rows its predicate admits, so it is the same shape as V258's and V260's indexes "
+            + "on this table, whose measured builds took 58 ms at 2,000,000 rows and 7.2 s to 10.8 s at 3,000,000 rows. Not CONCURRENTLY, "
+            + "inside the ladder's transaction. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
+        new(
+            315,
+            SetsTheFloor: false,
+            "#9434: CREATE UNIQUE INDEX on collect.read_latency (created V148), the new bucket key that also names the process start, after the "
+            + "primary key is dropped. V182's case on the same table: one row per hour per surface, route and outcome that was read, kept 90 days, "
+            + "so at most a few hundred thousand narrow rows and a build of about a second. The new nullable column is catalog-only. It does not "
+            + "move the lock-wait floor."),
+        new(
+            318,
+            SetsTheFloor: false,
             "#9485: a partial CREATE INDEX over config.investigation_requests (created V184) on the new nullable held_window_id, which is NULL on every "
             + "existing row, so the index is empty when it is built. V215's case on the same narrow control-plane table (one row per incident, kept a "
             + "year), and cheaper, because the partial predicate keeps no existing row. The two ADD COLUMNs are nullable with no default and are "

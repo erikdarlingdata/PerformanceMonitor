@@ -16,7 +16,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// listable and claimable, but it is not handed to the request runner (it does not wake <c>wait_for_investigation_requests</c> and
 /// it is not posted to the route's webhook). Pages and the alert history do not change.
 ///
-/// <para><b>Shape (V310).</b> <c>config.investigation_change_windows</c> holds one row per declared window. <c>server_ids</c> NULL means
+/// <para><b>Shape (V318).</b> <c>config.investigation_change_windows</c> holds one row per declared window. <c>server_ids</c> NULL means
 /// every server. <c>cleared_at</c> ends the window early: a cleared window holds nothing opened after that time. <c>summarized_at</c> is
 /// written when the close summary is journaled. <c>config.investigation_requests</c> gains <c>held_window_id</c> (the window that held
 /// the request, NULL when none did) and <c>hold_released_at</c> (set when a late join releases the hold). A request is held while
@@ -34,7 +34,7 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class InvestigationChangeWindows
 {
     /// <summary>The store schema version that adds the windows table and the two request columns. One constant so a renumber, when another rung lands first, is one edit.</summary>
-    public const int Version = 310;
+    public const int Version = 318;
 
     /// <summary>
     /// How long after a window's end a request still opens held (#9485): a re-capture or a settle period runs past the end of the work.
@@ -109,7 +109,7 @@ public static class InvestigationChangeWindows
         return now <= endsAt ? StateOpen : StateInTail;
     }
 
-    /// <summary>The rung (V310): one table and its index, two nullable columns on the requests and a partial index on the new link. All catalog-only, no data moves.</summary>
+    /// <summary>The rung (V318): one table and its index, two nullable columns on the requests and a partial index on the new link. All catalog-only, no data moves.</summary>
     public const string CreateSql = @"
 CREATE TABLE IF NOT EXISTS config.investigation_change_windows
 (

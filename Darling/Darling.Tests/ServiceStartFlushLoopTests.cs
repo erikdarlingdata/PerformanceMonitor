@@ -112,7 +112,7 @@ public sealed class ServiceStartFlushLoopTests
         try
         {
             await using (var setup = NpgsqlDataSource.Create(scratch.ConnectionString))
-            await using (var create = setup.CreateCommand("CREATE SCHEMA IF NOT EXISTS collect; " + ServiceStartHistory.CreateSql))
+            await using (var create = setup.CreateCommand("CREATE SCHEMA IF NOT EXISTS collect; " + ServiceStartHistory.CreateSql + ServiceStartRungObjects.CreateSql))
             {
                 create.CommandTimeout = 30;
                 await create.ExecuteNonQueryAsync(ct);

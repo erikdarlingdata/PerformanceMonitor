@@ -114,6 +114,33 @@ public sealed class ReadLatencyAccumulator
         10_000, 15_000, 20_000, 30_000, 45_000, 60_000, 90_000, 120_000,
     };
 
+    /// <summary>When this service process started, in UTC, to the millisecond (#9434). Every bucket this process flushes carries it as
+    /// <c>process_started_at</c>, and it is part of the bucket's key, so a restart inside one hour writes a second row for that hour
+    /// instead of adding into the first, and <c>get_read_latency</c> can split a route's timings at a given start. Read once, from the
+    /// operating system's record of the process, so a second accumulator built in the same process carries the same instant.</summary>
+    internal static DateTime ProcessStartedAtUtc { get; } = ReadProcessStart();
+
+    private static DateTime ReadProcessStart()
+    {
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        var started = process.StartTime.ToUniversalTime();
+        return new DateTime(started.Ticks - (started.Ticks % TimeSpan.TicksPerMillisecond), DateTimeKind.Utc);
+    }
+
+    /// <summary>The start instant this accumulator stamps on its buckets: the process's own, unless a test builds one for another
+    /// process.</summary>
+    internal DateTime ProcessStartedAt { get; }
+
+    public ReadLatencyAccumulator()
+        : this(ProcessStartedAtUtc)
+    {
+    }
+
+    internal ReadLatencyAccumulator(DateTime processStartedAtUtc)
+    {
+        ProcessStartedAt = DateTime.SpecifyKind(processStartedAtUtc, DateTimeKind.Utc);
+    }
+
     /// <summary>One past the last finite bucket — the overflow bucket for anything above
     /// <see cref="BucketUpperBoundsMs"/>'s last entry.</summary>
     private static readonly int s_bucketCount = BucketUpperBoundsMs.Length + 1;
@@ -125,6 +152,9 @@ public sealed class ReadLatencyAccumulator
         public long MaxMs;
         public int MaxInFlight;
         public long WaitTotalMs;
+
+        /* #9433: the summed size in bytes of the replies the key's reads sent. */
+        public long ReplyBytesTotal;
         public readonly long[] BucketCounts = new long[s_bucketCount];
 
         /* #5793: the distinct callers of the key in the hour, cleared by the hourly drain. Capped at MaxDistinctCallers
@@ -159,8 +189,10 @@ public sealed class ReadLatencyAccumulator
 
     /// <summary>Records one read with its caller (#5793): the finished caller string from <see cref="ReadCaller"/>, never
     /// the request. The key keeps the hour's set of distinct callers, up to <see cref="MaxDistinctCallers"/>. A null caller
-    /// adds nothing to the set.</summary>
-    internal void Record(ReadSurface surface, string route, ReadOutcome outcome, long elapsedMs, string? windowBand, int inFlightAtStart, long waitMs, string? caller)
+    /// adds nothing to the set. <paramref name="replyBytes"/> (#9433) is the size in bytes of the reply the caller received, taken
+    /// from the answer the read already holds; a read that sent no reply adds 0.</summary>
+    internal void Record(ReadSurface surface, string route, ReadOutcome outcome, long elapsedMs, string? windowBand, int inFlightAtStart, long waitMs, string? caller,
+        long replyBytes = 0)
     {
         if (string.IsNullOrEmpty(route))
         {
@@ -186,6 +218,7 @@ public sealed class ReadLatencyAccumulator
                 bucket.MaxInFlight = inFlightAtStart;
             }
             bucket.WaitTotalMs += Math.Max(waitMs, 0);
+            bucket.ReplyBytesTotal += Math.Max(replyBytes, 0);
             if (!string.IsNullOrEmpty(caller))
             {
                 bucket.Callers ??= new HashSet<string>(StringComparer.Ordinal);
@@ -215,7 +248,7 @@ public sealed class ReadLatencyAccumulator
 
     internal sealed record DrainedLatency(
         ReadSurface Surface, string Route, ReadOutcome Outcome, long Count, long TotalMs, long MaxMs, long[] BucketCounts,
-        string WindowBand = ReadWindowBand.None, int MaxInFlight = 0, long WaitTotalMs = 0, int DistinctCallers = 0);
+        string WindowBand = ReadWindowBand.None, int MaxInFlight = 0, long WaitTotalMs = 0, int DistinctCallers = 0, long ReplyBytesTotal = 0);
 
     /// <summary>#5506 part 3: a copy of the unflushed rows, leaving them in place (the long-read table reads them).</summary>
     internal IReadOnlyList<DrainedLatency> Snapshot()
@@ -228,7 +261,7 @@ public sealed class ReadLatencyAccumulator
                 rows.Add(new DrainedLatency(
                     key.Surface, key.Route, key.Outcome, bucket.Count, bucket.TotalMs, bucket.MaxMs,
                     (long[])bucket.BucketCounts.Clone(), key.WindowBand, bucket.MaxInFlight, bucket.WaitTotalMs,
-                    bucket.DistinctCallers));
+                    bucket.DistinctCallers, bucket.ReplyBytesTotal));
             }
         }
 
@@ -261,7 +294,7 @@ public sealed class ReadLatencyAccumulator
                 rows.Add(new DrainedLatency(
                     key.Surface, key.Route, key.Outcome, bucket.Count, bucket.TotalMs, bucket.MaxMs,
                     (long[])bucket.BucketCounts.Clone(), key.WindowBand, bucket.MaxInFlight, bucket.WaitTotalMs,
-                    bucket.DistinctCallers));
+                    bucket.DistinctCallers, bucket.ReplyBytesTotal));
             }
         }
 
@@ -288,6 +321,7 @@ public sealed class ReadLatencyAccumulator
                 }
                 bucket.MaxInFlight = Math.Max(bucket.MaxInFlight, row.MaxInFlight);
                 bucket.WaitTotalMs += row.WaitTotalMs;
+                bucket.ReplyBytesTotal += row.ReplyBytesTotal;
                 bucket.CallerFloor = Math.Max(bucket.CallerFloor, row.DistinctCallers);
             }
         }
@@ -303,7 +337,7 @@ public sealed class ReadLatencyAccumulator
        prune. ON CONFLICT adds counts, totals and per-bucket counts element-wise and takes the greater of
        the two max_ms values — the shape a SECOND flush landing in the same hour needs (this accumulator
        flushes on the same worker tick as collector_cost, so ordinarily there is one flush per hour, but a
-       restart mid-hour can produce two partial ones for the same key and neither may be dropped). Draining
+       stop-time flush after a failed hourly one can produce two partial ones for the same key and neither may be dropped). Draining
        (TryRemove) resets the window, so an hour with no reads writes no row rather than a zero.
 
        One statement PER DRAINED KEY, not collector_cost's single unnest bulk insert: Npgsql's array binding
@@ -313,21 +347,28 @@ public sealed class ReadLatencyAccumulator
        never one per read — so a handful of round trips is the right shape for this table's real size.
 
        distinct_callers (#5793) takes the greater of the two counts: two partial flushes of one hour cannot union sets
-       that were never stored, so a mid-hour restart keeps the larger count, a floor of the hour's real number. */
+       that were never stored, so a mid-hour restart keeps the larger count, a floor of the hour's real number.
+
+       reply_bytes_total (#9433) adds like run_count. A row an older build wrote has NULL there, which reads as 0 when a newer flush of
+       the same hour lands on it.
+
+       #9434: process_started_at is part of the key, so the two partial flushes of a restart inside an hour are two rows, not one
+       added-together row. Two flushes by the SAME process still land on one key and add, as before. */
     private const string InsertSql = @"
 INSERT INTO collect.read_latency
 (
     metric_time, surface, route, outcome, window_band,
-    run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers
+    run_count, total_ms, max_ms, bucket_counts, max_in_flight, wait_total_ms, distinct_callers, reply_bytes_total, process_started_at
 )
-VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8, $10, $11, $12)
-ON CONFLICT (metric_time, surface, route, outcome, window_band) DO UPDATE SET
+VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8, $10, $11, $12, $13, $14)
+ON CONFLICT (metric_time, surface, route, outcome, window_band, process_started_at) DO UPDATE SET
     run_count = collect.read_latency.run_count + EXCLUDED.run_count,
     total_ms = collect.read_latency.total_ms + EXCLUDED.total_ms,
     max_ms = GREATEST(collect.read_latency.max_ms, EXCLUDED.max_ms),
     max_in_flight = GREATEST(collect.read_latency.max_in_flight, EXCLUDED.max_in_flight),
     wait_total_ms = collect.read_latency.wait_total_ms + EXCLUDED.wait_total_ms,
     distinct_callers = GREATEST(collect.read_latency.distinct_callers, EXCLUDED.distinct_callers),
+    reply_bytes_total = coalesce(collect.read_latency.reply_bytes_total, 0) + EXCLUDED.reply_bytes_total,
     bucket_counts = (
         SELECT array_agg(a + b ORDER BY ord)
         FROM unnest(collect.read_latency.bucket_counts) WITH ORDINALITY AS x(a, ord)
@@ -364,6 +405,8 @@ WHERE metric_time < $1";
                 insert.Parameters.AddWithValue(row.MaxInFlight);
                 insert.Parameters.AddWithValue(row.WaitTotalMs);
                 insert.Parameters.AddWithValue(row.DistinctCallers);
+                insert.Parameters.AddWithValue(row.ReplyBytesTotal);
+                insert.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.TimestampTz, ProcessStartedAt);
                 await insert.ExecuteNonQueryAsync(cancellationToken);
                 written++;
             }

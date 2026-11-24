@@ -407,7 +407,7 @@ public static partial class DarlingWebEndpoints
     /// name="name"/> is already a bounded-cardinality route label (the dispatch table's own tool name, never
     /// caller-supplied text). Never throws into the request: swallowed and logged at Debug, exactly like the
     /// compose path's own recording.</summary>
-    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, ReadScope scope)
+    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, ReadScope scope, long replyBytes = 0)
     {
         try
         {
@@ -415,7 +415,7 @@ public static partial class DarlingWebEndpoints
                request that sends none reads the read's own default window, which the catalog row declares (PHours(def),
                PInt("days_back", def)), so it records that window's band; only a read that takes no window records none. */
             var band = WebWindowBand(name, key => First(context, key));
-            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs, WebReadCaller(context));
+            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs, band, scope.InFlightAtStart, scope.WaitMs, WebReadCaller(context), replyBytes);
         }
         catch (Exception ex)
         {
@@ -510,9 +510,18 @@ public static partial class DarlingWebEndpoints
         return route.Length > 120 ? route[..120] : route;
     }
 
+    /// <summary>#9433: the size in bytes of the reply a read's answer text is written as, taken from the text the read already holds (a UTF-8 count,
+    /// no second serialization). Only a payload or a refusal is written as that text. A tool failure is answered with a fixed body and a plain
+    /// sentence is wrapped in a JSON object, so neither is the size of the text, and those answers return null.</summary>
+    internal static long? WebReplyBytes(string result) =>
+        ClassifyToolResponse(result) is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
+            ? System.Text.Encoding.UTF8.GetByteCount(result)
+            : null;
+
     /// <summary>Offers a slow or failed <c>/api/read/*</c> call to the slow-read record (#5097): the query string, as sent,
     /// becomes the arguments. Never throws into the request.</summary>
-    private static void OfferWebSlowRead(ReadLatencyRecorder recorder, ReadScope scope, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, string? errorClass)
+    private static void OfferWebSlowRead(ReadLatencyRecorder recorder, ReadScope scope, string name, ReadOutcome outcome, long elapsedMs, HttpContext context, string? errorClass,
+        long? replyBytes = null)
     {
         if (recorder.SlowReads is null || !recorder.SlowReads.ShouldRecord(outcome, elapsedMs))
         {
@@ -527,7 +536,7 @@ public static partial class DarlingWebEndpoints
                 ? q.Value.Select(v => new KeyValuePair<string, string?>(q.Key, v))
                 : [new KeyValuePair<string, string?>(q.Key, null)]));
 
-            recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger, WebReadCaller(context));
+            recorder.SlowReads.Offer(scope, ReadSurface.Web, name, outcome, elapsedMs, arguments, errorClass, recorder.Logger, WebReadCaller(context), replyBytes);
         }
         catch (Exception ex)
         {
@@ -1062,7 +1071,7 @@ public static partial class DarlingWebEndpoints
             ["get_store_table_health"] = R(CatOverview, "The health of the monitoring store's OWN tables: size split, estimated empty space from table statistics (an estimate, null with a reason when statistics are missing or stale), dead rows, last vacuum and analyze, autovacuum off, 7-day growth, and which tables are rewrite candidates.", PTop(DarlingMcpStoreTableHealthTools.DefaultTop), PBool("candidates_only", false), PText("section")),
             ["measure_store_table"] = R(CatOverview, "MEASURES the empty space of ONE store table (which file pages hold a live row): total and empty pages, rows per used page, the occupancy histogram, and a verdict (dense, only a rewrite returns the space, or VACUUM can truncate the tail). table is schema-qualified.", PText("table")),
             ["get_store_log"] = R(CatOverview, "What the monitoring store's OWN PostgreSQL server log recorded - a per-class census with the capture denominator beside it, not the lines. Deliberately unbanded. Pass query_id (from get_store_query_history) for that one statement's slow plan.", PHours(24), PLimit(DarlingMcpStoreLogTools.DefaultRetainedLimit), PAsOf(), PText("query_id")),
-            ["get_service_starts"] = R(CatOverview, "The monitoring service's own starts, newest first: the build each ran, the schema version before and after, the migration rungs with their timings, and the ERROR and WARN counts since the start. service_host keeps one host's starts.", PLimit(DarlingMcpServiceStartTools.DefaultLimit), PText("service_host")),
+            ["get_service_starts"] = R(CatOverview, "The monitoring service's own starts, newest first: the build each ran, the schema version before and after, the migration rungs with their timings, and the ERROR and WARN counts since the start. service_host keeps one host's starts, hours_back keeps the recent ones, and rung lists the tables, columns, indexes, constraints, views, functions and policies that migration rung created, changed or dropped.", PLimit(DarlingMcpServiceStartTools.DefaultLimit), PText("service_host"), PInt("rung"), PInt("hours_back")),
             ["get_store_checkpoints"] = R(CatOverview, "The monitoring store's OWN PostgreSQL checkpoints, one row each (reason, buffers, files synced, write and sync time), with a per-hour summary.", PHours(24), PLimit(DarlingMcpStoreCheckpointTools.DefaultLimit), PAsOf()),
             ["get_store_pass_steps"] = R(CatOverview, "What the monitoring store's own background passes did, step by step, newest first: when each step of the hourly store maintenance, 15-minute Query Store compose and hourly self-metrics passes started, how long it took, whether it worked, and the counts it reported.", PHours(24), PText("pass"), PText("step"), PLimit(DarlingMcpStorePassStepsTools.DefaultLimit), PAsOf()),
             ["get_store_query_history"] = R(CatOverview, "The monitoring store's OWN SQL statements hour by hour (pg_stat_statements deltas the service snapshots every hour): the top statements over the window by time spent, or one statement's hourly series with query_id.", PText("query_id"), PText("role"), PHours(DarlingMcpStoreQueryHistoryTools.DefaultHours), PTop(DarlingMcpStoreQueryHistoryTools.DefaultTop), PText("order_by")),
@@ -1072,7 +1081,7 @@ public static partial class DarlingWebEndpoints
             ["get_collector_stall_probes"] = R(CatOverview, "The out-of-band server-wide wait samples taken while one of OUR collectors was stalled mid-read - what the monitored instance was doing inside the window the sequential sweep records nothing in. Carries the outcome census beside the samples, deliberately unbanded.", PServer(), PInt("days_back", 7), PLimit(DarlingMcpStallProbeTools.DefaultLimit)),
             ["get_oversized_plan_backlog"] = R(CatOverview, "The cached plans this tool measured as too large to capture inline, and what the out-of-band sweep has done about each one: per server the four verdict buckets (pending/captured/expired/dropped, a strict partition), the attempt figures on still-pending rows, the newest capture and expiry instants, and observed_bytes min/median/max, with the per-collector census beside them. Takes no window - a worklist updated in place, not a series. Pass server_name with include_rows for the claim keys.", PServer(), PBool("include_rows", false), PLimit(DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
             ["get_slow_reads"] = R(CatOverview, "The monitoring tool's OWN slow or failed reads, newest first - each with the arguments it was asked with, the source that answered and its slowest statements. Recorded when a read took 5 seconds or more or ended in a timeout, error or limit. Optional server, surface (web/compose/mcp) and route filter.", PHours(DarlingMcpSlowReadTools.DefaultHours), PServer(), PText("surface"), PText("route"), PLimit(DarlingMcpSlowReadTools.DefaultLimit)),
-            ["get_read_latency"] = R(CatOverview, "The monitoring tool's OWN read-latency history (self-monitoring) - which of the web dashboard's or MCP server's own reads is really slow, and how often it times out. p50/p95/p99 are bucket upper-bound estimates, per (surface, route, window band: 1h, 24h, 7d, 7d+ or none), so one route can return a row per band; sorted p95 desc. window_band is the width of the window the read asked for (its default window when it sent none). max_in_flight is the most other reads running when one started; wait_total_ms is the summed wait for a store connection. Optional surface (web/compose/mcp) and route filter. fallbacks and gate_failures count reads that fell back to raw.", PHours(DarlingMcpReadLatencyTools.DefaultHours), PText("surface"), PText("route"), PLimit(DarlingMcpReadLatencyTools.DefaultLimit)),
+            ["get_read_latency"] = R(CatOverview, "The monitoring tool's OWN read-latency history (self-monitoring) - which of the web dashboard's or MCP server's own reads is really slow, and how often it times out. p50/p95/p99 are bucket upper-bound estimates, per (surface, route, window band: 1h, 24h, 7d, 7d+ or none), so one route can return a row per band; sorted p95 desc. window_band is the width of the window the read asked for (its default window when it sent none). max_in_flight is the most other reads running when one started; wait_total_ms is the summed wait for a store connection. Optional surface (web/compose/mcp) and route filter. fallbacks and gate_failures count reads that fell back to raw. Optional split_at (an ISO-8601 UTC service start) adds before and after figures per row: count, median and max, divided by the start of the service process that wrote each bucket.", PHours(DarlingMcpReadLatencyTools.DefaultHours), PText("surface"), PText("route"), PLimit(DarlingMcpReadLatencyTools.DefaultLimit), PText("split_at")),
 
             /* ── latch / spinlock (DarlingMcpLatchSpinlockTools) ── */
             ["get_latch_stats"] = R(CatLatch, "Top latch waits in the window.", PServer(), PHours(24), PTop(10), PAsOf()),
