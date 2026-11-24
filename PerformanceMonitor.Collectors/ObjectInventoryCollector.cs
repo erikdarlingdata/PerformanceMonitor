@@ -70,6 +70,12 @@ public sealed class ObjectInventoryCollector : CollectorDefinitionBase<ObjectInv
     /// <summary>A plain table with a time-sliced DELETE: the newest capture is the only one read.</summary>
     public override bool StaysPlainTable => true;
 
+    /// <summary>The 5 s lock wait before a blocked read yields, the one <see cref="IndexObjectStatsCollector"/> uses.</summary>
+    public const int LockTimeoutMilliseconds = IndexObjectStatsCollector.LockTimeoutMilliseconds;
+
+    /// <summary>The body sets a 5 s lock timeout, so a 1222 behind a DDL's schema lock is a yield, not a failure (#9526).</summary>
+    public override bool YieldsOnLockTimeout => true;
+
     /// <summary>Darling stores and reads it; Lite has no twin (ruling 10-21: new collection is Darling-only).</summary>
     public override bool IsDarlingOnly => true;
 
@@ -81,10 +87,22 @@ public sealed class ObjectInventoryCollector : CollectorDefinitionBase<ObjectInv
     public override CollectorQuery? BuildEnumerationQuery(CollectorContext context) =>
         IndexObjectStatsCollector.Instance.BuildEnumerationQuery(context);
 
-    /// <summary>The per-database read, one body for both paths (the on-prem path quote-doubles it into <c>[db].sys.sp_executesql</c>).</summary>
-    internal static string BuildPayloadBody() => $@"
+    /// <summary>
+    /// The per-database read, one body for both paths (the on-prem path quote-doubles it into <c>[db].sys.sp_executesql</c>). It sets a 5 s
+    /// lock timeout, so a DDL holding a schema modification lock on one module makes the database yield (error 1222) instead of waiting for
+    /// the DDL to commit (#9526). <paramref name="supportsNativeCompilationColumn"/> gates <c>sys.sql_modules.uses_native_compilation</c>
+    /// (SQL Server 2014+, Azure SQL DB, Managed Instance): below it the flag is a typed 0.
+    /// </summary>
+    internal static string BuildPayloadBody(bool supportsNativeCompilationColumn = true)
+    {
+        var nativelyCompiled = supportsNativeCompilationColumn
+            ? "CONVERT(bit, ISNULL(m.uses_native_compilation, 0))"
+            : "CONVERT(bit, 0)";
+
+        return $@"
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET LOCK_TIMEOUT {LockTimeoutMilliseconds.ToString(CultureInfo.InvariantCulture)};
 
 SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase.ToString(CultureInfo.InvariantCulture)})
     schema_name = s.name,
@@ -93,17 +111,21 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase.ToString(CultureInf
     type_desc = o.type_desc,
     create_date = o.create_date,
     modify_date = o.modify_date,
-    /* OBJECTPROPERTY rather than sys.sql_modules.uses_native_compilation: an unknown property reads NULL where a missing column fails the
-       SELECT on a version with no such modules. */
-    is_natively_compiled = CONVERT(bit, ISNULL(OBJECTPROPERTY(o.object_id, N'ExecIsWithNativeCompilation'), 0))
+    /* Read from sys.sql_modules, not OBJECTPROPERTY: OBJECTPROPERTY takes a schema stability lock per row, so a DDL open on one procedure
+       stalled the whole run behind it (#9526), where the catalog column does not wait. A version below SQL Server 2014 has no such column
+       and no such modules, so the flag is a typed 0 there. A CLR module has no sql_modules row and reads 0. */
+    is_natively_compiled = {nativelyCompiled}
 FROM sys.objects AS o
 JOIN sys.schemas AS s
   ON s.schema_id = o.schema_id
+LEFT JOIN sys.sql_modules AS m
+  ON m.object_id = o.object_id
 WHERE o.is_ms_shipped = 0
 AND   o.type IN (N'P', N'PC', N'FN', N'IF', N'TF', N'FS', N'FT', N'V')
 ORDER BY
     o.object_id
 OPTION(RECOMPILE);";
+    }
 
     /// <summary>The Azure per-database branch: the connection is already in the database.</summary>
     public override CollectorQuery BuildQuery(CollectorContext context)
@@ -116,7 +138,7 @@ OPTION(RECOMPILE);";
                 "object_inventory enumerates databases off Azure SQL DB; BuildEnumerationQuery drives the cycle.");
         }
 
-        return new CollectorQuery(BuildPayloadBody());
+        return new CollectorQuery(BuildPayloadBody(IndexObjectStatsCollector.SupportsInMemoryOltpColumns(context.Target)));
     }
 
     public override CollectorQuery BuildPerItemQuery(string item, CollectorContext context)
@@ -125,7 +147,7 @@ OPTION(RECOMPILE);";
 
         var text = $@"
 EXECUTE [{item.Replace("]", "]]", StringComparison.Ordinal)}].sys.sp_executesql
-    N'{BuildPayloadBody().Replace("'", "''", StringComparison.Ordinal)}';";
+    N'{BuildPayloadBody(IndexObjectStatsCollector.SupportsInMemoryOltpColumns(context.Target)).Replace("'", "''", StringComparison.Ordinal)}';";
 
         return new CollectorQuery(text);
     }
