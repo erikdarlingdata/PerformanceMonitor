@@ -4082,7 +4082,7 @@ function Write-DarlingUpgradeRunFile([string]$installRoot, $run, [string]$servic
                 $warning = "the service account '$serviceAccount' could not be given Modify on $path (icacls exit $LASTEXITCODE), so the service may not be able to remove it. It records the file on every pass and keeps one row for the run."
             }
         }
-        if (Test-Path -LiteralPath $path -PathType Leaf) { [System.IO.File]::Replace($temp, $path, $null) }
+        if (Test-Path -LiteralPath $path -PathType Leaf) { [System.IO.File]::Replace($temp, $path, [NullString]::Value) }
         else { [System.IO.File]::Move($temp, $path) }
         return [pscustomobject]@{ Ok = $true; Reason = ''; Warning = $warning }
     }
