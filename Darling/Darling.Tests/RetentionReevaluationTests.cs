@@ -360,7 +360,7 @@ public sealed class RetentionReevaluationTests
 
         /* Its own connection from the worker's pool — the startup connection is disposed with the setup
            block, which is the one thing the issue said to get right. */
-        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);", body, StringComparison.Ordinal);
+        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.RetentionReevaluate, budget.Token);", body, StringComparison.Ordinal);
 
         /* The Periodic pass, named explicitly, on the budget token. */
         Assert.Contains("TimescaleSupport.RetentionSweepPass.Periodic,", body, StringComparison.Ordinal);

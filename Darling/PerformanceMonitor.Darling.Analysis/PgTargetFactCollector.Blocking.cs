@@ -376,7 +376,7 @@ LIMIT 25";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
             var windowEnd = AsNaive(context.TimeRangeEnd);
 
             var settings = await ReadBlockingSettingsAsync(connection, context);

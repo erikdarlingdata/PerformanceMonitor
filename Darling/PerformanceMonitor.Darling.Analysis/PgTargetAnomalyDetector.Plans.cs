@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Storage;
 using static PerformanceMonitor.Analysis.Baselines.AnomalyThresholds;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -210,7 +211,7 @@ FROM per_collection";
         try
         {
             var candidates = new List<(long QueryId, double PeakMeanMs, double AvgMeanMs, long Samples, DateTime? PeakTime)>();
-            await using (var connection = await _postgres.OpenConnectionAsync(context.CancellationToken))
+            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken))
             {
                 using var cmd = WindowCommand(StatementMeanKeyedWindowSql, connection, context);
                 cmd.Parameters.AddWithValue(PgTargetFactCollector.TopStatementCount);
@@ -358,7 +359,7 @@ FROM per_collection";
             context.ServerId, MetricNames.PgStatementMeanMs, context.TimeRangeStart, context.CancellationToken);
         if (baseline.SampleCount == 0) return;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisAnomaly, context.CancellationToken);
         using var cmd = WindowCommand(StatementMeanWindowSql, connection, context);
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         if (!await reader.ReadAsync(context.CancellationToken)) return;
