@@ -136,7 +136,7 @@ public class FleetPartialDatabaseFailureBandTests
         /* The refresh itself is called from exactly one place: the background method on its own connection. */
         Assert.Single(Regex.Matches(worker, Regex.Escape("TimescaleSupport.WarmCollectionHealthHourlyAsync(connection")));
         var method = worker[worker.IndexOf("private async Task RunCollectionHealthRollupWarmAsync(", StringComparison.Ordinal)..];
-        Assert.Contains("await using var connection = await postgres.OpenConnectionAsync(stoppingToken);", method[..600], StringComparison.Ordinal);
+        Assert.Contains("await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RollupWarm, stoppingToken);", method[..600], StringComparison.Ordinal);
     }
 
     [Fact]
