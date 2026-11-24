@@ -180,11 +180,6 @@ FROM (SELECT " + string.Format(CultureInfo.InvariantCulture, StampToUtc, "$2") +
     /// <summary>The most checkpoint lines one slab (4 MiB of log) writes: the newest ones. A slab holds a few hundred in a heavy hour, so this
     /// only bounds the time a log full of checkpoint lines (a test log, a store that checkpoints every second) holds the sweep's transaction.</summary>
     public const int MaxLinesPerSlab = 2000;
-
-    /// <summary>The most checkpoint lines one slab (4 MiB of log) writes: the newest ones. A slab holds a few hundred in a heavy hour, so this
-    /// only bounds the time a log full of checkpoint lines holds the sweep's transaction.</summary>
-    public const int MaxLinesPerSlab = 2000;
-
     /// <summary>What a slab held: the lines in order, how many checkpoint lines had no stamp to place them by, and how many the cap left out.</summary>
     public sealed record Parsed(IReadOnlyList<Line> Lines, int NoStamp, int Dropped = 0);
 
