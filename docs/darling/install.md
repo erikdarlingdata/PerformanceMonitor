@@ -232,7 +232,7 @@ PerformanceMonitor Darling collection loop started
 Two things look wrong on a first start and are not:
 
 - One-time `discarding and regenerating` warnings about the role `.dpapi` credential files. A role password can be asserted again, so the service does that. The ownership check is working.
-- A collector that reports `YIELDED`. The one-second lock-timeout guard fired on a busy target. The guard stops Darling from becoming the problem that it monitors.
+- A collector that reports `YIELDED`. A short lock-timeout guard (one to five seconds) fired on a busy target. The guard stops Darling from becoming the problem that it monitors.
 
 If the service idles instead, the message is literal and named: `Cannot load configuration`, `Configuration problem: <field>`, or `Cannot reach or migrate the Postgres store`. See [Troubleshooting](troubleshooting.md).
 
