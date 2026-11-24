@@ -352,7 +352,7 @@ public sealed class StoreMetricsSummaryFirstTests
     public void TheWebCatalog_AdvertisesTheNewParameters()
     {
         var descriptor = DarlingWebEndpoints.CatalogDescriptors["get_store_metrics"];
-        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit" }, descriptor.Params.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit", "wal_hours_back" }, descriptor.Params.Select(p => p.Name).ToArray());
         Assert.All(descriptor.Params, p => Assert.False(p.Required));
         Assert.Equal(DarlingMcpStoreMetricsTools.DefaultLimit, descriptor.Params.Single(p => p.Name == "limit").Default);
     }
