@@ -170,10 +170,11 @@ public partial class StoreHealthTab : UserControl
                the longer of the two. The last sizes never overwrite a live result that landed first. */
             var readiness = LoadReadinessAsync(timer);
             var firstOpen = !force && !_tablesLoaded && TablesDataGrid.Items.Count == 0 && !(HoldsTablesRead?.Invoke() ?? _dataService?.HoldsStoreTables ?? false);
-            /* #9364: the rows the Viewer saved after its last live read come first (a local file, read at once), then the store's last measured
-               sizes only when the file gave no tables. Both are shown beside the live reads, which start now. */
+            /* #9364: the rows the Viewer saved after its last live read (a local file, read at once) and the store's last measured sizes
+               are both read, and the tables on screen are whichever was measured later (the store's last sizes win a tie). The file's indexes
+               stay, since the last sizes have no index rows. Both are shown beside the live reads, which start now. */
             var snapshot = firstOpen ? ShowSnapshotAsync(timer) : Task.FromResult(false);
-            var lastSizes = firstOpen ? ShowLastSizesUnlessSnapshotAsync(timer, snapshot) : Task.CompletedTask;
+            var lastSizes = firstOpen ? ShowLastSizesAsync(timer) : Task.CompletedTask;
             await Task.WhenAll(LoadTablesAsync(timer, fresh: force), LoadIndexesAsync(timer, fresh: force), readiness, snapshot, lastSizes);
             if (!StampIfLoaded())
             {
@@ -243,7 +244,8 @@ public partial class StoreHealthTab : UserControl
 
     /// <summary>#9364: puts the rows the Viewer saved after its last live read of this store on screen with the strip saying how old they are,
     /// unless the live read of a part has already landed (live rows are never overwritten). Leaves the screen alone when there is no file or it
-    /// cannot be read. Returns whether the tables are on screen from the file.</summary>
+    /// cannot be read. The file's tables yield to the store's last sizes when those are on screen and were measured at the same time or later.
+    /// Returns whether the tables are on screen from the file.</summary>
     private async Task<bool> ShowSnapshotAsync(ViewerLoadTimer timer)
     {
         if (Snapshots is not { } store)
@@ -258,7 +260,7 @@ public partial class StoreHealthTab : UserControl
         }
 
         var tablesShown = false;
-        if (!_tablesLoaded && saved.Tables is { } tables && saved.TablesReadAtUtc is { } tablesAt)
+        if (!_tablesLoaded && saved.Tables is { } tables && saved.TablesReadAtUtc is { } tablesAt && !(OnLastSizes() && _lastSizesAtUtc >= tablesAt))
         {
             ShowTables(tables);
             _snapshotTablesAtUtc = tablesAt;
@@ -281,16 +283,6 @@ public partial class StoreHealthTab : UserControl
         }
 
         return tablesShown;
-    }
-
-    /// <summary>#9364: the store's last measured sizes (#9374) only when the saved rows gave no tables: with them on screen there is nothing
-    /// to show sooner, and the store is spared the read.</summary>
-    private async Task ShowLastSizesUnlessSnapshotAsync(ViewerLoadTimer timer, Task<bool> snapshot)
-    {
-        if (!await snapshot)
-        {
-            await ShowLastSizesAsync(timer);
-        }
     }
 
     /// <summary>#9364: saves a live read for the next process's first open, off the UI thread, one save after another. A failed save is a log
@@ -319,7 +311,8 @@ public partial class StoreHealthTab : UserControl
 
     /// <summary>#9374: reads the store's last measured sizes and puts the tables rows on screen, with the strip saying so, unless the live
     /// tables read has already landed (its rows are never overwritten). Leaves the screen alone when the store has no sizes to give (the live
-    /// read then runs as it always did). The caller starts the live reads before awaiting this one.</summary>
+    /// read then runs as it always did). Tables the Viewer saved (#9364) stay when they were measured later than these sizes, so a tie goes
+    /// to these. The caller starts the live reads before awaiting this one.</summary>
     private async Task ShowLastSizesAsync(ViewerLoadTimer timer)
     {
         var read = LastSizesRead?.Invoke() ?? _dataService?.GetStoreLastSizesHealthAsync();
@@ -335,7 +328,7 @@ public partial class StoreHealthTab : UserControl
         }
 
         timer.NotePhase("store last sizes read", StoreHealthRows.LastSizesNote(last.Tables.Rows.Count, last.MeasuredAtUtc, DateTime.UtcNow));
-        if (_tablesLoaded)
+        if (_tablesLoaded || (_tablesFromSnapshot && _snapshotTablesAtUtc > last.MeasuredAtUtc))
         {
             return;
         }
@@ -343,6 +336,7 @@ public partial class StoreHealthTab : UserControl
         ShowTables(last.Tables.Rows);
         _lastSizesAtUtc = last.MeasuredAtUtc;
         _tablesFromLastSizes = true;
+        _tablesFromSnapshot = false;
         ShowRefreshing();
     }
 

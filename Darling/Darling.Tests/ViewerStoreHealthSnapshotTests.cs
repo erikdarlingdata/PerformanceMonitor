@@ -68,6 +68,9 @@ public sealed class ViewerStoreHealthSnapshotTests : IDisposable
         public TaskCompletionSource? Gate;
         public DateTime ReadAt = DateTime.UtcNow;
 
+        /// <summary>What the store's last sizes read answers (#9374): null is a store with no last sizes.</summary>
+        public StoreLastSizesHealth? LastSizesAnswer;
+
         public void Wire(StoreHealthTab tab)
         {
             tab.TablesRead = async fresh =>
@@ -91,7 +94,7 @@ public sealed class ViewerStoreHealthSnapshotTests : IDisposable
             tab.LastSizesRead = () =>
             {
                 LastSizes++;
-                return Task.FromResult<StoreLastSizesHealth?>(null);
+                return Task.FromResult(LastSizesAnswer);
             };
         }
     }
@@ -157,8 +160,9 @@ public sealed class ViewerStoreHealthSnapshotTests : IDisposable
             var refresh = tab.RefreshAsync();
             await UntilAsync(() => tab.TablesDataGrid.Items.Count == 2 && tab.IndexesDataGrid.Items.Count == 1);
 
-            /* The live reads are out at their gate: what is on screen is the saved file, with its age, and the store's own last sizes were not asked. */
-            Assert.Equal((1, 1, 0), (reads.Tables, reads.Indexes, reads.LastSizes));
+            /* The live reads are out at their gate: what is on screen is the saved file, with its age. The store has no last sizes to give. */
+            Assert.Equal((1, 1, 1), (reads.Tables, reads.Indexes, reads.LastSizes));
+            Assert.Equal(["saved_more", "saved_things"], TableNames(tab));
             Assert.Equal("ix_saved", ((StoreIndexRow)tab.IndexesDataGrid.Items[0]).Index);
             Assert.StartsWith("Tables and indexes are from the last measurement, 12 min ago. A live read is running", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
 
@@ -168,6 +172,90 @@ public sealed class ViewerStoreHealthSnapshotTests : IDisposable
             Assert.Equal((1, 1), (reads.Tables, reads.Indexes));
             Assert.Single(tab.TablesDataGrid.Items);
             Assert.Equal("ix_live", ((StoreIndexRow)tab.IndexesDataGrid.Items[0]).Index);
+            Assert.StartsWith("Last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+        });
+    }
+
+    private static StoreLastSizesHealth LastSizesOf(DateTime measuredAt, params string[] tables) =>
+        new(new StoreHealthRead<IReadOnlyList<StoreTableHealthRow>>([.. tables.Select(TableRow)], DateTime.UtcNow), measuredAt);
+
+    private static string[] TableNames(StoreHealthTab tab) =>
+        [.. tab.TablesDataGrid.Items.Cast<StoreTableRow>().Select(r => r.Table.Split('.').Last()).Order(StringComparer.Ordinal)];
+
+    private static string[] TableNamesContaining(StoreHealthTab tab, string text) =>
+        [.. tab.TablesDataGrid.Items.Cast<StoreTableRow>().Where(r => r.Table.Contains(text, StringComparison.Ordinal)).Select(r => r.Table)];
+
+    private static string StampOf(DateTime utc) => ViewerTimeHelper.RefreshedStamp(utc, ViewerTimeHelper.CurrentDisplayMode);
+
+    [Fact]
+    public void TheFirstOpen_WithAFileOlderThanTheStoresLastSizes_ShowsTheStoresTablesAndTheFilesIndexes()
+    {
+        RunTab(async (tab, reads, store) =>
+        {
+            var storeMeasured = DateTime.UtcNow.AddMinutes(-3);
+            Save(store, DateTime.UtcNow.AddMinutes(-12).AddSeconds(-10));
+            reads.LastSizesAnswer = LastSizesOf(storeMeasured, "store_a", "store_b", "store_c");
+
+            var refresh = tab.RefreshAsync();
+            await UntilAsync(() => TableNamesContaining(tab, "store_").Length == 3 && tab.IndexesDataGrid.Items.Count == 1);
+
+            /* The live reads are out at their gate: the tables are the store's last sizes, the indexes are the file's, and the strip says where each is from. */
+            Assert.Empty(TableNamesContaining(tab, "saved_"));
+            Assert.Equal("ix_saved", ((StoreIndexRow)tab.IndexesDataGrid.Items[0]).Index);
+            Assert.Equal(
+                "Sizes are from the store's last measurement, taken " + StampOf(storeMeasured) + ". Indexes are from the last measurement, 12 min ago. A live read is running…",
+                tab.LastRefreshedIndicator.Text);
+
+            reads.Gate!.SetResult();
+            await refresh;
+
+            Assert.Equal(["live_things"], TableNames(tab));
+            Assert.Equal("ix_live", ((StoreIndexRow)tab.IndexesDataGrid.Items[0]).Index);
+            Assert.StartsWith("Last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public void TheFirstOpen_WithAFileMeasuredAtTheSameTimeAsTheStoresLastSizes_ShowsTheStoresTables()
+    {
+        RunTab(async (tab, reads, store) =>
+        {
+            var measured = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, 0, 0, 0, DateTimeKind.Utc).AddMinutes(-15);
+            Save(store, measured);
+            reads.LastSizesAnswer = LastSizesOf(measured, "store_a", "store_b", "store_c");
+
+            var refresh = tab.RefreshAsync();
+            await UntilAsync(() => TableNamesContaining(tab, "store_").Length == 3 && tab.IndexesDataGrid.Items.Count == 1);
+
+            Assert.Empty(TableNamesContaining(tab, "saved_"));
+            Assert.StartsWith("Sizes are from the store's last measurement, taken " + StampOf(measured) + ". Indexes are from the last measurement,", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+
+            reads.Gate!.SetResult();
+            await refresh;
+            Assert.Equal(["live_things"], TableNames(tab));
+        });
+    }
+
+    [Fact]
+    public void TheFirstOpen_WithAFileNewerThanTheStoresLastSizes_ShowsTheFilesTables()
+    {
+        RunTab(async (tab, reads, store) =>
+        {
+            Save(store, DateTime.UtcNow.AddMinutes(-3).AddSeconds(-10));
+            reads.LastSizesAnswer = LastSizesOf(DateTime.UtcNow.AddMinutes(-12), "store_a", "store_b", "store_c");
+
+            var refresh = tab.RefreshAsync();
+            await UntilAsync(() => reads.LastSizes == 1 && tab.TablesDataGrid.Items.Count > 0 && tab.IndexesDataGrid.Items.Count == 1);
+            await Task.Delay(50);
+
+            /* The store's last sizes were read and are older than the file, so they never reach the screen. */
+            Assert.Equal(["saved_more", "saved_things"], TableNames(tab));
+            Assert.StartsWith("Tables and indexes are from the last measurement, 3 min ago. A live read is running", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
+
+            reads.Gate!.SetResult();
+            await refresh;
+
+            Assert.Equal(["live_things"], TableNames(tab));
             Assert.StartsWith("Last refreshed ", tab.LastRefreshedIndicator.Text, StringComparison.Ordinal);
         });
     }
