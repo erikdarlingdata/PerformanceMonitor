@@ -145,7 +145,7 @@ SELECT count(*)::bigint FROM built;";
     /// delete the day and aggregate it from midnight again. The same SELECT as <see cref="BuildDaySql"/>
     /// (<see cref="DayAggregateHead"/> and <see cref="DayAggregateTail"/>) with one more bound, <c>first_execution_time &gt;= $6</c>,
     /// the <c>built_through</c> the stored totals cover; $1 to $5 as <see cref="BuildDaySql"/> ($5 is the new watermark), $6 the
-    /// stored <c>built_through</c> (timestamp). Returns the rows it wrote and how many of them were new plans.
+    /// stored <c>built_through</c> (timestamp). Returns the rows it wrote and how many of them were new plans (the caller adds those to the day's stored row count).
     ///
     /// <para><b>Why the stored totals need no re-reading.</b> While <c>partial_seq = late_seq</c> no interval row below
     /// <c>built_through</c> has been written since the stored build: V185's trigger fires on every INSERT or UPDATE whose
@@ -570,7 +570,7 @@ AND   day = $2::date;";
     /// the new hours to the day's totals (<see cref="BuildSliceSql"/>, #9458: only for a valid partial day whose watermark
     /// advances) or deletes the day's totals and inserts them again, then stamps <c>built_seq = s0</c>. A late apply that bumps <c>late_seq</c> after s0 was read
     /// leaves the day invalid for a reader (<c>built_seq &lt;&gt; late_seq</c>) and due again, so a race costs one more build,
-    /// never a wrong total. Returns the rows inserted (the rows written, for a slice), or null when the lock was not free.
+    /// never a wrong total. Returns the rows in the day's totals (the day's stored count plus the plans a slice inserted, for a slice), or null when the lock was not free.
     /// </summary>
     /// <param name="afterSeqRead">A test seam, called between reading s0 and aggregating, so a pin can land a late apply at
     /// the point the race matters. Null in the service.</param>
@@ -631,7 +631,6 @@ AND   day = $2::date;";
         }
 
         long sourceRows;
-        long returned;
         var dayStart = day.ToDateTime(TimeOnly.MinValue);
 
         /* #9458: a valid partial day that advances adds the rows from its stored watermark up to the new one. The stored
@@ -646,7 +645,6 @@ AND   day = $2::date;";
             slice.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(sliceFrom) });
             await using var sliceReader = await slice.ExecuteReaderAsync(cancellationToken);
             await sliceReader.ReadAsync(cancellationToken);
-            returned = sliceReader.GetInt64(0);
             sourceRows = storedRows + sliceReader.GetInt64(1);
         }
         else
@@ -659,7 +657,7 @@ AND   day = $2::date;";
 
             await using var insert = new NpgsqlCommand(BuildDaySql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
             AddBuildBounds(insert, serverId, day, dayStart, builtThrough);
-            returned = sourceRows = Convert.ToInt64(await insert.ExecuteScalarAsync(cancellationToken));
+            sourceRows = Convert.ToInt64(await insert.ExecuteScalarAsync(cancellationToken));
         }
 
         await using (var mark = new NpgsqlCommand(MarkBuiltSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
@@ -682,7 +680,7 @@ AND   day = $2::date;";
         }
 
         await transaction.CommitAsync(cancellationToken);
-        return returned;
+        return sourceRows;
     }
 
     /// <summary>Binds $1 to $5 of <see cref="BuildDaySql"/> and <see cref="BuildSliceSql"/>.</summary>
