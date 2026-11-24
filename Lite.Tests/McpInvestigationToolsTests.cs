@@ -71,6 +71,7 @@ public sealed class McpInvestigationToolsTests : IDisposable
     private sealed class FaultingStore(DuckDbInvestigationStore inner) : IInvestigationRequestStore
     {
         public Exception? SetBriefThrows { get; set; }
+        public bool SetBriefReturnsFalse { get; set; }
         public Exception? ReleaseThrows { get; set; }
         public Exception? RefusalThrows { get; set; }
         public CancellationTokenSource? CancelOnSetBrief { get; set; }
@@ -80,6 +81,7 @@ public sealed class McpInvestigationToolsTests : IDisposable
         {
             CancelOnSetBrief?.Cancel();
             if (SetBriefThrows is not null) throw SetBriefThrows;
+            if (SetBriefReturnsFalse) return Task.FromResult(false);
             cancellationToken.ThrowIfCancellationRequested();
             return inner.SetBriefAsync(requestId, claimId, briefFormat, briefJson, cancellationToken);
         }
@@ -133,6 +135,27 @@ public sealed class McpInvestigationToolsTests : IDisposable
         Assert.Contains("released", failed.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
         Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:answer_failed'"));
+        Assert.Single(ErrorLines(openedId), l => l.Contains("step store_brief", StringComparison.Ordinal));
+
+        var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
+        Assert.Equal("claimed", again.GetProperty("status").GetString());
+    }
+
+    /// <summary>#9511: the store_brief branch, where the write returns false because the claim no longer holds the request. The claim is
+    /// released and journaled as brief_failed, and the step is logged.</summary>
+    [Fact]
+    public async Task BriefNotStored_ReleasesTheClaim_JournalsBriefFailed_LogsTheStep_AndAReclaimSucceeds()
+    {
+        var openedId = (await _store.OpenOrJoinAsync(Alert(), Ct)).RequestId!.Value;
+        var faulting = new FaultingStore(_store) { SetBriefReturnsFalse = true };
+        AppLogger.DrainBufferedLines();
+
+        var failed = Root(await McpInvestigationTools.ClaimAsync(faulting, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
+
+        Assert.Equal("error", failed.GetProperty("status").GetString());
+        Assert.Contains("released", failed.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("open", Scalar($"SELECT state FROM investigation_requests WHERE request_id = '{openedId}'"));
+        Assert.Equal("1", Scalar($"SELECT count(*) FROM investigation_journal WHERE request_id = '{openedId}' AND reason = 'claim:brief_failed'"));
         Assert.Single(ErrorLines(openedId), l => l.Contains("step store_brief", StringComparison.Ordinal));
 
         var again = Root(await McpInvestigationTools.ClaimAsync(_store, Composer(), openedId.ToString(), "agent-a", null, null, Ct));
