@@ -585,6 +585,60 @@ public sealed class InvestigationRequestEventsLiveTests
         });
     }
 
+    /// <summary>#9485 review: a request that was held and is then released reaches the route once, as hold_released. Its opened and joined rows
+    /// were journaled while it was held, and neither the signed delivery nor the long-poll hands them out with the release.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AReleasedRequest_IsDeliveredOnce_AsHoldReleased_WhetherAClearOrALateJoinReleasedIt(bool clearTheWindow)
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var windowId = long.Parse(await ScalarAsync(connection,
+                $"INSERT INTO config.investigation_change_windows (server_ids, starts_at, ends_at, reason, declared_by) VALUES (NULL, '{T0:O}', '{T0.AddMinutes(20):O}', 'resize', 'test') RETURNING window_id",
+                ct) ?? "0", CultureInfo.InvariantCulture);
+            _now = T0.AddMinutes(5);
+            var id = (await store.OpenOrJoinAsync(Alert(_now, "High CPU", InvestigationEvents.Warning), ct)).RequestId!.Value;
+            _now = T0.AddMinutes(8);
+            Assert.True((await store.OpenOrJoinAsync(Alert(_now, "Memory Pressure", InvestigationEvents.Warning), ct)).Evented);
+            Assert.Equal("opened,joined", await ScalarAsync(connection,
+                "SELECT string_agg(event, ',' ORDER BY journal_id) FROM config.investigation_journal", ct));
+
+            /* While it is held nothing is deliverable. */
+            Assert.Empty(await store.PendingDeliveriesAsync(T0.AddHours(-1), 100, ct));
+            Assert.Empty(await store.OpenedSinceAsync(T0.AddHours(-1), null, 100, ct));
+
+            if (clearTheWindow)
+            {
+                _now = T0.AddMinutes(10);
+                var operatorSeat = new DarlingAgentActionSeat(new DarlingMcpWritePolicy.Effective(true, false));
+                var cleared = await DarlingMcpChangeWindowWriteTools.ClearAsync(_dataSource!, operatorSeat, windowId, "work cancelled", _now, ct);
+                Assert.Contains("\"cleared\"", cleared, StringComparison.Ordinal);
+            }
+            else
+            {
+                /* The tail ends 30 minutes after the window: this join is new evidence from outside it. */
+                _now = T0.AddMinutes(55);
+                Assert.True((await store.OpenOrJoinAsync(Alert(_now, "Disk Space", InvestigationEvents.Warning), ct)).Evented);
+            }
+
+            var pending = await store.PendingDeliveriesAsync(T0.AddHours(-1), 100, ct);
+            var row = Assert.Single(pending);
+            Assert.Equal((id, InvestigationEvents.HoldReleased), (row.RequestId, row.Event));
+            var waited = await store.OpenedSinceAsync(T0.AddHours(-1), null, 100, ct);
+            var waitRow = Assert.Single(waited);
+            Assert.Equal((id, InvestigationEvents.HoldReleased), (waitRow.RequestId, waitRow.Event));
+
+            /* The signed delivery sends exactly one POST for the request, then nothing more. */
+            var sends = new FakeSends();
+            var delivery = Delivery(store, sends, Route(1, generic: "https://agent.example/hook"));
+            Assert.Equal(1, (await delivery.RunOnceAsync(ct)).Posted);
+            Assert.Equal(0, (await delivery.RunOnceAsync(ct)).Posted);
+            var post = Assert.Single(sends.Posts);
+            Assert.Equal(InvestigationEvents.HoldReleased, (string)JsonNode.Parse(post.Payload)!["event"]!);
+        });
+    }
+
     private static string JournalRow(Guid? request, string journalEvent, string? onceKey = null, string time = "now()", string? reason = null,
         string columns = "event_time, request_id, route_id, server_id, event, actor, reason, once_key", string? idValues = null) =>
         $"INSERT INTO config.investigation_journal ({columns}) {(idValues is null ? "" : "OVERRIDING SYSTEM VALUE ")}"

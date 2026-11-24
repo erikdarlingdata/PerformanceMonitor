@@ -190,9 +190,11 @@ public sealed class InvestigationChangeWindowHoldLiveTests
             var id = (await store.OpenOrJoinAsync(Alert(_now, 7), ct)).RequestId!.Value;
             Assert.Empty(await store.OpenedSinceAsync(T0.AddHours(-1), null, 10, ct));
 
-            await ExecAsync(connection, $"UPDATE config.investigation_requests SET hold_released_at = '{T0.AddMinutes(95):O}' WHERE request_id = '{id}'", ct);
+            /* A join after the tail (60 + 30 minutes) releases it. */
+            _now = T0.AddMinutes(95);
+            Assert.Equal(InvestigationOpenOutcome.Joined, (await store.OpenOrJoinAsync(Alert(_now, 7), ct)).Outcome);
 
-            Assert.Equal([id], (await store.OpenedSinceAsync(T0.AddHours(-1), null, 10, ct)).Select(r => r.RequestId));
+            Assert.Equal([(id, "hold_released")], (await store.OpenedSinceAsync(T0.AddHours(-1), null, 10, ct)).Select(r => (r.RequestId, r.Event)));
             Assert.Empty(await store.ListAsync(null, null, null, 10, InvestigationChangeWindows.HeldOnly, ct));
             var row = Assert.Single(await store.ListAsync(null, null, null, 10, InvestigationChangeWindows.HeldExclude, ct));
             Assert.Equal(T0.AddMinutes(95), row.HeldBy!.ReleasedAtUtc);
@@ -292,7 +294,12 @@ public sealed class InvestigationChangeWindowHoldLiveTests
             _now = T0.AddMinutes(15);
             Assert.Equal(InvestigationOpenOutcome.Joined, (await store.OpenOrJoinAsync(Alert(_now, 7), ct)).Outcome);
 
-            Assert.Contains(id, (await store.OpenedSinceAsync(T0.AddHours(-1), null, 10, ct)).Select(r => r.RequestId));
+            /* The release delivers exactly one row for the request, its hold_released. Its opened row (journaled while it was held) and the
+               joined row of this very join stay back, in the long-poll read and in the signed delivery read. */
+            var waited = Assert.Single(await store.OpenedSinceAsync(T0.AddHours(-1), null, 10, ct));
+            Assert.Equal((id, "hold_released"), (waited.RequestId, waited.Event));
+            var delivered = Assert.Single(await store.PendingDeliveriesAsync(T0.AddHours(-1), 10, ct));
+            Assert.Equal((id, "hold_released"), (delivered.RequestId, delivered.Event));
             Assert.Single(await store.ListAsync(null, null, null, 10, InvestigationChangeWindows.HeldExclude, ct));
         });
     }

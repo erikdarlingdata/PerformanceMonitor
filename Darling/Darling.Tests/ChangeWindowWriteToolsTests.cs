@@ -261,6 +261,12 @@ VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now())", ct);
 
             Assert.Empty(await store.OpenedSinceAsync(now.AddHours(-1), null, 10, c.Ct));
 
+            /* The first request also takes a join with a new metric while held, so it carries an opened and a joined row to hold back. */
+            var joined = await store.OpenOrJoinAsync(
+                new InvestigationAlert(1, 7, "srv-7", "blocking", "Deadlocks", DateTime.UtcNow, [], null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240), c.Ct);
+            Assert.Equal((InvestigationOpenOutcome.Joined, held[0]), (joined.Outcome, joined.RequestId!.Value));
+            Assert.Empty(await store.PendingDeliveriesAsync(now.AddHours(-1), 10, c.Ct));
+
             var signal = new InvestigationOpenSignal();
             using var waiter = signal.Register([1]);
             waiter.Rearm();
@@ -270,8 +276,13 @@ VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now())", ct);
             Assert.True(await waiter.WaitAsync(TimeSpan.FromSeconds(5), c.Ct));
             Assert.Equal("2", await ScalarAsync(c, $"SELECT count(*) FROM config.investigation_requests WHERE held_window_id = {id} AND hold_released_at IS NOT NULL"));
             Assert.Equal("2", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_journal WHERE event = 'hold_released'"));
-            var comesBack = (await store.OpenedSinceAsync(now.AddHours(-1), null, 10, c.Ct)).Where(r => r.Event == "hold_released").Select(r => r.RequestId).Order().ToArray();
-            Assert.Equal(held.Order().ToArray(), comesBack);
+
+            /* The whole set a reader hands out: one hold_released row per request and nothing journaled while it was held (its opened and
+               joined rows), in the long-poll read and in the signed delivery read. */
+            var comesBack = (await store.OpenedSinceAsync(now.AddHours(-1), null, 10, c.Ct)).Select(r => (r.RequestId, r.Event)).Order().ToArray();
+            Assert.Equal(held.Select(h => (h, (string?)"hold_released")).Order().ToArray(), comesBack);
+            var delivered = (await store.PendingDeliveriesAsync(now.AddHours(-1), 10, c.Ct)).Select(r => (r.RequestId, (string?)r.Event)).Order().ToArray();
+            Assert.Equal(held.Select(h => (h, (string?)"hold_released")).Order().ToArray(), delivered);
 
             /* A second clear writes nothing and releases nothing more. */
             Assert.Equal("already_cleared", (string?)Parse(await Clear(c, Operator, id))["status"]);
@@ -308,6 +319,20 @@ VALUES ({id}, 'srv-{id}', 'srv-{id}', TRUE, 15, now(), now())", ct);
             Assert.Equal("already_declared", (string?)again["status"]);
             Assert.Equal((long)first["window_id"]!, (long)again["window_id"]!);
             Assert.Equal("1", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_change_windows"));
+        });
+    }
+
+    [Fact]
+    public async Task OperatorDeclaresStartedTogether_EndWithOneWindow()
+    {
+        await RunAsync(async c =>
+        {
+            var start = DateTime.UtcNow.AddHours(1);
+            var answers = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(() => Declare(c, Operator, start: start, end: start.AddHours(2)), c.Ct)));
+
+            Assert.Equal("1", await ScalarAsync(c, "SELECT count(*) FROM config.investigation_change_windows"));
+            Assert.Equal(1, answers.Count(a => (string?)Parse(a)["status"] == "declared"));
+            Assert.Equal(7, answers.Count(a => (string?)Parse(a)["status"] == "already_declared"));
         });
     }
 
