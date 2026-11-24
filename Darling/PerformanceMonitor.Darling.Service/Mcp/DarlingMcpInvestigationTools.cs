@@ -567,7 +567,7 @@ public sealed partial class DarlingMcpInvestigationTools
                     new InvalidOperationException("the claim answer could not be built, so the claim was released: " + ex.Message, ex));
             }
         }
-        catch (OperationCanceledException) when (false && claimWritten is not null)
+        catch (OperationCanceledException) when (claimWritten is not null)
         {
             /* #9511: the caller cancelled after the claim row was written. The claim would stay live until the lease lapses, which is the
                lock-out this method guards against, so it is released with a token that cannot be cancelled before the cancel goes on. A cancel
