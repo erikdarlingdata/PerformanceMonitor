@@ -824,13 +824,6 @@ export const READ_FIELDS = {
         { key: "cache_hits", label: "Cache hits", format: "int" },
         { key: "cancelled", label: "Cancelled", format: "int" },
         { key: "distinct_callers", label: "Callers", format: "int" },
-        /* #9434: present only when the read passed split_at, the figures before and after that service start. */
-        { key: "split.before.count", label: "Before reads", format: "int" },
-        { key: "split.before.median_ms", label: "Before median", format: "ms" },
-        { key: "split.before.max_ms", label: "Before max", format: "ms" },
-        { key: "split.after.count", label: "After reads", format: "int" },
-        { key: "split.after.median_ms", label: "After median", format: "ms" },
-        { key: "split.after.max_ms", label: "After max", format: "ms" },
       ],
     },
   },
