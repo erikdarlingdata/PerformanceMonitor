@@ -95,7 +95,9 @@ public sealed class CollectorReadinessSinceStartLiveTests
             }
 
             /* Every collector the catalog runs gets a good cycle on both servers: the verdict flips and the first full cycle is the newest first good cycle. */
+            /* PostgreSQL keeps microseconds, so the expected instant is cut to them. */
             var newest = start.AddMinutes(6);
+            newest = new DateTime(newest.Ticks - (newest.Ticks % 10), DateTimeKind.Utc);
             foreach (var name in CollectorCatalog.All.Select(d => d.Name))
             {
                 await InsertAsync(connection, 9417001, "readiness-a", name, start.AddMinutes(3), "SUCCESS", null, ct);
