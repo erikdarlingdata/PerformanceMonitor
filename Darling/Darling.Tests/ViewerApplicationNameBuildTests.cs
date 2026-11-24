@@ -87,7 +87,7 @@ public sealed class ViewerApplicationNameBuildTests
     [Fact]
     public void BringYourOwnConnectionString_WithoutAName_GetsTheBuiltName()
     {
-        var result = ViewerDataService.NameAndPinStoreConnection("Host=h;Database=d;Username=u");
+        var result = ViewerDataService.NameStoreConnection("Host=h;Database=d;Username=u");
 
         Assert.Equal(ViewerSettings.BuiltApplicationName, new NpgsqlConnectionStringBuilder(result).ApplicationName);
     }
@@ -95,7 +95,7 @@ public sealed class ViewerApplicationNameBuildTests
     [Fact]
     public void BringYourOwnConnectionString_WithItsOwnName_KeepsIt()
     {
-        var result = ViewerDataService.NameAndPinStoreConnection("Host=h;Database=d;Username=u;Application Name=OperatorsOwn");
+        var result = ViewerDataService.NameStoreConnection("Host=h;Database=d;Username=u;Application Name=OperatorsOwn");
 
         Assert.Equal("OperatorsOwn", new NpgsqlConnectionStringBuilder(result).ApplicationName);
     }

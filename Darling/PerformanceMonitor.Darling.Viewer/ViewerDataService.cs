@@ -584,19 +584,18 @@ public sealed partial class ViewerDataService : IAsyncDisposable
         /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.BuiltApplicationName,
            set on the builder there, #9436); this is the BYO connection string's turn — set-if-absent, so an
            operator's own ApplicationName on a bring-your-own store wins. */
-        _dataSource = NpgsqlDataSource.Create(NameAndPinStoreConnection(effectiveConnectionString));
+        _dataSource = NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(NameStoreConnection(effectiveConnectionString)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
         StoreConnectionIdentity = ViewerPasswordKey.StoreIdentityOf(connectionString);
         _alertClocks = new ServerClockCache(ct => GetServerClocksAsync(serverId: null, ct), AlertClockLifetime);
     }
 
     /// <summary>
-    /// The string the store pool is created from (#4479, #9436): the viewer's name with its build set if the string has
-    /// no <c>ApplicationName</c> of its own, then the session time zone pinned to UTC.
+    /// The viewer's name with its build (#4479, #9436), set on the string only when it has no <c>ApplicationName</c> of its own.
     /// </summary>
-    internal static string NameAndPinStoreConnection(string effectiveConnectionString) =>
-        DarlingStoreConnection.PinSessionTimeZoneUtc(
-            DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.BuiltApplicationName));
+    internal static string NameStoreConnection(string effectiveConnectionString) =>
+        DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.BuiltApplicationName);
 
     /// <summary>
     /// Builds the data service, or says why the store connection string cannot be used. The constructor
