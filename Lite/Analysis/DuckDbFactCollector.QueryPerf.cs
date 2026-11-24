@@ -423,6 +423,9 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     /// </summary>
     internal Action? AfterPlanRegressionDatabaseReadForTests { get; set; }
 
+    /// <summary>A test seam: the longest hold a batch of databases aims for (#9353), so a test can make every database a batch of its own (zero) or none. Null in production.</summary>
+    internal TimeSpan? PlanRegressionHoldTargetForTests { get; set; }
+
     /// <summary>
     /// #9195, #9353: one Information line when the plan regression pass took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>,
     /// with the time split between its steps: the archive read plan, each statement (its read lock wait, its own time and its rows),

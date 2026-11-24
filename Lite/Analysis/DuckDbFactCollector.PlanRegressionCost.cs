@@ -293,15 +293,15 @@ LIMIT 100";
     /// </summary>
     internal static async Task<List<PlanRegressionCandidate>> ReadPlanRegressionCandidatesAsync(
         DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string sql)
-        => (await ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, sql, database: null)).ConvertAll(r => r.Candidate);
+        => (await ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, sql, databases: null)).ConvertAll(r => r.Candidate);
 
     /// <summary>
-    /// The cost statement's rows with the CPU each lost, the key the statement ranks by. <paramref name="database"/> limits the read to
-    /// one database (#9353): every comparison in the statement stays inside one database, so its rows are that database's rows of the
-    /// whole read, and a pass that reads its databases in turn lets go of the store's lock between them.
+    /// The cost statement's rows with the CPU each lost, the key the statement ranks by. <paramref name="databases"/> limits the read to
+    /// those databases (#9353): every comparison in the statement stays inside one database, so its rows are those databases' rows of
+    /// the whole read, and a pass that reads its databases in batches lets go of the store's lock between them.
     /// </summary>
     internal static async Task<List<RankedPlanRegression>> ReadRankedPlanRegressionCandidatesAsync(
-        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string sql, string? database)
+        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string sql, IReadOnlyList<string>? databases)
     {
         var candidates = new List<RankedPlanRegression>();
         using var cmd = connection.CreateCommand();
@@ -312,13 +312,7 @@ LIMIT 100";
         /* #5558: Query Store on a secondary copy is the primary's content, and rows from the days this node was
            primary stay in the window, so the read skips those databases. */
         cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 4);
-        var databaseFilter = "";
-        if (database is not null)
-        {
-            cmd.Parameters.Add(new DuckDBParameter { Value = database });
-            databaseFilter = $"AND database_name = ${cmd.Parameters.Count}";
-        }
-        cmd.CommandText = plan.Apply(cmd.CommandText.Replace("/*DB*/", databaseFilter));
+        cmd.CommandText = plan.Apply(cmd.CommandText.Replace("/*DB*/", DatabaseFilter(cmd, databases)));
         using var reader = await cmd.ExecuteProfiledReaderAsync("plan-regression-cost", context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
@@ -356,6 +350,45 @@ LIMIT 100";
     /// </summary>
     internal readonly record struct PlanRegressionRankKey(double LostCpu, double Factor, string Database, long QueryId, string? ReplicaRole);
 
+    /// <summary>
+    /// The statement's database predicate for its <c>/*DB*/</c> marker, adding the names to <paramref name="cmd"/> as parameters (#9353).
+    /// A NULL database_name cannot reach the Query Store table (its column is NOT NULL and the collector writes the name of the database it
+    /// read), so a read of every database leaves such a row out as a read of listed databases does, and the rows never depend on how many
+    /// databases the store has.
+    /// </summary>
+    internal static string DatabaseFilter(DuckDBCommand cmd, IReadOnlyList<string>? databases)
+    {
+        if (databases is null) return "AND database_name IS NOT NULL";
+        var markers = new List<string>();
+        foreach (var database in databases)
+        {
+            cmd.Parameters.Add(new DuckDBParameter { Value = database });
+            markers.Add("$" + cmd.Parameters.Count);
+        }
+        return $"AND database_name IN ({string.Join(", ", markers)})";
+    }
+
+    /// <summary>A database of the plan regression window and the rows it holds there, the measure of how long its read takes.</summary>
+    internal readonly record struct PlanRegressionDatabase(string Name, long Rows);
+
+    /// <summary>
+    /// The longest hold of the store's read lock one batch of databases aims for (#9353): a fifth of the 5 s the housekeeping writers wait.
+    /// </summary>
+    internal static readonly TimeSpan PlanRegressionHoldTarget = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// How many rows the next batch may read: the rows the last batch read, scaled by how far its hold was from <paramref name="target"/>.
+    /// The rate is taken from the whole hold, so a batch whose hold was mostly the fixed cost of decoding the window (every read of
+    /// the Parquet files decodes the same columns of every row group, whichever database it keeps) over-states the cost of a row, and
+    /// the next batch is smaller than it could be, never larger.
+    /// </summary>
+    internal static long NextBatchRows(long rowsRead, TimeSpan held, TimeSpan target)
+    {
+        if (held <= TimeSpan.Zero) return long.MaxValue;
+        var rows = rowsRead * (target.TotalSeconds / held.TotalSeconds);
+        return rows >= long.MaxValue ? long.MaxValue : (long)rows;
+    }
+
     internal static IOrderedEnumerable<T> InRankOrder<T>(IEnumerable<T> rows, Func<T, PlanRegressionRankKey> key) =>
         rows.OrderByDescending(r => key(r).LostCpu)
             .ThenByDescending(r => key(r).Factor)
@@ -365,21 +398,30 @@ LIMIT 100";
             .ThenBy(r => key(r).ReplicaRole, StringComparer.Ordinal);
 
     /// <summary>
-    /// Runs a plan regression read (<paramref name="readOne"/>: its statement, on an open connection, for one database or for all of them
-    /// when the database is null) one database at a time, each read under its own hold of the store's read lock, and returns every row.
-    /// Every comparison in these statements stays inside one database, so each database's rows are its rows of the whole read, and a
-    /// housekeeping writer waiting on its 5 s budget gets in between the reads (#9353). The databases are listed first, under a hold of
-    /// their own. One database, or none, is read as one statement. <paramref name="onlyDatabases"/> drops the databases a read cannot
-    /// return a row for. The caller puts the rows in order and cuts them (<see cref="InRankOrder"/>).
+    /// Runs a plan regression read (<paramref name="readOne"/>: its statement, on an open connection, for the listed databases, or for all
+    /// of them when the list is null) over batches of databases, each batch under its own hold of the store's read lock, and returns every
+    /// row. Every comparison in these statements stays inside one database, so a database's rows are its rows of the whole read, and a
+    /// housekeeping writer waiting on its 5 s budget gets in between the reads (#9353). The databases are listed with their row counts
+    /// first, under a hold of their own. One database, or none, is read as one statement. <paramref name="onlyDatabases"/> drops the
+    /// databases a read cannot return a row for. The caller puts the rows in order and cuts them (<see cref="InRankOrder"/>).
+    /// <para>
+    /// Every read decodes the same columns of the window's Parquet row groups whichever databases it keeps, because rows are written in
+    /// collection order and a row group holds several databases. A read per database multiplied the pass's time by the number of databases
+    /// (20 databases took 4.7 times as long as one statement, 50 took 10.6 times), so the databases go in batches. The first batch is the
+    /// largest database alone. Each next batch takes databases, largest first, while their rows fit what the last batch's hold says one
+    /// <paramref name="holdTarget"/> can read (<see cref="NextBatchRows"/>), and always at least one. A database is never split, so one
+    /// that holds longer than the target alone is a batch of its own.
+    /// </para>
     /// <paramref name="betweenReads"/> is a test seam, run with the lock let go before each read after the first. The plan is taken once, before
     /// the first hold: a store reset between two holds moves the archive generation, and the plan then reads the views, which hold every row.
     /// </summary>
     internal static async Task<(List<T> Rows, PlanRegressionStatementTime Time)> ReadPlanRegressionByDatabaseAsync<T>(
         DuckDbInitializer duckDb, AnalysisContext context, ArchiveReadPlan plan,
-        Func<DuckDBConnection, string?, Task<List<T>>> readOne, Action? betweenReads, ISet<string>? onlyDatabases = null)
+        Func<DuckDBConnection, IReadOnlyList<string>?, Task<List<T>>> readOne, Action? betweenReads, ISet<string>? onlyDatabases = null,
+        TimeSpan? holdTarget = null)
     {
         var time = default(PlanRegressionStatementTime);
-        List<string> databases;
+        List<PlanRegressionDatabase> databases;
         {
             var waitStarted = Stopwatch.GetTimestamp();
             using var readLock = duckDb.AcquireReadLock(context.CancellationToken);
@@ -394,13 +436,33 @@ LIMIT 100";
             time.Held = Stopwatch.GetElapsedTime(heldFrom);
         }
 
-        if (onlyDatabases is not null) databases = databases.Where(onlyDatabases.Contains).ToList();
+        if (onlyDatabases is not null) databases = databases.Where(d => onlyDatabases.Contains(d.Name)).ToList();
 
         var rows = new List<T>();
-        var readEach = databases.Count > 1;
-        for (var d = 0; d < (readEach ? databases.Count : 1); d++)
+        var target = holdTarget ?? PlanRegressionHoldTarget;
+        var readBatches = databases.Count > 1;
+        /* Largest first, name second, so the first batch is the one that sets the rate and the order is the same every time. */
+        var pending = readBatches ? databases.OrderByDescending(d => d.Rows).ThenBy(d => d.Name, StringComparer.Ordinal).ToList() : new List<PlanRegressionDatabase>();
+        var budget = 0L;
+        var first = true;
+        while (first || pending.Count > 0)
         {
-            if (d > 0) betweenReads?.Invoke();
+            var batch = new List<string>();
+            long batchRows = 0;
+            if (readBatches)
+            {
+                /* The first batch is the largest database alone: nothing is known yet of how fast a row reads. */
+                do
+                {
+                    batch.Add(pending[0].Name);
+                    batchRows += pending[0].Rows;
+                    pending.RemoveAt(0);
+                }
+                while (pending.Count > 0 && batchRows + pending[0].Rows <= budget);
+            }
+
+            if (!first) betweenReads?.Invoke();
+            first = false;
 
             var waitStarted = Stopwatch.GetTimestamp();
             using var readLock = duckDb.AcquireReadLock(context.CancellationToken);
@@ -410,10 +472,11 @@ LIMIT 100";
             await connection.OpenAsync(context.CancellationToken);
 
             var statementFrom = Stopwatch.GetTimestamp();
-            rows.AddRange(await readOne(connection, readEach ? databases[d] : null));
+            rows.AddRange(await readOne(connection, readBatches ? batch : null));
             time.Statement += Stopwatch.GetElapsedTime(statementFrom);
             var held = Stopwatch.GetElapsedTime(heldFrom);
             if (held > time.Held) time.Held = held;
+            budget = NextBatchRows(batchRows, held, target);
         }
 
         return (rows, time);
@@ -421,7 +484,7 @@ LIMIT 100";
 
     /// <summary>
     /// The cost statement's candidates in its own order and cut (#9353): the CPU lost, the factor second, the row's key last, the first
-    /// <see cref="PlanRegressionCandidateLimit"/>. Read one database at a time (<see cref="ReadPlanRegressionByDatabaseAsync{T}"/>), and the same
+    /// <see cref="PlanRegressionCandidateLimit"/>. Read in batches of databases (<see cref="ReadPlanRegressionByDatabaseAsync{T}"/>), and the same
     /// rows in the same order as one statement over every database gives, ties included.
     /// </summary>
     internal async Task<(List<PlanRegressionCandidate> Candidates, PlanRegressionStatementTime Time)> ReadPlanRegressionCostAsync(
@@ -429,8 +492,8 @@ LIMIT 100";
     {
         var (ranked, time) = await ReadPlanRegressionByDatabaseAsync(
             _duckDb, context, plan,
-            (connection, database) => ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql, database),
-            AfterPlanRegressionDatabaseReadForTests);
+            (connection, databases) => ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql, databases),
+            AfterPlanRegressionDatabaseReadForTests, holdTarget: PlanRegressionHoldTargetForTests);
         return (InRankOrder(ranked, r => r.Key).Take(PlanRegressionCandidateLimit).Select(r => r.Candidate).ToList(), time);
     }
 
@@ -441,19 +504,20 @@ LIMIT 100";
     /// The databases that hold Regular runs inside the cost statement's window, for the pass that reads them in turn (#9353). It is
     /// read under its own short hold of the store's read lock.
     /// </summary>
-    internal static async Task<List<string>> ReadPlanRegressionDatabasesAsync(
+    internal static async Task<List<PlanRegressionDatabase>> ReadPlanRegressionDatabasesAsync(
         DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan)
     {
-        var databases = new List<string>();
+        var databases = new List<PlanRegressionDatabase>();
         using var cmd = connection.CreateCommand();
         cmd.CommandText = plan.Apply(@"
-SELECT DISTINCT database_name
+SELECT database_name, count(*)
 FROM v_query_store_stats
 WHERE server_id = $1
 AND   execution_type_desc = 'Regular'
 AND   last_execution_time >= $2
 AND   collection_time <= $3
 AND   database_name IS NOT NULL
+GROUP BY database_name
 ORDER BY database_name");
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart.AddDays(-14) });
@@ -461,7 +525,7 @@ ORDER BY database_name");
         using var reader = await cmd.ExecuteProfiledReaderAsync("plan-regression-databases", context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
-            databases.Add(reader.GetString(0));
+            databases.Add(new PlanRegressionDatabase(reader.GetString(0), Convert.ToInt64(reader.GetValue(1))));
         }
         return databases;
     }

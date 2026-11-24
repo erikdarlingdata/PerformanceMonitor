@@ -506,15 +506,16 @@ QUALIFY ROW_NUMBER() OVER
     {
         var plan = await _duckDb.PlanArchiveReadAsync(context.CancellationToken, new ArchiveWindow("query_stats", "collection_time", context.TimeRangeStart), new ArchiveWindow("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14)));
 
-        /* #9353: read one database at a time, each under its own hold of the read lock, as the PLAN_REGRESSION fact's cost read is (the same
-           helper). Each database's top five are its rows of the whole read's top five, so the five best of them in the statement's order
+        /* #9353: read the databases in batches, each under its own hold of the read lock, as the PLAN_REGRESSION fact's cost read is (the same
+           helper). Each batch's top five include its rows of the whole read's top five, so the five best of them in the statement's order
            are the whole read's five. A fact that named its offenders leaves the databases they are not in unread. */
         var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
         var (rows, _) = await DuckDbFactCollector.ReadPlanRegressionByDatabaseAsync(
             _duckDb, context, plan,
-            (connection, database) => ReadRegressedQueriesAsync(connection, context, plan, database),
+            (connection, databases) => ReadRegressedQueriesAsync(connection, context, plan, databases),
             AfterRegressedQueriesDatabaseReadForTests,
-            offenders?.Select(o => o.DatabaseName).ToHashSet(StringComparer.Ordinal));
+            offenders?.Select(o => o.DatabaseName).ToHashSet(StringComparer.Ordinal),
+            RegressedQueriesHoldTargetForTests);
 
         var items = DuckDbFactCollector.InRankOrder(rows, r => r.Key).Take(RegressedQueriesLimit).Select(r => r.Item).ToList();
 
@@ -530,6 +531,9 @@ QUALIFY ROW_NUMBER() OVER
     /// </summary>
     internal Action? AfterRegressedQueriesDatabaseReadForTests { get; set; }
 
+    /// <summary>A test seam: the longest hold a batch of databases aims for (#9353), so a test can make every database a batch of its own (zero). Null in production.</summary>
+    internal TimeSpan? RegressedQueriesHoldTargetForTests { get; set; }
+
     /// <summary>A drill-down row, and the key the statement ranks it by.</summary>
     internal readonly record struct RegressedQueryRow(object Item, DuckDbFactCollector.PlanRegressionRankKey Key);
 
@@ -538,7 +542,7 @@ QUALIFY ROW_NUMBER() OVER
     /// <paramref name="database"/>, or for all of them when it is null (#9353).
     /// </summary>
     internal static async Task<List<RegressedQueryRow>> ReadRegressedQueriesAsync(
-        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, string? database)
+        DuckDBConnection connection, AnalysisContext context, ArchiveReadPlan plan, IReadOnlyList<string>? databases)
     {
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
@@ -835,15 +839,8 @@ LIMIT 5";
            run and the offender list above is NULL. */
         cmd.CommandText = SecondaryReplicaScope.Apply(cmd.CommandText, cmd, context, "PLAN_REGRESSION", "database_name", 8);
 
-        var databaseFilter = "";
-        if (database is not null)
-        {
-            cmd.Parameters.Add(new DuckDBParameter { Value = database });
-            databaseFilter = $"AND database_name = ${cmd.Parameters.Count}";
-        }
-
         var items = new List<RegressedQueryRow>();
-        cmd.CommandText = plan.Apply(cmd.CommandText.Replace("/*DB*/", databaseFilter));
+        cmd.CommandText = plan.Apply(cmd.CommandText.Replace("/*DB*/", DuckDbFactCollector.DatabaseFilter(cmd, databases)));
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
