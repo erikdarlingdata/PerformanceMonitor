@@ -1439,6 +1439,38 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// The #9427 once-a-minute capture of the store's settings: compared with the last capture, each change is a row (old and new value, source, reload
+    /// time), and the first capture on a store writes only the baseline. Awaited on the main loop, so it runs under one short budget. A failure (a store
+    /// that is down, a store below the rung, the budget expiring) is a Debug line and a skipped minute, since the next capture compares against the same
+    /// state. A capture with changes logs only how many settings changed, never a name or a value, since a setting can hold a
+    /// credential. Never throws except for the service stopping.
+    /// </summary>
+    private async Task CaptureStoreSettingChangesAsync(CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_storeSettingCaptureBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            var capture = await StoreSettingChanges.CaptureAsync(connection, budget.Token);
+            if (capture.IsBaseline)
+            {
+                _logger.LogInformation("Store settings baseline captured: {Settings} settings. Changes from here on are recorded.", capture.Stored);
+            }
+            else if (capture.Changes > 0)
+            {
+                _logger.LogInformation("Store settings changed: {Changes} setting(s) recorded. get_store_setting_changes lists them.", capture.Changes);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogDebug(ex, "store setting capture failed and was skipped");
+        }
+    }
+
+    /// <summary>
     /// The sentence the store-log capture's warning gives as the cause (#9333). A 58P01 (UndefinedFile) means the log
     /// folder is not there, which is a store that keeps no log files, not a missing privilege: the compose store ran
     /// without logging_collector and named the privilege anyway. A 42501 (InsufficientPrivilege) keeps the privilege

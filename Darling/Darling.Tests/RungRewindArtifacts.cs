@@ -1010,6 +1010,10 @@ DROP TABLE IF EXISTS collect.store_table_activity_baseline;"),
         new(311, "hasServiceStartRungObjects", @"DROP TABLE IF EXISTS collect.service_start_rung_objects;"),
         // V312 (#9432): the upgrade run table. The rewind drops it, so a re-run of V312 creates it again. Safe on a store that never had it.
         new(312, "hasUpgradeRuns", @"DROP TABLE IF EXISTS collect.upgrade_runs;"),
+        // V313 (#9427): the store setting state and changes tables. The probe's newest sentinel is both. The rewind drops both, so a re-run of V313 creates them empty. Safe on a store
+        // that never had them.
+        new(313, "hasStoreSettingChanges", @"DROP TABLE IF EXISTS collect.store_setting_changes;
+DROP TABLE IF EXISTS collect.store_setting_state;"),
     ];
 
     /// <summary>

@@ -4096,6 +4096,10 @@ END $$;";
         new Migration(ServiceStartRungObjects.Version, "service-start-rung-objects", ServiceStartRungObjects.CreateSql),
         /* V312 (#9432): the record of each upgrade run, one new table keyed on the run id. No existing table changes and no data moves. An older build never names it. */
         new Migration(UpgradeRuns.Version, "upgrade-runs", UpgradeRuns.CreateSql),
+        /* V313 (#9427): the last captured state of the store's settings and a row for each change between starts (old and new value, source, source file and line,
+           pending_restart, when seen, and when the server last loaded its configuration). Two plain tables created empty: no data moves, and the first capture on a
+           store writes only the baseline. An older build ignores both. */
+        new Migration(StoreSettingChanges.Version, "store-setting-changes", StoreSettingChanges.CreateSql),
     };
 
     /// <summary>

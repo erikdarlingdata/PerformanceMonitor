@@ -1817,6 +1817,9 @@ public sealed partial class DarlingWorker
             {
                 _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
                 await SampleCheckpointSyncAsync(stoppingToken);
+
+                /* #9427: the store's settings, compared with the last capture on this same minute pass, so there is no timer of its own. */
+                await CaptureStoreSettingChangesAsync(stoppingToken);
             }
 
             /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */

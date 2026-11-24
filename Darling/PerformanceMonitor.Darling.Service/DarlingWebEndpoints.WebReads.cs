@@ -1187,7 +1187,7 @@ public static partial class DarlingWebEndpoints
     private static string? NonIntegerParamRefusal(HttpContext context) =>
         NonIntegerParamRefusal(key => First(context, key));
 
-    private static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
+    internal static int QueryInt(HttpContext context, string key, string? aliasKey, int def) =>
         ParseInt(First(context, key) ?? (aliasKey is null ? null : First(context, aliasKey)), def);
 
     /// <summary>A knob whose omitted value is derived from another knob (#5633 item 12: compare_analysis's baseline follows
