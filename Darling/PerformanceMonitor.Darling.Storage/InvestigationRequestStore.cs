@@ -457,7 +457,7 @@ ON CONFLICT (once_key) WHERE once_key IS NOT NULL DO NOTHING";
 SELECT request_id, route_id, server_id, server_name, family, first_metric, first_alert_at, last_alert_at, alert_count,
        effective_state, opened_at, expires_at, claimed_by, lease_until, claim_count, reported_at, practice_of,
        registry_display_name, registry_instance_name, change_watch_detail,
-       hold_window_id, hold_reason, hold_ends_at, hold_released_at
+       hold_window_id, hold_reason, hold_ends_at, hold_released
 FROM (
     SELECT r.*,
            CASE
@@ -469,7 +469,7 @@ FROM (
            END AS effective_state,
            {RegistryNamesSelect("r", "sv")},
            {ChangeWatchDetailSelect("r")},
-           r.held_window_id AS hold_window_id, w.reason AS hold_reason, w.ends_at AS hold_ends_at, r.hold_released_at AS hold_released_at
+           r.held_window_id AS hold_window_id, w.reason AS hold_reason, w.ends_at AS hold_ends_at, r.hold_released_at AS hold_released
     FROM config.investigation_requests AS r
     LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
     LEFT JOIN config.investigation_change_windows AS w ON w.window_id = r.held_window_id
