@@ -144,7 +144,7 @@ WHERE table_schema = 'collect' AND table_name IN ('slow_reads', 'read_latency')"
         Assert.Equal("web:0123456789ab", (string?)slow["reads"]![0]!["caller"]);
 
         var latency = JsonNode.Parse(await DarlingMcpReadLatencyTools.GetReadLatency(postgres, 24, null, null, 50, cancellationToken: ct))!;
-        var row = latency.AsObject().Select(p => p.Value).OfType<JsonArray>().SelectMany(a => a).Single(r => (string?)r!["route"] == "get_wait_stats")!;
+        var row = latency.AsObject().Select(p => p.Value).OfType<JsonArray>().SelectMany(a => a).OfType<JsonObject>().Single(r => (string?)r["route"] == "get_wait_stats");
         Assert.Equal(2, (int)row["distinct_callers"]!);
     }
 

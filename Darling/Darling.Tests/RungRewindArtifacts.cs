@@ -1017,6 +1017,10 @@ DROP TABLE IF EXISTS collect.store_setting_state;"),
         // V314 (#9437): the two store connection tables. collect.store_connection_slots is the probe's newest sentinel. The rewind drops both, so a re-run of V314 creates them
         // empty. Safe on a store that never had them.
         new(314, "hasStoreConnectionSamples", @"DROP TABLE IF EXISTS collect.store_connection_slots; DROP TABLE IF EXISTS collect.store_connection_samples;"),
+        // V315 (#9434): the process start column and the unique index that is the read_latency bucket key. The index is the probe's newest sentinel. The rewind drops the column,
+        // which drops the index with it, then puts the primary key back, so a re-run of V315 moves the key again. Safe on a store that never had them.
+        new(315, "hasReadLatencyProcessStart", @"ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS process_started_at;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'collect.read_latency'::regclass AND contype = 'p') THEN ALTER TABLE collect.read_latency ADD CONSTRAINT read_latency_pkey PRIMARY KEY (metric_time, surface, route, outcome, window_band); END IF; END $$;"),
     ];
 
     /// <summary>
