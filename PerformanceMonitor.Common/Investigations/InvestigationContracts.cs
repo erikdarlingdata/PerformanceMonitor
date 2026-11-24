@@ -100,6 +100,10 @@ public sealed record InvestigationOpenResult(InvestigationOpenOutcome Outcome, G
     /// <summary>#6003: true when the store journaled an event (<c>opened</c>, or a <c>joined</c> that brought a new metric or a
     /// higher severity); a quiet join and a limit journal none.</summary>
     public bool Evented { get; init; }
+
+    /// <summary>#9485: true when the request opened inside a planned change window (or its tail) and was created held: it is listable and
+    /// claimable but not handed to the request runner, so the dispatcher does not wake the long-poll for it.</summary>
+    public bool Held { get; init; }
 }
 
 /// <summary>What a claim answered.</summary>

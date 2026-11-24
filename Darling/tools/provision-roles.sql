@@ -3921,6 +3921,21 @@ BEGIN
    GRANT SELECT ON config.investigation_person_messages TO admin;
 END $do$;
 
+-- 3j8. The planned change windows (V309, #9485), mirroring managed provisioning's section 10e8: REVOKE ALL ... CASCADE, then SELECT back to every
+--     role. The service opens requests as the owner and reads the windows to hold a request that opens inside one. It is created by V309: on a store below
+--     it the block warns and skips, so the rest of the script still runs.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_change_windows') IS NULL THEN
+      RAISE WARNING 'The change window table was not found, so its grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_change_windows FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_change_windows TO admin, viewer, web;
+   GRANT SELECT ON config.investigation_change_windows TO mcp;
+END $do$;
+
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person
 --     edits: the tags, the hand assignments and the rules. The map and the sightings are the service's (the owner writes
 --     them), so mcp holds only DELETE on the map, which remove_server runs to clear a removed server's map rows (a server_id is

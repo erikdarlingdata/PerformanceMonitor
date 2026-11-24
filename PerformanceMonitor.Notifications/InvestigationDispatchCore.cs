@@ -230,7 +230,12 @@ public sealed class InvestigationDispatchCore
                     _logger.LogInformation(
                         "Investigation request {RequestId} opened for {Metric} on {Server} (family {Family}, route {RouteId})",
                         result.RequestId, metricName, serverName, family, route.RouteId);
-                    _opened?.Invoke(route.RouteId);
+                    /* #9485: a request opened inside a change window is held, not handed to the request runner. */
+                    if (!result.Held)
+                    {
+                        _opened?.Invoke(route.RouteId);
+                    }
+
                     break;
                 case InvestigationOpenOutcome.LimitReached:
                     _logger.LogWarning(

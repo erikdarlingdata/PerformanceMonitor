@@ -330,6 +330,15 @@ public static class DarlingRetention
         "DELETE FROM config.investigation_signature_days WHERE day < $1::date";
 
     /// <summary>
+    /// The planned change windows (config.investigation_change_windows, V309, #9485) a request still points at are never deleted, so a window
+    /// ages out no earlier than the requests it held. A window goes when it ended before the cutoff (<c>$1</c>, the same year as the requests)
+    /// and no request names it. A request that is still open or claimed is kept by the request purge, and so keeps its window here.
+    /// </summary>
+    internal const string PurgeInvestigationChangeWindowsSql =
+        "DELETE FROM config.investigation_change_windows AS w WHERE w.ends_at < $1 "
+        + "AND NOT EXISTS (SELECT 1 FROM config.investigation_requests AS r WHERE r.held_window_id = w.window_id)";
+
+    /// <summary>
     /// The row cap for <see cref="QueryStorePlanMap"/>'s and <see cref="QueryStoreTextStore"/>'s prune
     /// (#4250 item 3), shared by both tables rather than sized per table, because both clear it in ONE
     /// batch at every measured rate and a single named constant is easier to keep correct than two.
@@ -1249,10 +1258,17 @@ public static class DarlingRetention
                 PurgeInvestigationSignatureDaysSql,
                 utcNow.AddDays(-InvestigationSignatureDayRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
+            /* config.investigation_change_windows (V309, #9485): a window is pruned a year after it ended, and only once no request names it, so
+               it outlives the requests it held (the request purge runs first, above). Failure-isolated like its siblings. */
+            var investigationChangeWindowsDeleted = await PurgeOneAsync(
+                postgres, "config.investigation_change_windows",
+                PurgeInvestigationChangeWindowsSql,
+                utcNow.AddDays(-InvestigationRetentionDays), logger, cancellationToken,
+                pacer: walPacer);
             foreach (var investigationResult in new[]
             {
                 investigationsDeleted, investigationJournalDeleted, investigationBriefsCleared,
-                investigationEvidenceCleared, investigationSignatureDaysDeleted,
+                investigationEvidenceCleared, investigationSignatureDaysDeleted, investigationChangeWindowsDeleted,
             })
             {
                 if (investigationResult is not null)

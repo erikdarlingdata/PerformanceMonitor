@@ -134,7 +134,9 @@ SET alert_count = alert_count + 1,
     max_severity = $5
 WHERE request_id = $1";
 
-    /* A chat request (#7659) is counted apart, by ChatCountsSql, so a busy thread cannot block the route's alerts. */
+    /* A chat request (#7659) is counted apart, by ChatCountsSql, so a busy thread cannot block the route's alerts. A request that is still held by a
+       change window (#9485) is left out, so one window cannot use up a route's limit and make a real request after the tail read limit_reached. A
+       released request counts. */
     internal const string CountRouteSql = @"
 SELECT count(*) FILTER (WHERE opened_at > $2 - interval '1 hour'),
        count(*)
@@ -143,6 +145,7 @@ WHERE route_id = $1
   AND practice_of IS NULL
   AND force_check_of IS NULL
   AND trigger_kind <> 'chat'
+  AND (held_window_id IS NULL OR hold_released_at IS NOT NULL)
   AND opened_at > $2 - interval '1 day'";
 
     /* #8578: server_name is the registry's display name for server_id when the server is registered, else the name the caller passed. An alert
@@ -151,9 +154,9 @@ WHERE route_id = $1
     internal static readonly string OpenSql = @"
 INSERT INTO config.investigation_requests
     (request_id, route_id, server_id, server_name, family, first_metric, first_dedup_key, story_path_hash,
-     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity, trigger_kind)
+     first_alert_at, last_alert_at, window_until, opened_at, expires_at, lease_minutes, autonomy_level, max_severity, trigger_kind, held_window_id)
 VALUES ($1, $2, $3, COALESCE((SELECT COALESCE(sv.display_name, sv.server_name) FROM collect.servers AS sv WHERE sv.server_id = $3), $4), $5, $6, $7, $8, $9, $9, $9 + " + GroupingWindowSql + @", $10, $10 + make_interval(mins => $11), $12,
-        " + StampLevelSql(6, 13) + ", $14, $15)";
+        " + StampLevelSql(6, 13) + ", $14, $15, " + InvestigationChangeWindows.HeldWindowIdSql("$10", "$3") + ")";
 
     internal const string AlertRowsSql = @"
 INSERT INTO config.investigation_request_alerts
@@ -370,6 +373,7 @@ LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
 WHERE j.event_time > $1
   AND j.event = ANY ($4)
   AND ($2::integer[] IS NULL OR r.route_id = ANY ($2))
+  AND (r.held_window_id IS NULL OR r.hold_released_at IS NOT NULL)
 ORDER BY j.event_time, j.event_id
 LIMIT $3";
 
@@ -382,6 +386,7 @@ FROM config.investigation_journal AS j
 JOIN config.investigation_requests AS r ON r.request_id = j.request_id
 WHERE j.event_time > $1
   AND j.event = ANY ($2)
+  AND (r.held_window_id IS NULL OR r.hold_released_at IS NOT NULL)
   AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS d
                   WHERE d.once_key = 'delivered:' || j.event_id::text)
 ORDER BY j.journal_id
@@ -395,6 +400,7 @@ JOIN config.investigation_requests AS r ON r.request_id = j.request_id
 WHERE j.event = 'expired'
   AND j.event_time > $1
   AND r.practice_of IS NULL
+  AND (r.held_window_id IS NULL OR r.hold_released_at IS NOT NULL)
   AND COALESCE((j.detail ->> 'unclaimed')::boolean, false)
   AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS f
                   WHERE f.once_key = 'fallback:' || r.request_id::text)
@@ -496,6 +502,7 @@ SELECT route_id,
 FROM config.investigation_requests
 WHERE opened_at > $1 - interval '1 day'
   AND practice_of IS NULL
+  AND (held_window_id IS NULL OR hold_released_at IS NOT NULL)
 GROUP BY route_id";
 
     internal const string RefusalServerSql = @"
