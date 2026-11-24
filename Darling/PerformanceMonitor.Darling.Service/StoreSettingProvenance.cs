@@ -25,7 +25,10 @@ internal readonly record struct UnappliedFileSetting(string? File, int? Line, st
 /// name that is not applied. <see cref="SourceFile"/> and <see cref="SourceLine"/> are null when the role cannot
 /// read them (see <see cref="SettingProvenanceRead.SourceColumnsReadable"/>), and when the value does not come
 /// from a file at all. <see cref="AppliedFileValue"/> is the text the winning file line carries (for example
-/// <c>77MB</c>), where <c>pg_settings.setting</c> only has the normalized figure (<c>78848</c> kB).</summary>
+/// <c>77MB</c>), where <c>pg_settings.setting</c> only has the normalized figure (<c>78848</c> kB).
+/// <see cref="Shown"/> is the running value the way <c>SHOW</c> prints it (<c>77MB</c>, <c>2GB</c>, <c>5s</c>): in
+/// <c>pg_settings</c> the figure and its unit are separate columns and the unit can be a multiple (<c>8kB</c> for
+/// <c>shared_buffers</c>), so joining them reads wrong. <see cref="Context"/> is <c>pg_settings.context</c>.</summary>
 internal sealed record SettingProvenance(
     string Name,
     string Setting,
@@ -35,10 +38,13 @@ internal sealed record SettingProvenance(
     int? SourceLine,
     bool PendingRestart,
     IReadOnlyList<UnappliedFileSetting> UnappliedFileRows,
-    string? AppliedFileValue = null)
+    string? AppliedFileValue = null,
+    string? Shown = null,
+    string? Context = null)
 {
-    /// <summary>The running value as <c>pg_settings</c> reports it, with its unit when it has one.</summary>
-    public string ValueDisplay => string.IsNullOrEmpty(Unit) ? Setting : Setting + Unit;
+    /// <summary>The running value the way <c>SHOW</c> prints it. Falls back to the bare <c>pg_settings.setting</c>
+    /// figure when no <c>SHOW</c> text was read, never a figure joined to a unit that may be a multiple.</summary>
+    public string ValueDisplay => Shown ?? Setting;
 }
 
 /// <summary>The provenance of a set of settings plus what the reading role could and could not see.</summary>
@@ -49,8 +55,8 @@ internal sealed record SettingProvenanceRead(
     string RoleName);
 
 /// <summary>
-/// Reads and words the provenance of store settings (#9418), and is the one place the store settings capture
-/// (#9427) reads <c>pg_settings</c> from. <c>pg_settings.sourcefile</c> and <c>sourceline</c> need superuser or
+/// Reads and words the provenance of store settings (#9418): where the running value comes from, which file lines
+/// are hidden behind it, and whether a restart is waiting. <c>pg_settings.sourcefile</c> and <c>sourceline</c> need superuser or
 /// <c>pg_read_all_settings</c>, and <c>pg_file_settings</c> needs superuser or a grant, so a role without them
 /// gets a read that says so with the grant that fixes it, never a silent blank.
 /// </summary>
@@ -63,7 +69,7 @@ SELECT current_user::text,
        has_table_privilege(current_user, 'pg_file_settings', 'SELECT')";
 
     internal const string SettingsSql = @"
-SELECT name, setting, unit, source, sourcefile, sourceline, pending_restart
+SELECT name, setting, unit, source, sourcefile, sourceline, context, current_setting(name)
 FROM pg_settings
 WHERE name = ANY($1)";
 
@@ -72,6 +78,21 @@ SELECT name, sourcefile, sourceline, setting, error, coalesce(applied, false)
 FROM pg_file_settings
 WHERE name = ANY($1)
 ORDER BY name, seqno";
+
+    /// <summary>The <c>pg_file_settings.error</c> text PostgreSQL gives a line it read but could not apply. The same
+    /// text <see cref="DarlingStoreHostProfile.ManagedConfPgFileSettingsErrorSql"/> matches (#4251).</summary>
+    internal const string FileSettingNotAppliedError = "setting could not be applied";
+
+    /// <summary>The <c>pg_settings.context</c> of a setting that only a restart can change.</summary>
+    internal const string PostmasterContext = "postmaster";
+
+    /// <summary>The restart rule the managed verdicts use (#4251): a setting is pending a restart when its context is
+    /// <c>postmaster</c> and <c>pg_file_settings</c> holds a line for it that PostgreSQL could not apply. Never
+    /// <c>pg_settings.pending_restart</c>, which reads <c>f</c> on Windows after a reload. Unknown (false) when the
+    /// role cannot read <c>pg_file_settings</c>.</summary>
+    internal static bool IsPendingRestart(string? context, IReadOnlyList<UnappliedFileSetting> unappliedRows)
+        => string.Equals(context, PostmasterContext, StringComparison.Ordinal)
+            && unappliedRows.Any(r => string.Equals(r.Error, FileSettingNotAppliedError, StringComparison.Ordinal));
 
     /// <summary>How many unapplied lines one setting's sentence names before it says how many more there are. A
     /// store that has carried several versioned managed blocks has one hidden line per block.</summary>
@@ -133,6 +154,8 @@ ORDER BY name, seqno";
             while (await reader.ReadAsync(cancellationToken))
             {
                 var name = reader.GetString(0);
+                IReadOnlyList<UnappliedFileSetting> rows = unapplied.TryGetValue(name, out var found) ? found : [];
+                var context = reader.IsDBNull(6) ? null : reader.GetString(6);
                 byName[name] = new SettingProvenance(
                     name,
                     reader.GetString(1),
@@ -140,9 +163,11 @@ ORDER BY name, seqno";
                     reader.IsDBNull(3) ? null : reader.GetString(3),
                     reader.IsDBNull(4) ? null : reader.GetString(4),
                     reader.IsDBNull(5) ? null : reader.GetInt32(5),
-                    !reader.IsDBNull(6) && reader.GetBoolean(6),
-                    unapplied.TryGetValue(name, out var rows) ? rows : [],
-                    appliedValue.GetValueOrDefault(name));
+                    IsPendingRestart(context, rows),
+                    rows,
+                    appliedValue.GetValueOrDefault(name),
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    context);
             }
         }
 

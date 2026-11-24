@@ -1643,7 +1643,7 @@ WHERE NOT is_compressed";
     internal const string ManagedConfPgFileSettingsErrorSql = @"
 SELECT name, sourcefile, sourceline
 FROM pg_file_settings
-WHERE error = 'setting could not be applied'
+WHERE error = '" + StoreSettingProvenance.FileSettingNotAppliedError + @"'
 AND   name = ANY($1)";
 
     internal const string ManagedConfPostmasterStartTimeSql = "SELECT pg_postmaster_start_time() AT TIME ZONE 'UTC'";
