@@ -410,6 +410,8 @@ public sealed class StoreJobRunsToolLiveTests
                 });
                 Assert.False(asReader.ToString().Contains("jr9440 deliberate failure", StringComparison.Ordinal), "the error text reached a login that may not read it");
                 Assert.NotEqual(JsonValueKind.Null, asReader.GetProperty("history").GetProperty("oldest_row_at").ValueKind);
+                /* Through the function the key stays and holds null: every job is readable, and error_readable is the per-run signal. */
+                Assert.Equal(JsonValueKind.Null, asReader.GetProperty("access").ValueKind);
 
                 var asOwner = await ReadAsync(cs, ct, kind: "jr9440_boom");
                 var ownerRun = Runs(asOwner)[0];

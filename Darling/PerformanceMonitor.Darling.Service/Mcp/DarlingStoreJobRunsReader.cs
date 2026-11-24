@@ -209,6 +209,10 @@ SELECT (SELECT j.config::text FROM timescaledb_information.jobs AS j WHERE j.pro
     private static readonly DateTime HistoryFloor = new(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime HistoryCeiling = new(2200, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
+    /// <summary>The error text, cut to <see cref="MaxErrorMessageChars"/> UTF-16 units but never inside a surrogate pair or a grapheme: a cut at a bare index ends the payload in U+FFFD when a non-BMP character sits across it (#9484).</summary>
+    internal static string? CutError(string? message) =>
+        message is { Length: > MaxErrorMessageChars } ? message[..McpHelpers.TextElementCutLength(message, MaxErrorMessageChars)] : message;
+
     private static async Task<(List<Run> Runs, DateTime? OldestRowAt)> ReadRunsAsync(
         NpgsqlConnection connection, string sql, DateTime startUtc, DateTime endUtc, string? jobKind, string? hypertable, int fetch, CancellationToken cancellationToken)
     {
@@ -223,11 +227,7 @@ SELECT (SELECT j.config::text FROM timescaledb_information.jobs AS j WHERE j.pro
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var message = reader.IsDBNull(10) ? null : reader.GetString(10);
-            if (message is { Length: > MaxErrorMessageChars })
-            {
-                message = message[..MaxErrorMessageChars];
-            }
+            var message = CutError(reader.IsDBNull(10) ? null : reader.GetString(10));
 
             if (!reader.IsDBNull(11))
             {

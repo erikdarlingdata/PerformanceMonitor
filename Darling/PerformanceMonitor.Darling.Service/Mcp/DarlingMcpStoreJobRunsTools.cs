@@ -76,7 +76,7 @@ public sealed class DarlingMcpStoreJobRunsTools
         + "and per-job caps. An empty older window is therefore not proof of no runs. TimescaleDB shows a job's runs only to a member of the "
         + "database owner's role or of the job's owner, and the store's mcp and viewer roles are neither, so the read goes through the store's "
         + "collect.store_job_runs function, which every read role may call: every run comes back, and error_readable is false, with the error "
-        + "withheld, on a run whose error text TimescaleDB would not show this login (not the job's owner and not in the database owner's role). "
+        + "withheld, on a run whose error text TimescaleDB would not show this login (not the job's owner and not in the database owner's role). access is null on this path, because every job is readable and error_readable says which runs carry their error text. "
         + "On a store that has no such function yet (an older schema, or a login without EXECUTE on it) the read falls back to the view itself: "
         + "access then gives jobs_matching, jobs_readable and jobs_hidden for the filters, and when a job's runs are hidden the answer is "
         + "precondition, never empty. A hidden run is not a short row, it is no row. limit cuts the page "
