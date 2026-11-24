@@ -360,7 +360,7 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         using (var connection = _duckDb.CreateConnection())
         {
             await connection.OpenAsync();
-            oneStatement = (await DrillDownCollector.ReadRegressedQueriesAsync(connection, context, plan, database: null))
+            oneStatement = (await DrillDownCollector.ReadRegressedQueriesAsync(connection, context, plan, databases: null))
                 .Select(r => System.Text.Json.JsonSerializer.Serialize(r.Item)).ToList();
         }
 
