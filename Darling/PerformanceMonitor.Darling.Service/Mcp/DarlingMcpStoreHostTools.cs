@@ -65,7 +65,12 @@ public sealed class DarlingMcpStoreHostTools
         + "managed block set it but re-deriving from the CURRENT host gives a different number - a resize the "
         + "settings never caught up with), operator_override (postgresql.auto.conf, or a hand-edited line after "
         + "every managed block, is what is actually in force), or not_managed (a bring-your-own store; nothing "
-        + "here ever wrote a block to compare against, so pg_settings.source is reported as-is). "
+        + "here ever wrote a block to compare against, so pg_settings.source is reported as-is). Each settings row also "
+        + "carries provenance (#9418): value (the running value the way SHOW prints it, such as 2GB), file_value (the text the winning line carries, such as 77MB), source (pg_settings.source), source_file and source_line (null when the "
+        + "role cannot read them), pending_restart (a restart-only setting whose file line the server could not apply yet; false when the role cannot read pg_file_settings), not_applied (every pg_file_settings line for the setting that is not the value "
+        + "in force, with file, line and value, so a managed line hidden by ALTER SYSTEM shows) and summary, one sentence naming them. "
+        + "provenance_unreadable is one sentence with the grant that fixes it when the role cannot read the source columns or "
+        + "pg_file_settings, else null. "
         + "planner_costs is one row per planner cost setting (random_page_cost, seq_page_cost, effective_io_concurrency): "
         + "current, source (pg_settings.source), source_file (the conf file when the role can read pg_settings.sourcefile, "
         + "else null: the source alone is reported), managed_value and matches_managed (the managed file writes only "
@@ -248,7 +253,9 @@ public sealed class DarlingMcpStoreHostTools
                     derived = s.DerivedValueDisplay,
                     source = DarlingStoreHostProfile.FormatSourceForMcp(s, mcpDataDirectory),
                     verdict = DarlingStoreHostProfile.DescribeVerdict(s.Verdict).Replace('-', '_'),
+                    provenance = ShapeProvenance(s.Provenance, mcpDataDirectory),
                 }),
+                provenance_unreadable = profile.Settings.Select(s => s.ProvenanceUnreadable).FirstOrDefault(note => note is not null),
                 /* #9179: the planner cost settings, with the same current/source fields the sizing settings carry plus
                    the file (null when the role cannot read pg_settings.sourcefile) and whether each matches the value
                    the managed file writes. managed_value and matches_managed are null where the managed file sets none
@@ -296,6 +303,35 @@ public sealed class DarlingMcpStoreHostTools
             : null,
         root = report.Root is { } root ? new { subject = root.Subject, sha256 = root.Sha256 } : null,
     };
+
+    /// <summary>One setting's provenance as the MCP payload carries it (#9418), with every file path reduced to what a
+    /// remote caller may see. Null when the setting was not visible on the connection.</summary>
+    internal static object? ShapeProvenance(SettingProvenance? provenance, string? dataDirectory)
+    {
+        if (provenance is null)
+        {
+            return null;
+        }
+
+        Func<string, string> redact = file => DarlingStoreHostProfile.SanitizeSourcePathForMcp(file, dataDirectory);
+        return new
+        {
+            value = provenance.ValueDisplay,
+            file_value = provenance.AppliedFileValue,
+            source = provenance.Source,
+            source_file = provenance.SourceFile is null ? null : redact(provenance.SourceFile),
+            source_line = provenance.SourceLine,
+            pending_restart = provenance.PendingRestart,
+            not_applied = provenance.UnappliedFileRows.Select(r => new
+            {
+                file = r.File is null ? null : redact(r.File),
+                line = r.Line,
+                value = r.Value,
+                error = r.Error,
+            }),
+            summary = StoreSettingProvenance.Describe(provenance, redact),
+        };
+    }
 
     /// <summary>
     /// The exception whose message the error envelope carries for a failure that escaped the gather (#5718).

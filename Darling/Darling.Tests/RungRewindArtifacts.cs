@@ -985,6 +985,9 @@ DROP TABLE IF EXISTS collect.store_relation_sizes_measured;"),
         // adds them again, empty. Safe on a store that never had them.
         new(304, "hasStatementHistoryWriteCounters", @"ALTER TABLE collect.store_statement_history DROP COLUMN IF EXISTS delta_shared_blks_dirtied, DROP COLUMN IF EXISTS delta_shared_blks_written, DROP COLUMN IF EXISTS delta_wal_bytes, DROP COLUMN IF EXISTS delta_wal_fpi;
 ALTER TABLE config.store_statement_baseline DROP COLUMN IF EXISTS shared_blks_dirtied, DROP COLUMN IF EXISTS shared_blks_written, DROP COLUMN IF EXISTS wal_bytes, DROP COLUMN IF EXISTS wal_fpi;"),
+        // V305 (#9419): the WAL columns on collect.store_metrics. wal_stats_reset is the probe's newest sentinel. The rewind drops the eleven columns, so a re-run of V305
+        // adds them again. Safe on a store that never had them.
+        new(305, "hasStoreWalFigures", @"ALTER TABLE collect.store_metrics DROP COLUMN IF EXISTS wal_records, DROP COLUMN IF EXISTS wal_fpi, DROP COLUMN IF EXISTS wal_bytes, DROP COLUMN IF EXISTS wal_buffers_full, DROP COLUMN IF EXISTS wal_write_count, DROP COLUMN IF EXISTS wal_sync_count, DROP COLUMN IF EXISTS wal_write_ms, DROP COLUMN IF EXISTS wal_sync_ms, DROP COLUMN IF EXISTS wal_stats_reset, DROP COLUMN IF EXISTS wal_dir_bytes, DROP COLUMN IF EXISTS wal_dir_files;"),
     ];
 
     /// <summary>
