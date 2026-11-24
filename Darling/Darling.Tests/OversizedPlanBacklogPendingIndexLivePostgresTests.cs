@@ -300,7 +300,8 @@ FROM generate_series(1, $3) AS n;";
         await using (var record = new NpgsqlCommand(OversizedPlanBacklog.RecordSightingsSql, connection, transaction))
         {
             BindSightings(record, server, sightings, 1_000_000, withDropLimit: true);
-            Assert.Equal(resighted, Convert.ToInt32(await record.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
+            /* The statement returns how many new rows it did not insert: none here, every sighting is of a row the table holds. */
+            Assert.Equal(0, Convert.ToInt32(await record.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture));
         }
 
         Assert.Equal(updatedBefore + resighted, await XactCounterAsync(connection, transaction, "pg_stat_get_xact_tuples_updated", ct));
