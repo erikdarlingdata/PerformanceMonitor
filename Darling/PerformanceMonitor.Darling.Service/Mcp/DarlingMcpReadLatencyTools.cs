@@ -52,7 +52,6 @@ public sealed class DarlingMcpReadLatencyTools
         + "max_in_flight is the most other reads running when one started. "
         + "wait_total_ms is the summed wait for a store connection. "
         + "distinct_callers is the most different callers in one hour; no personal data. "
-        + "reply_bytes_total is the summed reply size in bytes of the reads that ran, mean_reply_bytes its average (null when no row has a size). "
         + "Sorted p95 desc. Optional surface (web/compose/mcp) and route filter. Empty means no read in the window, not a failure. "
         + "<<GUIDE>> "
         + "Gets the monitoring tool's OWN read-latency history: how long the web dashboard's `/api/read/*` "
