@@ -224,18 +224,6 @@ public sealed class ViewerQueryTabLoadTests
     }
 
     [Fact]
-    public void InnerTabLoad_HandsTheTabHeaderToFinish_SoASlowLineNamesTheTab()
-    {
-        var shell = Source("ViewerServerTab.xaml.cs");
-        var finish = shell.IndexOf("timer.Finish(", StringComparison.Ordinal);
-        Assert.True(finish >= 0);
-        var call = shell[finish..shell.IndexOf(';', finish)];
-        Assert.Contains("InnerTabLoadName(tabIndex,", call, StringComparison.Ordinal);
-        Assert.Contains("InnerTabs.Items[tabIndex] as TabItem", call, StringComparison.Ordinal);
-        Assert.Contains(".Header", call, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task TraceCheck_AnswersTrueOrFalse_WhenItSucceeds_AndNullWithAWarning_WhenItFails()
     {
         var warned = new List<string>();

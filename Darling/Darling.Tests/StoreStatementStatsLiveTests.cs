@@ -322,12 +322,13 @@ public sealed class StoreStatementStatsLiveTests
            PUBLIC cannot run them. */
         var definers = await DefinersAsync(c, ct);
         Assert.Equal(
-            new[] { StoreStatementStats.FunctionName, StoreStatementStats.InfoFunctionName },
+            new[] { StoreStatementStats.FunctionName, StoreStatementStats.InfoFunctionName, StoreStatementStats.WriteCounterFunctionName },
             definers.Select(d => d.Name).ToArray());
         Assert.All(definers, d => Assert.True(d.Definer, $"{d.Name} is not SECURITY DEFINER"));
         Assert.All(definers, d => Assert.Contains("search_path=pg_catalog, pg_temp", d.Config, StringComparison.Ordinal));
         Assert.All(definers, d => Assert.Contains("standard_conforming_strings=on", d.Config, StringComparison.Ordinal));
         Assert.False(await ScalarAsync<bool>(c, $"SELECT pg_catalog.has_function_privilege('public', 'config.{StoreStatementStats.FunctionName}()', 'EXECUTE')", ct));
+        Assert.False(await ScalarAsync<bool>(c, $"SELECT pg_catalog.has_function_privilege('public', 'config.{StoreStatementStats.WriteCounterFunctionName}()', 'EXECUTE')", ct));
 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var result = await DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(dataSource);
@@ -344,6 +345,54 @@ public sealed class StoreStatementStatsLiveTests
 
         /* A second pass, the hourly tick's shape, reports the same state. */
         Assert.Equal(outcome, await StoreStatementStats.EnsureAsync(c, "config", ["pgss_role_that_does_not_exist"], NullLogger.Instance, ct));
+    }
+
+    /// <summary>
+    /// #9410: the store's statement history reads <c>config.store_statement_stats_v2()</c>, and the setup leaves
+    /// <c>config.store_statement_stats()</c> exactly as an older build made it. So a store that an older build set up
+    /// is set up again by this build, and the older build's own setup (its <c>CREATE OR REPLACE</c> of the old
+    /// reader) and its read (the old name and columns) still work afterwards. Rolling back needs no manual drop.
+    /// </summary>
+    [Fact]
+    public async Task AnOlderBuildsSetupAndReaderCall_StillWorkAfterThisBuildsSetupRan_AgainstScratchPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(baseConnectionString),
+            "Set DARLING_TEST_PG to a superuser connection string to run the #9410 rollback proof in a scratch database.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true);
+        await using var c = await OpenAsync(scratch.ConnectionString, ct);
+        var preloaded = await IsPreloadedAsync(c, ct);
+        await ExecAsync(c, "CREATE SCHEMA IF NOT EXISTS config", ct);
+        await ExecAsync(c, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements", ct);
+        var extensionSchema = await ScalarAsync<string>(c,
+            "SELECT n.nspname::text FROM pg_catalog.pg_extension AS e JOIN pg_catalog.pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'pg_stat_statements'", ct);
+
+        /* The older build's setup, as that build ran it: the old reader and the info reader, no write-counter reader. */
+        await ExecAsync(c, StoreStatementStats.BuildFunctionSql("config", extensionSchema), ct);
+        Assert.Equal(0L, await ScalarAsync<long>(c, $"SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc WHERE proname = '{StoreStatementStats.WriteCounterFunctionName}'", ct));
+
+        /* This build's setup, then the older build's setup again (a rollback, then its next start). Neither fails. */
+        await StoreStatementStats.EnsureAsync(c, "config", [], NullLogger.Instance, ct);
+        await ExecAsync(c, StoreStatementStats.BuildFunctionSql("config", extensionSchema), ct);
+
+        /* Both readers exist, and the old one still returns the columns the older build reads. */
+        Assert.Equal(1L, await ScalarAsync<long>(c, $"SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc WHERE proname = '{StoreStatementStats.WriteCounterFunctionName}'", ct));
+        var oldColumns = await ScalarAsync<string>(c,
+            $"SELECT pg_catalog.array_to_string(p.proargnames, ',') FROM pg_catalog.pg_proc AS p WHERE p.oid = 'config.{StoreStatementStats.FunctionName}()'::regprocedure", ct);
+        Assert.Equal(
+            "role_name,queryid,calls,total_exec_ms,mean_exec_ms,max_exec_ms,total_plan_ms,rows_returned,shared_blks_hit,shared_blks_read,temp_blks_written,query",
+            oldColumns);
+
+        if (preloaded)
+        {
+            /* The older build's read, by its old name and columns, and this build's, by the new name. */
+            await ScalarAsync<long>(c,
+                $"SELECT pg_catalog.count(*) FROM (SELECT role_name, queryid, calls, total_exec_ms, mean_exec_ms, max_exec_ms, total_plan_ms, rows_returned, shared_blks_hit, shared_blks_read, temp_blks_written, query FROM config.{StoreStatementStats.FunctionName}()) AS f", ct);
+            await ScalarAsync<long>(c,
+                $"SELECT pg_catalog.count(*) FROM (SELECT role_name, queryid, calls, total_exec_ms, max_exec_ms, rows_returned, shared_blks_hit, shared_blks_read, temp_blks_written, shared_blks_dirtied, shared_blks_written, wal_fpi, wal_bytes FROM config.{StoreStatementStats.WriteCounterFunctionName}()) AS f", ct);
+        }
     }
 
     /// <summary>
