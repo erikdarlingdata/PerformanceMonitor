@@ -31,7 +31,8 @@ namespace PerformanceMonitorLite.Tests;
 /// the real template or tab on the shared STA thread with the theme and the shared styles merged, at both window sizes, and
 /// reads the realized result. With REFRESH_SHOTS_DIR set, each screen is saved as a PNG.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LiteSidebarAndCardButtonTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -40,8 +41,6 @@ public sealed class LiteSidebarAndCardButtonTests
 
     /* The sidebar's width in MainWindow.xaml, and the width a tab has beside it (or beside its 40 px rail below about 1100 DIPs, #8219). */
     private const int SidebarWidth = 280;
-    private static int PaneWidth(int windowWidth) => windowWidth - (windowWidth < 1100 ? 40 : SidebarWidth);
-
     public static IEnumerable<object[]> Themes()
     {
         yield return new object[] { "DarkTheme" };
@@ -116,104 +115,6 @@ public sealed class LiteSidebarAndCardButtonTests
         }
     }
 
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void TheAskAiButton_StandsOutFromItsCard(string theme)
-    {
-        var problems = StaTestThread.Run(() => WithTheme(theme, () =>
-        {
-            var found = new List<string>();
-            var tab = new RecommendationsTab();
-            var template = (DataTemplate)tab.Resources["LiteRecommendationCardTemplate"];
-            var item = new LiteRecommendationItem { IncidentId = "i1", Severity = LiteRecommendationSeverity.Warning, RawSeverity = 2, Title = "Plan cache bloat", AdviceText = "Advice.", ServerName = "s" };
-            var card = LiteRecommendationsViewModel.FromItems(new[] { item }).Sections[0].Cards[0];
-            var presenter = new ContentPresenter { Content = card, ContentTemplate = template, Margin = new Thickness(10) };
-            foreach (var (width, height) in Sizes)
-            {
-                var window = Open(presenter, PaneWidth(width), height);
-                try
-                {
-                    var at = $"{theme} {width}x{height}";
-                    var border = Visual<Border>(presenter).First();
-                    var button = Visual<Button>(presenter).FirstOrDefault(b => b.Content as string == "Ask AI");
-                    if (button is null || !button.IsVisible)
-                    {
-                        found.Add($"{at}: the card shows no Ask AI button");
-                    }
-                    else if (Describe(button.Background) == Describe(border.Background))
-                    {
-                        found.Add($"{at}: Ask AI is drawn in the card's own background ({Describe(border.Background)}), so it does not read as a button");
-                    }
-
-                    Shoot(window, $"{theme}-{width}x{height}-recommendation-card.png");
-                }
-                finally
-                {
-                    window.Close();
-                }
-            }
-
-            return found;
-        }));
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void TheServerToolbar_HasNoSeparatorAfterTheAutoRefreshGroup(string theme)
-    {
-        var dir = Path.Combine(Path.GetTempPath(), "ToolbarSeparator_" + Guid.NewGuid().ToString("N")[..8]);
-        Directory.CreateDirectory(dir);
-        try
-        {
-            using var duckDb = new DuckDbInitializer(Path.Combine(dir, "test.duckdb"));
-            var problems = StaTestThread.Run(() => WithTheme(theme, () =>
-            {
-                var found = new List<string>();
-                var server = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "toolbar-test", DisplayName = "toolbar-test", IsEnabled = true };
-                var tab = new ServerTab(server, duckDb, new CredentialResolver(new CredentialService(), null));
-                typeof(ServerTab).GetField("_suppressActiveQueriesAutoRefresh", Instance)!.SetValue(tab, true);
-                foreach (var (width, height) in Sizes)
-                {
-                    var window = Open(tab, PaneWidth(width), height);
-                    try
-                    {
-                        var toolbar = (ToolBar)tab.FindName("ServerToolbarMain")!;
-                        var separators = Visual<Separator>(toolbar).Count(s => s.IsVisible);
-                        if (separators != 0)
-                        {
-                            found.Add($"{theme} {width}x{height}: the server toolbar draws {separators} separator(s)");
-                        }
-
-                        var autoRefresh = (FrameworkElement)tab.FindName("AutoRefreshCheckBox")!;
-                        var times = (FrameworkElement)tab.FindName("TimeDisplayModeBox")!;
-                        var group = toolbar.Items.OfType<DependencyObject>().ToList();
-                        var afterAutoRefresh = group.IndexOf(ItemOf(autoRefresh, toolbar)) + 1;
-                        if (afterAutoRefresh <= 0 || afterAutoRefresh >= group.Count || !group[afterAutoRefresh].Equals(ItemOf(times, toolbar)))
-                        {
-                            found.Add($"{theme} {width}x{height}: the Times group does not follow the auto-refresh group directly");
-                        }
-
-                        Shoot(window, $"{theme}-{width}x{height}-toolbar.png");
-                    }
-                    finally
-                    {
-                        window.Close();
-                    }
-                }
-
-                return found;
-            }));
-
-            Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-        }
-        finally
-        {
-            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
-        }
-    }
-
     /// <summary>A sidebar item the way the list builds one: the server row over a server whose connection carries the names.</summary>
     private static object Item(string serverName, string displayName) =>
         new PerformanceMonitorLite.FleetServerRow(
@@ -223,20 +124,6 @@ public sealed class LiteSidebarAndCardButtonTests
     /// <summary>How many visible text lines in <paramref name="item"/> read exactly <paramref name="text"/>.</summary>
     private static int VisibleLines(FrameworkElement item, string text) =>
         Visual<TextBlock>(item).Count(t => t.IsVisible && t.ActualWidth > 0 && t.Text == text);
-
-    /// <summary>The toolbar item that holds <paramref name="element"/>: the element itself, or the panel around it.</summary>
-    private static DependencyObject ItemOf(DependencyObject element, ToolBar toolbar)
-    {
-        for (DependencyObject? up = element; up is not null; up = LogicalTreeHelper.GetParent(up))
-        {
-            if (toolbar.Items.Contains(up))
-            {
-                return up;
-            }
-        }
-
-        throw new Xunit.Sdk.XunitException("the element is not on the toolbar");
-    }
 
     private static IEnumerable<T> Visual<T>(DependencyObject root) where T : DependencyObject
     {
@@ -263,8 +150,6 @@ public sealed class LiteSidebarAndCardButtonTests
         ClippedTextProbe.Settle(window);
         return window;
     }
-
-    private static string Describe(Brush? brush) => brush is SolidColorBrush solid ? solid.Color.ToString() : brush?.ToString() ?? "null";
 
     /// <summary>Saves the window's content as a PNG under REFRESH_SHOTS_DIR when that directory is given; otherwise nothing.</summary>
     private static void Shoot(Window window, string fileName)

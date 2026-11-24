@@ -23,7 +23,7 @@ export const MCP_TOOL_NAMES = [
   "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_agent_alerts", "get_alert_history", "get_alert_settings",
   "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking", "get_blocking_plan_xml",
   "get_blocking_stats", "get_blocking_trend", "get_change_watches", "get_known_patterns", "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collection_state", "get_collector_cost", "get_collector_schedules",
-  "get_collector_stall_probes", "get_agent_changes", "get_command_result", "get_compiles_after_evict", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",
+  "get_collector_stall_probes", "get_collector_readiness", "get_agent_changes", "get_command_result", "get_compiles_after_evict", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",
   "get_custom_alert_rule", "get_custom_view", "get_daily_health_report", "get_daily_summary", "get_daily_summary_range", "get_database_config",
   "get_database_config_changes", "get_database_protection", "get_database_scoped_config", "get_database_state_expectations", "get_database_sizes", "get_deadlock_detail",
   "get_deadlock_plan_xml", "get_deadlock_trend", "get_deadlocks", "get_default_trace_events", "get_file_io_stats",
@@ -33,7 +33,7 @@ export const MCP_TOOL_NAMES = [
   "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
   "get_identity_capacity", "get_index_usage", "get_investigation_evidence", "get_investigation_reports", "get_job_history", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions",
   "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend",
-  "get_mute_rules", "get_notification_routes", "get_object_definition", "get_object_locking", "get_oversized_plan_backlog", "get_people",
+  "get_mute_rules", "get_notification_routes", "get_object_definition", "get_object_locking", "get_object_usage", "get_oversized_plan_backlog", "get_people",
   "get_perfmon_stats", "get_perfmon_trend", "get_pg_autovacuum_health", "get_pg_blocking", "get_pg_buffer_usage",
   "get_pg_column_stats", "get_pg_cpu_utilization", "get_pg_database_stats", "get_pg_database_trend",
   "get_pg_deadlock_detail", "get_pg_deadlocks", "get_pg_extensions", "get_pg_index_bloat", "get_pg_index_usage",
@@ -49,7 +49,7 @@ export const MCP_TOOL_NAMES = [
   "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_read_latency",
   "get_resource_semaphore", "get_schema_changes", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes", "get_server_settings",
   "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
-  "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_metrics", "get_store_query_history",
+  "get_service_starts", "get_spinlock_stats", "get_store_host", "get_store_log", "get_store_checkpoints", "get_store_metrics", "get_store_table_health", "get_store_maintenance_readiness", "get_store_pass_steps", "get_store_query_history",
   "get_store_query_stats", "get_sweep_reports", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide",
   "get_top_procedures_by_cpu", "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags",
   "get_wait_stats", "get_wait_trend", "get_wait_types", "get_waiting_tasks",
@@ -60,13 +60,13 @@ const TOOL_NAME_SET = new Set(MCP_TOOL_NAMES);
     tools. A message that names one tells a client what to call next; a web reader cannot call it. WebPlainTextTests checks
     this list against the registry, like the get_ list above. */
 export const MCP_ACTION_TOOL_NAMES = [
-  "add_servers", "analyze_now", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-  "analyze_server", "approve_investigation_note", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "claim_investigation_request",
+  "add_servers", "measure_store_table", "analyze_now", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
+  "analyze_server", "approve_investigation_note", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "call_tool", "claim_investigation_request",
   "clear_quiet_window", "close_investigation_request", "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_known_pattern", "create_mute_rule",
   "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",
   "delete_custom_view", "delete_known_pattern", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
   "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
-  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "find_queries_by_text", "find_schema_objects", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
+  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "find_queries_by_text", "find_schema_objects", "find_tools", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
   "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules",
   "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_expired_mute_rules", "purge_now",
   "create_plan_guide", "drop_plan_guide", "recompile_module",
@@ -113,11 +113,11 @@ const PAGE_FOR_TOOL = new Map(PAGE_FOR_TOOLS.flatMap(([page, tools]) => tools.ma
 /** The label=value measurement labels the collectors write (the CollectorMeasurement labels). A lone label=value pair is
     rewritten only when its label is one of these; WebPlainTextTests checks the list against the collectors' source. */
 export const MEASUREMENT_LABELS = [
-  "csv_records_discarded", "event_file_buffer_cut", "event_file_error", "event_file_events", "event_file_fallback", "event_file_wildcard",
+  "csv_records_discarded", "default_trace_off", "event_file_buffer_cut", "event_file_error", "event_file_events", "event_file_fallback", "event_file_wildcard",
   "events_read", "events_stored", "foreign_zone_lines_skipped", "forged_captures_skipped",
   "identity_epoch_changes", "job_history_identity_regressions", "job_history_identity_store_watermark",
   "job_history_identity_target_row", "json_records_discarded", "log_bytes_skipped", "log_files_skipped_by_rotation",
-  "log_matches_limited", "log_resume_file_missing", "log_resume_file_recycled", "newest_visible_event_age_s",
+  "log_matches_limited", "log_resume_file_missing", "log_resume_file_recycled", "memory_dumps_new", "newest_visible_event_age_s",
   "postmaster_epoch_changes", "raise_shaped_deadlocks_skipped", "report_xml_empty", "report_xml_unparsed",
   "ring_buffer_events_hidden", "ring_buffer_events_limit", "ring_buffer_evicted", "ring_buffer_limit_below_setting",
   "ring_buffer_loss_at_least", "ring_buffer_loss_unknown", "ring_buffer_loss_window_s", "ring_buffer_memory_capped",
@@ -381,6 +381,16 @@ export function plainText(text) {
   /* The health sentence's collector and field names, said as the page's own words (#5492). Not in the named path: a Last
      Error can quote a real relation or column called the same thing. */
   t = t.replace(/\bpg_wraparound_stats\b/g, "the freeze-headroom collector");
+  /* #8929: a field name with a prefix has no word boundary before `hours_back` (the underscore is a word character), so namedTokenText's two hours_back rules
+     miss it. These are field and table names, which a Last Error can quote as real objects, so they live in plainText and not in namedTokenText. The Query Store clutter strip draws the span from the reply's own value (util.js, windowFloorStrip); these are the fallbacks for
+     a text with no value beside it. `raw query_store_stats` is the store table the raw statistics sit in, which the page calls the raw query statistics. */
+  t = t.replace(/\braw query_store_stats\b/g, "raw query statistics");
+  t = t.replace(/\bquery_store_stats\b/g, "the raw query statistics");
+  /* #9116: the heat map's cut-window sentence names the raw stats table the same way (`raw query_stats`). Only the prefixed form: a bare `query_stats` is also the tail of a real object name. */
+  t = t.replace(/\braw query_stats\b/g, "raw query statistics");
+  t = t.replace(/\beffective_hours_back\b/g, "only the part of the time range it holds");
+  t = t.replace(/\bbaseline_hours_back\b/g, "the baseline range");
+  t = t.replace(/\btrend_hours_back\b/g, "the trend range");
   for (const [re, words] of FIELD_WORDS) t = t.replace(re, words);
 
   t = measurementCountsText(t);
@@ -592,6 +602,13 @@ export function shortEmptyLine(res, extensionLine) {
      fix among others and the table above says why for the rest. */
   if (res.status === "no_answers" && Array.isArray(h.suppressed_by_reason)) {
     const buckets = h.suppressed_by_reason;
+    /* #8926: the rows in this range carry no answer, but some index has one over the longer span the census measures. "No index has a bloat estimate" would
+       be wrong, and the table above may not be drawn at this range, so the sentence says what is true and what reaches the answered ones. */
+    const trusted = Number(h.trusted_index_count);
+    if (trusted > 0) {
+      return "No index in this range has a bloat estimate, but " + trusted + (trusted === 1 ? " index has" : " indexes have") +
+        " one over a longer range. Choose a longer range to see " + (trusted === 1 ? "it." : "them.");
+    }
     const grantBucket = buckets.some((b) => b && b.reason === "ColumnWidthsNotVisible");
     if (grantBucket && buckets.length === 1) {
       return "No index has a bloat estimate because the monitoring login cannot read pg_stats. " + PG_STATS_GRANT;
@@ -623,7 +640,12 @@ export function shortEmptyLine(res, extensionLine) {
   if (h.reason === "plan_capture_not_ready") {
     const n = typeof h.unsatisfied_count === "number" && h.unsatisfied_count > 0 ? h.unsatisfied_count : 0;
     return (n === 1 ? "One setting that plan capture needs is" : n > 1 ? n + " settings that plan capture needs are" : "Plan capture is") +
-      " not ready on this server, so no plans are captured. The Plan Capture Readiness panel lists each one with its fix.";
+      " not ready on this server, so no plans are captured. The Plan Capture Readiness panel lists each one with its fix." +
+      (h.engine_limited === true ? " Plans also cannot be attributed to a statement on this engine, which no setting changes." : "");
+  }
+  /* #8912: Aurora's parameter group cannot put %Q in log_line_prefix, so no plan is stored and none can join to a statement. */
+  if (h.reason === "plan_attribution_engine_limit") {
+    return "Plans are not captured on this server, and no setting changes that. Aurora PostgreSQL does not let log_line_prefix carry the query id the plan capture needs.";
   }
   return null;
 }

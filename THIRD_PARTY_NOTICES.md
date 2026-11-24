@@ -205,6 +205,7 @@ Performance Monitor would not be possible without the excellent work of:
 
 - **Microsoft** for vscode-mssql execution plan operator icons used in the Plan Viewer
 - **Hannah Vernon** for SqlServerAgMonitor, whose queries shape the Availability Group health collector
+- **James Noonan** for SQLExtended (MIT), from which `get_object_usage`'s statement scanner, whole-word matcher and dependency filters were ported
 
 We are grateful for their contributions to the SQL Server community and their commitment to open-source software.
 
@@ -245,6 +246,19 @@ The following NuGet packages are used as runtime dependencies. Test-only package
 **Author**: Microsoft
 **License**: MIT
 **Repository**: https://github.com/dotnet/runtime
+
+© Microsoft Corporation. All rights reserved.
+
+---
+
+### Microsoft.SqlServer.TransactSql.ScriptDom
+
+**Version**: 180.140.0
+**Author**: Microsoft
+**License**: MIT
+**Repository**: https://github.com/microsoft/SqlScriptDOM
+
+Parses Query Store statement text for `get_object_usage`'s view usage read.
 
 © Microsoft Corporation. All rights reserved.
 

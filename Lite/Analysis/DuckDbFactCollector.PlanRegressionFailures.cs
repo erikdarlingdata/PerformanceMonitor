@@ -16,9 +16,9 @@ namespace PerformanceMonitorLite.Analysis;
 public partial class DuckDbFactCollector
 {
     /// <summary>
-    /// The failure read: $1 server, $2 window start, $3 recent start, $4 recent hours, $5 baseline hours, then the
-    /// secondary-database names. The interval dedup is the cost read's (the latest snapshot of each interval, per outcome),
-    /// over the non-Regular rows only.
+    /// The failure read: $1 server, $2 window start, $3 recent start, $4 recent hours, $5 baseline hours, $6 window end, then
+    /// the secondary-database names. The interval dedup is the cost read's (the latest snapshot of each interval, per outcome),
+    /// over the non-Regular rows only, and like it reads the rows collected by the window's end.
     /// </summary>
     internal static readonly string PlanRegressionFailureSql = $@"
 WITH deduped AS
@@ -38,6 +38,7 @@ WITH deduped AS
     WHERE server_id = $1
     AND   execution_type_desc <> 'Regular'
     AND   last_execution_time >= $2
+    AND   collection_time <= $6
     /*SEC*/
 ),
 agg AS
@@ -83,11 +84,12 @@ LIMIT {PlanRegressionFailureRule.ReadLimit}";
         cmd.Parameters.Add(new DuckDBParameter { Value = recentStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = (double)PlanRegressionFailureRule.RecentHours });
         cmd.Parameters.Add(new DuckDBParameter { Value = baselineHours });
+        cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
         /* #7256: the plan is the cost read's (query_store_stats from the window start less 14 days, the same lower bound). */
-        cmd.CommandText = plan.Apply(SecondaryReplicaScope.Apply(PlanRegressionFailureSql, cmd, context, "PLAN_REGRESSION", "database_name", 6));
+        cmd.CommandText = plan.Apply(SecondaryReplicaScope.Apply(PlanRegressionFailureSql, cmd, context, "PLAN_REGRESSION", "database_name", 7));
 
         var rows = new List<PlanRegressionFailureRule.Failure>();
-        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        using var reader = await cmd.ExecuteProfiledReaderAsync("plan-regression-failures", context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
             rows.Add(new PlanRegressionFailureRule.Failure(

@@ -337,15 +337,16 @@ INSERT dbo.t (pad) SELECT TOP (20000) 'x' FROM sys.all_columns AS a CROSS JOIN s
         });
     }
 
-    /// <summary>The newest last_seen of the plan's map row, its plan-dim row (by the map's digest) and its query's text row.</summary>
+    /// <summary>The last_seen of the plan's map row, its plan-dim row (by the map's digest) and its query's text: the liveness stamp
+    /// the touch keeps in <c>collect.query_store_text_seen</c> (#9043).</summary>
     private static async Task<(DateTime Map, DateTime Dim, DateTime Text)> LastSeenAsync(Rig rig, string tag, CancellationToken ct)
     {
         var (queryId, planId) = rig.Ids[tag];
         await using var command = new NpgsqlCommand(@"
 SELECT m.last_seen, d.last_seen, t.last_seen
 FROM collect.query_store_plan_map AS m
-JOIN collect.query_plan_dim AS d ON d.digest = m.digest
-JOIN collect.query_store_text AS t ON t.server_id = m.server_id AND t.database_name = m.database_name AND t.query_id = $4
+JOIN collect.query_plan_dim_seen AS d ON d.digest = m.digest
+JOIN collect.query_store_text_seen AS t ON t.server_id = m.server_id AND t.database_name = m.database_name AND t.query_id = $4
 WHERE m.server_id = $1 AND m.database_name = $2 AND m.plan_id = $3", rig.Connection);
         command.Parameters.AddWithValue(rig.Server.ServerId);
         command.Parameters.AddWithValue(rig.Database);
@@ -365,8 +366,8 @@ WHERE m.server_id = $1 AND m.database_name = $2 AND m.plan_id = $3", rig.Connect
             await CollectAsync(rig, ct);
             var (queryId, planId) = rig.Ids["cold1"];
             await Exec(rig.Connection, ct, "UPDATE collect.query_store_plan_map SET last_seen = last_seen - interval '2 days' WHERE server_id = $1 AND database_name = $2 AND plan_id = $3", rig.Server.ServerId, rig.Database, planId);
-            await Exec(rig.Connection, ct, "UPDATE collect.query_plan_dim SET last_seen = last_seen - interval '2 days' WHERE digest IN (SELECT digest FROM collect.query_store_plan_map WHERE server_id = $1 AND database_name = $2 AND plan_id = $3)", rig.Server.ServerId, rig.Database, planId);
-            await Exec(rig.Connection, ct, "UPDATE collect.query_store_text SET last_seen = last_seen - interval '2 days' WHERE server_id = $1 AND database_name = $2 AND query_id = $3", rig.Server.ServerId, rig.Database, queryId);
+            await Exec(rig.Connection, ct, "UPDATE collect.query_plan_dim_seen SET last_seen = last_seen - interval '2 days' WHERE digest IN (SELECT digest FROM collect.query_store_plan_map WHERE server_id = $1 AND database_name = $2 AND plan_id = $3)", rig.Server.ServerId, rig.Database, planId);
+            await Exec(rig.Connection, ct, "UPDATE collect.query_store_text_seen SET last_seen = last_seen - interval '2 days' WHERE server_id = $1 AND database_name = $2 AND query_id = $3", rig.Server.ServerId, rig.Database, queryId);
             var aged = await LastSeenAsync(rig, "cold1", ct);
 
             /* N drops to 1 and cold1 runs again: it is in the batch, it is far outside the top 1 on every metric, and it is already stored. The fetch

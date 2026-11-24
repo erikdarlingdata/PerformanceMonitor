@@ -433,7 +433,7 @@ LIMIT 1";
 
             var buckets = new Dictionary<(int, int), BaselineBucket>();
 
-            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            using var reader = await cmd.ExecuteProfiledReaderAsync($"baseline-{metricName}", cancellationToken);
             /* #1743: the robust-scaffold metrics return eight columns (…, median_val, mad_val)
                and carry sentinel tier rows — every Lite arm except the two event-family ones,
                which keep the six-column classical shape (detected by column count) and whose

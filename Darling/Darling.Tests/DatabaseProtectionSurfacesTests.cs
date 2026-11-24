@@ -8,8 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +21,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -113,9 +117,21 @@ public sealed class ViewerDatabaseProtectionTextTests : IDisposable
 
         Assert.Equal(["zeta", "alpha", "beta"], rows.Select(r => r.Database).ToArray());
         Assert.Equal(
-            new ViewerDatabaseProtectionRow("zeta", "ONLINE", "9 days 2 hours - overdue", "1 hour 30 minutes - overdue", "20 days - overdue", "", "", true),
+            new ViewerDatabaseProtectionRow("zeta", "ONLINE", "9 days 2 hours - overdue", "1 hour 30 minutes - overdue", "20 days - overdue", "", "", true, "Boot page"),
             rows[0]);
-        Assert.Equal(new ViewerDatabaseProtectionRow("alpha", "ONLINE", "1 day", "10 minutes", "3 days", "", "", false), rows[1]);
+        Assert.Equal(new ViewerDatabaseProtectionRow("alpha", "ONLINE", "1 day", "10 minutes", "3 days", "", "", false, "Boot page"), rows[1]);
+    }
+
+    [Fact]
+    public void AModelWithNoLogBackup_ReadsNotExpected_WithItsSentence_AndIsNotOverdue()
+    {
+        var read = Read(Fact("model", fullAgo: Day, checkDbAgo: Day, logState: "none_in_window"), Fact("Sales", fullAgo: Day, checkDbAgo: Day, logState: "none_in_window"));
+        var rows = ViewerDatabaseProtectionText.Rows(read);
+
+        var model = rows.Single(r => r.Database == "model");
+        Assert.Equal(("not expected", false, DatabaseProtectionBands.DetailSystemDatabase), (model.LogBackup, model.Overdue, model.LogBackupNote));
+        var sales = rows.Single(r => r.Database == "Sales");
+        Assert.Equal(("none in window - overdue", true, (string?)null), (sales.LogBackup, sales.Overdue, sales.LogBackupNote));
     }
 
     [Fact]
@@ -208,6 +224,245 @@ public sealed class ViewerDatabaseProtectionTextTests : IDisposable
 
         Assert.Equal("No databases in the newest capture.", ViewerDatabaseProtectionText.EmptyText(read));
         Assert.Empty(ViewerDatabaseProtectionText.Rows(read));
+    }
+}
+
+/// <summary>
+/// #8865: the surfaces of a CHECKDB judged per replica. The MCP tool's projections (the CHECKDB fact and the server-level error_log block) are
+/// serialised exactly as the tool does, the web panel's page script runs under Node on that reply, and the Viewer's words are asked for the same facts.
+/// </summary>
+public sealed class DatabaseProtectionPerReplicaSurfacesTests
+{
+    private static readonly DateTime Now = new(2026, 11, 16, 12, 0, 0, DateTimeKind.Utc);
+    private static readonly DatabaseProtectionThresholds Limits = DatabaseProtectionThresholds.Default;
+
+    private static DatabaseProtectionFact Base(string name, string? role = null) => new(
+        name, "ONLINE", "FULL", Now.AddDays(-400), role, "native",
+        Now.AddDays(-3), "checked", Now.AddDays(-1), "recorded", Now.AddMinutes(-10), "recorded");
+
+    private static DatabaseProtectionFact Logged(string name, string? role, TimeSpan? checkAgo, int? errors = null, string? options = "NO_INFOMSGS") =>
+        Base(name, role) with
+        {
+            ErrorLogState = "read", ErrorLogBackfillComplete = true,
+            ErrorLogCheckDbTime = checkAgo is { } a ? Now - a : null, ErrorLogCheckDbOptions = options, ErrorLogCheckDbErrors = errors,
+        };
+
+    /// <summary>The tool's reply for these facts, built from the tool's own projection helpers and serialised with its options.</summary>
+    private static JsonElement ToolReply(params DatabaseProtectionFact[] facts)
+    {
+        var banded = facts.Select(f => (Fact: f, Band: DatabaseProtectionBands.Evaluate(f, Now, Limits))).ToList();
+        var reply = new
+        {
+            error_log = DarlingMcpDatabaseProtectionTools.ErrorLogBlock(facts.FirstOrDefault()),
+            databases = banded.Select(b => DarlingMcpDatabaseProtectionTools.DatabaseEntry(b.Fact, b.Band)),
+        };
+        return JsonDocument.Parse(JsonSerializer.Serialize(reply, McpHelpers.JsonOptions)).RootElement.Clone();
+    }
+
+    private static JsonElement Db(JsonElement reply, string name) =>
+        reply.GetProperty("databases").EnumerateArray().Single(d => d.GetProperty("database").GetString() == name);
+
+    private static string? Str(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    [Fact]
+    public void TheToolsLastTime_IsTheTimeTheBandJudged_AndTheBootPageStaysSeparate()
+    {
+        /* #8865 I7: last_time was always the boot page, so an error-log judgement showed an age and a state the time beside it did not explain. */
+        static string Iso(DateTime t) => t.ToString("o", CultureInfo.InvariantCulture);
+        var reply = ToolReply(
+            Logged("AgDb", "SECONDARY", TimeSpan.FromDays(2)) with { LastGoodCheckDbTime = Now.AddDays(-30) },
+            Logged("LogNewer", null, TimeSpan.FromDays(1)) with { LastGoodCheckDbTime = Now.AddDays(-9) },
+            Logged("BootNewer", null, TimeSpan.FromDays(9)) with { LastGoodCheckDbTime = Now.AddDays(-1) });
+
+        var ag = Db(reply, "AgDb").GetProperty("checkdb");
+        Assert.Equal(Iso(Now.AddDays(-2)), Str(ag, "last_time"));
+        Assert.Equal(Iso(Now.AddDays(-30)), Str(ag, "boot_page_time"));
+        /* #8865 M8: the tool description promises detail secondary on a secondary's backup facts. */
+        Assert.Equal(("excluded", "secondary"), (Str(Db(reply, "AgDb").GetProperty("full_backup"), "state"), Str(Db(reply, "AgDb").GetProperty("full_backup"), "detail")));
+
+        var logNewer = Db(reply, "LogNewer").GetProperty("checkdb");
+        Assert.Equal(("error_log", Iso(Now.AddDays(-1))), (Str(logNewer, "source"), Str(logNewer, "last_time")));
+
+        var bootNewer = Db(reply, "BootNewer").GetProperty("checkdb");
+        Assert.Equal(("boot_page", Iso(Now.AddDays(-1))), (Str(bootNewer, "source"), Str(bootNewer, "last_time")));
+    }
+
+    [Fact]
+    public void TheTool_ShowsSourceOptionsAndErrors_AndTheErrorLogBlock()
+    {
+        /* An AG secondary judged on its own log; the boot page is kept for reference. */
+        var secondary = Logged("Sales", "SECONDARY", TimeSpan.FromDays(2)) with { LastGoodCheckDbTime = Now.AddDays(-30), ReplicaReadable = true };
+        var primary = Logged("Hr", "PRIMARY", TimeSpan.FromDays(1), errors: 3, options: "PHYSICAL_ONLY");
+        var read = ToolReply(secondary, primary);
+
+        var s = Db(read, "Sales");
+        var sc = s.GetProperty("checkdb");
+        Assert.Equal(("ok", "error_log", "NO_INFOMSGS"), (sc.GetProperty("state").GetString(), sc.GetProperty("source").GetString(), sc.GetProperty("options").GetString()));
+        Assert.Equal(Now.AddDays(-30).ToString("o", CultureInfo.InvariantCulture), sc.GetProperty("boot_page_time").GetString());
+        Assert.True(s.GetProperty("replica_readable").GetBoolean());
+        Assert.Null(Str(s, "excluded_reason"));
+
+        var p = Db(read, "Hr").GetProperty("checkdb");
+        Assert.Equal(("errors_found", true, 3, "PHYSICAL_ONLY"), (p.GetProperty("state").GetString(), p.GetProperty("overdue").GetBoolean(), p.GetProperty("errors").GetInt32(), p.GetProperty("options").GetString()));
+
+        var log = read.GetProperty("error_log");
+        Assert.Equal(("read", "complete"), (log.GetProperty("status").GetString(), log.GetProperty("backfill").GetString()));
+
+        /* R11: a capture from before the error-log read shows the boot page as its source, and no boot-page reference. */
+        var old = ToolReply(Base("Old"));
+        var oc = Db(old, "Old").GetProperty("checkdb");
+        Assert.Equal("boot_page", oc.GetProperty("source").GetString());
+        Assert.Null(Str(oc, "boot_page_time"));
+        Assert.Equal("not_applicable", old.GetProperty("error_log").GetProperty("status").GetString());
+
+        /* A refused read reports precondition and names the grant; the CHECKDB falls back to the boot page. */
+        var refused = ToolReply(Base("Sales", "PRIMARY") with { ErrorLogState = "refused", ErrorLogMessage = "The VIEW SERVER STATE permission was denied.", ErrorLogGrant = "VIEW SERVER STATE" });
+        var rl = refused.GetProperty("error_log");
+        Assert.Equal(("precondition", "VIEW SERVER STATE"), (rl.GetProperty("status").GetString(), rl.GetProperty("grant").GetString()));
+        Assert.Contains("denied", rl.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal("boot_page", Db(refused, "Sales").GetProperty("checkdb").GetProperty("source").GetString());
+
+        /* A failed read with skipped archives and unparsed lines says so, and a backfill still running is in progress. */
+        var failed = ToolReply(Logged("Sales", "PRIMARY", TimeSpan.FromDays(1)) with
+        {
+            ErrorLogState = "failed", ErrorLogMessage = "timeout", ErrorLogBackfillComplete = false, ErrorLogSkippedArchives = "3, 4", ErrorLogUnparsedLines = 7,
+        });
+        var fl = failed.GetProperty("error_log");
+        Assert.Equal(("failed", "in_progress", "3, 4", 7), (fl.GetProperty("status").GetString(), fl.GetProperty("backfill").GetString(), fl.GetProperty("skipped_archives").GetString(), fl.GetProperty("unparsed_lines").GetInt32()));
+
+        /* pending: the sentence travels with the state. */
+        var pending = ToolReply(Base("Sales", "SECONDARY") with { ErrorLogState = "read", ErrorLogBackfillComplete = false, ReplicaReadable = false });
+        var pc = Db(pending, "Sales").GetProperty("checkdb");
+        Assert.Equal(("pending", "error_log"), (pc.GetProperty("state").GetString(), pc.GetProperty("source").GetString()));
+        Assert.Contains("still being read", pc.GetProperty("detail").GetString(), StringComparison.Ordinal);
+        Assert.False(Db(pending, "Sales").GetProperty("replica_readable").GetBoolean());
+    }
+
+    [Fact]
+    public void TheDescription_NoLongerCallsASecondaryExcludedForCheckDb_AndNamesPendingAndErrorsFound()
+    {
+        var text = typeof(DarlingMcpDatabaseProtectionTools).GetMethod(nameof(DarlingMcpDatabaseProtectionTools.GetDatabaseProtection))!
+            .GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.DoesNotContain("a secondary or otherwise", text, StringComparison.Ordinal);
+        Assert.Contains("pending", text, StringComparison.Ordinal);
+        Assert.Contains("errors_found", text, StringComparison.Ordinal);
+        Assert.Contains("error_log", text, StringComparison.Ordinal);
+        Assert.Contains("boot_page", text, StringComparison.Ordinal);
+        Assert.Contains("backup facts also read excluded", text, StringComparison.Ordinal);
+    }
+
+    private static string[][] Grid(JsonElement web, string[] headers)
+    {
+        var cells = web.GetProperty("cells").EnumerateArray().Select(c => c.GetString()!).ToArray();
+        return cells.Chunk(headers.Length).ToArray();
+    }
+
+    /// <summary>The same facts through the page script (under Node) and through the Viewer's text: the CHECKDB cell, the source, the options and the error log
+    /// sentence read the same, for an AG secondary, an errors_found primary, a pending replica and a boot-page database.</summary>
+    [Fact]
+    public void TheSurfacesSayTheSameWords()
+    {
+        var facts = new[]
+        {
+            Logged("Sales", "SECONDARY", TimeSpan.FromDays(2)) with { LastGoodCheckDbTime = Now.AddDays(-30), ErrorLogState = "failed", ErrorLogMessage = "timeout", ErrorLogSkippedArchives = "3", ErrorLogUnparsedLines = 2 },
+            Logged("Hr", "PRIMARY", TimeSpan.FromDays(1), errors: 3, options: "PHYSICAL_ONLY"),
+            Base("Wait", "SECONDARY") with { ErrorLogState = "read", ErrorLogBackfillComplete = false, ReplicaReadable = false },
+            Base("Plain"),
+        };
+        var reply = ToolReply(facts);
+        var file = Path.Combine(Path.GetTempPath(), "darling-8865-" + Guid.NewGuid().ToString("N") + ".json");
+        JsonElement web;
+        try
+        {
+            File.WriteAllText(file, reply.GetRawText());
+            web = WebTileTruthsTests.Run(file).GetProperty("protectionRead");
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+
+        var headers = web.GetProperty("headers").EnumerateArray().Select(h => h.GetString()!).ToArray();
+        var rows = Grid(web, headers).ToDictionary(r => r[0]);
+        int At(string header) => Array.IndexOf(headers, header);
+
+        var banded = facts.Select(f => (Fact: f, Band: DatabaseProtectionBands.Evaluate(f, Now, Limits))).ToList();
+        var viewer = ViewerDatabaseProtectionText.Rows(new ViewerDatabaseProtectionRead(
+            ViewerDatabaseProtectionRead.Overdue, null, Now, banded, DatabaseProtectionBands.Summarize(banded))).ToDictionary(r => r.Database);
+
+        Assert.Equal(4, rows.Count);
+        foreach (var (name, v) in viewer)
+        {
+            Assert.Equal(v.CheckDb, rows[name][At("Last good CHECKDB")]);
+            Assert.Equal(v.CheckDbSource, rows[name][At("CHECKDB source")]);
+            if (v.CheckDbOptions.Length > 0)
+            {
+                Assert.Equal(v.CheckDbOptions, rows[name][At("CHECKDB options")]);
+            }
+        }
+
+        Assert.Equal("2 days (ok)".Replace(" (ok)", ""), viewer["Sales"].CheckDb);
+        Assert.Equal("1 day (errors found, 3 errors) - overdue", viewer["Hr"].CheckDb);
+        Assert.Equal("pending", viewer["Wait"].CheckDb);
+        Assert.Equal(("Error log", "Error log", "Error log", "Boot page"), (viewer["Sales"].CheckDbSource, viewer["Hr"].CheckDbSource, viewer["Wait"].CheckDbSource, viewer["Plain"].CheckDbSource));
+        Assert.Equal("PHYSICAL_ONLY", viewer["Hr"].CheckDbOptions);
+
+        /* The tooltips: the pending sentence is the same string the Viewer's cell carries. */
+        var tooltips = web.GetProperty("tooltips").EnumerateArray().Select(t => t.GetString()!).ToArray();
+        Assert.Contains(viewer["Wait"].CheckDbNote, tooltips);
+        Assert.Contains("still being read", viewer["Wait"].CheckDbNote, StringComparison.Ordinal);
+        /* #8865 M2: a cell with nothing to say has no tooltip: null, because WPF draws an empty box for "". */
+        Assert.Null(viewer["Plain"].CheckDbNote);
+
+        /* The server-level sentence: failed with the message, a skipped archive and unparsed lines. */
+        var viewerNote = ViewerDatabaseProtectionText.ErrorLogNote(new ViewerDatabaseProtectionRead(ViewerDatabaseProtectionRead.Overdue, null, Now, banded, DatabaseProtectionBands.Summarize(banded)));
+        Assert.Equal("failed: timeout; skipped archives 3; 2 unparsed lines", viewerNote);
+        Assert.Equal(viewerNote, web.GetProperty("errorLog").GetString());
+
+        /* R12: a healthy read and an old capture have no tile on the web and no note on the Viewer. */
+        var healthy = ToolReply(Logged("Sales", "PRIMARY", TimeSpan.FromDays(1)));
+        var healthyFile = Path.Combine(Path.GetTempPath(), "darling-8865-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
+            File.WriteAllText(healthyFile, healthy.GetRawText());
+            Assert.Equal(JsonValueKind.Null, WebTileTruthsTests.Run(healthyFile).GetProperty("protectionRead").GetProperty("errorLog").ValueKind);
+        }
+        finally
+        {
+            File.Delete(healthyFile);
+        }
+    }
+
+    [Fact]
+    public void TheErrorLogNote_IsPresentForASkippedArchiveAndForUnparsedLines_EvenOnAHealthyRead()
+    {
+        static string? Note(DatabaseProtectionFact f)
+        {
+            var banded = new[] { (Fact: f, Band: DatabaseProtectionBands.Evaluate(f, Now, Limits)) }.ToList();
+            return ViewerDatabaseProtectionText.ErrorLogNote(new ViewerDatabaseProtectionRead(ViewerDatabaseProtectionRead.Ok, null, Now, banded, DatabaseProtectionBands.Summarize(banded)));
+        }
+
+        var healthy = Logged("a", "PRIMARY", TimeSpan.FromDays(1));
+        Assert.Null(Note(healthy));
+        Assert.Equal("skipped archives 2", Note(healthy with { ErrorLogSkippedArchives = "2" }));
+        Assert.Equal("1 unparsed line", Note(healthy with { ErrorLogUnparsedLines = 1 }));
+        Assert.Equal("failed: boom", Note(healthy with { ErrorLogState = "failed", ErrorLogMessage = "boom" }));
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("not_applicable", null)]
+    [InlineData("read", null)]
+    [InlineData("refused", "refused, grant VIEW SERVER STATE")]
+    public void TheErrorLogNote_IsAbsentWhenThereIsNothingToActOn_AndNamesTheGrantWhenRefused(string? state, string? expected)
+    {
+        var fact = Base("a") with { ErrorLogState = state, ErrorLogGrant = state == "refused" ? "VIEW SERVER STATE" : null };
+        var banded = new[] { (Fact: fact, Band: DatabaseProtectionBands.Evaluate(fact, Now, Limits)) }.ToList();
+        var read = new ViewerDatabaseProtectionRead(ViewerDatabaseProtectionRead.Ok, null, Now, banded, DatabaseProtectionBands.Summarize(banded));
+
+        Assert.Equal(expected, ViewerDatabaseProtectionText.ErrorLogNote(read));
     }
 }
 

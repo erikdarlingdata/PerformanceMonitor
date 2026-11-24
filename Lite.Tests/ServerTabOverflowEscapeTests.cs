@@ -30,7 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 /// until the next one. At 900x600 the filters toolbar overflows (Compare, Apply to All and Use by tag), so there is something to open.
 /// The tab's credential resolver reaches the real Credential Manager, so the class runs in that collection (#5785).
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabOverflowEscapeTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

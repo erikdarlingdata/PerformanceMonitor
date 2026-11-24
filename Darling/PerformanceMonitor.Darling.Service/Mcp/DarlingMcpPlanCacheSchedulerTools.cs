@@ -48,7 +48,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
     /// equal instead. Change one, change both.
     /// </summary>
     internal const string CpuSchedulerPressureDescription =
-        "Gets CPU scheduler pressure from the latest snapshot: runnable task queue depth, worker thread utilization, queued/blocked requests, the collector's pressure warning flags, and the banded pressure_level verdict with its recommendation. Shows whether the server has enough worker threads and if tasks are queuing for CPU time. LATEST IS A TIME: this is the newest scheduler snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end; the verdict is that instant's, so read age_seconds before reading pressure_level as current." + McpHelpers.UtcStampsDescription;
+        "Gets CPU scheduler pressure from the latest snapshot: runnable task queue depth, worker thread utilization, queued/blocked requests, the collector's pressure warning flags, and the banded pressure_level verdict with its recommendation. Shows whether the server has enough worker threads and if tasks are queuing for CPU time. Worker thread exhaustion is a task waiting for a worker: tasks_waiting_for_worker above 0. workers counts idle pooled workers and the workers of system tasks too, so workers can pass max_workers and worker_utilization_percent can pass 100 on an idle server. LATEST IS A TIME: this is the newest scheduler snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant it was collected and age_seconds its distance from the window's end; the verdict is that instant's, so read age_seconds before reading pressure_level as current." + McpHelpers.UtcStampsDescription;
 
     [ReadsLatestSnapshot(LatestSnapshotShape.SearchBound)]
     [McpServerTool(Name = "get_plan_cache_bloat"), Description("Gets plan cache composition showing single-use vs multi-use plans, with a bloat-level classification. High single-use plan counts indicate ad-hoc query bloat consuming buffer pool memory. Consider enabling 'optimize for ad hoc workloads'. bloat_level is decided by the compiled_* figures, which leave out parse trees and extended procedures: single_use_percent counts every cache entry, so it can read high on a cache that is NORMAL. LATEST IS A TIME: this is the newest plan-cache snapshot found within hours_back of as_of, not an aggregate over those hours - captured_at is the instant the snapshot was collected and age_seconds its distance from the window's end.")]
@@ -145,7 +145,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
                 ? Math.Round(item.TotalCurrentWorkersCount * 100.0 / item.MaxWorkersCount, 2)
                 : 0;
             var (pressureLevel, recommendation) = DarlingPlanCacheSchedulerReader.ClassifyCpuSchedulerPressure(
-                item.TotalRunnableTasksCount, item.TotalCurrentWorkersCount, item.MaxWorkersCount,
+                item.TotalRunnableTasksCount,
                 item.TotalQueuedRequestCount, item.WorkerThreadExhaustionWarning, item.RunnableTasksWarning,
                 item.QueuedRequestsWarning);
 
@@ -160,6 +160,7 @@ public sealed class DarlingMcpPlanCacheSchedulerTools
                 workers = item.TotalCurrentWorkersCount,
                 max_workers = item.MaxWorkersCount,
                 worker_utilization_percent = workerUtilizationPercent,
+                tasks_waiting_for_worker = item.TotalWorkQueueCount,
                 runnable_percent = item.RunnablePercent,
                 queued_requests = item.TotalQueuedRequestCount,
                 active_requests = item.TotalActiveRequestCount,

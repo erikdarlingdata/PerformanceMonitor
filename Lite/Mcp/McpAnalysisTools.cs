@@ -88,7 +88,8 @@ public sealed class McpAnalysisTools
                 return McpHelpers.Status(
                     "unavailable",
                     analysisService.WindowEmptyMessage +
-                    " Check get_collection_health to see when each collector last succeeded." +
+                    /* #8910: a window retention removed has nothing for collection health to say. */
+                    WindowEmptyText.HealthPointer(analysisService.WindowEmptyRemovedByRetention) +
                     (unobservedCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {unobservedCaveat}"),
                     unobservedCollection.Attach(new
                     {
@@ -294,7 +295,7 @@ public sealed class McpAnalysisTools
         }
     }
 
-    [McpServerTool(Name = "get_analysis_facts"), Description("Raw scored facts from the inference engine's pipeline, WITHOUT graph traversal: facts, not findings. Includes ANOMALY_* facts with gate metadata even when they fired but stayed under the finding floor, so a fact here did not necessarily produce a finding. baseline_confidence (a fact's baseline trustworthiness) differs from a finding's confidence in analyze_server. collection_caveats is absent on a clean read; when present, the families it names were NOT read, so their absence is not evidence they were quiet. ranked is absent unless 2+ objects ride. <<GUIDE>> Exposes the raw scored facts from the inference engine's collect+score pipeline WITHOUT graph traversal. Shows every observation the engine sees: wait stats as fraction-of-period, blocking rates, config settings, memory stats, plus base severity, final severity after amplifiers, and which amplifiers matched. The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's. For ANOMALY_* facts the metadata carries baseline_confidence: the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server. Use this to understand exactly what the engine is working with, or to investigate facts that didn't reach the severity threshold for findings. When one or more fact families could not be read (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the caveat says so; the field is absent on a clean read, and a fact set missing those families is not evidence that they were quiet. A fact whose read ranked several objects carries ranked: the objects it ranks, worst first, as [{object_name, database_name, value, figures}] with the family's own un-prefixed metadata names as the figure keys, entry [0] being the fact's own subject (same object_name, and the same value except on QUERY_SPILLS, where it is that query's own spilled pages and the fact value is the window total). Absent unless two or more objects ride, and capped at three - the per-object lists are the get_pg_* reads. The PLAN_REGRESSION fact leaves out a regression whose statement is OPTION (RECOMPILE), whose newer plan returns 10x the rows per call with the cost gone per row, or whose two plans were compiled for different parameter values over unchanged statistics, and counts them in cross_input_excluded_count. Its worst_input_basis says how the worst kept offender's two plans were compared: 1 both plans were compiled for the same parameter values, 2 the compiled values differ and the statistics were updated between the compiles (a possible statistics-update flip), 0 not checked (a plan or the statement text was missing or withheld). source accepts: anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_bloat, pg_blocking, pg_buffer, pg_config, pg_cpu, pg_database, pg_growth, pg_io, pg_kernel, pg_memory, pg_plans, pg_posture, pg_queries, pg_replication, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits; omit it for all. total_facts counts every scored fact before the source and min_severity filters; shown counts the facts that passed them; filters echoes the two values applied. QUERY_SPILLS and PARAMETER_SENSITIVITY facts also carry object_name even for one query: the worst query as database/query_hash, or database/query_hash/query_plan_hash.")]
+    [McpServerTool(Name = "get_analysis_facts"), Description("Raw scored facts from the inference engine's pipeline, WITHOUT graph traversal: facts, not findings. Includes ANOMALY_* facts with gate metadata even when they fired but stayed under the finding floor, so a fact here did not necessarily produce a finding. baseline_confidence (a fact's baseline trustworthiness) differs from a finding's confidence in analyze_server. collection_caveats is absent on a clean read; when present, the families it names were NOT read, so their absence is not evidence they were quiet. ranked is absent unless 2+ objects ride. <<GUIDE>> Exposes the raw scored facts from the inference engine's collect+score pipeline WITHOUT graph traversal. Shows every observation the engine sees: wait stats as fraction-of-period, blocking rates, config settings, memory stats, plus base severity, final severity after amplifiers, and which amplifiers matched. The anomaly detector runs on this read too, so the ANOMALY_* facts the full pass would score are here with the gate metadata the pass scored them on (deviation_sigma against fire_threshold, baseline_samples, baseline_tier, baseline_low_quality), including the ones that fired but stayed under the finding floor; the cost is the detector's baseline reads on top of the collector's. For ANOMALY_* facts the metadata carries baseline_confidence: the baseline's own trustworthiness (tier x sample density), which the scorer multiplies into that fact's severity; it is a different quantity from a finding's confidence in analyze_server. Use this to understand exactly what the engine is working with, or to investigate facts that didn't reach the severity threshold for findings. When one or more fact families could not be read (a timed-out, cancelled or failed collector read), the payload carries collection_caveats (families_failed, families_total, entries[{family, read, outcome, message}]) and the caveat says so; the field is absent on a clean read, and a fact set missing those families is not evidence that they were quiet. A fact whose read ranked several objects carries ranked: the objects it ranks, worst first, as [{object_name, database_name, value, figures}] with the family's own un-prefixed metadata names as the figure keys, entry [0] being the fact's own subject (same object_name, and the same value except on QUERY_SPILLS, where it is that query's own spilled pages and the fact value is the window total). Absent unless two or more objects ride, and capped at three - the per-object lists are the get_pg_* reads. The PLAN_REGRESSION fact leaves out a regression whose statement is OPTION (RECOMPILE) or whose newer plan returns 10x the rows per call with the cost gone per row, and counts them in cross_input_excluded_count. It also leaves out one whose two plans were compiled for different parameter values over unchanged statistics, but this call compares plans only for pairs an earlier background pass already checked plus at most 3 plan fetches made in the call (3 s in all, and the answers are kept for the next call), so the other pairs stay in the fact and count in inputs_unverified_count. worst_input_basis says how the worst kept offender's two plans were compared: 1 both plans were compiled for the same parameter values, 2 the compiled values differ and the statistics were updated between the compiles (a possible statistics-update flip), 0 not checked (a plan or the statement text was missing or withheld, or the pair was not reached on this call). source accepts: anomaly, bad_actor, blocking, config, coverage, cpu, database_config, disk, io, jobs, memory, pg_bloat, pg_blocking, pg_buffer, pg_config, pg_cpu, pg_database, pg_growth, pg_io, pg_kernel, pg_memory, pg_plans, pg_posture, pg_queries, pg_replication, pg_sessions, pg_temp, pg_vacuum, pg_waits, pg_write, queries, sessions, tempdb, waits; omit it for all. total_facts counts every scored fact before the source and min_severity filters; shown counts the facts that passed them; filters echoes the two values applied. QUERY_SPILLS and PARAMETER_SENSITIVITY facts also carry object_name even for one query: the worst query as database/query_hash, or database/query_hash/query_plan_hash.")]
     public static async Task<string> GetAnalysisFacts(
         AnalysisService analysisService,
         ServerManager serverManager,
@@ -306,7 +307,16 @@ public sealed class McpAnalysisTools
         CancellationToken cancellationToken = default)
     {
         var answer = await GetAnalysisFactsCore(analysisService, serverManager, server_name, hours_back, source, min_severity, as_of, cancellationToken);
-        return await WithRunWindowNoticeAsync(answer, analysisService, serverManager, server_name, hours_back, as_of);
+        var withNotice = await WithRunWindowNoticeAsync(answer, analysisService, serverManager, server_name, hours_back, as_of);
+
+        /* #9195: a default 4 h window on a busy server answered 33.1 to 33.5 KB, a few hundred bytes past the response budget every other
+           Lite read honours (#9140), with no key to say so. The cut comes after the window notice so the notice's keys count against the budget.
+           The facts are already worst first (severity), so the cut drops the mildest, and budget_truncated and budget_note say so. total_facts,
+           shown and coverage count what was scored, not what fit. A status answer with no facts array passes through as it came. */
+        return McpResponseBudget.CapArrayInReply(
+            withNotice, "facts", "highest severity first", "facts",
+            _ => "Narrow the read with source or min_severity, or use a shorter hours_back, to see the rest. total_facts and shown count every fact that was scored.",
+            "budget_truncated", "budget_note");
     }
 
     /// <summary>
@@ -366,6 +376,25 @@ public sealed class McpAnalysisTools
 
         try
         {
+            /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and an unavailable answer for it
+               must not blame collection. Read only for the two unavailable answers below; null when the window sits inside the span. */
+            async Task<RetentionBoundary?> RetentionRemovedAsync()
+            {
+                var boundary = await analysisService.ReadRetentionBoundaryAsync(resolved.ServerId, cancellationToken);
+                return boundary is not null && boundary.RemovedWindow(windowEnd) ? boundary : null;
+            }
+
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention, and no fact
+               statement can find anything in it (the table the facts are windowed on starts there). Say so from the one MIN and read
+               no fact. A window that straddles the oldest row reads the facts as before. */
+            if (anchor is not null && await RetentionRemovedAsync() is { } removedBeforeRead)
+            {
+                return McpHelpers.Status(
+                    "unavailable",
+                    WindowEmptyText.RemovedFactsMessage(resolved.DisplayName, removedBeforeRead),
+                    new CollectionCaveatState([], 0).Attach(new { secondary_replica_note = (string?)null, coverage = (object?)null }, McpHelpers.JsonOptions));
+            }
+
             var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken);
 
@@ -385,7 +414,10 @@ public sealed class McpAnalysisTools
                    not retrievable now rather than an all-clear (mirrors get_perfmon_trend's empty case).
                    #3691: a pass in which every family FAILED lands here too, and used to be told apart from
                    "no data" only by the service log; the caveat now says which families were not read. */
-                const string noFacts = "No facts collected. The collector may not have run yet, or no data exists in the requested time range.";
+                var removedWindow = await RetentionRemovedAsync();
+                var noFacts = removedWindow is null
+                    ? "No facts collected. The collector may not have run yet, or no data exists in the requested time range."
+                    : $"No facts were collected in the requested window. {removedWindow.Describe()} This is NOT an all-clear.";
                 var noFactsMessage = secondaryReplicaNote is null ? noFacts : $"{noFacts} {secondaryReplicaNote}";
                 return McpHelpers.Status(
                     "unavailable",
@@ -401,11 +433,14 @@ public sealed class McpAnalysisTools
                    "wait stats as fraction-of-period, blocking rates"; none of those can be shown, so
                    this is the unavailable envelope, with the count of what COULD be read so a caller
                    after configuration alone knows audit_config still has it. */
+                var removedWindow = await RetentionRemovedAsync();
                 return McpHelpers.Status(
                     "unavailable",
-                    $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
-                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those. " +
-                    "Check get_collection_health to see when each collector last succeeded." +
+                    (removedWindow is null
+                        ? $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. "
+                        : $"{removedWindow.Describe()} The requested window for {resolved.DisplayName} is gone from the store, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. ") +
+                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those." +
+                    WindowEmptyText.HealthPointer(removedWindow is not null) +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
                     collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions));
             }
@@ -514,7 +549,7 @@ public sealed class McpAnalysisTools
                 resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
                 comparisonStart, comparisonEnd,
-                cancellationToken);
+                cancellationToken, interactive: true);
 
             /* #5558: per window, because each window uses the role at its own end and the two can straddle a
                failover. Built from the sets the windows' contexts filtered with (returned beside the coverages), not
@@ -637,6 +672,9 @@ public sealed class McpAnalysisTools
                shared response target. Rows are already worse first, then better, then stable, so what is left off the end is
                the stable tail; summary and families above still count every fact. */
             var factRows = comparison.Rows.Select(r => r.ToPayload()).ToList();
+            string? CutNote(int factCount) => factCount < factRows.Count
+                ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
+                : null;
             return McpResponseBudget.FitPrefix(factRows.Count, factCount => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -671,9 +709,10 @@ public sealed class McpAnalysisTools
                 truncated = factCount < factRows.Count,
                 facts_returned = factCount,
                 facts_total = factRows.Count,
-                size_note = factCount < factRows.Count
-                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
-                    : null,
+                size_note = CutNote(factCount),
+                /* #9195: the budget keys every other read carries (#9140), the same sentence as size_note, which stays for readers of the older key. */
+                budget_truncated = factCount < factRows.Count,
+                budget_note = CutNote(factCount),
                 facts = factRows.Take(factCount)
             }, McpHelpers.JsonOptions)).Json;
         }
@@ -1530,6 +1569,11 @@ internal static class ToolRecommendations
             new("audit_config", "Check server-level configuration"),
             new("get_blocked_process_reports", "Check if RCSI-off databases have blocking")
         ],
+        ["TEMPDB_FILE_SETUP"] =
+        [
+            new("get_database_sizes", "See tempdb's files with their sizes and growth settings"),
+            new("get_wait_stats", "Check for PAGELATCH waits on tempdb allocation pages")
+        ],
         ["FILE_AUTOGROWTH_PERCENT"] =
         [
             new("get_database_sizes", "See per-file sizes and autogrowth settings"),
@@ -1664,14 +1708,14 @@ internal static class ToolRecommendations
         ],
         ["PAGELATCH_EX"] =
         [
-            new("get_waiting_tasks", "See the page and object the latch waits sit on"),
+            new("get_active_queries", "See the page and the indexes the latch waits sit on", new() { ["wait_type"] = "PAGELATCH_EX" }),
             new("get_wait_trend", "Track the PAGELATCH_EX wait over time", new() { ["wait_type"] = "PAGELATCH_EX" }),
             new("get_top_queries_by_cpu", "Find the queries hammering the hot page")
         ],
         ["PAGELATCH_UP"] =
         [
             new("get_tempdb_trend", "Check tempdb allocation pressure behind the UP-mode waits"),
-            new("get_waiting_tasks", "See the allocation page the waits sit on"),
+            new("get_active_queries", "See the allocation page the waits sit on", new() { ["wait_type"] = "PAGELATCH_UP" }),
             new("get_wait_trend", "Track the PAGELATCH_UP wait over time", new() { ["wait_type"] = "PAGELATCH_UP" })
         ],
         ["MISSING_INDEX"] =

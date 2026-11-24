@@ -62,6 +62,16 @@ out.noOldest = text(windowFloorStrip({ truncated: true, order: "collection_time_
 out.serverNoteWins = text(windowFloorStrip({ ...active, ...serverCapped }, { viz: "table" }));
 out.ownNote = text(windowFloorStrip(active, { viz: "table", noteKey: "truncation_note" }));
 
+/* #9116: the heat map's cut-window note says where its data starts, in the page's words; a descriptor without `floorSpan` draws the note alone. */
+const heatNote = "The window reaches further back than this server's raw query_stats retains (or this server has been monitored for less time than that), so the older part of it was not read.";
+const heatCut = { window_truncated: true, effective_start: "2026-11-12T00:00:00.0000000", window_end: "2026-11-16T00:00:00.0000000Z", truncation_note: heatNote };
+const heatDesc = { viz: "table", floorSpan: { subject: "The heat map", endKey: "window_end" } };
+out.heatmapFloor = text(windowFloorStrip(heatCut, heatDesc));
+out.heatmapFloorShortSpan = text(windowFloorStrip({ ...heatCut, effective_start: "2026-11-15T18:00:00.0000000" }, heatDesc));
+out.heatmapNoSubject = text(windowFloorStrip(heatCut, { viz: "table" }));
+out.heatmapNoEnd = text(windowFloorStrip({ ...heatCut, window_end: undefined }, heatDesc));
+out.heatmapNotCut = text(windowFloorStrip({ ...heatCut, window_truncated: false }, heatDesc));
+
 /* #6654: the left-out note, drawn on an empty answer only for a grid that names it */
 const leftOutNote = "These databases were left out of this read because the server's newest database snapshot no longer lists them.";
 out.leftOutNamed = text(leftOutStrip({ databases_left_out_note: leftOutNote }, { viz: "table", noteKey: "databases_left_out_note" }));
@@ -126,6 +136,7 @@ const alertBody = [
   "  Incident Since: 2026-10-12 23:13:00Z",
   "  Blocked Query: SELECT 1 WHERE d = '2026-01-01 00:00:00Z'",
   "  Failed At: 2026-10-12 07:00:00Z",
+  "  Run Started: 2026-10-12 06:30:00Z",
   "  Started: 2026-09-27 21:32:43 (server clock, UTC offset not collected)",
   "  Window: 2026-10-12 07:00:00Z → 2026-10-12 08:00:00Z",
   "",
@@ -148,7 +159,7 @@ out.h2 = {
   bodyNoSample: localizeAlertDetail(alertBody, null),
   bodyOtherClock: localizeAlertDetail(alertBody, { ...sample, instant_utc: "2026-10-12T23:12:46Z" }),
   stripUtc: noticeStrip("until 2026-10-11 12:48:52Z").textContent,
-  here: { inc: here("2026-10-12T23:13:00Z"), fail: here("2026-10-12T07:00:00Z"), end: here("2026-10-12T08:00:00Z"), samp: here("2026-10-12T23:12:45Z") },
+  here: { inc: here("2026-10-12T23:13:00Z"), fail: here("2026-10-12T07:00:00Z"), runStart: here("2026-10-12T06:30:00Z"), end: here("2026-10-12T08:00:00Z"), samp: here("2026-10-12T23:12:45Z") },
   bodyRaw: alertBody,
   auditBody: localizeAlertDetail(auditBody, null),
   /* a later clause that a full plainText pass would rewrite: the audit's match must stop at the end of its own sentence */

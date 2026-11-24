@@ -31,7 +31,8 @@ namespace PerformanceMonitorLite.Tests;
 /// bound, and the realized cells are measured (<see cref="GridColumnLayoutProbe"/>). The Viewer's twin is
 /// <c>ViewerServerTabGridColumnLayoutTests</c>.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabGridColumnLayoutTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

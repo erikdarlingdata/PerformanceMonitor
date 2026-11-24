@@ -929,7 +929,7 @@ public sealed class DarlingManagedRolesTests
         Assert.Contains("ALTER ROLE viewer SET log_min_duration_statement = '5000ms';", byo, StringComparison.Ordinal);
         Assert.Contains("ALTER ROLE viewer SET log_parameter_max_length = 0;", byo, StringComparison.Ordinal);
 
-        var utilityOff = byo.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
+        var utilityOff = byo.IndexOf("set_config('pg_stat_statements.track_utility', 'off', false)", StringComparison.Ordinal);
         Assert.True(utilityOff >= 0, "provision-roles.sql no longer turns utility tracking off for its own session");
         Assert.True(utilityOff < byo.IndexOf("ALTER ROLE admin  LOGIN PASSWORD", StringComparison.Ordinal),
             "provision-roles.sql sends a password before it turns utility tracking off");

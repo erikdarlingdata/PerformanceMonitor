@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Notifications;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
@@ -53,6 +54,9 @@ public partial class NotificationRouteEditDialog : Window
         Func<int, Task<LiteRouteSigning?>>? signingState = null)
     {
         InitializeComponent();
+        /* The form scrolls above a pinned Save and Cancel when it is taller than the work area of the monitor it is on (#8804). */
+        SourceInitialized += (_, _) => WindowWorkArea.Clamp(this);
+        SizeChanged += (_, _) => WindowWorkArea.Clamp(this);
         _save = save;
         _generateKey = generateKey;
         _removeKey = removeKey;

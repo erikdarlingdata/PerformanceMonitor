@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace PerformanceMonitorLite.Services;
@@ -86,7 +87,7 @@ internal static class DataRootMigration
     private static readonly string[] s_directories = { "config", "archive", "logs", "monitor.duckdb.tmp" };
 
     /// <summary>Files Lite owns directly under its data root.</summary>
-    private static readonly string[] s_files = { "monitor.duckdb", "monitor.duckdb.wal", "alert_state.json" };
+    private static readonly string[] s_files = { "monitor.duckdb", "monitor.duckdb.wal", "alert_state.json", "store-health-history.json" };
 
     /// <summary>
     /// The two artifacts that make a root "the live install": user settings and the store. If BOTH are
@@ -95,6 +96,45 @@ internal static class DataRootMigration
     private static bool HasCompleteStore(string root) =>
         File.Exists(Path.Combine(root, "config", "settings.json"))
         && File.Exists(Path.Combine(root, "monitor.duckdb"));
+
+    /// <summary>
+    /// The <c>logs</c> folder a start that fails before <see cref="Migrate"/> has run (the single-instance check, #9197) writes
+    /// to. It must be a folder the next good start's <see cref="Migrate"/> will not have to rescue. A <c>logs</c> folder
+    /// with a file in it, created under the new root while a legacy root still holds data, would collide with the legacy
+    /// <c>logs</c> folder and send it to <see cref="RescuedDirName"/>. So when the legacy root has something to move, the new
+    /// root is not yet complete and the new root has no logs of its own, the failure goes in the legacy <c>logs</c>, which
+    /// <see cref="Migrate"/> then moves like any other. In every other case the new root is the one in use and its
+    /// <c>logs</c> is where the line belongs: a complete new root rescues the legacy items either way, and a legacy root with
+    /// nothing to move is never migrated.
+    /// </summary>
+    internal static string LogDirectoryForStart(string legacyRoot, string newRoot)
+    {
+        var newLogs = Path.Combine(newRoot, "logs");
+        try
+        {
+            if (Directory.Exists(legacyRoot)
+                && !HasCompleteStore(newRoot)
+                && !(Directory.Exists(newLogs) && Directory.EnumerateFileSystemEntries(newLogs).Any())
+                && HasItemsToMove(legacyRoot)
+                && !string.Equals(
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(legacyRoot)),
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(newRoot)),
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                return Path.Combine(legacyRoot, "logs");
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            /* An unreadable root: fall through to the new root, which is where the start proceeds. */
+        }
+
+        return newLogs;
+    }
+
+    private static bool HasItemsToMove(string legacyRoot) =>
+        s_directories.Any(name => Directory.Exists(Path.Combine(legacyRoot, name)))
+        || s_files.Any(name => File.Exists(Path.Combine(legacyRoot, name)));
 
     /// <summary>
     /// Moves everything Lite owns from <paramref name="legacyRoot"/> to <paramref name="newRoot"/>, then

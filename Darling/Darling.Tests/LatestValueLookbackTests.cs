@@ -743,7 +743,9 @@ CROSS JOIN generate_series(1, 3) AS f", connection))
 
             if (timescaleEnabled)
             {
-                var shippedChunks = PlanChunkScans.Count(shipped);
+                /* The shipped read names the hypertable four times (three snapshot times, then their rows), so the same chunk
+                   is planned more than once: distinct chunks, not scan nodes. */
+                var shippedChunks = PlanChunkScans.DistinctChunkCount(shipped);
                 var oracleChunks = PlanChunkScans.Count(oracle);
                 Assert.True(oracleChunks >= 11,
                     $"the pre-#3896 shape should plan every seeded chunk (eleven days of data), planned {oracleChunks}:\n{oracle}");

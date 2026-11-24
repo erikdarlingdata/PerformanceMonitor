@@ -856,6 +856,26 @@ GROUP BY collector_name";
     /// </summary>
     internal static Func<int, string, int?>? DefaultCollectorFrequencyMinutes { get; set; }
 
+    private Func<int, string, bool?>? _collectorEnabled;
+
+    /// <summary>
+    /// #9139: whether one collector is switched on for a server (<c>ScheduleManager.IsCollectorEnabledForStorageServer</c>),
+    /// keyed by the storage server id, or null for an unknown server or collector. Null means the schedule cannot say, which
+    /// every reader takes as enabled. Laid out like <see cref="CollectorFrequencyMinutes"/>: an instance's own value wins,
+    /// else <see cref="DefaultCollectorEnabled"/>.
+    /// </summary>
+    internal Func<int, string, bool?>? CollectorEnabled
+    {
+        get => _collectorEnabled ?? DefaultCollectorEnabled;
+        set => _collectorEnabled = value;
+    }
+
+    /// <summary>
+    /// #9139: the schedule store's enabled answer for every <see cref="LocalDataService"/> in the process, set once at startup
+    /// beside <see cref="DefaultCollectorFrequencyMinutes"/>. Process-wide, so a test that sets it runs alone.
+    /// </summary>
+    internal static Func<int, string, bool?>? DefaultCollectorEnabled { get; set; }
+
     /// <summary>
     /// #4999: stamps each catalog collector's row with the interval it is scheduled at on
     /// <paramref name="serverId"/>: the schedule store's answer through
@@ -982,7 +1002,7 @@ SELECT
     read_source
 FROM v_collection_log
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   ($5 IS NULL OR collector_name = $5)
 AND   ($6 IS NULL OR duration_ms >= $6)
@@ -1058,7 +1078,7 @@ SELECT
     COUNT(*) AS run_count
 FROM v_collection_log
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   status = 'SUCCESS'
 AND   duration_ms IS NOT NULL
@@ -1152,7 +1172,7 @@ SELECT
     read_source
 FROM v_collection_log
 WHERE server_id IN ({string.Join(",", serverIds)})
-AND   collection_time >= $1
+AND   collection_time > $1
 AND   collection_time <= $2
 AND   ($4 IS NULL OR collector_name = $4)
 AND   ($5 IS NULL OR duration_ms >= $5)
@@ -1216,7 +1236,7 @@ SELECT
 FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = $2
-AND   collection_time >= $3
+AND   collection_time > $3
 AND   collection_time <= $4
 ORDER BY collection_time DESC";
 
@@ -1691,6 +1711,14 @@ public class CollectorHealthRow
     internal int? EffectiveFrequencyMinutes { get; set; }
 
     /// <summary>
+    /// #9101: the success count the ladder reads (<see cref="CollectorHealthClassifier.SuccessCountForLadder"/>):
+    /// zero when the window's successes all stored nothing and every run since is EXTENSION_MISSING, so the row
+    /// bands EXTENSION_MISSING, and <see cref="SuccessCount"/> otherwise.
+    /// </summary>
+    internal long LadderSuccessCount => CollectorHealthClassifier.SuccessCountForLadder(
+        TotalRuns, SuccessCount, ExtensionMissingCount, LastRunTime, LastNonSkipTime, LastProductiveTime);
+
+    /// <summary>
     /// The row's band: the shared ladder's verdict, with #3819's regression FLOOR applied over it —
     /// WARNING where the ladder said HEALTHY and this collector stopped producing, the ladder's own
     /// answer everywhere else.
@@ -1705,7 +1733,7 @@ public class CollectorHealthRow
     /// </summary>
     public string HealthStatus => CollectorHealthClassifier.BandWithRegression(
         CollectorHealthClassifier.Classify(
-            TotalRuns, SuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
+            TotalRuns, LadderSuccessCount, ErrorCount, PermissionDeniedCount, ExtensionMissingCount, AbandonedCount,
             HoursSinceLastSuccess, HoursSinceLastRun, FrequencyMinutes, LatestRunNote, TrailingSuccessRuns),
         /* #3885: both regression classes reach the floor. A produced-then-stopped collector is the one
            that most needs it — its successes are FRESH, so the staleness ladder has nothing to say and

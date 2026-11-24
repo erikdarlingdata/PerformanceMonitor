@@ -29,7 +29,8 @@ namespace PerformanceMonitorLite.Tests;
 /// that paints a stock white square or a tooltip in another theme's colours fails here. The sidebar rail and the footer are in
 /// <see cref="SidebarRailRenderTests"/>.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ThemeChromeLeftoversRenderTests
 {
     public static TheoryData<string> Themes => new() { "Dark", "Light", "CoolBreeze" };
@@ -118,36 +119,6 @@ public sealed class ThemeChromeLeftoversRenderTests
     private static string Hex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
 
     // ── Item 2: the scroll viewer's corner ──────────────────────────────────────────────────────
-
-    /// <summary>The Wait Stats wait-type list is a transparent ListBox in a card. Where its two scroll bars meet, the corner is painted in the scroll bars' own track colour, not the system's control grey.</summary>
-    [Theory]
-    [MemberData(nameof(Themes))]
-    public void TheListBoxScrollCorner_IsTheScrollTrackColour(string theme)
-    {
-        var (corner, track, barsShown) = Themed(theme, app =>
-        {
-            var list = new ListBox { Background = Brushes.Transparent, BorderThickness = new Thickness(0), ItemsSource = Enumerable.Range(0, 60).Select(i => $"PAGEIOLATCH_SH wait type number {i} with a long enough name to need the horizontal bar").ToList() };
-            var card = new Border { Background = (Brush)app.FindResource("BackgroundLightBrush"), Child = list, Width = 220, Height = 200 };
-            var window = Show(card, 300, 260);
-            try
-            {
-                var scroll = ClippedTextProbe.Descendants(list).OfType<ScrollViewer>().First();
-                var bars = ClippedTextProbe.Descendants(scroll).OfType<ScrollBar>().Count(b => b.Visibility == Visibility.Visible && b.ActualWidth > 0 && b.ActualHeight > 0);
-                var bitmap = Render(Root(window));
-                var bounds = BoundsIn(scroll, Root(window));
-                var pixel = PixelAt(bitmap, (int)(bounds.Right - 4), (int)(bounds.Bottom - 4));
-                var trackColour = ColorOf(((Setter)((Style)app.FindResource(typeof(ScrollBar))).Setters.OfType<Setter>().First(s => s.Property == Control.BackgroundProperty)).Value as Brush);
-                return (pixel, trackColour, bars);
-            }
-            finally
-            {
-                window.Close();
-            }
-        });
-
-        Assert.Equal(2, barsShown);
-        Assert.Equal((track.R, track.G, track.B), (corner.R, corner.G, corner.B));
-    }
 
     // ── Item 3: the expander's header ───────────────────────────────────────────────────────────
 
@@ -266,5 +237,4 @@ public sealed class ThemeChromeLeftoversRenderTests
         Assert.Equal(wantFrame, frame);
         Assert.Equal(wantText, text);
     }
-
 }

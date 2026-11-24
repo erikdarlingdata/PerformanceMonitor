@@ -37,73 +37,198 @@ public sealed partial class DarlingCollectorRunner
     /// the whole point of keeping this state off the payload. Best-effort: a failed write leaves the older
     /// value, and the next cycle re-derives from it or falls back.
     /// </summary>
-    public async Task SaveCollectorStateAsync(
+    public Task SaveCollectorStateAsync(
         int serverId, string collectorName, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
     {
         if (state.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return SaveCollectorStateRowsAsync(
+            serverId,
+            state.Select(entry => (collectorName, entry.Key, entry.Value)).ToList(),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// #8795: upserts every <c>(collector, key, value)</c> row of one cycle as ONE statement, so the cycle pays one commit and
+    /// one WAL flush however many keys it saved. A fan-out collector that tracks a position per database saved one key per
+    /// statement before, and each statement was its own commit. The rows may name more than one owner, because one
+    /// run can land state under two collector names (Query Store's open-interval stamps live under the host's own owner).
+    /// The conflict handling and the <c>updated_at</c> stamp are the per-key statement's, and one stamp covers the whole call.
+    /// Best-effort like the single-owner overload: a failed write leaves the older values, and the next cycle re-derives
+    /// from them or falls back. The rows of one call must not repeat a <c>(collector, key)</c> pair, which both callers
+    /// guarantee by building them from dictionaries with disjoint owners.
+    /// </summary>
+    public async Task SaveCollectorStateRowsAsync(
+        int serverId, IReadOnlyList<(string CollectorName, string Key, string Value)> rows, CancellationToken cancellationToken)
+    {
+        if (rows.Count == 0)
         {
             return;
         }
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            foreach (var entry in state)
-            {
-                /* One statement per key: Npgsql's positional parameters cannot span a multi-statement
-                   batch (they bind to the FIRST statement and the rest fail silently), and this loop
-                   runs over a single declared key today. */
-                using var command = new NpgsqlCommand(@"
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
+
+            /* One statement over three parallel arrays. Npgsql's positional parameters cannot span a multi-statement
+               batch (they bind to the FIRST statement and the rest fail silently), and a set-based insert needs none. */
+            using var command = new NpgsqlCommand(@"
 INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at)
-VALUES ($1, $2, $3, $4, $5)
+SELECT $1, u.collector_name, u.state_key, u.state_value, $5
+FROM unnest($2::text[], $3::text[], $4::text[]) AS u(collector_name, state_key, state_value)
 ON CONFLICT (server_id, collector_name, state_key)
 DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at", connection);
-                command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
-                command.Parameters.AddWithValue(serverId);
-                command.Parameters.AddWithValue(collectorName);
-                command.Parameters.AddWithValue(entry.Key);
-                command.Parameters.AddWithValue(entry.Value);
-                /* Naive UTC, Kind-Unspecified — the product-wide PG timestamp discipline
-                   (PgAlertStateStore.NaiveUtcNow, DarlingObservability, the storedCollectionTime below).
-                   updated_at is `timestamp` WITHOUT time zone, and binding a Kind=Utc DateTime does not
-                   fail: Npgsql infers `timestamptz` from the Kind, PostgreSQL casts it into the column,
-                   and the cast renders it in the SERVER's zone — so the row lands silently offset by the
-                   server's UTC offset (measured at exactly 4h on an America/New_York store) while every
-                   other timestamp in the store is UTC. Nothing throws and nothing logs; the column simply
-                   disagrees with the rest of the store. */
-                command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified));
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = rows.Select(row => row.CollectorName).ToArray() });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = rows.Select(row => row.Key).ToArray() });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = rows.Select(row => row.Value).ToArray() });
+            /* Naive UTC, Kind-Unspecified — the product-wide PG timestamp discipline
+               (PgAlertStateStore.NaiveUtcNow, DarlingObservability, the storedCollectionTime below).
+               updated_at is `timestamp` WITHOUT time zone, and binding a Kind=Utc DateTime does not
+               fail: Npgsql infers `timestamptz` from the Kind, PostgreSQL casts it into the column,
+               and the cast renders it in the SERVER's zone — so the row lands silently offset by the
+               server's UTC offset (measured at exactly 4h on an America/New_York store) while every
+               other timestamp in the store is UTC. Nothing throws and nothing logs; the column simply
+               disagrees with the rest of the store. */
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Timestamp,
+                Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+            });
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "Storing collector state for {Collector} failed; next cycle uses the older value", collectorName);
+            _logger?.LogDebug(ex, "Storing collector state for server {ServerId} failed; next cycle uses the older value", serverId);
         }
     }
 
     /// <summary>
     /// Records a clamp-opened Query Store hole for the #2022 backfill worker, under the WORKER's
     /// collector_state name (not the definition's — query_store still declares no state keys).
-    /// Merged wider with any pending hole so a repeat outage cannot overwrite an unserviced one.
+    /// Added to the database's pending holes and merged only with one it overlaps, so a repeat outage cannot
+    /// overwrite an unserviced one and cannot send the dig back over a range it already filled (#9352).
     /// Best-effort: a lost record means a lost backfill opportunity, never wrong data — the live
     /// path's own WARNING already disclosed the hole.
     /// </summary>
-    private async Task RecordQueryStoreBackfillHoleAsync(
+    internal async Task RecordQueryStoreBackfillHoleAsync(
         int serverId, string databaseName, DateTime fromUtc, DateTime toUtc, CancellationToken cancellationToken)
     {
         try
         {
+            /* #9359: read, merge and save in ONE transaction, reading the key FOR UPDATE. The backfill slice locks the same row
+               while it retires a dug range, so the two serialize: a plain read here saw the value from before the slice, and the
+               save that followed put the serviced range back for the backfill to walk (and copy) again. With no row yet there is
+               nothing to lock and nothing for a slice to have changed, so the upsert alone is right. */
             var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
-            var existing = await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken);
-            var merged = QueryStoreBackfillState.MergeHole(existing.TryGetValue(key, out var encoded) ? encoded : null, fromUtc, toUtc);
-            await SaveCollectorStateAsync(
-                serverId, QueryStoreBackfillState.StateCollectorName,
-                new Dictionary<string, string>(StringComparer.Ordinal) { [key] = QueryStoreBackfillState.EncodeHole(merged.FromUtc, merged.ToUtc) },
-                cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            string? encoded;
+            using (var read = new NpgsqlCommand(
+                "SELECT state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3 FOR UPDATE", connection, transaction))
+            {
+                read.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                read.Parameters.AddWithValue(serverId);
+                read.Parameters.AddWithValue(QueryStoreBackfillState.StateCollectorName);
+                read.Parameters.AddWithValue(key);
+                encoded = await read.ExecuteScalarAsync(cancellationToken) as string;
+            }
+
+            var added = QueryStoreBackfillState.AddHole(encoded, fromUtc, toUtc);
+            using (var save = new NpgsqlCommand(
+                "INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES ($1, $2, $3, $4, $5) "
+                + "ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at",
+                connection, transaction))
+            {
+                save.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                save.Parameters.AddWithValue(serverId);
+                save.Parameters.AddWithValue(QueryStoreBackfillState.StateCollectorName);
+                save.Parameters.AddWithValue(key);
+                save.Parameters.AddWithValue(added);
+                /* Naive UTC, Kind-Unspecified: updated_at is timestamp WITHOUT time zone (see SaveCollectorStateRowsAsync). */
+                save.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified) });
+                await save.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
         }
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Recording query_store backfill hole for [{Database}] failed; the live WARNING remains the disclosure", databaseName);
+        }
+    }
+
+    /// <summary>Loads the clamp entries a previous process stored for the server (#9359), once per server, before the cycle's
+    /// first clamp decision. A failed read returns no rows, which is the memory-only behaviour: one possible re-walk after a restart.</summary>
+    private async Task SeedQueryStoreClampReportsAsync(int serverId, CancellationToken cancellationToken)
+    {
+        if (_queryStoreClampReports.IsSeeded(serverId))
+        {
+            return;
+        }
+
+        _queryStoreClampReports.Seed(
+            serverId, await GetCollectorStateAsync(serverId, QueryStoreBackfillState.StateCollectorName, cancellationToken));
+    }
+
+    /// <summary>Keeps the stored clamp entries current (#9359): the upsert for each clamped landed cycle and the delete for each
+    /// first one that no longer clamps, all of a server's cycle in ONE transaction. Best-effort like
+    /// <see cref="RecordQueryStoreBackfillHoleAsync"/>: a failed write costs one possible re-walk after a restart, never wrong data,
+    /// and its deletes are not confirmed, so the next cycle that does not clamp returns them again.</summary>
+    internal async Task PersistQueryStoreLandedAsync(int serverId, IReadOnlyList<QueryStoreLandedChange> changes, CancellationToken cancellationToken)
+    {
+        if (changes.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var upserts = changes.Where(change => change.Value is not null).ToList();
+            var deletes = changes.Where(change => change.Value is null).Select(change => change.Key).ToArray();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            if (upserts.Count > 0)
+            {
+                using var upsert = new NpgsqlCommand(@"
+INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at)
+SELECT $1, $2, u.state_key, u.state_value, $5
+FROM unnest($3::text[], $4::text[]) AS u(state_key, state_value)
+ON CONFLICT (server_id, collector_name, state_key)
+DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at", connection, transaction);
+                upsert.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                upsert.Parameters.AddWithValue(serverId);
+                upsert.Parameters.AddWithValue(QueryStoreBackfillState.StateCollectorName);
+                upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = upserts.Select(change => change.Key).ToArray() });
+                upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = upserts.Select(change => change.Value!).ToArray() });
+                /* Naive UTC, Kind-Unspecified: updated_at is timestamp WITHOUT time zone (see SaveCollectorStateRowsAsync). */
+                upsert.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified) });
+                await upsert.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (deletes.Length > 0)
+            {
+                using var delete = new NpgsqlCommand(
+                    "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = ANY($3::text[])", connection, transaction);
+                delete.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+                delete.Parameters.AddWithValue(serverId);
+                delete.Parameters.AddWithValue(QueryStoreBackfillState.StateCollectorName);
+                delete.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = deletes });
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            _queryStoreClampReports.Confirm(serverId, changes);
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Storing the query_store clamp entries for server {ServerId} failed; a restart may re-walk a database once", serverId);
         }
     }
 
@@ -117,7 +242,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             using var command = new NpgsqlCommand(
                 "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3", connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
@@ -266,7 +391,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var pruned = new List<string>();
 
             /* #8013: the snapshot is resolved once, for every prefix, before any delete: a windowed probe (two days,
@@ -418,7 +543,7 @@ RETURNING s.state_key";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var live = enumeratedDatabases.ToArray();
 
             foreach (var (owner, prefix) in owned)
@@ -479,7 +604,7 @@ RETURNING s.state_key";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var pruned = new List<string>();
 
             foreach (var (owner, prefix) in QueryStorePerDatabaseState.PrunableKeys)
@@ -527,7 +652,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var pgConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var written = await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
 
             /* #6254: backfill reads the primary and ships rows with their own old times; the ship guard learns them so a look-back
@@ -587,63 +712,19 @@ RETURNING s.state_key";
         var failed = false;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-
-            /* #4197: same probe-then-confirm as the server-scoped twins. collectedSince non-null (Azure
-               SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first, then
-               (#5515) to WidenedWatermarkWindow, and falls back to the true unbounded read only on a second
-               miss, instead of skipping straight to it. */
-            var autoWindow = collectedSince is null;
-            var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
-
-            var sql = BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: true);
-            using (var command = new NpgsqlCommand(sql, connection))
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
+            var primary = await ReadDatabaseWatermarkAsync(
+                connection, serverId, tableName, columnName, databaseColumnName, databaseName, collectedSince, cancellationToken);
+            if (!string.Equals(tableName, AttentionLegacyTableWatermark.TargetTable, StringComparison.Ordinal))
             {
-                /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
-                command.CommandTimeout = CommandTimeoutSeconds;
-                command.Parameters.AddWithValue(serverId);
-                command.Parameters.AddWithValue(databaseName);
-                /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
-                   timestamptz and Postgres would convert it into the session zone on the way in. */
-                command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
-
-                var result = await command.ExecuteScalarAsync(cancellationToken);
-                if (result is DateTime dt)
-                {
-                    return (dt, true);
-                }
+                return (primary, true);
             }
 
-            if (autoWindow)
-            {
-                /* #5515: the same second rung as the server-scoped twin. A database whose newest row is days old
-                   (a quiet Azure database's last deadlock or blocked-process report) missed the 6 h probe on
-                   every cycle and paid the unbounded read each time, per database; the week answers it. */
-                using (var widened = new NpgsqlCommand(sql, connection))
-                {
-                    widened.CommandTimeout = CommandTimeoutSeconds;
-                    widened.Parameters.AddWithValue(serverId);
-                    widened.Parameters.AddWithValue(databaseName);
-                    widened.Parameters.AddWithValue(DateTime.SpecifyKind(
-                        DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
-                    var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
-                    if (widenedResult is DateTime widenedDt)
-                    {
-                        return (widenedDt, true);
-                    }
-                }
-
-                using var fallback = new NpgsqlCommand(
-                    BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: false), connection);
-                fallback.CommandTimeout = CommandTimeoutSeconds;
-                fallback.Parameters.AddWithValue(serverId);
-                fallback.Parameters.AddWithValue(databaseName);
-                var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
-                if (fallbackResult is DateTime fallbackDt)
-                {
-                    return (fallbackDt, true);
-                }
-            }
+            /* #8967: the per-database twin of the server-scoped read. While the swapped-out attention table exists, the new table holds only
+               what was written since the swap, so the greater of the two tables' MAX for this server and database is the watermark. */
+            var legacy = await AttentionLegacyTableWatermark.ReadAsync(
+                connection, serverId, columnName, CommandTimeoutSeconds, cancellationToken, databaseColumnName, databaseName);
+            return (primary is { } p && legacy is { } l ? (p >= l ? p : l) : primary ?? legacy, true);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -659,6 +740,72 @@ RETURNING s.state_key";
                 serverId, databaseName, tableName, columnName, ex.Message);
         }
         return (null, !failed);
+    }
+
+    /// <summary>
+    /// The read behind <see cref="ReadLastCollectedTimeForDatabaseAsync"/> on one open connection: the bounded probe, the widened week,
+    /// then the unbounded MAX. Throws on a store fault; the caller owns the warning and the fallback window.
+    /// </summary>
+    private static async Task<DateTime?> ReadDatabaseWatermarkAsync(
+        NpgsqlConnection connection, int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        DateTime? collectedSince, CancellationToken cancellationToken)
+    {
+        /* #4197: same probe-then-confirm as the server-scoped twins. collectedSince non-null (Azure
+           SQL DB's query_store clamp) is unchanged; null now bounds to RecentWatermarkWindow first, then
+           (#5515) to WidenedWatermarkWindow, and falls back to the true unbounded read only on a second
+           miss, instead of skipping straight to it. */
+        var autoWindow = collectedSince is null;
+        var bound = collectedSince ?? DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
+
+        var sql = BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: true);
+        using (var command = new NpgsqlCommand(sql, connection))
+        {
+            /* Parity with the server-scoped twin (#2795): explicit, not Npgsql's inherited 30 s. */
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(databaseName);
+            /* Naive like every other timestamp bound in this store (#1969): a Utc Kind infers
+               timestamptz and Postgres would convert it into the session zone on the way in. */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(bound, DateTimeKind.Unspecified));
+
+            var result = await command.ExecuteScalarAsync(cancellationToken);
+            if (result is DateTime dt)
+            {
+                return dt;
+            }
+        }
+
+        if (autoWindow)
+        {
+            /* #5515: the same second rung as the server-scoped twin. A database whose newest row is days old
+               (a quiet Azure database's last deadlock or blocked-process report) missed the 6 h probe on
+               every cycle and paid the unbounded read each time, per database; the week answers it. */
+            using (var widened = new NpgsqlCommand(sql, connection))
+            {
+                widened.CommandTimeout = CommandTimeoutSeconds;
+                widened.Parameters.AddWithValue(serverId);
+                widened.Parameters.AddWithValue(databaseName);
+                widened.Parameters.AddWithValue(DateTime.SpecifyKind(
+                    DateTime.UtcNow - WatermarkPolicy.WidenedWatermarkWindow, DateTimeKind.Unspecified));
+                var widenedResult = await widened.ExecuteScalarAsync(cancellationToken);
+                if (widenedResult is DateTime widenedDt)
+                {
+                    return widenedDt;
+                }
+            }
+
+            using var fallback = new NpgsqlCommand(
+                BuildServerWatermarkForDatabaseSql(tableName, columnName, databaseColumnName, bounded: false), connection);
+            fallback.CommandTimeout = CommandTimeoutSeconds;
+            fallback.Parameters.AddWithValue(serverId);
+            fallback.Parameters.AddWithValue(databaseName);
+            var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
+            if (fallbackResult is DateTime fallbackDt)
+            {
+                return fallbackDt;
+            }
+        }
+        return null;
     }
 
     /// <summary>True when the seed read is the Query Store one the per-batch side table (#5684) answers.</summary>
@@ -681,7 +828,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var rawSql = BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName);
             if (IsQueryStoreWatermarkShape(tableName, columnName, databaseColumnName))
             {
@@ -735,7 +882,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             var bound = DateTime.UtcNow - WatermarkPolicy.RecentWatermarkWindow;
             using (var command = new NpgsqlCommand(
                 BuildServerWatermarkInstanceIdSql(tableName, columnName, bounded: true), connection))
@@ -803,7 +950,7 @@ RETURNING s.state_key";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
             using var command = new NpgsqlCommand(
                 "SELECT EXISTS(SELECT 1 FROM collection_log WHERE server_id = $1 AND collector_name = $2 AND status = 'SUCCESS')", connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;

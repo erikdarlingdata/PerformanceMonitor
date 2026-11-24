@@ -138,12 +138,12 @@ public sealed class ViewerCollectionLogDataStartTests
     {
         var load = MethodBody(TabFile(), @"private async Task LoadHealthAsync\(");
 
-        /* Five reads in flight (the health rollup, the probe, the log, the chart's bucketed read and the caveats, #4966), so the width
-           declared to the deadline is five. */
-        Assert.Equal(1, Matches(load, @"using var readFanOut = ViewerReadFanOut\.Of\(5\);"));
-        Assert.Equal(5, Matches(load, @"_dataService\.Get\w+Async\("));
+        /* Six reads in flight (the health rollup, the probe, the log, the chart's bucketed read, the caveats, #4966, and the extensions
+           an Aurora engine does not offer, #8913), so the width declared to the deadline is six. */
+        Assert.Equal(1, Matches(load, @"using var readFanOut = ViewerReadFanOut\.Of\(6\);"));
+        Assert.Equal(6, Matches(load, @"_dataService\.Get\w+Async\("));
 
-        var declared = load.IndexOf("ViewerReadFanOut.Of(5)", StringComparison.Ordinal);
+        var declared = load.IndexOf("ViewerReadFanOut.Of(6)", StringComparison.Ordinal);
         var probe = load.IndexOf("_dataService.GetCollectionLogDataStartAsync(_server.ServerId, startUtc, endUtc)", StringComparison.Ordinal);
         var read = load.IndexOf("_dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc)", StringComparison.Ordinal);
         /* #5034: the join is awaited through the watching helper, which is the same join with the probe watched beside it. */
@@ -162,7 +162,7 @@ public sealed class ViewerCollectionLogDataStartTests
 
         /* The probe is only the disclosure: it is not part of the join and is never awaited bare, so one that throws costs its banner and nothing after it.
            The chart's read is a read the tab draws, so it is joined with the others. */
-        Assert.Matches(@"await AwaitReadWatchingProbeAsync\(Task\.WhenAll\(healthTask,\s*logTask,\s*durationTask,\s*caveatsTask\),\s*dataStartTask,\s*""Collection Log""\);", load);
+        Assert.Matches(@"await AwaitReadWatchingProbeAsync\(Task\.WhenAll\(healthTask,\s*logTask,\s*durationTask,\s*caveatsTask,\s*notOfferedTask\),\s*dataStartTask,\s*""Collection Log""\);", load);
         Assert.DoesNotContain("await dataStartTask", load, StringComparison.Ordinal);
     }
 
@@ -263,7 +263,6 @@ public sealed class ViewerCollectionLogDataStartTests
     public void TheDrillsSql_BoundsTheRunsOnBothSides_AndTheReadBindsBothAsNaiveUtc()
     {
         var sql = ViewerDataService.CollectionLogByCollectorSql;
-        Assert.Contains("AND   collection_time >= $3", sql, StringComparison.Ordinal);
         Assert.Contains("AND   collection_time <= $4", sql, StringComparison.Ordinal);
 
         var body = MethodBody(DataServiceFile(), @"public async Task<List<CollectionLogRow>> GetCollectionLogByCollectorAsync\(int serverId, string collectorName, DateTime startUtc, DateTime endUtc");

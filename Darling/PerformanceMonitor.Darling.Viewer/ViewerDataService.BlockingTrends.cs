@@ -79,7 +79,7 @@ public sealed partial class ViewerDataService
         WITH bpr AS (
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
@@ -88,7 +88,7 @@ public sealed partial class ViewerDataService
         dmv AS (
             SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $5
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
@@ -116,7 +116,7 @@ public sealed partial class ViewerDataService
                 COUNT(*) AS deadlock_count
             FROM v_deadlocks
             WHERE server_id = $1
-            AND   deadlock_time >= $2
+            AND   deadlock_time > $2
             AND   deadlock_time <= $3
             AND   collection_time >= $4
             GROUP BY DATE_TRUNC('minute', deadlock_time)
@@ -152,6 +152,8 @@ public sealed partial class ViewerDataService
             FROM v_wait_stats
             WHERE server_id = $1
             AND   wait_type LIKE 'LCK%'
+            /* A pre-V127 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+               the read below drops it, and every row it returns was collected in ($2, $3]. */
             AND   collection_time >= $2
             AND   collection_time <= $3
         ),
@@ -163,6 +165,7 @@ public sealed partial class ViewerDataService
                 CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN delta_wait_time_ms END AS rated_wait_ms,
                 CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN interval_seconds END AS rated_seconds
             FROM raw
+            WHERE collection_time > $2
         )
         SELECT
             wait_type,
@@ -196,7 +199,7 @@ public sealed partial class ViewerDataService
             COUNT(*) AS collection_count
         FROM waiting_tasks
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         GROUP BY
@@ -229,7 +232,7 @@ public sealed partial class ViewerDataService
             WHERE server_id = $1
             AND   blocking_session_id > 0
             AND   blocking_session_id <> session_id
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   database_name IS NOT NULL
@@ -289,7 +292,7 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         if (boundEventWindow)
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new BlockingTrendPoint(
@@ -331,7 +334,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, double Rate)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)
@@ -407,7 +410,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, long TotalWaitMs)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)
@@ -462,7 +465,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(string DatabaseName, DateTime BucketStart, DateTime FirstCollectionTime, int BlockedCount)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(4) != 1)

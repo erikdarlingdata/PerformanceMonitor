@@ -65,10 +65,50 @@ public class OptionalTablesTests
     }
 
     [Fact]
-    public void ByGroup_7a_has_the_28_tables_from_the_registry_table()
+    public void ByGroup_7a_has_the_31_tables_from_the_registry_table()
     {
-        // 27 original 7a entries plus incident_occurrences (docs/optional-grains.md §1.1, lane G1).
-        Assert.Equal(28, OptionalTables.ByGroup("7a").Count);
+        // 27 original 7a entries plus incident_occurrences (docs/optional-grains.md §1.1, lane G1), then attention_events,
+        // column_stats and column_stats_runs.
+        Assert.Equal(31, OptionalTables.ByGroup("7a").Count);
+    }
+
+    [Fact]
+    public void Attention_events_is_a_candidate_event_window_gated_on_its_rung()
+    {
+        var table = OptionalTables.TryGet("attention_events");
+        Assert.NotNull(table);
+        Assert.Equal(OptionalTableStatus.Candidate, table!.Status);
+        Assert.Equal(OptionalTableKind.Window, table.Kind);
+        Assert.Equal(ExportGrain.Event, table.Grain);
+        Assert.Equal("collection_time", table.TimeColumn);
+        Assert.Equal(179, table.MinDarlingSchemaVersion);
+        Assert.Null(OptionalTables.TryGet("attention_events_legacy"));
+        Assert.Null(OptionalTables.TryGet("attention_events_legacy_copy"));
+    }
+
+    [Fact]
+    public void Column_stats_runs_is_a_candidate_event_window_gated_on_its_rung()
+    {
+        var table = OptionalTables.TryGet("column_stats_runs");
+        Assert.NotNull(table);
+        Assert.Equal(OptionalTableStatus.Candidate, table!.Status);
+        Assert.Equal(OptionalTableKind.Window, table.Kind);
+        Assert.Equal(ExportGrain.Event, table.Grain);
+        Assert.Equal("collection_time", table.TimeColumn);
+        Assert.Equal(272, table.MinDarlingSchemaVersion);
+    }
+
+    [Fact]
+    public void Column_stats_is_a_blocked_snapshot_because_its_text_array_has_no_parquet_mapping_and_its_cursor_table_is_not_registered()
+    {
+        var table = OptionalTables.TryGet("column_stats");
+        Assert.NotNull(table);
+        Assert.Equal(OptionalTableStatus.Blocked, table!.Status);
+        Assert.Equal(OptionalTableKind.Snapshot, table.Kind);
+        Assert.Null(table.TimeColumn);
+        Assert.Equal(272, table.MinDarlingSchemaVersion);
+        Assert.Throws<NotSupportedException>(() => DuckDbTypeMapper.Map("columns", "text[]"));
+        Assert.Null(OptionalTables.TryGet("column_stats_state"));
     }
 
     // ---- 7c: store_pg's pg_* tables (docs/optional-tables.md §8, lane O6) --------------------
@@ -112,6 +152,21 @@ public class OptionalTablesTests
     }
 
     public static IEnumerable<object[]> Group7cWindowNamesMemberData() => Group7cWindowNames.Select(n => new object[] { n });
+
+    [Fact]
+    public void Pg_lock_stats_is_a_candidate_event_table_and_pg_session_states_stays_blocked()
+    {
+        // pg_lock_stats holds numbers and lock states only, so it may be exported. pg_session_states carries
+        // usernames and client addresses, so it stays out of every export.
+        var locks = OptionalTables.TryGet("pg_lock_stats");
+        Assert.NotNull(locks);
+        Assert.Equal(OptionalTableStatus.Candidate, locks!.Status);
+        Assert.Equal(ExportGrain.Event, locks.Grain);
+
+        var sessions = OptionalTables.TryGet("pg_session_states");
+        Assert.NotNull(sessions);
+        Assert.Equal(OptionalTableStatus.Blocked, sessions!.Status);
+    }
 
     [Fact]
     public void Pg_statement_stats_is_blocked_pending_the_index_range_read_proof()

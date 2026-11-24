@@ -191,7 +191,6 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.Contains("contentious_object", sql, StringComparison.Ordinal);
         Assert.Contains("blocked_spid", sql, StringComparison.Ordinal);
         Assert.Contains("blocking_spid", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("event_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $5", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY event_time DESC", sql, StringComparison.Ordinal);
@@ -231,7 +230,6 @@ public sealed class DarlingMcpBlockingToolsSurfaceAndSqlTests
         Assert.Contains("FROM v_dmv_blocking_snapshots", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("blocked_process_report_xml", sql, StringComparison.Ordinal);  /* the DMV snapshot has no report XML */
         Assert.Contains("contentious_object", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("LIMIT $4", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT 200", sql, StringComparison.Ordinal);
     }

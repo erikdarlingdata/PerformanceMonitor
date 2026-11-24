@@ -4,11 +4,17 @@
 #                               credentials/ is 700 and owned by 1654; the password key survives a pod restart.
 #   external_plain_postgres     a plain postgres:17 whose owner is not a superuser: Ready, with the owner-fallback warning and
 #                               no other store-login warning.
+#   external_provision_roles    store.provisionRoles on a plain postgres whose owner `app` holds CREATEROLE (the fixture
+#                               plain-postgres-createrole.yaml; image postgres:17, or KIND_PG_IMAGE, e.g. postgres:15): the store-roles
+#                               Job completes, the web and MCP surfaces connect as `web` and `mcp`, and an upgrade re-runs it.
+#   provision_roles_fails_the_release   an owner without CREATEROLE, and an error outside the guards, fail the release (exit 3).
 #   password_key_secret         passwordKey from a Secret: the key's fingerprint, no passwordKey: warning, the same after a restart.
 #   degraded_at_start           the external store down at install: not Ready and never restarted for 90 s, Ready once it is up.
 #   stopped_refused_config      a darling.json the service refuses: Running, not Ready, never restarted.
 #   stopped_root_owned_volume   an existingClaim whose credentials/ a root-run release wrote (#8141 D1): Running, not Ready,
 #                               never restarted, and the log says what to chown.
+#   metrics_scrape              metrics.enabled: the /metrics port answers 401 without a bearer token and with a wrong one, and
+#                               200 with the chart Secret's metrics-token, with the refresh and snapshot-age series.
 #
 # Usage: kind-tests.sh <image>   (repository:tag of the Darling image already loaded into the cluster)
 # Every kubectl and helm call names the context kind-darling (override with KIND_CONTEXT) and never uses another one.
@@ -26,8 +32,11 @@ fi
 CONTEXT="${KIND_CONTEXT:-kind-darling}"
 CHART_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE="${CHART_DIR}/tests/fixtures/plain-postgres.yaml"
+ROLES_FIXTURE="${CHART_DIR}/tests/fixtures/plain-postgres-createrole.yaml"
+PG_IMAGE="${KIND_PG_IMAGE:-postgres:17}"
 RELEASE=pm
 FULL="${RELEASE}-performancemonitor-darling"
+JOB="${FULL}-store-roles"
 SELECTOR="app.kubernetes.io/name=performancemonitor-darling,app.kubernetes.io/instance=${RELEASE}"
 FP_RE='[0-9A-F]{4}(-[0-9A-F]{4}){3}'
 # Longer than the liveness probe's periodSeconds x failureThreshold (20 x 3), so a liveness kill would have happened.
@@ -140,8 +149,12 @@ wait_started() { # wait_started <pod>: the container runs and its startup probe 
 
 wait_log() { # wait_log <pod> <fixed text> [seconds]
   local p="$1" text="$2" limit="${3:-240}" i=0
+  # Read the log into a file, then grep the file. grep -q exits at the first match; piped, the cut-off
+  # kubectl writer gets SIGPIPE once the log is bigger than the pipe buffer, and under pipefail a found
+  # line then counted as a miss (#9060). A failed kubectl logs is a miss, not an exit.
   while [ "${i}" -lt "${limit}" ]; do
-    if k -n "${NS}" logs "${p}" -c darling 2>/dev/null | grep -qF -- "${text}"; then
+    k -n "${NS}" logs "${p}" -c darling >"${WORK}/wait-log.out" 2>/dev/null || true
+    if grep -qF -- "${text}" "${WORK}/wait-log.out"; then
       return 0
     fi
     sleep 5
@@ -262,6 +275,126 @@ case_external_plain_postgres() {
   echo "  owner-fallback warnings: ${owner}; other store-login warnings: ${other}"
   [ "${owner}" -ge 1 ] || fail "no owner-fallback warning"
   [ "${other}" = "0" ] || fail "another store-login warning: $(grep -F "connects to the store as" "${log}" | grep -vF "as the owner login")"
+}
+
+# The provision-roles store: the fixture with its postgres image replaced by ${PG_IMAGE}.
+apply_roles_fixture() {
+  sed "s|image: postgres:17|image: ${PG_IMAGE}|" "${ROLES_FIXTURE}" | k -n "${NS}" apply -f - >/dev/null
+  k -n "${NS}" rollout status deploy/plain-postgres --timeout=300s >/dev/null || fail "the fixture store did not become ready"
+}
+
+roles_args() {
+  printf '%s\n' --set store.mode=external --set store.external.host=plain-postgres --set store.external.database=app \
+    --set store.external.username=app --set store.external.passwordSecret.name=plain-postgres \
+    --set store.external.passwordSecret.key=password --set store.provisionRoles.enabled=true --set mcp.enabled=true \
+    --set store.provisionRoles.login.passwordSecret.name=plain-postgres --set store.provisionRoles.login.passwordSecret.key=password \
+    --set store.provisionRoles.rolePasswordsSecret=plain-postgres
+}
+
+# store_sql <sql>: runs a statement in the fixture store as the superuser.
+store_sql() {
+  kx deploy/plain-postgres -c postgres -- psql -X -U postgres -d app -At -c "$1"
+}
+
+# mcp_call <pod>: one MCP tool call through a port-forward, so the mcp login opens a store session (the MCP pool opens its
+# connections on first use).
+mcp_call() {
+  local token out="" i
+  token="$(k -n "${NS}" get secret "${FULL}" -o go-template='{{index .data "mcp-token"}}' | base64 -d)"
+  wait_log "$1" "Starting MCP server on"
+  # A port-forward dies on its first refused connection, so each attempt starts its own: the MCP port may open a moment after
+  # the log line.
+  for i in $(seq 1 20); do
+    k -n "${NS}" port-forward "pod/$1" 18152:5152 >"${WORK}/pf.log" 2>&1 &
+    PF_PID=$!
+    sleep 3
+    out="$(curl -s -m 20 -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -H "Authorization: Bearer ${token}" -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_fleet_overview","arguments":{}}}' http://127.0.0.1:18152/ || true)"
+    stop_port_forward
+    if [ -n "${out}" ]; then
+      break
+    fi
+  done
+  if [ -z "${out}" ]; then
+    fail "no answer from the MCP endpoint; port-forward said: $(cat "${WORK}/pf.log")"
+  fi
+  grep -qF '"result"' <<<"${out}" || fail "the MCP tool call answered: ${out:0:200}"
+  echo "  MCP get_fleet_overview answered"
+}
+
+case_external_provision_roles() {
+  echo "  postgres image: ${PG_IMAGE}"
+  apply_roles_fixture
+  local args p log users n
+  mapfile -t args < <(roles_args)
+  install "${args[@]}" >/dev/null
+  k -n "${NS}" wait --for=condition=complete "job/${JOB}" --timeout=600s >/dev/null || fail "the store-roles Job did not complete"
+  log="${WORK}/job-log"
+  k -n "${NS}" logs "job/${JOB}" --all-containers --prefix >"${log}"
+  grep -F "provision-roles.sql exit code: 0" "${log}" >/dev/null || fail "the Job log has no 'provision-roles.sql exit code: 0'"
+  n="$(grep -c "superuser-only settings" "${log}" || true)"
+  [ "${n}" = "1" ] || fail "expected one 'superuser-only settings' line, got ${n}"
+  if grep -E 'SCRAM-SHA-256\$[0-9]' "${log}" >/dev/null; then
+    fail "the Job log shows a SCRAM verifier"
+  fi
+  p="$(wait_for_pod)"
+  wait_ready "${p}"
+  [ "$(container_field "${p}" restartCount)" = "0" ] || fail "${p} restarted"
+  mcp_call "${p}"
+  users=""
+  for _ in $(seq 1 24); do
+    users="$(store_sql "SELECT DISTINCT usename FROM pg_stat_activity WHERE datname='app'" || true)"
+    if grep -qx web <<<"${users}" && grep -qx mcp <<<"${users}"; then
+      break
+    fi
+    sleep 5
+  done
+  echo "  logins connected to app: $(tr '
+' ' ' <<<"${users}")"
+  grep -qx web <<<"${users}" || fail "no session of the web login"
+  grep -qx mcp <<<"${users}" || fail "no session of the mcp login"
+  k -n "${NS}" logs "${p}" -c darling >"${WORK}/log"
+  if grep -iE "MCP server not started|connection string .* is unusable|refus.*(web|mcp)ConnectionString" "${WORK}/log" >/dev/null; then
+    fail "Darling refused a store-login file: $(grep -iE "MCP server not started|is unusable" "${WORK}/log" | cut -c1-200)"
+  fi
+  if grep -F "connects to the store as the owner login" "${WORK}/log" >/dev/null; then
+    fail "the Darling log has the owner-fallback warning"
+  fi
+  local old_job_pod
+  old_job_pod="$(k -n "${NS}" get pods -l app.kubernetes.io/component=store-roles -o name)"
+  h upgrade "${RELEASE}" "${CHART_DIR}" -n "${NS}" --reuse-values --wait --timeout 10m >/dev/null || fail "helm upgrade failed"
+  k -n "${NS}" wait --for=condition=complete "job/${JOB}" --timeout=300s >/dev/null || fail "the Job did not complete after the upgrade"
+  if [ "$(k -n "${NS}" get pods -l app.kubernetes.io/component=store-roles -o name)" = "${old_job_pod}" ]; then
+    fail "the upgrade did not make a new Job pod"
+  fi
+}
+
+case_provision_roles_fails_the_release() {
+  apply_roles_fixture
+  local args log
+  mapfile -t args < <(roles_args)
+  store_sql "ALTER ROLE app NOCREATEROLE" >/dev/null
+  if install "${args[@]}" --wait --timeout 10m >/dev/null 2>&1; then
+    fail "the install of an owner without CREATEROLE succeeded"
+  fi
+  log="${WORK}/job-log"
+  k -n "${NS}" logs "job/${JOB}" --all-containers --prefix >"${log}" || fail "could not read the Job log"
+  tail -n 4 "${log}" | cut -c1-220 | sed 's/^/  /'
+  grep -F "provision-roles.sql exit code: 3" "${log}" >/dev/null || fail "no exit code 3 in the Job log"
+  grep -F "does not have CREATEROLE" "${log}" >/dev/null || fail "no CREATEROLE guard text in the Job log"
+  echo "  no CREATEROLE: install failed, exit 3, the guard named the missing attribute"
+
+  store_sql "ALTER ROLE app CREATEROLE" >/dev/null
+  h uninstall "${RELEASE}" -n "${NS}" >/dev/null || fail "uninstall failed"
+  k -n "${NS}" delete job "${JOB}" --ignore-not-found >/dev/null
+  install "${args[@]}" --wait --timeout 10m >/dev/null || fail "the good install failed"
+  store_sql "COMMENT ON ROLE darling_alert_sources IS 'not darling'" >/dev/null
+  if h upgrade "${RELEASE}" "${CHART_DIR}" -n "${NS}" --reuse-values --wait --timeout 10m >/dev/null 2>&1; then
+    fail "the upgrade succeeded although the marker check must raise"
+  fi
+  k -n "${NS}" logs "job/${JOB}" --all-containers --prefix >"${log}"
+  grep -F "provision-roles.sql exit code: 3" "${log}" >/dev/null || fail "no exit code 3 after the marker error"
+  grep -F 'The group role "darling_alert_sources" already exists and was not created by Darling' "${log}" >/dev/null || fail "no darling_alert_sources marker error in the Job log"
+  echo "  marker error outside the guards: upgrade failed, exit 3"
 }
 
 case_password_key_secret() {
@@ -393,13 +526,72 @@ YAML
   not_ready_never_restarted "${p}" "${STABLE_SECONDS}"
 }
 
+# metrics_attempt <pod> [<bearer token>]: one scrape of /metrics through its own port-forward (a port-forward dies on
+# its first refused connection, so each attempt starts one); leaves the status in ${WORK}/metrics.status and the body in
+# ${WORK}/metrics.body.
+metrics_attempt() {
+  local pod_name="$1" auth=() code
+  shift
+  if [ "$#" -gt 0 ]; then
+    auth=(-H "Authorization: Bearer $1")
+  fi
+  k -n "${NS}" port-forward "pod/${pod_name}" 18155:5155 >"${WORK}/pf.log" 2>&1 &
+  PF_PID=$!
+  sleep 3
+  code="$(curl -s -m 20 -o "${WORK}/metrics.body" -w '%{http_code}' "${auth[@]}" http://127.0.0.1:18155/metrics || true)"
+  stop_port_forward
+  echo "${code}" >"${WORK}/metrics.status"
+}
+
+# metrics_expect_401 <pod> [<bearer token>]: 401 with an empty body, retried while the port-forward is not up yet.
+metrics_expect_401() {
+  local i
+  for i in $(seq 1 20); do
+    metrics_attempt "$@"
+    if [ "$(cat "${WORK}/metrics.status")" != "000" ]; then
+      break
+    fi
+  done
+  [ "$(cat "${WORK}/metrics.status")" = "401" ] || fail "/metrics answered $(cat "${WORK}/metrics.status"), expected 401"
+  [ ! -s "${WORK}/metrics.body" ] || fail "the 401 had a body: $(head -c 200 "${WORK}/metrics.body")"
+}
+
+case_metrics_scrape() {
+  local token i p
+  install --set metrics.enabled=true
+  p="$(wait_for_pod)"
+  wait_log "${p}" "Metrics port listening on"
+  token="$(k -n "${NS}" get secret "${FULL}" -o go-template='{{index .data "metrics-token"}}' | base64 -d)"
+  [ -n "${token}" ] || fail "the chart Secret has no metrics-token"
+  metrics_expect_401 "${p}"
+  metrics_expect_401 "${p}" "$(printf 'x%.0s' $(seq 1 40))"
+  # The first refresh needs the store, so the success series reads 1 and the snapshot age appears only after a while.
+  for i in $(seq 1 24); do
+    metrics_attempt "${p}" "${token}"
+    if [ "$(cat "${WORK}/metrics.status")" = "200" ] && grep -qF 'darling_metrics_last_refresh_success 1' "${WORK}/metrics.body" &&
+      grep -qF 'darling_metrics_snapshot_age_seconds' "${WORK}/metrics.body"; then
+      break
+    fi
+    sleep 5
+  done
+  [ "$(cat "${WORK}/metrics.status")" = "200" ] || fail "/metrics with the token answered $(cat "${WORK}/metrics.status"), expected 200"
+  grep -qF 'darling_metrics_last_refresh_success 1' "${WORK}/metrics.body" ||
+    fail "no darling_metrics_last_refresh_success 1 in: $(head -c 400 "${WORK}/metrics.body")"
+  grep -qF 'darling_metrics_snapshot_age_seconds' "${WORK}/metrics.body" ||
+    fail "no darling_metrics_snapshot_age_seconds in: $(head -c 400 "${WORK}/metrics.body")"
+  echo "  metrics scraped"
+}
+
 cases=(
   bundled_defaults
   external_plain_postgres
+  external_provision_roles
+  provision_roles_fails_the_release
   password_key_secret
   degraded_at_start
   stopped_refused_config
   stopped_root_owned_volume
+  metrics_scrape
 )
 if [ -n "${KIND_CASES:-}" ]; then
   read -r -a cases <<<"${KIND_CASES}"

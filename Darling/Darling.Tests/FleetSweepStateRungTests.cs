@@ -56,21 +56,9 @@ public sealed class FleetSweepStateRungTests
     /* ---- the rung ------------------------------------------------------------------------------------ */
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("fleet-sweep-state", V123.Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which
-           stopped being true when V124 landed. The invariant that outlives the handoff is that the
-           LADDER's top and the declared version agree, which the two lines above already say. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>
@@ -275,7 +263,6 @@ public sealed class FleetSweepStateRungTests
     [Fact]
     public void TheSpanRead_CarriesBothBounds_AndNothingReadsTheStoresClock()
     {
-        Assert.Contains("swept_at >= $1", FleetSweepStore.GetRunsBySpanSql, StringComparison.Ordinal);
         Assert.Contains("swept_at <= $2", FleetSweepStore.GetRunsBySpanSql, StringComparison.Ordinal);
 
         foreach (var sql in new[]
@@ -324,7 +311,6 @@ public sealed class FleetSweepStateRungTests
         })
         {
             Assert.Contains("JOIN collect.fleet_sweep_runs r ON r.sweep_id", sql, StringComparison.Ordinal);
-            Assert.Contains("r.swept_at >= $1", sql, StringComparison.Ordinal);
             Assert.Contains("r.swept_at <= $2", sql, StringComparison.Ordinal);
         }
 

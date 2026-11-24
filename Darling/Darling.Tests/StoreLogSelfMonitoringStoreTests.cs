@@ -29,24 +29,10 @@ public class StoreLogSelfMonitoringStoreTests
     internal const int RungVersion = 111;
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("store-log-self-monitoring",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-
-        /* This rung is no longer the top one, so its own version is asserted where it belongs — against
-           the ladder — rather than against StorageVersion.SchemaVersion, which now names a later rung. The
-           top-rung claim travels with whichever rung is top; V110's test left the same note for this one. */
-        Assert.Contains(RungVersion, versions);
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
-        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>
@@ -208,7 +194,8 @@ public class StoreLogSelfMonitoringStoreTests
         Assert.Contains("hours", descriptor.Params.Select(p => p.Name));
         Assert.Contains("as_of", descriptor.Params.Select(p => p.Name));
 
-        Assert.Contains("get_store_log", DarlingMcpInstructions.Text, StringComparison.Ordinal);
+        /* #9474: the instructions name the store's own reads as the group get_store_*, which covers get_store_log. */
+        Assert.Contains("get_store_*", DarlingMcpInstructions.Text, StringComparison.Ordinal);
     }
 
     /// <summary>

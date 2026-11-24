@@ -222,8 +222,10 @@ public sealed class CrossSkuSurfaceSourceTests
            the other daily documents' shared delivery-stamp read because the report keeps its own stamp. Both Darling-only.
            Eighteenth since #7368: the Store Autovacuum Behind self-alert's hourly read of the store, Darling-only like the other store self-alerts.
            Nineteenth and twentieth since #8302: the stale daily rollup self-alert's two alert-history reads, the restart seed
-           and the close of an episode that ended while the service was down, Darling-only like the other store self-alerts. */
-        Assert.Equal(20, nullKeyReads.Count);
+           and the close of an episode that ended while the service was down, Darling-only like the other store self-alerts.
+           Twenty-first since #8950: the Store Vacuum Stalled self-alert's hourly read of the store, Darling-only like the other store self-alerts.
+           Twenty-second since #9000: the Store Growth self-alert's hourly read of the store sizes, Darling-only like the other store self-alerts. */
+        Assert.Equal(22, nullKeyReads.Count);
 
         var inventory = AlertReadFailureCounter.FleetScopedReads;
 
@@ -248,6 +250,8 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains(nullKeyReads, r => r.Contains("external alert self-alert", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("threshold-override reload", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("store autovacuum self-alert", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("store vacuum stalled", StringComparison.Ordinal));
+        Assert.Contains(nullKeyReads, r => r.Contains("store growth self-alert", StringComparison.Ordinal));
         Assert.Contains(nullKeyReads, r => r.Contains("daily-health-report", StringComparison.Ordinal));
         Assert.Equal(2, nullKeyReads.Count(r => r.Contains("daily-health-report", StringComparison.Ordinal)));
         Assert.Equal(2, nullKeyReads.Count(r => r.Contains("stale rollup", StringComparison.Ordinal)));
@@ -275,7 +279,7 @@ public sealed class CrossSkuSurfaceSourceTests
         Assert.Contains("collection-history audit", inventory, StringComparison.Ordinal);
         Assert.Contains("external-alert delivery", inventory, StringComparison.Ordinal);
         Assert.Contains("threshold-override reload", inventory, StringComparison.Ordinal);
-        Assert.Contains("reload, daily report, store autovacuum, and the stale", inventory, StringComparison.Ordinal);
+        Assert.Contains("reload, daily report, store autovacuum, store vacuum stalled, and the stale", inventory, StringComparison.Ordinal);
         Assert.Contains("stale daily rollup", inventory, StringComparison.Ordinal);
 
         /* And the phantom stays gone. Disk pressure's feed reads are exempt — a local filesystem read and a

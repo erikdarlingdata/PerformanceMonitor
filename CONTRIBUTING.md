@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to the SQL Server Performance Monitor! This guide will help you understand the project structure, set up your development environment, and submit high-quality contributions.
 
+New here? Start with the code map: [docs/CODEMAP.md](docs/CODEMAP.md), also as [docs/codemap.html](docs/codemap.html) and [docs/codemap.json](docs/codemap.json) for tools.
+
 ## Table of Contents
 
 1. [Project Overview](#project-overview)
@@ -266,6 +268,8 @@ until all four are there.
    trailing `bool hasThing = false` parameter, and an arm `if (hasThing) return N;` placed **above** the
    previous one. Miss it and a fully-migrated store probes one rung short, so the connect-time gate refuses
    a store that is in fact current — permanently, because no later upgrade changes the answer.
+
+A PR that adds a table or a view to the `collect` schema also adds its row to `docs/darling/store-tables.csv`. The row says what the relation holds and whether a copy of the store needs it. `StoreTableInventoryLiveTests` builds a store and lists the relations in `collect`. It fails until the file matches.
 
 #### Rung numbering: `max(dev) + 1`, never pre-reserved
 

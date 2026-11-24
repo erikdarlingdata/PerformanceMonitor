@@ -13,6 +13,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -220,6 +221,28 @@ public sealed class SlowReadLogTests
     {
         Assert.Equal("InvalidOperationException", SlowReadLog.ErrorClassOf(new InvalidOperationException("secret text")));
         Assert.Equal("57014", SlowReadLog.ErrorClassOf(new PostgresException("canceling statement", "ERROR", "ERROR", "57014")));
+    }
+
+    /// <summary>#8570: a read the client's own command timeout stopped records the same error_class whether the exception reached the
+    /// filter live or a tool caught it into a sentence first, and it is not 57014: the store never raised that. A real 57014 keeps it.</summary>
+    [Fact]
+    public void ErrorClass_ClientTimeout_IsTheSameOnTheLivePathAndTheToolCaughtPath()
+    {
+        foreach (var ex in new Exception[] { new TimeoutException("t"), new NpgsqlException("t", new TimeoutException()) })
+        {
+            var live = SlowReadLog.ErrorClassOf(ex);
+            var sentence = McpHelpers.ErrorSentence("get_thing", ex);
+            var caught = SlowReadLog.ErrorClassOf(ReadOutcomeClassifier.ClassifySentence(sentence, default), sentence);
+
+            Assert.Equal(live, caught);
+            Assert.NotEqual("57014", caught);
+        }
+
+        var statement = new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014");
+        var statementSentence = McpHelpers.ErrorSentence("get_thing", statement);
+        Assert.Equal(SlowReadLog.ErrorClassOf(statement),
+            SlowReadLog.ErrorClassOf(ReadOutcomeClassifier.ClassifySentence(statementSentence, default), statementSentence));
+        Assert.Equal("57014", SlowReadLog.ErrorClassOf(statement));
     }
 
     private static JsonObject Stored(JsonObject arguments, out string json)

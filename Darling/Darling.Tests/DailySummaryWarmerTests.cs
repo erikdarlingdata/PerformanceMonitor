@@ -37,8 +37,72 @@ public sealed class DailySummaryWarmerTests
     private static DateTime NextBoundary(DateTime nowUtc) =>
         nowUtc.Date.AddDays(1).Add(Warmers.PassMargin);
 
+    /// <summary>#9334: a fresh install's first pass runs before the first connection registers the server. The server is
+    /// skipped (no warm, no heavy slot, no Warning, the pass still complete) and warmed on the pass after it registers.</summary>
     [Fact]
-    public async Task RunAsync_WarmsEveryServerOnceAfterTheStartDelay_ThenWaitsForTheDayBoundaryPlusGrace()
+    public async Task Pass_SkipsAServerTheRegistryDoesNotHoldYet_WithoutAWarning_AndWarmsItOnceItIsRegistered()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var registeredIds = new HashSet<int> { 1 };
+        var warmed = new List<int>();
+        var log = new CapturingTestLogger();
+        var warmer = Warmers.Create(
+            servers: () => TwoServers,
+            warm: (serverId, _, _) =>
+            {
+                warmed.Add(serverId);
+                return Task.CompletedTask;
+            },
+            enabled: () => true,
+            admission: null,
+            logger: log,
+            registered: _ => Task.FromResult<IReadOnlySet<int>>(registeredIds));
+
+        var first = await Warmers.RunPassAsync(warmer, ct);
+
+        Assert.Equal([1], warmed);
+        Assert.Equal(1, first.Warmed);
+        Assert.Equal(1, first.Skipped);
+        Assert.Equal(0, first.Failed);
+        Assert.True(first.Complete);
+        Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+
+        registeredIds.Add(2);
+        var second = await Warmers.RunPassAsync(warmer, ct);
+
+        Assert.Equal([1, 1, 2], warmed);
+        Assert.Equal(2, second.Warmed);
+        Assert.Equal(0, second.Skipped);
+        Assert.Equal(0, log.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+    }
+
+    /// <summary>#9334: a registry read that fails must not stop the pass or hide servers: each is warmed as before, so a store
+    /// that cannot answer fails the reads with their own Warnings.</summary>
+    [Fact]
+    public async Task Pass_WhenTheRegistryReadFails_WarmsEveryServerAsBefore()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var warmed = new List<int>();
+        var warmer = Warmers.Create(
+            servers: () => TwoServers,
+            warm: (serverId, _, _) =>
+            {
+                warmed.Add(serverId);
+                return Task.CompletedTask;
+            },
+            enabled: () => true,
+            admission: null,
+            registered: _ => throw new InvalidOperationException("registry unavailable"));
+
+        var pass = await Warmers.RunPassAsync(warmer, ct);
+
+        Assert.Equal([1, 2], warmed);
+        Assert.Equal(2, pass.Warmed);
+        Assert.Equal(0, pass.Skipped);
+    }
+
+    [Fact]
+    public async Task RunAsync_WarmsEveryServerOnceAfterTheStartDelay_ThenWaitsTheRefreshInterval()
     {
         var harness = new Harness(Start) { StopAfterDelays = 2 };
 
@@ -47,22 +111,24 @@ public sealed class DailySummaryWarmerTests
         var passAt = Start + Warmers.StartDelay;
         Assert.Equal(Warmers.StartDelay, harness.Delays[0]);
         Assert.Equal([(1, "alpha", passAt), (2, "beta", passAt)], harness.Warmed);
-        Assert.Equal(NextBoundary(passAt) - passAt, harness.Delays[1]);
+        Assert.Equal(Warmers.RefreshInterval, harness.Delays[1]); // #8824: not the day boundary 14 hours away
     }
 
     [Fact]
-    public async Task RunAsync_RunsASecondPassAtTheBoundary_AndRebuildsEveryServerThere()
+    public async Task RunAsync_RepeatsEveryRefreshInterval_AndRunsAPassAtTheBoundaryItself()
     {
-        var harness = new Harness(Start) { StopAfterDelays = 3 };
+        /* Start 23:20: the first pass is at 23:22, the next at 23:52, and the one after lands on the boundary (00:01), not
+           a whole interval later, so the new day's key is built the minute it is in use. */
+        var harness = new Harness(new DateTime(2026, 11, 8, 23, 20, 0, DateTimeKind.Utc)) { StopAfterDelays = 4 };
 
         await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
-        var firstPassAt = Start + Warmers.StartDelay;
-        var secondPassAt = NextBoundary(firstPassAt);
-        Assert.Equal(new DateTime(2026, 11, 9, 0, 1, 0, DateTimeKind.Utc), secondPassAt);
-        Assert.Equal(4, harness.Warmed.Count);
-        Assert.Equal([secondPassAt, secondPassAt], harness.Warmed.Skip(2).Select(w => w.At).ToArray());
-        Assert.Equal(TimeSpan.FromDays(1), harness.Delays[2]); // the pass after that is one whole day later
+        var boundary = new DateTime(2026, 11, 9, 0, 1, 0, DateTimeKind.Utc);
+        Assert.Equal(
+            [new DateTime(2026, 11, 8, 23, 22, 0, DateTimeKind.Utc), new DateTime(2026, 11, 8, 23, 52, 0, DateTimeKind.Utc), boundary],
+            harness.Warmed.Where(w => w.ServerId == 1).Select(w => w.At).ToArray());
+        Assert.Equal(boundary - new DateTime(2026, 11, 8, 23, 52, 0, DateTimeKind.Utc), harness.Delays[2]);
+        Assert.Equal(Warmers.RefreshInterval, harness.Delays[3]);
     }
 
     [Fact]
@@ -93,13 +159,14 @@ public sealed class DailySummaryWarmerTests
     }
 
     [Fact]
-    public async Task RunAsync_BacksOffAfterAFailedServer_DoublesOnTheNextFailure_AndReturnsToTheBoundaryOnSuccess()
+    public async Task RunAsync_BacksOffAfterAFailedServer_FollowsTheRetryLadderOnEachFailure_AndReturnsToTheRefreshIntervalOnSuccess()
     {
-        var harness = new Harness(Start) { StopAfterDelays = 4 };
+        /* Delays[0] is the start wait; Delays[1..4] follow the four failed passes; Delays[5] follows the pass that succeeded. */
+        var harness = new Harness(Start) { StopAfterDelays = 6 };
         var betaFailures = 0;
         harness.WarmOverride = (serverId, _, _) =>
         {
-            if (serverId == 2 && betaFailures < 2)
+            if (serverId == 2 && betaFailures < 4)
             {
                 betaFailures++;
                 throw new InvalidOperationException("seeded store fault");
@@ -110,11 +177,16 @@ public sealed class DailySummaryWarmerTests
 
         await Warmers.RunAsync(harness.Build(TwoServers), harness.Cts.Token);
 
-        Assert.Equal(Warmers.RetryDelay, harness.Delays[1]);
-        Assert.Equal(Warmers.RetryDelay + Warmers.RetryDelay, harness.Delays[2]);
-        var thirdPassAt = Start + Warmers.StartDelay + harness.Delays[1] + harness.Delays[2];
-        Assert.Equal(NextBoundary(thirdPassAt) - thirdPassAt, harness.Delays[3]);
-        Assert.Equal(3, harness.Warmed.Count(w => w.ServerId == 1)); // alpha is warmed on every pass, a cache hit after the first
+        /* The 30-minute refresh interval is a healthy pass's cadence. A failing server is retried at 15, 30, 60 and 120 minutes,
+           not every 30 minutes, each try holding a heavy slot until it times out. */
+        Assert.Equal(TimeSpan.FromMinutes(15), harness.Delays[1]);
+        Assert.Equal(TimeSpan.FromMinutes(30), harness.Delays[2]);
+        Assert.Equal(TimeSpan.FromMinutes(60), harness.Delays[3]);
+        Assert.Equal(TimeSpan.FromMinutes(120), harness.Delays[4]);
+        var fifthPassAt = Start + Warmers.StartDelay + harness.Delays[1] + harness.Delays[2] + harness.Delays[3] + harness.Delays[4];
+        Assert.True(NextBoundary(fifthPassAt) - fifthPassAt > Warmers.RefreshInterval);
+        Assert.Equal(TimeSpan.FromMinutes(30), harness.Delays[5]);
+        Assert.Equal(5, harness.Warmed.Count(w => w.ServerId == 1)); // alpha is warmed on every pass, a cache hit after the first
         Assert.Single(harness.Warmed, w => w.ServerId == 2);
     }
 
@@ -185,7 +257,7 @@ public sealed class DailySummaryWarmerTests
 
         Assert.Equal([1, 1], runningDuringWarm); // each server's read holds exactly one slot
         Assert.Equal(0, admission.Stats().Running); // and the pass leaves none held
-        Assert.Equal(NextBoundary(Start + Warmers.StartDelay) - (Start + Warmers.StartDelay), harness.Delays[1]);
+        Assert.Equal(Warmers.RefreshInterval, harness.Delays[1]);
     }
 
     [Fact]
@@ -269,7 +341,7 @@ public sealed class DailySummaryWarmerTests
         Assert.True(harness.Delays[1] <= Warmers.PassMargin,
             $"the pass after the straddle waits {harness.Delays[1]}: the servers warmed before midnight sit under the old day's key until then");
         Assert.Equal([midnight.Add(Warmers.PassMargin), midnight.Add(Warmers.PassMargin)], harness.Warmed.Skip(2).Select(w => w.At).ToArray());
-        Assert.Equal(TimeSpan.FromDays(1), harness.Delays[2]);
+        Assert.Equal(Warmers.RefreshInterval, harness.Delays[2]);
     }
 
     /// <summary>A fake clock, a recording delay that advances it, and a warm callback that records each call.</summary>
@@ -327,6 +399,7 @@ internal static class Warmers
     public static TimeSpan StartDelay => DailySummaryWarmer.StartDelay;
     public static TimeSpan PassMargin => DailySummaryWarmer.PassMargin;
     public static TimeSpan RetryDelay => DailySummaryWarmer.RetryDelay;
+    public static TimeSpan RefreshInterval => DailySummaryWarmer.RefreshInterval;
 
     public static DateTime NextPassUtc(DateTime nowUtc) => DailySummaryWarmer.NextPassUtc(nowUtc);
 
@@ -336,14 +409,20 @@ internal static class Warmers
         Func<bool> enabled,
         ReadAdmission? admission,
         Func<DateTime>? clock = null,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
-        => new(servers, warm, enabled, admission, NullLogger.Instance, clock, delay);
+        Func<TimeSpan, CancellationToken, Task>? delay = null,
+        Microsoft.Extensions.Logging.ILogger? logger = null,
+        Func<CancellationToken, Task<IReadOnlySet<int>>>? registered = null)
+        => new(servers, warm, enabled, admission, logger ?? NullLogger.Instance, clock, delay, registered);
+
+    /// <summary>The product's registry read: the ids of the servers the store holds, the set the warm reads resolve through.</summary>
+    public static Task<IReadOnlySet<int>> RegisteredIdsAsync(Npgsql.NpgsqlDataSource postgres, CancellationToken ct)
+        => DailySummaryWarmer.RegisteredServerIdsAsync(postgres, ct);
 
     /// <summary>The product's own warm read for one server: the Overview's range through the daily summary reader.</summary>
-    public static Task WarmAsync(Npgsql.NpgsqlDataSource postgres, int serverId, string name, CancellationToken ct)
-        => DailySummaryWarmer.WarmAsync(postgres, serverId, name, registryState: null, logger: null, ct);
+    public static Task WarmAsync(Npgsql.NpgsqlDataSource postgres, int serverId, string name, CancellationToken ct, Microsoft.Extensions.Logging.ILogger? logger = null)
+        => DailySummaryWarmer.WarmAsync(postgres, serverId, name, registryState: null, logger: logger, ct);
 
     public static Task RunAsync(DailySummaryWarmer warmer, CancellationToken ct) => warmer.RunAsync(ct);
 
-    public static Task RunPassAsync(DailySummaryWarmer warmer, CancellationToken ct) => warmer.RunPassAsync(ct);
+    public static Task<DailySummaryWarmPass> RunPassAsync(DailySummaryWarmer warmer, CancellationToken ct) => warmer.RunPassAsync(ct);
 }

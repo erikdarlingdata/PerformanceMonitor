@@ -372,6 +372,20 @@ if (args.Length > 0 && DarlingCliCommands.IsGrantScriptVerb(args[0]))
     return await DarlingCliCommands.GrantScriptAsync(args[1..], DarlingCliCommands.OpenGrantScriptOutput(), Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --prepare-provision-roles (#8779) - the init step of the chart's store-roles Job: wait for the store schema, check that the
+   login owns the collect and config objects, and write the rendered provision-roles.sql with a pgpass and a libpq env file for psql.
+   Needs no darling.json; prints no password. */
+if (args.Length > 0 && DarlingCliCommands.IsPrepareProvisionRolesVerb(args[0]))
+{
+    return await DarlingCliCommands.PrepareProvisionRolesAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* #9349: read one database's object usage from the stored chain and from every snapshot, and print the difference. Reads only. */
+if (args.Length > 0 && DarlingCliCommands.IsObjectUsageCompareVerb(args[0]))
+{
+    return await DarlingCliCommands.ObjectUsageCompareAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+}
+
 if (args.Length > 0 && DarlingCliCommands.IsExportInvestigationsVerb(args[0]))
 {
     return await DarlingCliCommands.ExportInvestigationsAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
@@ -542,6 +556,9 @@ builder.Services.AddWindowsService(options =>
    runs get the same file, which is exactly what an operator collecting a bug report wants. */
 var fileLoggerProvider = new DarlingFileLoggerProvider();
 builder.Logging.AddProvider(fileLoggerProvider);
+
+/* #9415: counts the service's own ERROR and WARN lines (and keeps the first of each) for the start history row. It writes nothing. */
+builder.Logging.AddProvider(new ServiceLogTallyProvider(ServiceLogTally.Shared));
 
 if (OperatingSystem.IsWindows())
 {

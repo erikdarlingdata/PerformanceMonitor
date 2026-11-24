@@ -63,10 +63,14 @@ public sealed class QueryTrendBucketingLiveTests
         var bodySucceeded = false;
         try
         {
-            /* The window ends on the ladder's 10-minute grid, so every bucket is whole and the first sits exactly at the start. */
+            /* The window ends on the hour, which is on the grid of every width the ladder serves a day at (10, 15, 20, 30 minutes),
+               so every bucket is whole and the first sits exactly at the start. The collections are half a minute off the minute, so
+               none is stamped on the window's start, which belongs to the window before, and all 1,440 are inside (start, end]. */
             var end = WindowEnd(minuteModTen: 0);
+            end = end.AddMinutes(-end.Minute);
             var start = end.AddHours(-24);
-            await SeedMinuteCollectionsAsync(connection, ct, start, 1440);
+            var firstCollection = start.AddSeconds(30);
+            await SeedMinuteCollectionsAsync(connection, ct, firstCollection, 1440);
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
             var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 24, AsOf(end), cancellationToken: ct);
@@ -106,7 +110,8 @@ public sealed class QueryTrendBucketingLiveTests
             /* Stamped at the bucket's start: the first at the window's start, the second one width on. */
             Assert.Equal(start.ToString(Stamp), points[0].GetProperty("collection_time").GetString()![..19]);
             Assert.Equal(start.AddMinutes(width).ToString(Stamp), points[1].GetProperty("collection_time").GetString()![..19]);
-            Assert.Equal(start.ToString(Stamp), root.GetProperty("effective_start").GetString()![..19]);
+            /* The coverage is the first collection the store held, half a minute after the first bucket's stamp. */
+            Assert.Equal(firstCollection.ToString(Stamp), root.GetProperty("effective_start").GetString()![..19]);
             Assert.False(root.GetProperty("window_truncated").GetBoolean());
 
             var note = root.GetProperty("aggregate_note").GetString();
@@ -150,12 +155,13 @@ public sealed class QueryTrendBucketingLiveTests
             await SeedMinuteCollectionsAsync(connection, ct, firstCollection, 30);
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-            var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 24, AsOf(end), cancellationToken: ct);
+            var json = await DarlingMcpTrendTools.GetQueryTrend(postgres, QueryHash, Db, ServerName, 24, AsOf(end), 10, cancellationToken: ct);
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             Assert.False(root.TryGetProperty("error", out _), json);
 
-            /* Red on dev: bucket_minutes null. 24 hours at the shared 200-point target is the ladder's 10-minute rung. */
+            /* Red on dev: bucket_minutes null. The width is named here (the ladder's 10-minute rung, 145 points a day) because the grid
+               alignment is what this test pins; the automatic width for a day is 30 minutes since #8812 and has its own test. */
             Assert.True(root.GetProperty("bucket_minutes").ValueKind == JsonValueKind.Number, "bucket_minutes is not a number: " + root.GetProperty("bucket_minutes"));
             Assert.Equal(10, root.GetProperty("bucket_minutes").GetInt32());
 
@@ -211,9 +217,10 @@ public sealed class QueryTrendBucketingLiveTests
         var bodySucceeded = false;
         try
         {
+            /* The collections are half a minute off the minute, so none is stamped on the window's start and all 1,440 are inside (start, end]. */
             var end = WindowEnd(minuteModTen: 0);
             var start = end.AddHours(-24);
-            await SeedMinuteCollectionsAsync(connection, ct, start, 1440);
+            await SeedMinuteCollectionsAsync(connection, ct, start.AddSeconds(30), 1440);
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
@@ -243,12 +250,12 @@ public sealed class QueryTrendBucketingLiveTests
 
     /// <summary>
     /// The hourly tier takes the width the way <c>get_query_duration_trend</c> does: the automatic width is the ladder's
-    /// pick for the shared 200-point target, raised to at least the rollup's hour, so a 90-day window is 12-hour points
-    /// (181 of them) gathering the rollup's hours, each stamped at its bucket's start. The rollup does not count
+    /// pick for this read's own 70-point target (#8812, sized to the response budget), raised to at least the rollup's hour, so a
+    /// 90-day window is daily points (91 of them) gathering the rollup's hours, each stamped at its bucket's start. The rollup does not count
     /// collections, so <c>collection_count</c> is null there, as the columns the rollup does not carry are.
     /// </summary>
     [Fact]
-    public async Task TheHourlyTier_ServesANinetyDayWindow_InTwelveHourBucketsOfTheRollupsHours()
+    public async Task TheHourlyTier_ServesANinetyDayWindow_InDayBucketsOfTheRollupsHours()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -294,21 +301,21 @@ public sealed class QueryTrendBucketingLiveTests
             Assert.Equal("hourly", root.GetProperty("source").GetString());
 
             /* Red on dev: the hourly tier answers one point per hour (bucket_minutes 60, 72 points) whatever the window. The
-               width is the one the sibling trends resolve for 90 hours times 24 at the shared target: the 720-minute rung. */
-            var width = TrendBuckets.OnHourlyTier(null, TrendBuckets.AutoMinutes(WebReadReach.RollupTrendHours * 60, 1, TrendBuckets.McpPointBudget));
-            Assert.Equal(720, width);
+               width is the one the ladder resolves for 90 days at the read's own target (#8812, sized to the response budget): the day-wide rung. */
+            var width = TrendBuckets.OnHourlyTier(null, TrendBuckets.AutoMinutes(WebReadReach.RollupTrendHours * 60, 1, TrendBuckets.QueryTrendMcpAutoPoints));
+            Assert.Equal(1440, width);
             Assert.Equal(width, root.GetProperty("bucket_minutes").GetInt32());
-            Assert.Equal("12 hours", root.GetProperty("bucket").GetString());
+            Assert.Equal("1 day", root.GetProperty("bucket").GetString());
 
             var points = root.GetProperty("trend").EnumerateArray().ToArray();
-            Assert.Equal(6, points.Length);
-            Assert.Equal(6, root.GetProperty("data_points").GetInt32());
-            for (var half = 0; half < 6; half++)
+            Assert.Equal(3, points.Length);
+            Assert.Equal(3, root.GetProperty("data_points").GetInt32());
+            for (var half = 0; half < 3; half++)
             {
                 var point = points[half];
-                Assert.Equal(day0.AddHours(12 * half).ToString(Stamp), point.GetProperty("collection_time").GetString()![..19]);
-                Assert.Equal(12 * ExecutionsPerCollection, point.GetProperty("execution_count").GetInt64());
-                Assert.Equal(12 * WorkerUsPerCollection / 1000.0, point.GetProperty("cpu_ms").GetDouble());
+                Assert.Equal(day0.AddHours(24 * half).ToString(Stamp), point.GetProperty("collection_time").GetString()![..19]);
+                Assert.Equal(24 * ExecutionsPerCollection, point.GetProperty("execution_count").GetInt64());
+                Assert.Equal(24 * WorkerUsPerCollection / 1000.0, point.GetProperty("cpu_ms").GetDouble());
                 Assert.Equal(1.0, point.GetProperty("avg_cpu_ms").GetDouble());
                 Assert.True(point.TryGetProperty("collection_count", out var count), "a point has no collection_count: " + point);
                 Assert.Equal(JsonValueKind.Null, count.ValueKind);

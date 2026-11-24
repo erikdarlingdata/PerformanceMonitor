@@ -14,6 +14,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -84,6 +85,42 @@ public sealed class McpRouteAgentFieldsLiveTests
                 asMcp, routeId, agent_max_per_hour: 500, served: OperatorPolicy(), cancellationToken: ct);
             Assert.Equal("invalid", Status(outOfRange));
             Assert.Equal("5", await ScalarAsync(owner, $"SELECT agent_max_per_hour FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+        });
+    }
+
+    /// <summary>#8737: a personal operator token is operator-class too. Its route change is journaled as <c>operator:personal token NAME of SUBJECT</c>,
+    /// which the store functions accept beside the file-token form; an actor whose subject holds a control character is still refused.</summary>
+    [Fact]
+    public async Task APersonalOperatorToken_SetsALevel_AndTheJournalNamesThePersonAndTheToken()
+    {
+        await WithMcpRoleAsync(async (owner, asMcp, ct) =>
+        {
+            var tokens = DarlingMcpTokenSet.Resolve(new McpConfig(), "", DarlingMcpWritePolicy.Effective.Off, null,
+                new PersonalTokenSettings(30, 5, McpTokenEntry.OperatorRole, null));
+            var caller = tokens.PersonalCaller(new PersonalTokenRow("0123456789abcdef", "owner-alice", "a/b@corp", "ci", McpTokenEntry.OperatorRole,
+                DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(29), null, null, null, null));
+            var served = new DarlingMcpServedPolicy(caller.Policy);
+            Assert.Equal("operator:personal token ci of a/b@corp", caller.Policy.OperatorActor);
+
+            var created = await DarlingMcpAlertTools.CreateNotificationRoute(
+                asMcp, "Blocking", agent_level: 1, served: served, cancellationToken: ct);
+            Assert.Equal("created", Status(created));
+            var routeId = RouteIdOf(created);
+            Assert.Equal("updated", Status(await DarlingMcpAlertTools.UpdateNotificationRoute(
+                asMcp, routeId, agent_level: 2, served: served, cancellationToken: ct)));
+
+            Assert.Equal("2", await ScalarAsync(owner, $"SELECT agent_level FROM config.config_notification_routes WHERE route_id = {routeId}", ct));
+            Assert.Equal("2", await ScalarAsync(owner,
+                $"SELECT count(*) FROM config.investigation_journal WHERE route_id = {routeId} AND event = 'route_agent_changed' " +
+                "AND actor = 'operator:personal token ci of a/b@corp'", ct));
+
+            var direct = await Assert.ThrowsAsync<PostgresException>(async () =>
+            {
+                await using var command = asMcp.CreateCommand(
+                    $"SELECT config.set_notification_route_agent({routeId}, E'operator:personal token ci of a\nb', ARRAY['agent_level'], 1, NULL, NULL, NULL, NULL, NULL, false, NULL)");
+                await command.ExecuteNonQueryAsync(ct);
+            });
+            Assert.Equal("DL400", direct.SqlState);
         });
     }
 

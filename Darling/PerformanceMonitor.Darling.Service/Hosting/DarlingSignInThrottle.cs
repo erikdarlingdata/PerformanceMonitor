@@ -321,6 +321,42 @@ internal sealed class DarlingSignInThrottle
         }
     }
 
+    /// <summary>The reserved attempt was neither a match nor a miss (the credential was not one this check judges, or the check could not
+    /// be made): its reservation is given back like <see cref="Accepted"/>, but the source is NOT remembered as having presented a right
+    /// token (so it earns no exemption from the total budget) and no miss is recorded. A held attempt reserved nothing, so this does
+    /// nothing for it.</summary>
+    public void Released(SignInAttempt attempt)
+    {
+        if (!attempt.IsReserved)
+        {
+            return;
+        }
+
+        lock (_sync)
+        {
+            if (_perSource.TryGetValue(attempt.Source!, out var entry))
+            {
+                if (entry.InFlight > 0)
+                {
+                    entry.InFlight--;
+                }
+
+                if (entry.InFlight == 0 && entry.Misses == 0)
+                {
+                    _perSource.Remove(attempt.Source!);
+                }
+            }
+
+            var index = _global.LastIndexOf(attempt.ReservedAtUtc);
+            if (index >= 0)
+            {
+                _global.RemoveAt(index);
+            }
+
+            Signal();
+        }
+    }
+
     /// <summary>The reserved attempt did not match: it becomes a recorded miss, and the wait is computed from
     /// the recorded misses. The reservation stays counted in the total budget. Attempts waiting on in-flight
     /// reservations are woken to be decided again. A held attempt reserved nothing, so this does nothing for

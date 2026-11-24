@@ -560,63 +560,7 @@ public sealed partial class DarlingWorker
                     continue;
                 }
 
-                if (effective.FrequencyMinutes == 0)
-                {
-                    var ranAtConnect = await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken);
-
-                    /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
-                       seeded from the SAME pre-dispatch watermark used below - the run just above updates it
-                       moments from now, but seeding from the watermark read at the top of this method means a
-                       collector that already ran recently (a quick reconnect) is not re-phased a full day
-                       forward. Without this, a long-lived connection never re-captures: its on-load config
-                       snapshot ages out of retention (#3930) and a cleared trace flag has nothing to overwrite
-                       its stale ON row (#3929) until the next reconnect. */
-                    var onLoadInterval = CollectorScheduleDefaults.OnLoadRecaptureMinutes;
-                    var onLoadLastRun = watermarks.TryGetValue(name, out var w0) ? w0 : (DateTime?)null;
-                    var onLoadJitter = SeedJitter(serverId, onLoadInterval * 60);
-                    if (effective.RunAtMinute is int onLoadRunAt)
-                    {
-                        SeedOnLoadRunTime(server, name, serverId, onLoadRunAt, onLoadInterval, ranAtConnect, onLoadLastRun);
-                    }
-                    else
-                    {
-                        lock (server.ScheduleLock)
-                        {
-                            server.RunTimeSlots.TryRemove(name, out _);
-                            server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
-                        }
-                    }
-                }
-                else
-                {
-                    var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
-                    var jitter = SeedJitter(serverId, effective.FrequencyMinutes * 60);
-
-                    /* #4938: with a run time the seed is the slot (ComputeSeededNextDue holds the rules), on this
-                       server's clock as read above; the slot's inputs are kept beside the stamp so a reload or a clock
-                       change computes it again from the same last run. */
-                    if (effective.RunAtMinute is int runAt)
-                    {
-                        var clock = server.Clock;
-                        lock (server.ScheduleLock)
-                        {
-                            /* #5033: a daily run of the previous connection can still be recording, so its last run counts. */
-                            server.RunTimeSlots.TryGetValue(name, out var heldSlot);
-                            var seedLastRun = Newer(heldSlot?.LastRunUtc, lastRun);
-                            server.NextDue[name] = ComputeSeededNextDue(
-                                seedLastRun, effective.FrequencyMinutes, now, jitter, new RunTimeRule(runAt, serverId, clock.ToUtc));
-                            server.RunTimeSlots[name] = new RunTimeSlot(runAt, effective.FrequencyMinutes, clock.Id, seedLastRun);
-                        }
-                    }
-                    else
-                    {
-                        lock (server.ScheduleLock)
-                        {
-                            server.RunTimeSlots.TryRemove(name, out _);
-                            server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
-                        }
-                    }
-                }
+                await SeedCollectorAtConnectAsync(server, runner, name, serverId, effective, watermarks, now, cancellationToken);
             }
 
             /* #5597: every due stamp above was seeded from the clock read before the on-load runs, and this body is the
@@ -776,6 +720,79 @@ public sealed partial class DarlingWorker
     private int _nativeLoadFailureLogged;
 
     /// <summary>
+    /// One collector's part of the connect pass (the loop body of the connect that runs after the server's clock and the collector
+    /// watermarks are read): an on-load collector (effective frequency 0) runs now and is seeded to its daily recapture, then the early
+    /// recapture of #9270 is applied AFTER that seed, which would otherwise put a transitional <c>database_config</c> capture's next run a
+    /// day out; every other collector is seeded from its watermark.
+    /// </summary>
+    internal async Task SeedCollectorAtConnectAsync(
+        ServerLoopState server, DarlingCollectorRunner runner, string name, int serverId, EffectiveSchedule effective,
+        IReadOnlyDictionary<string, DateTime> watermarks, DateTime now, CancellationToken cancellationToken)
+    {
+        if (effective.FrequencyMinutes == 0)
+        {
+            var onLoadOutcome = new RunOutcome();
+            var ranAtConnect = await RunOnLoadAsync(server, runner, name, serverId, effective, cancellationToken, onLoadOutcome);
+
+            /* #3929/#3930: ALSO becomes due again on CollectorScheduleDefaults.OnLoadRecaptureMinutes,
+               seeded from the SAME pre-dispatch watermark used below - the run just above updates it
+               moments from now, but seeding from the watermark read at the top of this method means a
+               collector that already ran recently (a quick reconnect) is not re-phased a full day
+               forward. Without this, a long-lived connection never re-captures: its on-load config
+               snapshot ages out of retention (#3930) and a cleared trace flag has nothing to overwrite
+               its stale ON row (#3929) until the next reconnect. */
+            var onLoadInterval = CollectorScheduleDefaults.OnLoadRecaptureMinutes;
+            var onLoadLastRun = watermarks.TryGetValue(name, out var w0) ? w0 : (DateTime?)null;
+            var onLoadJitter = SeedJitter(serverId, onLoadInterval * 60);
+            if (effective.RunAtMinute is int onLoadRunAt)
+            {
+                SeedOnLoadRunTime(server, name, serverId, onLoadRunAt, onLoadInterval, ranAtConnect, onLoadLastRun);
+            }
+            else
+            {
+                lock (server.ScheduleLock)
+                {
+                    server.RunTimeSlots.TryRemove(name, out _);
+                    server.NextDue[name] = ComputeSeededNextDue(onLoadLastRun, onLoadInterval, now, onLoadJitter);
+                }
+            }
+
+            /* #9270: after the seed above, which would otherwise put the next capture a day out. */
+            ApplyTransitionalRecapture(server, name, onLoadOutcome.RecaptureEarly);
+        }
+        else
+        {
+            var lastRun = watermarks.TryGetValue(name, out var w) ? w : (DateTime?)null;
+            var jitter = SeedJitter(serverId, effective.FrequencyMinutes * 60);
+
+            /* #4938: with a run time the seed is the slot (ComputeSeededNextDue holds the rules), on this
+               server's clock as read above; the slot's inputs are kept beside the stamp so a reload or a clock
+               change computes it again from the same last run. */
+            if (effective.RunAtMinute is int runAt)
+            {
+                var clock = server.Clock;
+                lock (server.ScheduleLock)
+                {
+                    /* #5033: a daily run of the previous connection can still be recording, so its last run counts. */
+                    server.RunTimeSlots.TryGetValue(name, out var heldSlot);
+                    var seedLastRun = Newer(heldSlot?.LastRunUtc, lastRun);
+                    server.NextDue[name] = ComputeSeededNextDue(
+                        seedLastRun, effective.FrequencyMinutes, now, jitter, new RunTimeRule(runAt, serverId, clock.ToUtc));
+                    server.RunTimeSlots[name] = new RunTimeSlot(runAt, effective.FrequencyMinutes, clock.Id, seedLastRun);
+                }
+            }
+            else
+            {
+                lock (server.ScheduleLock)
+                {
+                    server.RunTimeSlots.TryRemove(name, out _);
+                    server.NextDue[name] = ComputeSeededNextDue(lastRun, effective.FrequencyMinutes, now, jitter);
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// #4999: the at-connect run of ONE on-load collector (effective frequency 0), inline in
     /// <see cref="TryConnectAsync"/>. Each on-load collector's SCHEDULED run is detached (its recapture is daily), and
     /// a detached run outlives the pass that dispatched it: a fault and a reconnect while it is still going, or still
@@ -791,7 +808,7 @@ public sealed partial class DarlingWorker
     /// <returns>True when the collector ran and succeeded; false when its slot was held or the run failed.</returns>
     internal async Task<bool> RunOnLoadAsync(
         ServerLoopState server, DarlingCollectorRunner runner, string collectorName, int serverId, EffectiveSchedule effective,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, RunOutcome? outcome = null)
     {
         using var slot = TryTakeInlineDailySlot(serverId, collectorName, effective);
         if (slot is null)
@@ -805,9 +822,109 @@ public sealed partial class DarlingWorker
         /* null, not the live mark: the on-load dispatch is not a scheduled sweep body and
            never resets it, so folding it in would mix a previous body's bookkeeping
            into these rows - the cross-body contamination the reset exists to prevent. */
-        var runOutcome = new RunOutcome();
+        var runOutcome = outcome ?? new RunOutcome();
         await RunOneAsync(server, runner, collectorName, peerMaxAtDispatchMs: null, cancellationToken, runOutcome: runOutcome);
         return runOutcome.Succeeded;
+    }
+
+    /// <summary>
+    /// #9270: a <c>database_config</c> capture taken while a database is still restoring or recovering (a connect right after a
+    /// restart or failover) holds that database's engine defaults, and the collector's next capture is a day away. When the stored captures
+    /// say the collector is due early (<paramref name="recaptureEarly"/> true, <see cref="TransitionalDatabaseRuns.RecaptureIsDue"/>) it
+    /// becomes due again in <see cref="CollectorScheduleDefaults.TransitionalRecaptureMinutes"/> minutes; otherwise it keeps its normal due time.
+    /// The count of repeats lives in the stored captures, so nothing is held here. Null (not a <c>database_config</c> run, or the read of the
+    /// captures failed) changes nothing. A collector with a run time keeps its time of day, and one no longer scheduled stays unscheduled.
+    /// </summary>
+    internal void ApplyTransitionalRecapture(ServerLoopState server, string collectorName, bool? recaptureEarly)
+    {
+        if (recaptureEarly is not true)
+        {
+            return;
+        }
+
+        lock (server.ScheduleLock)
+        {
+            if (server.RunTimeSlots.ContainsKey(collectorName) || !server.NextDue.ContainsKey(collectorName))
+            {
+                return;
+            }
+
+            server.NextDue[collectorName] = DateTime.UtcNow.AddMinutes(CollectorScheduleDefaults.TransitionalRecaptureMinutes);
+        }
+    }
+
+    private static bool IsTransitionalCaptureCollector(string collectorName) =>
+        string.Equals(collectorName, DatabaseConfigCollector.Instance.Name, StringComparison.Ordinal);
+
+    /// <summary>
+    /// #9270: decides the early recapture after a successful <c>database_config</c> run, from the stored captures. A caller that passed a
+    /// <paramref name="runOutcome"/> (the at-connect run, which seeds the collector's due time after the run, and the in-sweep run) gets the
+    /// answer there and applies it itself; a run with no outcome (the detached daily run) applies it here, to the due time it was dispatched with.
+    /// </summary>
+    private async Task SettleTransitionalRecaptureAsync(
+        ServerLoopState server, ServerRuntime runtime, string collectorName, RunOutcome? runOutcome, CancellationToken cancellationToken)
+    {
+        var recaptureEarly = await ReadRecaptureDueAsync(runtime, cancellationToken);
+        if (runOutcome is not null)
+        {
+            runOutcome.RecaptureEarly = recaptureEarly;
+        }
+        else
+        {
+            ApplyTransitionalRecapture(server, collectorName, recaptureEarly);
+        }
+    }
+
+    /// <summary>
+    /// #9270: <see cref="TransitionalDatabaseRuns.RecaptureIsDue"/> over the server's stored <c>database_config</c> captures of the databases
+    /// that are transitional in its newest one. Null when the read failed: a store hiccup leaves the collector's schedule as it was, and
+    /// never fails the run that asked.
+    /// </summary>
+    private async Task<bool?> ReadRecaptureDueAsync(ServerRuntime runtime, CancellationToken cancellationToken)
+    {
+        if (RecaptureDueOverride is { } answer)
+        {
+            return answer(runtime.ServerId);
+        }
+
+        if (_postgres is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await QueryRecaptureDueAsync(_postgres, runtime.ServerId, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug("Observability: transitional database read for server_id {ServerId} failed: {Message}", runtime.ServerId, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>#9270: the store read behind <see cref="ReadRecaptureDueAsync"/>.</summary>
+    internal static async Task<bool> QueryRecaptureDueAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var states = string.Join(", ", ConfigChangeDiff.TransitionalDatabaseStates.Select(state => "'" + state + "'"));
+        await using var command = postgres.CreateCommand(
+            "SELECT d.database_name, d.capture_time, d.state_desc FROM v_database_config AS d WHERE d.server_id = $1 " +
+            "AND d.database_name IN (SELECT n.database_name FROM v_database_config AS n WHERE n.server_id = $1 " +
+            "AND n.capture_time = (SELECT max(m.capture_time) FROM v_database_config AS m WHERE m.server_id = $1) " +
+            "AND upper(n.state_desc) IN (" + states + "))");
+        command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+        command.Parameters.AddWithValue(serverId);
+        var captures = new List<TransitionalDatabaseRuns.Capture>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0) && !reader.IsDBNull(1))
+            {
+                captures.Add(new TransitionalDatabaseRuns.Capture(reader.GetDateTime(1), reader.GetString(0), reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+        }
+
+        return TransitionalDatabaseRuns.RecaptureIsDue(captures);
     }
 
     /// <summary>
@@ -903,10 +1020,15 @@ public sealed partial class DarlingWorker
                 server.LastBodyMs, server.LastBodySlowestName, server.LastBodySlowestMs, server.LastGateWaitMs,
                 server.LastAnalysisMs, server.LastGateWaitAnalysisHolders,
                 _dailyRunPermits.Waiting,
-                _dailyRunPermits.OldestWaitUtc is { } oldestDailyWait ? (long)Math.Max(0, (now - oldestDailyWait).TotalMilliseconds) : 0);
+                _dailyRunPermits.OldestWaitUtc is { } oldestDailyWait ? (long)Math.Max(0, (now - oldestDailyWait).TotalMilliseconds) : 0,
+                server.LastGateWaitHolder);
             var bodyStarted = Stopwatch.GetTimestamp();
             var bodySlowestName = (string?)null;
             var bodySlowestMs = 0L;
+
+            /* #9192: this body's longest collector run as the collection log measures it, kept for the bodies that wait for the
+               slot it holds (FleetSlotHolds). Its own tally, apart from the wall-clock one above. */
+            SlotHold? heldLongest = null;
 
             /* #2864: the peer high-water mark describes ONE body. Reset here rather than decayed, because
                the comparison it feeds is 'were this sweep's other collectors slow', and a mark carried
@@ -1086,7 +1208,9 @@ public sealed partial class DarlingWorker
                     server.NextDue[name] = CollectorCadence.NextDue(due, now, intervalSpan);
 
                     /* #6186: a collector the server refused with the same answer run after run waits out its backoff instead
-                       of writing a PERMISSIONS row every interval. The slot is served like any other: counted above, with the
+                       of writing a PERMISSIONS row every interval, and so does one whose statement times out run after run
+                       (#8891), which would otherwise hold up the collectors after it in this pass for its whole timeout. The
+                       slot is served like any other: counted above, with the
                        grid slots the loop stepped over, and the stamp moved on, because the fleet gate measures whether the
                        sweep loop keeps cadence and those slots are real whether or not this collector then runs. The backoff
                        only decides not to run it, so the first try after the wait is an ordinary slot, not a burst of missed
@@ -1095,7 +1219,7 @@ public sealed partial class DarlingWorker
                     if (server.RefusedBackoff.IsBackedOff(name, now, intervalSpan))
                     {
                         _logger.LogDebug(
-                            "  [{Server}] {Collector} not run this slot: the server has refused it {Streak} times in a row, so it is tried less often until that changes (#6186)",
+                            "  [{Server}] {Collector} not run this slot: it has been refused, or timed out, {Streak} times in a row, so it is tried less often until that changes (#6186, #8891)",
                             server.Config.DisplayName, name, server.RefusedBackoff.Streak(name));
                         continue;
                     }
@@ -1164,8 +1288,16 @@ public sealed partial class DarlingWorker
                 if (!RunsDetached(name, interval))
                 {
                     var collectorStarted = Stopwatch.GetTimestamp();
-                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, runTimeHandOff: handOff);
+                    var collectorOutcome = new RunOutcome();
+                    await RunOneAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, runTimeHandOff: handOff, runOutcome: collectorOutcome);
+                    ApplyTransitionalRecapture(server, name, collectorOutcome.RecaptureEarly);
                     var collectorMs = (long)Stopwatch.GetElapsedTime(collectorStarted).TotalMilliseconds;
+                    var measuredMs = collectorOutcome.SqlMs is { } readMs && collectorOutcome.StorageMs is { } writeMs ? readMs + writeMs : collectorMs;
+                    if (heldLongest is null || measuredMs > heldLongest.Value.TotalMs)
+                    {
+                        heldLongest = new SlotHold(name, measuredMs, collectorOutcome.SqlMs, collectorOutcome.StorageMs);
+                    }
+
                     if (collectorMs > bodySlowestMs)
                     {
                         bodySlowestMs = collectorMs;
@@ -1195,6 +1327,13 @@ public sealed partial class DarlingWorker
                 {
                     TrackDetachedRun(RunDetachedAsync(server, runner, name, peerMaxAtDispatchMs, cancellationToken, detachedDaily: true, runTimeHandOff: handOff, dueUtc: due));
                 }
+            }
+
+            /* #9192: this body held a fleet slot for its collectors, and a body still waiting for a slot names it when its wait
+               was long. Recorded before the body ends, so it is in the ledger when the slot passes on. */
+            if (heldLongest is { } held)
+            {
+                SlotHolds.Record(held);
             }
 
             /* #5735: the slots this server lost since its last row, written as one row by the body that noticed (at most one in
@@ -1388,7 +1527,7 @@ public sealed partial class DarlingWorker
                    the same slot: held means the scheduled run is still going, and the snapshot leaves that
                    collector out and says so. Free means the snapshot runs it inline, as before, holds the slot for
                    that run only, and gives it back after, so a snapshot that is over never makes the next scheduled
-                   run skip. The four collectors detached by name take their own slot inside RunOneAsync. */
+                   run skip. The collectors detached by name take their own slot inside RunOneAsync. */
                 var snapshotSlot = TryTakeInlineDailySlot(runtime.ServerId, name, effective);
                 if (snapshotSlot is null)
                 {
@@ -1898,7 +2037,7 @@ LIMIT 1";
         string? isolationLevel = null;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.ActualPlanLookup, cancellationToken);
             await using var command = new NpgsqlCommand(ResolveActualPlanSql(request.Source), connection);
             command.CommandTimeout = ServiceCommandDeadlines.ActualPlanResolveSeconds;
             BindActualPlanResolveParameters(command, serverId, request);
@@ -2088,12 +2227,25 @@ LIMIT 1";
     /// <summary>
     /// Where the missing extension has to be created, named when we know it (#2638).
     /// </summary>
-    private static string WhereToCreateIt(string? connectedDatabase)
-        => string.IsNullOrWhiteSpace(connectedDatabase)
-            ? "in the connected database (CREATE EXTENSION ...). "
-            : $"in database '{connectedDatabase}', which is the one this collector connects to: an "
-              + "extension installed in a DIFFERENT database on the same cluster is invisible from here, "
-              + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
+    private static string WhereToCreateIt(string? connectedDatabase, bool perDatabase = false)
+        => perDatabase
+            ? "in each database this collector reads (CREATE EXTENSION ...)"
+              + (string.IsNullOrWhiteSpace(connectedDatabase) ? ". " : $"; it failed in database '{connectedDatabase}'. ")
+              + "An extension installed in one database is invisible from another. "
+            : string.IsNullOrWhiteSpace(connectedDatabase)
+                ? "in the connected database (CREATE EXTENSION ...). "
+                : $"in database '{connectedDatabase}', which is the one this collector connects to: an "
+                  + "extension installed in a DIFFERENT database on the same cluster is invisible from here, "
+                  + $"so run CREATE EXTENSION in '{connectedDatabase}'. ";
+
+    /// <summary>
+    /// Whether <paramref name="collectorName"/> reads every database rather than the one the server entry connects to, so the
+    /// sentence for a fault in it says "each database" and names the one that failed instead of calling it the database the
+    /// collector connects to. A collector the catalog does not know is not per-database.
+    /// </summary>
+    private static bool RunsPerPostgresDatabase(string collectorName)
+        => CollectorCatalog.Find(collectorName)?.RunsPerDatabase(
+            new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql }) == true;
 
     /// <summary>
     /// The self-hosted log readers (#3239; three since #3601). Their dispatch entries send Aurora and RDS to
@@ -2135,17 +2287,20 @@ LIMIT 1";
     /// every cycle and starts collecting on the first one after the extension exists.
     /// </summary>
     private static string ExtensionMissingExplanation(
-        PostgresException ex, IReadOnlyList<PgExtensionDependency> required, string? connectedDatabase)
+        PostgresException ex, IReadOnlyList<PgExtensionDependency> required, string? connectedDatabase, bool perDatabase = false)
     {
         var names = string.Join(", ", required.Select(r => r.ExtensionName));
         var create = string.Join("; ", required.Select(r => $"CREATE EXTENSION {r.ExtensionName}"));
         var noun = required.Count == 1 ? "extension" : "extensions";
 
-        var where = string.IsNullOrWhiteSpace(connectedDatabase)
-            ? $"run {create} in the connected database (extensions are per-database). "
-            : $"run {create} in database '{connectedDatabase}', which is the one this collector connects "
-              + "to: an extension installed in a DIFFERENT database on the same cluster is invisible "
-              + "from here. ";
+        var where = perDatabase
+            ? $"run {create} in each database this collector reads (extensions are per-database)"
+              + (string.IsNullOrWhiteSpace(connectedDatabase) ? ". " : $"; it failed in database '{connectedDatabase}'. ")
+            : string.IsNullOrWhiteSpace(connectedDatabase)
+                ? $"run {create} in the connected database (extensions are per-database). "
+                : $"run {create} in database '{connectedDatabase}', which is the one this collector connects "
+                  + "to: an extension installed in a DIFFERENT database on the same cluster is invisible "
+                  + "from here. ";
 
         var preload = required.Any(r => r.InstallKind == PgExtensionInstallKind.SharedPreloadLibraries)
             ? $"The module also has to be in shared_preload_libraries first, which takes a server restart "
@@ -2531,7 +2686,7 @@ LIMIT 1";
 
             CollectorTargetFault.ObjectMissing when RequiredExtensionsOf(collectorName) is { Count: > 0 } required =>
                 (CollectorRuntimePrecondition.ExtensionMissingStatus,
-                    ExtensionMissingExplanation(ex, required, connectedDatabase)),
+                    ExtensionMissingExplanation(ex, required, connectedDatabase, RunsPerPostgresDatabase(collectorName))),
 
             /* 42P01 / 42883: the relation or function is not there. Overwhelmingly an extension that was
                never created in the connected database rather than anything to do with privileges. */
@@ -2544,7 +2699,7 @@ LIMIT 1";
             CollectorTargetFault.ObjectMissing => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}): the source object does not exist on this "
                 + "target. This is NOT a missing grant: it is normally an extension that was never created "
-                + WhereToCreateIt(connectedDatabase)
+                + WhereToCreateIt(connectedDatabase, RunsPerPostgresDatabase(collectorName))
                 + "The collector will keep degrading until it is. Recorded as a non-fatal skip rather than "
                 + "an error so it does not fill the log every cycle."),
 
@@ -2778,19 +2933,20 @@ LIMIT 1";
 
 
     /// <summary>
-    /// #6186: the collection_log write every <see cref="RunOneAsync"/> outcome goes through, then the refusal backoff's record
-    /// of that outcome, so no arm can write its row and forget the backoff.
+    /// #6186: the collection_log write every <see cref="RunOneAsync"/> outcome goes through, then the repeat-failure backoff's
+    /// record of that outcome, so no arm can write its row and forget the backoff. <paramref name="timedOut"/> is set only by
+    /// the arms that know the run's statement ran out of time on the monitored server (#8891); the row is ERROR either way.
     /// </summary>
     private async Task LogRunAsync(
         ServerLoopState server, ServerRuntime runtime, string collectorName, string status, int rowsCollected,
         long sqlMs, long storageMs, string? errorMessage, FanoutCost? fanout, ServerPhaseCost? phases,
         DrainForensics? drain, FetchPhaseCost? fetchPhases, int? sweepPeerMaxMs, ILogger? logger, CancellationToken cancellationToken,
-        string? readSource = null)
+        string? readSource = null, bool timedOut = false)
     {
         await DarlingObservability.LogCollectionAsync(
             _postgres!, runtime, collectorName, status, rowsCollected, sqlMs, storageMs, errorMessage, fanout, phases, drain,
             fetchPhases, sweepPeerMaxMs, logger, cancellationToken, readSource);
-        RecordRunForBackoff(server, runtime, collectorName, status, errorMessage);
+        RecordRunForBackoff(server, runtime, collectorName, status, errorMessage, timedOut);
 
         /* #8528: the row just written is the collector's own reading after any session start the ensure made, so a capture session
            marked as started and awaiting its read has been read: the Capture Down self-alert judges this collector's newest row as it
@@ -2799,11 +2955,22 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// #6186: feeds one run's status to the server's refusal backoff. A PERMISSIONS run with the same answer as the last one
-    /// extends the streak; a success, an error or a different answer restarts from the normal interval. YIELDED, ABANDONED and
-    /// SKIPPED runs say nothing about whether the grant changed, so they leave the streak alone.
+    /// Whether a fault that reached <see cref="RunOneAsync"/>'s general catch counts as a timeout for the repeat-failure
+    /// backoff (#8891): a SQL Server command timeout (number -2) on a connection that stays. A timeout that dropped the
+    /// connection is not this collector's statement (a fresh login failed too), so it does not count.
     /// </summary>
-    private void RecordRunForBackoff(ServerLoopState server, ServerRuntime runtime, string collectorName, string status, string? message)
+    internal static bool IsBackoffTimeout(Exception ex, bool dropped) => !dropped && ex is SqlException { Number: -2 };
+
+    /// <summary>
+    /// #6186: feeds one run's status to the server's repeat-failure backoff. A PERMISSIONS run with the same answer as the last
+    /// one extends the streak, and so does a run whose statement timed out after a timed-out run (#8891,
+    /// <paramref name="timedOut"/>): either one repeating is a standing condition, and the collector is tried less often while
+    /// it lasts. A success, any other error, a different answer, or a timeout after a refusal (or the other way round)
+    /// restarts from the normal interval. YIELDED, ABANDONED and SKIPPED runs say nothing about whether the condition changed,
+    /// so they leave the streak alone. Every timeout still writes its ERROR row, so collection health shows the failure.
+    /// </summary>
+    private void RecordRunForBackoff(
+        ServerLoopState server, ServerRuntime runtime, string collectorName, string status, string? message, bool timedOut = false)
     {
         if (status is "YIELDED" or "SKIPPED" || status == EnumeratedCollectorDriver.AbandonedStatus)
         {
@@ -2812,8 +2979,25 @@ LIMIT 1";
 
         var effective = StoreConfigProvider.ResolveSchedule(collectorName, runtime.ServerId, _scheduleOverrides);
         var interval = TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes));
-        var streak = server.RefusedBackoff.Record(collectorName, status == "PERMISSIONS", message, DateTime.UtcNow, interval);
-        if (streak == RefusedCollectorBackoff.FreeRefusals + 1)
+        var timeout = timedOut && status == "ERROR";
+        var streak = server.RefusedBackoff.Record(
+            collectorName,
+            status == "PERMISSIONS" || timeout,
+            timeout ? RefusedCollectorBackoff.TimedOutAnswer : message,
+            DateTime.UtcNow,
+            interval);
+        if (streak != RefusedCollectorBackoff.FreeRefusals + 1)
+        {
+            return;
+        }
+
+        if (timeout)
+        {
+            _logger.LogInformation(
+                "  [{Server}] {Collector} timed out {Streak} times in a row: it is tried less often (up to every {Max}) until a run ends some other way (#8891)",
+                server.Config.DisplayName, collectorName, streak, RefusedCollectorBackoff.MaxDelay);
+        }
+        else
         {
             _logger.LogInformation(
                 "  [{Server}] {Collector} refused {Streak} times in a row with the same answer: it is tried less often (up to every {Max}) until the answer changes or it succeeds (#6186)",
@@ -2899,7 +3083,7 @@ LIMIT 1";
            future third collector needs only its own IsXCollector check added to this one condition,
            never a second one to keep in sync. */
         using var detachedGate = IsPlanCorrectionCollector(collectorName) || IsPgWaitSamplingCollector(collectorName)
-            || IsSchemaObjectsCollector(collectorName) || detachedDaily
+            || IsSchemaObjectsCollector(collectorName) || IsColumnStatsCollector(collectorName) || detachedDaily
             ? _detachedCollectorGates.GetOrAdd((runtime.ServerId, collectorName), static _ => new DetachedCollectorGate()).TryAcquire()
             : DetachedCollectorGate.NotGated;
 
@@ -2983,6 +3167,11 @@ LIMIT 1";
                 /* Stands in for the PERMISSIONS arm: the same recorder the real run goes through (LogRunAsync). */
                 RecordRunForBackoff(server, runtime, collectorName, "PERMISSIONS", overrideRefusal);
             }
+            else if (RunOneTimeoutOverride?.Invoke(collectorName) is { } overrideTimeout)
+            {
+                /* Stands in for a timeout arm: an ERROR whose message carries the run's own elapsed time, as the real one does. */
+                RecordRunForBackoff(server, runtime, collectorName, "ERROR", overrideTimeout, timedOut: true);
+            }
             else
             {
                 RecordRunForBackoff(server, runtime, collectorName, overrideRows >= 0 ? "SUCCESS" : "ERROR", null);
@@ -2991,6 +3180,11 @@ LIMIT 1";
             if (runOutcome is not null)
             {
                 runOutcome.Succeeded = overrideRows >= 0;
+            }
+
+            if (overrideRows >= 0 && IsTransitionalCaptureCollector(collectorName))
+            {
+                await SettleTransitionalRecaptureAsync(server, runtime, collectorName, runOutcome, cancellationToken);
             }
 
             return Math.Max(overrideRows, 0);
@@ -3282,6 +3476,14 @@ LIMIT 1";
             if (runOutcome is not null)
             {
                 runOutcome.Succeeded = true;
+                runOutcome.SqlMs = result.SqlMs;
+                runOutcome.StorageMs = result.StorageMs;
+            }
+
+            /* #9270: a database_config capture that holds a database still restoring or recovering is retaken in minutes. */
+            if (!result.Abandoned && IsTransitionalCaptureCollector(collectorName))
+            {
+                await SettleTransitionalRecaptureAsync(server, runtime, collectorName, runOutcome, cancellationToken);
             }
 
             /* #7067: the precondition cleared, so the next failure of this collector is a new sighting and is logged at once.
@@ -3384,6 +3586,23 @@ LIMIT 1";
 
             await LogRunAsync(
                 server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, ex.Message,
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+            return 0;
+        }
+        catch (PgPlanCapturePreconditionException ex)
+        {
+            /* #8982: readiness says auto_explain is not loaded, so pg_plan_capture did not download the log. Recorded
+               under EXTENSION_MISSING, the named skip the extension collectors write for a module that is not set up
+               (#3240, #8913): every health surface already bands it as a setup step with the stored sentence as the
+               remedy, and none counts it as a failure or a stale collector. Not SUCCESS, which reads as "no new
+               plans" on a target that can never have one. Only the store's readiness row was read, so the time is
+               storage time. */
+            _logger.LogInformation("  [{Server}] {Collector} => {Status}: auto_explain is not loaded, so the log was not read",
+                server.Config.DisplayName, collectorName, CollectorRuntimePrecondition.ExtensionMissingStatus);
+
+            await LogRunAsync(
+                server, runtime, collectorName, CollectorRuntimePrecondition.ExtensionMissingStatus, 0, 0, runClock.ElapsedMilliseconds,
+                ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -3788,9 +4007,12 @@ LIMIT 1";
             _logger.LogError("  [{Server}] {Collector} => ERROR (timeout): {Message}",
                 server.Config.DisplayName, collectorName, explanation);
 
+            /* #8891: a statement that ran out of time counts toward the repeat-failure backoff, so one that times out on every
+               run stops holding up the collectors after it for its whole deadline each interval. */
             await LogRunAsync(
                 server, runtime, collectorName, "ERROR", 0, elapsedMs, 0, explanation,
-                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken,
+                timedOut: true);
             return 0;
         }
         catch (Exception ex)
@@ -3866,7 +4088,7 @@ LIMIT 1";
             /* The probe's result is kept here for the log below, not read back from the memo: another run's drop may
                have cleared the memo while this probe was in flight (#7851). */
             LivenessProbeResult? probeResult = null;
-            if (await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+            var dropped = await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
                     ex,
                     server.Runtime,
                     async (probed, token) =>
@@ -3877,7 +4099,8 @@ LIMIT 1";
                         probeResult = result;
                         return result.Alive;
                     },
-                    cancellationToken))
+                    cancellationToken);
+            if (dropped)
             {
                 server.Runtime = null;
                 server.Liveness.Clear();
@@ -3924,9 +4147,12 @@ LIMIT 1";
 
                    #5813: the fan-out comes off the exception, where the runner's all-failed rethrow put it, so a
                    one-database server whose Query Store read timed out names that database in slowest_item with
-                   the budget as slowest_item_ms. Null for every fault that carries none, as before. */
+                   the budget as slowest_item_ms. Null for every fault that carries none, as before.
+
+                   #8891: see IsBackoffTimeout for which faults here count toward the repeat-failure backoff. */
                 await LogRunAsync(
-                    server, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout.For(ex), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
+                    server, runtime, collectorName, "ERROR", 0, runClock.ElapsedMilliseconds, 0, message, fanout: CollectorFaultFanout.For(ex), phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken,
+                    timedOut: IsBackoffTimeout(ex, dropped));
             }
             catch
             {
@@ -4027,8 +4253,12 @@ LIMIT 1";
         ["query_store_forced_plans"] = (r, s, ct) => r.RunAsync(QueryStoreForcedPlansCollector.Instance, s, ct),
         ["query_store_hints"] = (r, s, ct) => r.RunAsync(QueryStoreHintsCollector.Instance, s, ct),
         ["identity_capacity"] = (r, s, ct) => r.RunAsync(IdentityCapacityCollector.Instance, s, ct),
+        ["object_inventory"] = (r, s, ct) => r.RunAsync(ObjectInventoryCollector.Instance, s, ct),
+        ["object_dependencies"] = (r, s, ct) => r.RunAsync(ObjectDependenciesCollector.Instance, s, ct),
         /* #7643: the schema pass has its own run (events, probe, per-database catalog reads, versioned store), not the one-query path. */
         ["schema_objects"] = (r, s, ct) => DarlingSchemaCapture.RunAsync(r, s, ct),
+        /* #8798: the column selectivity run has its own body, not the one-query path. */
+        ["column_stats"] = (r, s, ct) => DarlingColumnStatsCapture.RunAsync(r, s, ct),
         ["agent_alerts"] = (r, s, ct) => r.RunAsync(AgentAlertsCollector.Instance, s, ct),
         ["database_protection"] = (r, s, ct) => r.RunAsync(DatabaseProtectionCollector.Instance, s, ct),
         ["pvs_stats"] = (r, s, ct) => r.RunAsync(PvsStatsCollector.Instance, s, ct),

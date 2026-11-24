@@ -31,7 +31,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(isPostgres ? PgDataStartSql : SqlServerDataStartSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        var value = await command.ExecuteScalarAsync(cancellationToken);
+        var value = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         return value is DateTime first ? DateTime.SpecifyKind(first, DateTimeKind.Utc) : null;
     }
 }

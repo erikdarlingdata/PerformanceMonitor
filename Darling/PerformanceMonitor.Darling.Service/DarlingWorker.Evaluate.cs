@@ -1936,9 +1936,11 @@ public sealed partial class DarlingWorker
     /// exactly the shape AlertEngine's own SQL Server check already uses (an active flag plus a cooldown
     /// timestamp). Reusing the rolling-count gate here would answer a question this alert does not ask.</para>
     ///
-    /// <para>No query-text preview: <c>pg_session_states</c> deliberately stores none (see the collector's
-    /// class remarks), so the message identifies the session by pid/database/command tag instead of the
-    /// statement text SQL Server's equivalent shows.</para>
+    /// <para>The short message identifies the longest session by pid/database/command tag, since
+    /// <c>pg_session_states</c> deliberately stores no query text (see the collector's class remarks). The card
+    /// names each session shown (#8970, <see cref="BuildPgLongRunningSessionItems"/>), with its statement from the
+    /// statement store at the level <c>mcp.dataDetail</c> serves. The read leaves the managed-platform maintenance
+    /// database out (<see cref="DarlingPgSessionStatesReader.ManagedMaintenanceDatabase"/>).</para>
     ///
     /// <para><b>The noise opt-outs ride the SAME switches SQL Server's read takes</b> (#3539): the shared
     /// <c>longRunningQueryExcludeBackups</c> drops the dump/restore utilities' sessions, and the shared
@@ -2072,31 +2074,42 @@ public sealed partial class DarlingWorker
                 var dataDetailMode = McpDataDetailModes.TryParse(config.Mcp.DataDetail, out McpDataDetail dataDetail)
                     ? dataDetail
                     : McpDataDetail.MetadataOnly;
-                if (dataDetailMode != McpDataDetail.MetadataOnly && worst.QueryId is { } worstQueryId)
+                /* #8970: the card names each session it shows (the display cap the SQL Server card uses), and each
+                   shown session carries its statement at the level mcp.dataDetail serves. The statement annotates
+                   the page and never decides it: a failed lookup costs that session its Query line and nothing
+                   else. Each lookup is its own counted read, with its own clock, so a fault here records this
+                   lookup's elapsed and not the capture read's. */
+                var shown = rows.Take(AlertContextBuilders.LongRunningQueryDisplayCap).ToList();
+                if (dataDetailMode != McpDataDetail.MetadataOnly)
                 {
-                    /* The statement annotates the page and never decides it: a failed lookup costs the card its
-                       statement line and nothing else. It is its own counted read, with its own clock, so a fault here
-                       records this lookup's elapsed and not the capture read's. */
-                    var statementReadClock = Stopwatch.StartNew();
-                    try
+                    for (var i = 0; i < shown.Count; i++)
                     {
-                        var statementText = await DarlingPgSessionStatesReader.GetStatementTextAsync(
-                            _postgres, runtime.ServerId, worstQueryId, cancellationToken);
-                        worst = worst with { StatementText = statementText };
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning("[{Server}] Long-Running Query statement lookup failed after {ElapsedMs} ms, the page goes without it: {Message}",
-                            runtime.Config.DisplayName, statementReadClock.ElapsedMilliseconds, ex.Message);
-                        _readFailures.RecordReadFailure(
-                            snapshot.ServerKey, "PostgreSQL long-running-query statement lookup", statementReadClock.ElapsedMilliseconds);
-                    }
+                        if (shown[i].QueryId is not { } shownQueryId)
+                        {
+                            continue;
+                        }
 
-                    readClock.Restart();
+                        var statementReadClock = Stopwatch.StartNew();
+                        try
+                        {
+                            var statementText = await DarlingPgSessionStatesReader.GetStatementTextAsync(
+                                _postgres, runtime.ServerId, shownQueryId, cancellationToken);
+                            shown[i] = shown[i] with { StatementText = statementText };
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            throw;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning("[{Server}] Long-Running Query statement lookup failed after {ElapsedMs} ms, the page goes without it: {Message}",
+                                runtime.Config.DisplayName, statementReadClock.ElapsedMilliseconds, ex.Message);
+                            _readFailures.RecordReadFailure(
+                                snapshot.ServerKey, "PostgreSQL long-running-query statement lookup", statementReadClock.ElapsedMilliseconds);
+                        }
+
+                        readClock.Restart();
+                    }
                 }
 
                 var longRunningContext = AlertSampleAge.Stamp(
@@ -2114,10 +2127,7 @@ public sealed partial class DarlingWorker
                     /* #5642, ruling 6: the capture these rows were read from, counted once at fire time. The
                        same label the SQL Server twin uses for its snapshot. */
                     "query snapshot", AlertSampleAge.Newest(rows.Select(r => r.NewestSampleUtc ?? default)), now);
-                if (BuildPgLongRunningStatementItem(worst, dataDetailMode) is { } statementDetail)
-                {
-                    longRunningContext!.Details.Insert(0, statementDetail);
-                }
+                longRunningContext!.Details.InsertRange(0, BuildPgLongRunningSessionItems(shown, dataDetailMode));
 
                 var mute = JudgeMute(new AlertMuteContext
                 {
@@ -2227,29 +2237,49 @@ public sealed partial class DarlingWorker
             (double)PgLongRunningSampleMaxCycles * Math.Max(1, collectorIntervalMinutes), PgLongRunningSampleFloorMinutes));
 
     /// <summary>
-    /// The Long-Running Query card's statement item (#7086): the longest session and the statement its query_id
-    /// resolves to. <c>full</c> prints the stored text, <c>maskLiterals</c> prints it through
-    /// <see cref="McpDataDetailMasker.MaskLiterals"/>, <c>metadataOnly</c> leaves the statement out. Null when
-    /// there is nothing to show: no text captured for the query_id, or the level withholds it.
+    /// The Long-Running Query card's session items (#8970): one per session shown, in the SQL Server card's layout
+    /// (<see cref="AlertContextBuilders.BuildLongRunningQueryContext"/>): a heading with the session and its
+    /// duration, then the database (when named), the program (<c>application_name</c>, when set) and the
+    /// statement through <see cref="AlertContextBuilders.TruncateStatement"/>. The heading says <c>pid</c>
+    /// because PostgreSQL's session id is the backend pid. <c>full</c> prints the stored text, <c>maskLiterals</c>
+    /// prints it through <see cref="McpDataDetailMasker.MaskLiterals"/>, <c>metadataOnly</c> leaves the statement
+    /// out. A session with no stored text, or at a level that withholds it, still gets its item without a Query
+    /// field: the page names the session either way.
     /// </summary>
-    internal static AlertDetailItem? BuildPgLongRunningStatementItem(
-        DarlingPgSessionStatesReader.LongRunningSessionRow worst, McpDataDetail mode)
+    internal static List<AlertDetailItem> BuildPgLongRunningSessionItems(
+        IReadOnlyList<DarlingPgSessionStatesReader.LongRunningSessionRow> sessions, McpDataDetail mode)
     {
-        if (mode == McpDataDetail.MetadataOnly || string.IsNullOrWhiteSpace(worst.StatementText))
+        ArgumentNullException.ThrowIfNull(sessions);
+        var items = new List<AlertDetailItem>();
+        foreach (var session in sessions)
         {
-            return null;
+            var seconds = session.QueryDurationMs / 1000;
+            var item = new AlertDetailItem
+            {
+                Heading = $"Session pid {session.Pid}: {seconds / 60}m {seconds % 60}s",
+                Fields = new(),
+            };
+
+            if (!string.IsNullOrEmpty(session.DatabaseName))
+            {
+                item.Fields.Add(("Database", session.DatabaseName));
+            }
+
+            if (!string.IsNullOrEmpty(session.ApplicationName))
+            {
+                item.Fields.Add(("Program", session.ApplicationName));
+            }
+
+            if (mode != McpDataDetail.MetadataOnly && !string.IsNullOrWhiteSpace(session.StatementText))
+            {
+                var text = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(session.StatementText) : session.StatementText;
+                item.Fields.Add(("Query", AlertContextBuilders.TruncateStatement(text)));
+            }
+
+            items.Add(item);
         }
 
-        var text = mode == McpDataDetail.MaskLiterals ? McpDataDetailMasker.MaskLiterals(worst.StatementText) : worst.StatementText;
-        return new AlertDetailItem
-        {
-            Heading = "Longest query",
-            Fields = new()
-            {
-                ("Session", $"pid {worst.Pid} running {worst.QueryDurationMs / 60_000}m ({worst.CommandTag ?? "(unknown)"})"),
-                ("Statement", AlertContextBuilders.TruncateStatement(text)),
-            },
-        };
+        return items;
     }
 
     /// <summary>
@@ -3021,7 +3051,7 @@ LIMIT 1";
         DateTime? sampleTime = null;
         DateTime? sampleUtcOnly = null;
 
-        await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         /* #6968: the shared floor loop remembers where the newest row is; a bounded read that finds nothing means the row the
            bound came from is gone, so it asks again without one (the read that shipped before). */
         await _latestCpuFloor.ReadAsync(serverId, async since =>
@@ -3114,7 +3144,7 @@ LIMIT $3";
     {
         var samples = new List<AlertCpuSample>();
 
-        await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.AlertEngine, cancellationToken);
         using var command = new NpgsqlCommand(
             RecentCpuSamplesSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);

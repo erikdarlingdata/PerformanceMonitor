@@ -182,6 +182,13 @@ export function serverIsOffline(server) {
   return !!remembered && !!remembered.card && remembered.card.is_online === false;
 }
 
+/** True when the server's fleet card says it is an Amazon Aurora PostgreSQL target (is_aurora, #9117). A tab's text that is true only on Aurora reads this
+ *  through build()'s ctx.aurora. No card yet reads as not Aurora, which a PostgreSQL tab never meets: it is built after its card arrives. */
+export function serverIsAurora(server) {
+  const remembered = lastCard.get(server);
+  return !!remembered && !!remembered.card && remembered.card.is_aurora === true;
+}
+
 /** True when a remembered card is too old for a tab click to reuse; a card with no stamp is stale. */
 export function rememberedCardIsStale(remembered, nowMs) {
   return !remembered || typeof remembered.at !== "number" || nowMs - remembered.at > REMEMBERED_CARD_MAX_AGE_MS;
@@ -333,7 +340,7 @@ export function renderServer(main, server, tabId, opts) {
   const custom = customRanges.get(server);
   /* A fixed custom range cannot change under the poll, so the poll keeps the panels it already drew (same server, same
      tab) instead of reading the same hours again. The Refresh button passes `manual: true`: a click asks for a re-read, so it rebuilds even then. A live range, a preset and a tab or server click rebuild as before. */
-  const keep = isPoll && !(opts && opts.manual === true) && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || "");
+  const keep = takeRenamedBatch(server, tabId) || (isPoll && !(opts && opts.manual === true) && !!custom && !custom.live && !!gridNode && gridKey === server + "|" + (tabId || ""));
   /* #6933: every other poll, and the Refresh button, keep the same server and tab's panels on screen and read them again in place. */
   const inPlace = isPoll && !keep && gridPageIsShown(main, server, tabId);
   if (!isPoll && cancelRefresh) { cancelRefresh(); cancelRefresh = null; }
@@ -432,7 +439,30 @@ export function renderServer(main, server, tabId, opts) {
           rememberServerId(exactName, card.server_id);
           const next = storeHash("#/server/" + encodeURIComponent(exactName)) + (tabId ? "/" + encodeURIComponent(tabId) : "");
           if (typeof history !== "undefined" && history.replaceState) history.replaceState(null, "", next);
-          window.dispatchEvent(new Event("hashchange"));
+          /* #9220: the panels started on the route's partial name read the same one server the exact name does (the read API resolves a name by
+             the rule resolveFleetCard mirrors), so when they agree with the card they are the right reads and the render under the exact name
+             adopts them: app.js's route() does not end the page's reads for it, and renderServer keeps the grid. Without this the new render
+             aborted the batch in flight and sent every panel read again. A card that changes the tab set or the offline wording, or a range
+             waiting on the catalog, still draws afresh as before. The hold lives for the synchronous dispatch only. */
+          const tabKey = tabId || "";
+          /* The custom range is held by route name, and the panels in flight read the one held under the partial name. The render under the
+             exact name reads its own, so the range moves with the rename (the exact name takes it, the partial name lets go), on the
+             restart path too. The batch in flight agrees only when the exact name will read the same range: the partial name's own, or,
+             with none held there, no range held under the exact name either (it would read that one, where the batch read the preset). */
+          const partialRange = customRanges.get(server);
+          const sameRange = !!partialRange || !customRanges.has(exactName);
+          if (partialRange) {
+            customRanges.set(exactName, partialRange);
+            customRanges.delete(server);
+          }
+          const agrees = beforeCard && !!painted && serverTabsFor(card) === painted && !(serverIsOffline(exactName) && current.tab && current.tab.readsOffline === true)
+            && !!gridNode && gridKey === server + "|" + tabKey && !catalogWaits.has(server) && sameRange;
+          if (agrees) renameHold = { from: server, to: exactName, tabKey };
+          try {
+            window.dispatchEvent(new Event("hashchange"));
+          } finally {
+            renameHold = null;
+          }
           return;
         }
       }
@@ -447,19 +477,46 @@ export function renderServer(main, server, tabId, opts) {
 
       /* Repaint only when there is nothing painted yet, when the fresh card chooses a DIFFERENT registry —
          the two registries are module constants, so that comparison is exact — or when it flips the server's online
-         state, which the panels were built with (ctx.offline: the poll where a server first goes stale painted them
-         from the remembered, still-online card). A null card never repaints over a painted page: a fleet read that
+         state on a tab that words something by it (readsOffline), which the panels were built with (ctx.offline: the poll where a
+         server first goes stale painted them from the remembered, still-online card). Any other tab keeps its panels and the reads
+         in flight, whatever the card says about the server being online (#9220). A null card never repaints over a painted page: a fleet read that
          failed says nothing about which engine this server runs, and it leaves lastCard, so the online state, as it was. */
-      if (!painted || (card && serverTabsFor(card) !== painted) || serverIsOffline(server) !== paintedOffline) {
+      if (!painted || (card && serverTabsFor(card) !== painted) || (serverIsOffline(server) !== paintedOffline && current.tab && current.tab.readsOffline === true)) {
         painted = paintTabsKeeping(keep && !painted, tabsSlot, server, tabId, card, inPlace);
         paintedOffline = serverIsOffline(server);
       } else if (beforeCard) {
-        /* The card agrees with the set the panels were started on (#8554): draw the tab bar and notes around them, and read nothing again. */
+        /* The card agrees with the set the panels were started on (#8554): draw the tab bar and notes around them, and read nothing again.
+           #9220: a card that says the server is offline agrees too, unless the tab words something by it (readsOffline), so a stale server's
+           first visit no longer aborts the reads in flight and sends each of them again. */
         painted = paintTabsKeeping(true, tabsSlot, server, tabId, card, inPlace);
+        paintedOffline = serverIsOffline(server);
+      } else {
+        paintedOffline = serverIsOffline(server);
       }
       beforeCard = false;
     });
   }
+}
+
+/* #9220: set for the one synchronous hashchange that moves a partial route name to the card's own name while the panels started on the
+   partial name are still in flight. `from` and `to` are the two route names and `tabKey` the tab. */
+let renameHold = null;
+
+/** True while the page is moving a first visit from a partial route name to the server's own name and keeps the panel reads it has out,
+ *  so the router must not end the page's reads for that one route change (#9220). */
+export function holdsRenamedServerRoute() {
+  return renameHold !== null;
+}
+
+/** True once, for the render the rename above asked for: it is the same server and tab, and the grid on screen is the one the partial
+ *  name started, so its reads are kept and its grid is adopted (#9220). */
+function takeRenamedBatch(server, tabId) {
+  const hold = renameHold;
+  if (!hold || hold.to !== server || hold.tabKey !== (tabId || "") || !gridNode || gridKey !== hold.from + "|" + hold.tabKey) return false;
+  renameHold = null;
+  const started = dataStarts.get(hold.from);
+  if (started && !dataStarts.has(server)) dataStarts.set(server, started);
+  return true;
 }
 
 /** Whether the page may start a server's panel reads before its fleet card arrives (#8554). Not for a server this browser has seen as
@@ -595,7 +652,7 @@ function redrawPanels() {
   applyDatabaseFilter();
   /* #6793: the batch's signal rides in the tab's ctx too, for the tab files that read `ctx.signal` (the memory-grant charts, the overview strips,
      the recommendations list, the clerk and named trend draws). Without it each of them read on no signal on this page. */
-  const nodes = current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server), signal: panelAbort.signal });
+  const nodes = current.tab.build(current.server, { ...rangeContext(), offline: serverIsOffline(current.server), aurora: serverIsAurora(current.server), signal: panelAbort.signal });
   if (inPlace) cancelRefresh = refreshGridInPlace(gridNode, nodes);
   else mount(gridNode, nodes);
 }

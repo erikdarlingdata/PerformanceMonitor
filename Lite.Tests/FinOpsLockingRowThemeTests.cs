@@ -23,7 +23,8 @@ namespace PerformanceMonitorLite.Tests;
 /// under Dark, a detail row is added to a panel in a shown window, the application's theme dictionary is replaced, and the row's label and
 /// value are read from their text blocks against the page.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class FinOpsLockingRowThemeTests
 {
     private static readonly BindingFlags Instance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;

@@ -571,8 +571,14 @@ public sealed partial class DarlingCollectorRunner
     /// pairing is wrong for that one run's row only: the old identity leaves <c>dm_exec_query_stats</c> with the
     /// recompile, so nothing reads it again, and the cache prunes it after an hour. The inline form has the same
     /// race in a smaller window.</para>
+    ///
+    /// <para><b>One plan per shape (#8994).</b> A row whose identity misses but whose shape
+    /// (<see cref="QueryStatsPlanShapeKey"/>) this host committed takes that shape's digest and is not fetched, and of the
+    /// misses one row per shape is fetched: the other rows of that shape in this run carry the plan the first one fetched.
+    /// So the literal-only variants of an ad hoc statement store one plan between them. The shapes this run stored are
+    /// returned as pending beside the identities and settle with them.</para>
     /// </summary>
-    private async Task<List<QueryStatsPlanKey>> FetchDeferredQueryStatsPlansAsync(
+    private async Task<(List<QueryStatsPlanKey> Plans, List<QueryStatsPlanShapeKey> Shapes)> FetchDeferredQueryStatsPlansAsync(
         ITargetProvider provider,
         DbConnection targetConnection,
         ServerRuntime server,
@@ -581,12 +587,15 @@ public sealed partial class DarlingCollectorRunner
         CancellationToken cancellationToken)
     {
         var cache = _queryStatsPlanCaches.GetOrAdd(server.ServerId, static _ => new PlanDigestCache<QueryStatsPlanKey>());
+        var shapes = _queryStatsShapeCaches.GetOrAdd(server.ServerId, static _ => new PlanDigestCache<QueryStatsPlanShapeKey>());
         var pending = new List<QueryStatsPlanKey>();
+        var pendingShapes = new List<QueryStatsPlanShapeKey>();
         var now = DateTime.UtcNow;
 
         cache.Prune(now - QueryStatsPlanCacheMaxAge);
+        shapes.Prune(now - QueryStatsPlanCacheMaxAge);
 
-        var misses = PartitionDeferredQueryStatsPlans(server.ServerId, rows, cache, now);
+        var misses = PartitionDeferredQueryStatsPlans(server.ServerId, rows, cache, now, shapes);
 
         if (BetweenPlanPhasesForTests is { } hook)
         {
@@ -595,13 +604,14 @@ public sealed partial class DarlingCollectorRunner
 
         var renderedRows = 0;
         long renderedBytes = 0;
+        var fetchedByShape = new Dictionary<QueryStatsPlanShapeKey, (string? PlanXml, long? Bytes)>();
         var fetchWatch = Stopwatch.StartNew();
         if (misses.Count == 0)
         {
             /* Nothing to render: no fetch ran, so the stamps read 0 and the measurements say so. */
             fetchWatch.Stop();
             StampPlanFetch(context, 0, 0, 0);
-            return pending;
+            return (pending, pendingShapes);
         }
 
         try
@@ -623,40 +633,13 @@ public sealed partial class DarlingCollectorRunner
                 foreach (var (ord, result) in fetched)
                 {
                     var (key, row) = chunk[ord];
-                    if (result.PlanXml is null && result.Bytes is null)
+                    if (ApplyFetchedDeferredPlan(
+                            server.ServerId, key, row, result, unjudged.Contains(ord),
+                            cache, shapes, pending, pendingShapes, fetchedByShape, now))
                     {
-                        /* Aged out between the two queries: no plan and no size, and nothing worth caching. */
-                        continue;
+                        renderedRows++;
+                        renderedBytes += result.Bytes ?? 0;
                     }
-
-                    row.QueryPlanXmlBytes = result.Bytes;
-                    renderedRows++;
-                    renderedBytes += result.Bytes ?? 0;
-
-                    if (result.PlanXml is null)
-                    {
-                        /* Over the cap: the size, a NULL plan, and an entry that stops the next run rendering it again. */
-                        cache.AddPending(key, null, result.Bytes, now);
-                    }
-                    else if (unjudged.Contains(ord))
-                    {
-                        /* #4348: the filter's budget ran out before or during this plan. This row stores the marker; nothing
-                           is cached and nothing is pending, so the next cycle fetches and filters the plan again with a
-                           fresh budget instead of answering from a cached marker digest. A plan withheld whole for its own
-                           sake (its judge threw, it cannot be parsed) is not in this set: it fails the same way every
-                           cycle, so it is recorded like any fetched plan and the next cycle's dedup sees it (A-L4). */
-                        row.QueryPlanXml = result.PlanXml;
-                        continue;
-                    }
-                    else
-                    {
-                        row.QueryPlanXml = result.PlanXml;
-                        var digest = Convert.ToHexString(
-                            PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(result.PlanXml)));
-                        cache.AddPending(key, digest, result.Bytes, now);
-                    }
-
-                    pending.Add(key);
                 }
             }
         }
@@ -674,21 +657,150 @@ public sealed partial class DarlingCollectorRunner
             StampPlanFetch(context, renderedRows, renderedBytes, fetchWatch.ElapsedMilliseconds);
         }
 
-        return pending;
+        ShareFetchedPlansByShape(server.ServerId, rows, fetchedByShape);
+        return (pending, pendingShapes);
+    }
+
+    /// <summary>
+    /// One fetched plan, as <see cref="FetchDeferredQueryStatsPlansAsync"/> applies it to its row and the two caches. Returns
+    /// false for a plan that aged out between the two queries (no plan and no size: nothing is set, cached or pending), true
+    /// for every other result.
+    ///
+    /// <para>Only a real stored plan enters the shape cache (#8994). A plan over the cap carries its measured size to the
+    /// shape's other rows of this run, as each would have fetched it on its own, but the shape stays a miss. A plan the
+    /// filter's budget could not judge, one withheld whole for its own sake (the marker, A-L4) and one that aged out leave the
+    /// shape a miss too, so the next run picks the shape again; the shape's other rows of this run ship without a plan.
+    /// The identity cache keeps all of these exactly as before.</para>
+    /// </summary>
+    internal static bool ApplyFetchedDeferredPlan(
+        int serverId,
+        QueryStatsPlanKey key,
+        QueryStatsCollector.Row row,
+        (string? PlanXml, long? Bytes) result,
+        bool unjudged,
+        PlanDigestCache<QueryStatsPlanKey> cache,
+        PlanDigestCache<QueryStatsPlanShapeKey> shapes,
+        List<QueryStatsPlanKey> pending,
+        List<QueryStatsPlanShapeKey> pendingShapes,
+        Dictionary<QueryStatsPlanShapeKey, (string? PlanXml, long? Bytes)> fetchedByShape,
+        DateTime now)
+    {
+        if (result.PlanXml is null && result.Bytes is null)
+        {
+            /* Aged out between the two queries: no plan and no size, and nothing worth caching. */
+            return false;
+        }
+
+        row.QueryPlanXmlBytes = result.Bytes;
+
+        if (result.PlanXml is null)
+        {
+            /* Over the cap: the size, a NULL plan, and an entry that stops the next run rendering it again. The shape's
+               other rows of this run carry the size, as each did when it was fetched on its own. */
+            cache.AddPending(key, null, result.Bytes, now);
+            if (QueryStatsPlanShapeKey.TryCreate(serverId, row) is { } overCapShape)
+            {
+                fetchedByShape[overCapShape] = (null, result.Bytes);
+            }
+        }
+        else if (unjudged)
+        {
+            /* #4348: the filter's budget ran out before or during this plan. This row stores the marker; nothing
+               is cached and nothing is pending, so the next cycle fetches and filters the plan again with a
+               fresh budget instead of answering from a cached marker digest. A plan withheld whole for its own
+               sake (its judge threw, it cannot be parsed) is not in this set: it fails the same way every
+               cycle, so it is recorded like any fetched plan and the next cycle's dedup sees it (A-L4). */
+            row.QueryPlanXml = result.PlanXml;
+            return true;
+        }
+        else
+        {
+            row.QueryPlanXml = result.PlanXml;
+            var digest = Convert.ToHexString(
+                PayloadDimensions.Digest(PgCollectorRowWriter.StripEmbeddedNuls(result.PlanXml)));
+            cache.AddPending(key, digest, result.Bytes, now);
+
+            /* The marker of a plan withheld for its own sake is a verdict on this one plan, not the shape's plan. */
+            if (!SensitiveStatements.IsWithheldPlan(result.PlanXml))
+            {
+                RecordFetchedShape(serverId, row, digest, shapes, pendingShapes, fetchedByShape, now);
+            }
+        }
+
+        pending.Add(key);
+        return true;
+    }
+
+    /// <summary>
+    /// #8994: records a plan this run fetched and stored as its shape's plan: pending in <paramref name="shapes"/> until the
+    /// batch commits, and in <paramref name="fetchedByShape"/> for this run's other rows of the shape. The row carries the
+    /// plan XML and its measured size already.
+    /// </summary>
+    internal static void RecordFetchedShape(
+        int serverId,
+        QueryStatsCollector.Row row,
+        string digest,
+        PlanDigestCache<QueryStatsPlanShapeKey> shapes,
+        List<QueryStatsPlanShapeKey> pendingShapes,
+        Dictionary<QueryStatsPlanShapeKey, (string? PlanXml, long? Bytes)> fetchedByShape,
+        DateTime now)
+    {
+        if (row.QueryPlanXml is null || QueryStatsPlanShapeKey.TryCreate(serverId, row) is not { } shape)
+        {
+            return;
+        }
+
+        shapes.AddPending(shape, digest, row.QueryPlanXmlBytes, now);
+        pendingShapes.Add(shape);
+        fetchedByShape[shape] = (row.QueryPlanXml, row.QueryPlanXmlBytes);
+    }
+
+    /// <summary>
+    /// #8994: gives each row this run left without a plan the plan fetched for its shape in the same run. Those are the rows
+    /// <see cref="ChooseDeferredQueryStatsMisses"/> did not fetch because an earlier row of their shape took the slot. They
+    /// carry the same XML, so the batch stores it once (one digest) and every row of the shape resolves it. A row with a
+    /// plan, a known digest or a size already is left alone.
+    /// </summary>
+    internal static void ShareFetchedPlansByShape(
+        int serverId,
+        IEnumerable<QueryStatsCollector.Row> rows,
+        IReadOnlyDictionary<QueryStatsPlanShapeKey, (string? PlanXml, long? Bytes)> fetchedByShape)
+    {
+        if (fetchedByShape.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var row in rows)
+        {
+            if (row.QueryPlanXml is not null || row.KnownPlanDigest is not null || row.QueryPlanXmlBytes is not null)
+            {
+                continue;
+            }
+
+            if (QueryStatsPlanShapeKey.TryCreate(serverId, row) is { } shape
+                && fetchedByShape.TryGetValue(shape, out var plan))
+            {
+                row.QueryPlanXml = plan.PlanXml;
+                row.QueryPlanXmlBytes = plan.Bytes;
+            }
+        }
     }
 
     /// <summary>
     /// The hit-or-miss split of <see cref="FetchDeferredQueryStatsPlansAsync"/>, pulled out so the cap is testable
     /// without a target (#7156). A row with a cached digest takes it (and the cached size) and is not a miss; a row
-    /// with no usable plan handle is skipped; of the rest, <see cref="ChooseDeferredQueryStatsMisses"/> picks the first
-    /// <see cref="QueryStatsCollector.MaxPlansPerRun"/> misses, in input (rank) order, for the caller to fetch. A miss
-    /// past the cap is neither fetched nor cached: it ships without a plan and is fetched on a later run once it ranks.
+    /// with no usable plan handle is skipped; of the rest, <see cref="ChooseDeferredQueryStatsMisses"/> picks one miss per
+    /// shape, in input (rank) order, up to <see cref="QueryStatsCollector.MaxPlansPerRun"/>, for the caller to fetch. A miss
+    /// past the cap, or a later miss of a shape already picked, is neither fetched nor cached by identity: it ships without
+    /// a plan, or with the plan its shape's picked row fetched this run, and is fetched on a later run once it ranks.
     /// </summary>
     internal static List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)> PartitionDeferredQueryStatsPlans(
         int serverId,
         IEnumerable<QueryStatsCollector.Row> rows,
         PlanDigestCache<QueryStatsPlanKey> cache,
-        DateTime now)
+        DateTime now,
+        PlanDigestCache<QueryStatsPlanShapeKey>? shapes = null)
     {
         var candidates = new List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)>();
         foreach (var row in rows)
@@ -705,6 +817,16 @@ public sealed partial class DarlingCollectorRunner
                 row.KnownPlanDigest = hit.Digest;
                 row.QueryPlanXmlBytes = hit.Bytes;
             }
+            else if (shapes is not null
+                     && QueryStatsPlanShapeKey.TryCreate(serverId, row) is { } shape
+                     && shapes.TryGet(shape, now, out var shapeHit)
+                     && shapeHit.Digest is not null)
+            {
+                /* #8994: a new identity of a shape this host already stored (an ad hoc statement run again with other
+                   literals): the row links to the stored plan and nothing is rendered. */
+                row.KnownPlanDigest = shapeHit.Digest;
+                row.QueryPlanXmlBytes = shapeHit.Bytes;
+            }
             else
             {
                 candidates.Add((key, row));
@@ -715,9 +837,9 @@ public sealed partial class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// #7344: picks the plans one deferred run fetches from the misses: the first
-    /// <see cref="QueryStatsCollector.MaxPlansPerRun"/> in input order, which is all of them when there are no more than
-    /// that. Input order is the in-interval elapsed rank <c>QueryStatsCollector.SkipIdleAndRank</c> computes against the
+    /// #7344: picks the plans one deferred run fetches from the misses: one slot per shape (#8994),
+    /// in input order, up to <see cref="QueryStatsCollector.MaxPlansPerRun"/>, which is every miss when the shapes are
+    /// no more than that. Input order is the in-interval elapsed rank <c>QueryStatsCollector.SkipIdleAndRank</c> computes against the
     /// counter baselines, so it already covers both a plan that just regressed (a large delta) and a heavy statement that
     /// runs now and then (a large delta on the run it executes). The newest-and-heaviest split of #7337 belongs to the
     /// inline apply only, because the inline query has no baselines and can rank only by <c>last_execution_time</c> and
@@ -727,7 +849,27 @@ public sealed partial class DarlingCollectorRunner
     internal static List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)> ChooseDeferredQueryStatsMisses(
         IReadOnlyList<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)> candidates)
     {
-        return candidates.Take(QueryStatsCollector.MaxPlansPerRun).ToList();
+        /* #8994: one slot per shape. A later miss of a shape already chosen is not fetched: it takes the plan or the size
+           the chosen row fetches (ShareFetchedPlansByShape), and ships without either when that fetch stores no plan and
+           has no size to share. A row with no usable shape is its own. */
+        var chosen = new List<(QueryStatsPlanKey Key, QueryStatsCollector.Row Row)>();
+        var seen = new HashSet<QueryStatsPlanShapeKey>();
+        foreach (var candidate in candidates)
+        {
+            if (chosen.Count == QueryStatsCollector.MaxPlansPerRun)
+            {
+                break;
+            }
+
+            if (QueryStatsPlanShapeKey.TryCreate(candidate.Key.ServerId, candidate.Row) is { } shape && !seen.Add(shape))
+            {
+                continue;
+            }
+
+            chosen.Add(candidate);
+        }
+
+        return chosen;
     }
 
     /// <summary>

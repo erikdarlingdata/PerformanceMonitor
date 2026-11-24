@@ -628,6 +628,7 @@ public static partial class DarlingCliCommands
         || IsRemoveAlertSourceVerb(arg)
         || IsListAlertSourcesVerb(arg)
         || IsExportInvestigationsVerb(arg)
+        || IsObjectUsageCompareVerb(arg)
         || IsEnableCollectorVerb(arg)
         || IsDisableCollectorVerb(arg)
         || IsSetCollectorRunAtVerb(arg)
@@ -635,6 +636,7 @@ public static partial class DarlingCliCommands
         || IsSetCollectorRetentionVerb(arg)
         || IsDropXeSessionsVerb(arg)
         || IsGrantScriptVerb(arg)
+        || IsPrepareProvisionRolesVerb(arg)
         || IsResetPasswordKeyVerb(arg)
         || IsNewPasswordKeyVerb(arg)
         || IsSelfCheckPasswordKeyVerb(arg)
@@ -690,6 +692,13 @@ public static partial class DarlingCliCommands
         return assembly.GetName().Version?.ToString() ?? "unknown";
     }
 
+    /// <summary>#9203: the line that names this build ("Version 3.13.0 (commit 0993a1441)"), the same words the Viewer's About shows for the
+    /// same build. The web dashboard's footer shows it, and the front door shows each store's next to the store's name.</summary>
+    public static string BuildText() => ProductBuildText.ForAssembly(typeof(DarlingCliCommands).Assembly);
+
+    /// <summary>#9431: the commit this build was made from, in full, or null for a build made outside a git checkout.</summary>
+    public static string? CommitText() => ProductBuildText.CommitForAssembly(typeof(DarlingCliCommands).Assembly);
+
     /// <summary>The usage text for <c>--help</c> and the unknown-option error. Pure ASCII, one verb per line.</summary>
     public static string UsageText() =>
         "PerformanceMonitor Darling service." + Environment.NewLine +
@@ -726,6 +735,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --remove-alert-source <name> [--config <path>]   Drop a source's login and remove it, along with any alerts of its that are still queued. Alerts it already sent stay in the history." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --list-alert-sources [--config <path>]           List the sources: name, created, last alert sent and alerts not yet delivered. Never shows a password." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --export-investigations <file> [--since <date>] [--until <date>] [--server <name>] [--verdict right|partly|wrong] [--force] [--config <path>]   Write the investigation cases that have feedback, one JSON object per line: the alert, the brief and evidence the agent was given, its report and the recorded verdict and note. Collected text is masked at mcp.dataDetail, as get_investigation_reports masks it. Test your own agent on them." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --object-usage-compare <server> <database> [days] [--config <path>]   Read one database's object usage both ways, from the stored chain and from every snapshot, and print 'identical' with both timings or each difference. Reads only; exits 3 when the answers differ and 4 when the chain cannot answer the window." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path>]   Set the time of day (the monitored server's own clock) a collector that runs once a day or less often starts; none stops a fixed time, default clears the row's time so the next level applies. Fleet-wide by default; --server scopes it to one server. Only the run time changes. The running service applies it within one sweep." + Environment.NewLine +
@@ -735,6 +745,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for the shared sessions, and a query that lists every install's sessions with their DROP statements, in both scopes. It connects to nothing, so use it for a server that is no longer configured or that a removal could not reach." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--config <path>]   Print the T-SQL that creates the monitoring login and grants what Darling needs on a monitored server (the SQL login the entry uses, or the service account for Windows authentication). Safe to run twice. Connects to no monitored server." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure]   The same for a host not yet added." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --prepare-provision-roles --login <file> --login-kind password|connection-string --passwords <dir> --out <dir> --wait-seconds <n> [--host <h> --port <p> --database <d> --username <u> --ssl-mode <mode> [--root-certificate <path>]]   Used by the chart's store-roles Job: wait for the store schema, check ownership and write the rendered provision-roles.sql, a pgpass and a libpq env file into --out. Prints no password." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -816,14 +827,31 @@ public static partial class DarlingCliCommands
 
         await ReportAgentDispatchAsync(config, output, cancellationToken);
 
+        /* #8735: the tokenSignIn lines. An ERROR is a configuration the service refuses to start; only those return 1, and they are
+           all new settings, so an upgrade does not start failing a validation. */
+        var tokenSignInFailed = false;
+        foreach (var finding in TokenSignInFindings(config))
+        {
+            output.WriteLine(finding);
+            tokenSignInFailed |= finding.StartsWith("ERROR:", StringComparison.Ordinal);
+        }
+
+        /* #8737: a warning, not an error: personal tokens stay off or are served narrower, and the rest of the service starts as before. */
+        foreach (var problem in DarlingPersonalTokenSettings.Problems(config))
+        {
+            output.WriteLine("WARNING: " + problem);
+        }
+
         /* #6583: a warning, not an error, so a config that works today still starts: the port is ignored for a SQL Server target. */
         foreach (var warning in SqlServerPortAdvice.Warnings(targets))
         {
             output.WriteLine("WARNING: " + warning);
         }
 
-        /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. */
-        if (DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
+        /* #6265: a warning, not an error, so a setup that started before still starts; the web refuses that token for sign-in. The service
+           drops it under tokenSignIn off (no token signs in, so the clash is moot), and so does this. */
+        DarlingTokenSignIn.TryParse(config.Web.Network?.Oidc?.TokenSignIn, out var webTokenSignIn);
+        if (webTokenSignIn != TokenSignInMode.Off && DarlingAgentDispatchChecks.WebTokenFinding(config) is { } webTokenFinding)
         {
             output.WriteLine("WARNING: " + webTokenFinding);
         }
@@ -832,7 +860,7 @@ public static partial class DarlingCliCommands
         if (targets.Count == 0)
         {
             output.WriteLine("No monitored servers are configured yet, so there is nothing to test. Add one in the Viewer (Add Server) or with --add-server.");
-            return 0;
+            return tokenSignInFailed ? 1 : 0;
         }
 
         output.WriteLine($"Validating connectivity to {CountText.Plural(targets.Count, "server")}...");
@@ -866,7 +894,64 @@ public static partial class DarlingCliCommands
         output.WriteLine(allReachable
             ? "All servers reachable."
             : "One or more servers failed the connection pre-flight (see above).");
-        return allReachable ? 0 : 1;
+        return allReachable && !tokenSignInFailed ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The <c>web.network.oidc.tokenSignIn</c> lines <c>--validate-config</c> prints (#8735), each starting <c>ERROR:</c>, <c>NOTE:</c>
+    /// or <c>INFO:</c>. An <c>ERROR:</c> is a configuration the service refuses to start: an unknown value, or <c>off</c> with no
+    /// OIDC or no exposed dashboard, worded by the start's own <see cref="DarlingWebHostService.TokenSignInStartProblem"/> so the two
+    /// say the same thing. "Exposed" is the service's own verdict, <see cref="DarlingWebHostService.ResolveWebBind"/> (listen, allowFrom, a
+    /// token or the <c>off</c> + OIDC widening, and a managed store or a container), so a configuration the start would degrade to
+    /// loopback-only is not called exposed here. <paramref name="inContainer"/> is the ambient container marker unless a test passes it. The OIDC client the start refuses (a bad authority, say) needs a live start, so it is not judged here. Empty under <c>on</c> or with no
+    /// <c>web.network.oidc</c> block. With <c>web.enabled</c> false it is one <c>INFO:</c> line and nothing else, because the service never
+    /// evaluates the setting for a dashboard that is not started. Never holds a token.
+    /// </summary>
+    internal static IReadOnlyList<string> TokenSignInFindings(DarlingConfig config, bool? inContainer = null)
+    {
+        var findings = new List<string>();
+        var network = config.Web.Network;
+        if (network?.Oidc is not { } oidc)
+        {
+            return findings;
+        }
+
+        /* The service evaluates tokenSignIn only for a dashboard it starts, so a leftover setting under a disabled dashboard is not a problem.
+           web.enabled here is the file's seed: after the first run the store decides, so the line names that. */
+        if (!config.Web.Enabled)
+        {
+            findings.Add(
+                "INFO: web.enabled is false in darling.json, which only seeds the dashboard's first run, so web.network.oidc.tokenSignIn is not checked here. "
+                + "If the store has the dashboard enabled (--enable-web), set web.enabled to true to check it.");
+            return findings;
+        }
+
+        var exposed = DarlingWebHostService.ResolveWebBind(config.Web, config.Postgres.Managed, inContainer).Mode
+            == DarlingHostBinding.BindMode.NetworkAndLoopback;
+        if (DarlingWebHostService.TokenSignInStartProblem(oidc.TokenSignIn, oidc.IsConfigured, exposed, oidcClientPresent: oidc.IsConfigured) is { } problem)
+        {
+            findings.Add("ERROR: " + problem);
+            return findings;
+        }
+
+        DarlingTokenSignIn.TryParse(oidc.TokenSignIn, out var mode);
+        if (mode == TokenSignInMode.On)
+        {
+            return findings;
+        }
+
+        findings.Add($"INFO: web.network.oidc.tokenSignIn is '{DarlingTokenSignIn.Word(mode)}'.");
+        if (mode == TokenSignInMode.Loopback && exposed)
+        {
+            findings.Add(
+                "NOTE: web.network.oidc.tokenSignIn is 'loopback' and the dashboard is exposed. 'loopback' separates local clients from remote ones "
+                + "only when each remote client reaches this service with its own address. A service-mesh sidecar such as Envoy or Linkerd "
+                + "connects from loopback and usually sends no X-Forwarded-For, and a request from inside the mesh never carries one, so behind a "
+                + "sidecar every client would count as local; use 'off' there. Listing a reverse proxy in web.network.trustedProxies helps only "
+                + "when that proxy sends X-Forwarded-For with the client's address on every request.");
+        }
+
+        return findings;
     }
 
     /// <summary>
@@ -4081,14 +4166,19 @@ public static partial class DarlingCliCommands
     /// <summary>
     /// PURE: the line <c>--enable-mcp</c> / <c>--enable-web</c> prints when darling.json gives that endpoint no token and
     /// its <c>allowTokenlessLoopback</c> is off, because the service then does not start it; null when a token is set, the
-    /// opt-out is on, or (MCP only) <c>mcp.tokens</c> names tokens, which the host honors without a legacy token (#6542).
+    /// opt-out is on, the dashboard's <c>tokenSignIn</c> is <c>off</c> with OIDC configured (#8735), or (MCP only) <c>mcp.tokens</c> names tokens, which the host honors without a legacy token (#6542).
     /// Reads only whether a token value is present, never the token.
     /// </summary>
     internal static string? EnableTokenNote(bool mcp, DarlingConfig config)
     {
         var section = mcp ? "mcp" : "web";
         var optOut = mcp ? config.Mcp.AllowTokenlessLoopback : config.Web.AllowTokenlessLoopback;
-        return HasEndpointToken(mcp, config) || (mcp && config.Mcp.HasNamedTokens) || optOut
+        /* #8735: tokenSignIn "off" with OIDC configured makes OIDC the only way in, so the dashboard needs no token (the start's own rule). */
+        var oidcOnly = !mcp
+            && config.Web.Network?.Oidc is { IsConfigured: true } oidc
+            && DarlingTokenSignIn.TryParse(oidc.TokenSignIn, out var signInMode)
+            && signInMode == TokenSignInMode.Off;
+        return HasEndpointToken(mcp, config) || (mcp && config.Mcp.HasNamedTokens) || optOut || oidcOnly
             ? null
             : $"NOTE: darling.json gives {section} no token, so the service will not start it. Set {section}.network.encryptedToken " +
               $"(from --encrypt-password) or {section}.network.token and restart the service, or set {section}.allowTokenlessLoopback " +
@@ -5010,6 +5100,15 @@ public static partial class DarlingCliCommands
                 var readable = DarlingFileSecurity.IsReadableByOrdinaryUsers(full);
                 var others = DarlingFileSecurity.AccessBeyondTrusted(full);
                 var ownerTrusted = DarlingFileSecurity.IsTrustedOwner(full);
+                if (!readable && others is null && ownerTrusted && DarlingFileSecurity.GrantsHardenedAccount(full))
+                {
+                    /* #8923: nobody beyond SYSTEM, Administrators and the service account holds any entry, inherited ones included
+                       (both reads go by SID and count inherited rules), the owner is one of the three, and the service account can read it. There is nothing to
+                       fix, so this is a status line the installers print as plain output, not a warning. */
+                    output.WriteLine($"  SECURED  {full} ({what}): only SYSTEM, Administrators and the service account have access to it (outside the install folder, so it was not changed)");
+                    continue;
+                }
+
                 var note = readable ? "ordinary users can read it" : "ordinary users cannot read it";
                 if (others is not null)
                 {

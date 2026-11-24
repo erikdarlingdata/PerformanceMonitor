@@ -77,8 +77,12 @@ public sealed class DarlingMcpLatchSpinlockTools
         {
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
-            var rows = await DarlingLatchSpinlockReader.GetLatchStatsTopNAsync(
-                postgres, resolved.ServerId, windowStart, now, top, cancellationToken);
+            /* The caller's top + 1 as the fetch, the extra row as the observed truncation signal: the classes are ranked, so the extra row
+               is the next one and the first top are the same rows in the same order. */
+            var fetched = await DarlingLatchSpinlockReader.GetLatchStatsTopNAsync(
+                postgres, resolved.ServerId, windowStart, now, top + 1, cancellationToken);
+            var truncated = fetched.Count > top;
+            var rows = truncated ? fetched.Take(top).ToList() : fetched;
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "latch_stats", cancellationToken)
                     /* #7010: an answer with no rows over a window the store may not reach back to is not a true negative, so the window
@@ -143,6 +147,7 @@ public sealed class DarlingMcpLatchSpinlockTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 latch_count = rows.Count,
+                truncated,
                 latches
             }, McpHelpers.JsonOptions);
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;
@@ -175,8 +180,12 @@ public sealed class DarlingMcpLatchSpinlockTools
         {
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
-            var rows = await DarlingLatchSpinlockReader.GetSpinlockStatsTopNAsync(
-                postgres, resolved.ServerId, windowStart, now, top, cancellationToken);
+            /* The caller's top + 1 as the fetch, the extra row as the observed truncation signal: the spinlocks are ranked, so the extra row
+               is the next one and the first top are the same rows in the same order. */
+            var fetched = await DarlingLatchSpinlockReader.GetSpinlockStatsTopNAsync(
+                postgres, resolved.ServerId, windowStart, now, top + 1, cancellationToken);
+            var truncated = fetched.Count > top;
+            var rows = truncated ? fetched.Take(top).ToList() : fetched;
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.DisplayName, "spinlock_stats", cancellationToken)
                     /* #7010: an answer with no rows over a window the store may not reach back to is not a true negative, so the window
@@ -222,6 +231,7 @@ public sealed class DarlingMcpLatchSpinlockTools
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
                 spinlock_count = rows.Count,
+                truncated,
                 spinlocks
             }, McpHelpers.JsonOptions);
             return notice.IsUnavailable ? DarlingMcpWindowNotice.WithoutKeys(json) : json;

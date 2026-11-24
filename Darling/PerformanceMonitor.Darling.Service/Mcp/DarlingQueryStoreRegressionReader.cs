@@ -329,9 +329,13 @@ internal static class DarlingQueryStoreRegressionReader
     }
 
     /// <summary>
-    /// #5809: the regression read over <c>query_store_interval_wide</c>, by <c>get_query_store_top</c>'s own tier rule
+    /// #5809: the regression read over <c>query_store_interval_wide</c>, by <c>get_query_store_top</c>'s tier rule for every database
     /// (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>, then <see cref="QueryStoreIntervalWide.ResolveReadAsync"/>)
-    /// over the whole span the read compares, baseline start to window end, so the #5541 floor rule applies: a store whose
+    /// over the whole span the read compares, baseline start to window end. That span is never shorter than
+    /// <see cref="BaselineLookbackDays"/>, so a database filter changes nothing about the minimum window. Unlike the top read it passes
+    /// the window's end as the literal end (UseTable's clause 4): both its raw and table arms keep the snapshots collected by the window
+    /// end, so for an end before applied_through the table, which holds each interval's newest snapshot, would drop an interval raw still
+    /// counts. The #5541 floor rule applies: a store whose
     /// table does not yet cover that span (no coverage, coverage that starts after the baseline start, a pending batch, a
     /// table floor too close to raw's) reads raw. The decision and the read share ONE read-only REPEATABLE READ snapshot,
     /// as the top and history reads do, and so do the baseline's built days (#5506). Null when the gate says raw or anything

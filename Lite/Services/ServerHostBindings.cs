@@ -43,6 +43,7 @@ public sealed class ServerHostBindings
     internal const string UtilityDatabaseSetting = "utility database";
     internal const string EncryptionSetting = "encryption";
     internal const string CertificateSetting = "certificate check";
+    internal const string ManagedIdentityClientIdSetting = "managed identity client ID";
 
     private static readonly JsonSerializerOptions s_jsonOptions = new() { WriteIndented = true };
 
@@ -320,7 +321,7 @@ public sealed class ServerHostBindings
             if (bound.AzureClientId == null || !SameHost(bound.AzureClientId, now.AzureClientId))
                 changes.Add(new ServerSettingChange("application (client) ID", Recorded(bound.AzureClientId), OrNone(now.AzureClientId)));
             if (bound.ManagedIdentityClientId == null || !SameHost(bound.ManagedIdentityClientId, now.ManagedIdentityClientId))
-                changes.Add(new ServerSettingChange("managed identity client ID", Recorded(bound.ManagedIdentityClientId), OrNone(now.ManagedIdentityClientId)));
+                changes.Add(new ServerSettingChange(ManagedIdentityClientIdSetting, Recorded(bound.ManagedIdentityClientId), OrNone(now.ManagedIdentityClientId)));
         }
 
         if (!SameHost(bound.DatabaseName, server.DatabaseName))

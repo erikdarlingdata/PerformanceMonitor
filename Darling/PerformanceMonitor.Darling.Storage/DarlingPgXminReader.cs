@@ -53,7 +53,7 @@ public static class DarlingPgXminReader
                 source, collection_time, xmin_age, holder, detail, is_winner
             FROM pg_xmin_horizon
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             ORDER BY source, collection_time DESC
         ),
@@ -65,7 +65,7 @@ public static class DarlingPgXminReader
                 COUNT(*) AS samples
             FROM pg_xmin_horizon
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY source
         )
@@ -118,7 +118,7 @@ public static class DarlingPgXminReader
         FROM collection_log
         WHERE server_id = $1
         AND   collector_name = 'pg_xmin_horizon'
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   status = 'SUCCESS'
         """;

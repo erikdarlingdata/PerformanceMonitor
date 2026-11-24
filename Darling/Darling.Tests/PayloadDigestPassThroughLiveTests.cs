@@ -222,7 +222,7 @@ public sealed class PayloadDigestPassThroughLiveTests
 
     private static async Task<DateTime?> LastSeenAsync(NpgsqlConnection connection, byte[] digest, CancellationToken ct)
     {
-        await using var read = new NpgsqlCommand("SELECT last_seen FROM query_plan_dim WHERE digest = $1", connection);
+        await using var read = new NpgsqlCommand("SELECT last_seen FROM collect.query_plan_dim_seen WHERE digest = $1", connection);
         read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
         var value = await read.ExecuteScalarAsync(ct);
         return value is DateTime stamp ? stamp : null;
@@ -230,10 +230,15 @@ public sealed class PayloadDigestPassThroughLiveTests
 
     private static async Task SetLastSeenAsync(NpgsqlConnection connection, byte[] digest, DateTime lastSeen, CancellationToken ct)
     {
-        await using var update = new NpgsqlCommand("UPDATE query_plan_dim SET last_seen = $2 WHERE digest = $1", connection);
-        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
-        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = lastSeen });
-        await update.ExecuteNonQueryAsync(ct);
+        /* The liveness stamp is the stamp row's (#9304); the wide row's own stamp is set with it, as a store that has only run this build holds them. One
+           command each: positional parameters do not mix with several statements in one Npgsql command. */
+        foreach (var table in new[] { "collect.query_plan_dim_seen", "query_plan_dim" })
+        {
+            await using var update = new NpgsqlCommand($"UPDATE {table} SET last_seen = $2 WHERE digest = $1", connection);
+            update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bytea, Value = digest });
+            update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = lastSeen });
+            await update.ExecuteNonQueryAsync(ct);
+        }
     }
 
     private static async Task CleanupAsync(NpgsqlConnection cleanup, int serverId, IEnumerable<byte[]> planDigests, CancellationToken ct)

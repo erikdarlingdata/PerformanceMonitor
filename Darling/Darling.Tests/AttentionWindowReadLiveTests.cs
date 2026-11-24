@@ -120,8 +120,9 @@ public sealed class AttentionWindowReadLiveTests
             }
 
             await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 30_000_000);
-            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 999);
-            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 1000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 999_999);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-slow", "SELECT slow", ct, durationUs: 1_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-ms", "SELECT four ms", ct, durationUs: 4_000);
             await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-none", "SELECT no duration", ct, durationUs: null);
             for (var i = 0; i < 3; i++)
             {
@@ -135,18 +136,70 @@ public sealed class AttentionWindowReadLiveTests
 
             var window = await adapter.GetAttentionWindowAsync(server.ToString(CultureInfo.InvariantCulture), Lookback, ct);
 
-            /* 6 + 4 + 3 + 1 + 3 = 17 samples. Short: the six SqlClient ones, the 999 us one and the azdata #SVer at 20 us = 8. Azdata metadata (not short): 3 #SVer + 1 column read = 4. */
-            Assert.Equal(17, window.SampleGroups.Sum(g => g.Samples));
-            Assert.Equal(8, window.SampleGroups.Sum(g => g.ShortSamples));
+            /* 6 + 5 + 3 + 1 + 3 = 18 samples. Short (#9030, floor 1 s): the six SqlClient ones, the 999,999 us one, the 4 ms one and the azdata #SVer at 20 us = 9. The one at exactly 1 s, the 30 s one and the one with no duration count. Azdata metadata (not short): 3 #SVer + 1 column read = 4. */
+            Assert.Equal(18, window.SampleGroups.Sum(g => g.Samples));
+            Assert.Equal(9, window.SampleGroups.Sum(g => g.ShortSamples));
             Assert.Equal(4, window.SampleGroups.Sum(g => g.AzdataMetadataSamples));
 
             var reading = AttentionEvaluator.Read(window, now)!;
-            Assert.Equal(8, reading.ShortSamples);
+            Assert.Equal(9, reading.ShortSamples);
             Assert.Equal(4, reading.AzdataMetadataSamples);
 
             var finding = AttentionEvaluator.Evaluate(reading, 1, 10_000);
             Assert.NotNull(finding);
-            Assert.Equal(100d * 5 / 17, finding!.JudgedCount, 6);
+            Assert.Equal(100d * 5 / 18, finding!.JudgedCount, 6);
+        });
+    }
+
+    [Fact]
+    public async Task TheDbatoolsSmoMetadataShape_IsLeftOutOfTheSampleGroups_ButTheUsersOwnQueriesStayCounted()
+    {
+        await RunAsync(async (adapter, connection, ct) =>
+        {
+            var now = DateTime.UtcNow;
+            long id = 900;
+            var server = ServerId;
+            for (var i = 0; i < 6; i++)
+            {
+                await LogAsync(connection, id++, server, now.AddSeconds(-30).AddMinutes(-i), "SUCCESS", ct);
+            }
+
+            var at = now.AddSeconds(-28);
+            await RowAsync(connection, id++, server, at, "count", 100, null, null, null, null, ct);
+            /* Left out: dbatools running SMO statements, the name matched trimmed and ignoring case. */
+            for (var i = 0; i < 3; i++)
+            {
+                await RowAsync(connection, id++, server, at, "sample", 0, "master", AttentionWindowSql.DbatoolsClientApp, "fp-smo", "SELECT name FROM sys.schemas WHERE schema_id = @_msparam_0", ct, durationUs: 5_000_000);
+            }
+
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "  DBATOOLS PowerShell Module - dbatools.io ", "fp-smo2", "SELECT * FROM sys.columns WHERE object_id = @_MSPARAM_1", ct, durationUs: 5_000_000);
+            /* Stay counted: dbatools statements without the marker (a user's own queries), one with no statement text, a marker-like text without the
+               underscores, and another application sending the same marker. */
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", AttentionWindowSql.DbatoolsClientApp, "fp-user", "SELECT * FROM dbo.Orders", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", AttentionWindowSql.DbatoolsClientApp, "fp-user", "EXEC dbo.LoadOrders", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", AttentionWindowSql.DbatoolsClientApp, null, null, ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", AttentionWindowSql.DbatoolsClientApp, "fp-like", "SELECT @xmsparamy", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-other", "SELECT name FROM sys.schemas WHERE schema_id = @_msparam_0", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, at, "sample", 0, "db1", "etl", "fp-other", "SELECT name FROM sys.schemas WHERE schema_id = @_msparam_0", ct, durationUs: 30_000_000);
+            /* Under the duration floor: counted as short, not twice as dbatools. */
+            await RowAsync(connection, id++, server, at, "sample", 0, "master", AttentionWindowSql.DbatoolsClientApp, "fp-smo", "SELECT name FROM sys.schemas WHERE schema_id = @_msparam_0", ct, durationUs: 20);
+
+            var window = await adapter.GetAttentionWindowAsync(server.ToString(CultureInfo.InvariantCulture), Lookback, ct);
+
+            /* 4 left out + 4 user queries and look-alikes (one with no text) + 2 other application + 1 short = 11 samples. */
+            Assert.Equal(11, window.SampleGroups.Sum(g => g.Samples));
+            Assert.Equal(1, window.SampleGroups.Sum(g => g.ShortSamples));
+            Assert.Equal(4, window.SampleGroups.Sum(g => g.DbatoolsMetadataSamples));
+            Assert.Equal(0, window.SampleGroups.Sum(g => g.AzdataMetadataSamples));
+
+            var reading = AttentionEvaluator.Read(window, now)!;
+            Assert.Equal(4, reading.DbatoolsMetadataSamples);
+
+            /* 100 x (11 - 1 - 4) / 11: the rate judged is the exact count scaled by the share that passes. */
+            var finding = AttentionEvaluator.Evaluate(reading, 1, 10_000);
+            Assert.NotNull(finding);
+            Assert.Equal(100d * 6 / 11, finding!.JudgedCount, 6);
+            Assert.Equal(4, finding.DbatoolsMetadataSamples);
         });
     }
 
@@ -227,7 +280,7 @@ public sealed class AttentionWindowReadLiveTests
 
             var rows = new (int Minute, long Count, int Short, int Passing)[]
             {
-                (0, 100, 3, 1),   /* 100 x 1/4 = 25 */
+                (0, 100, 3, 1),   /* three of 4 ms are short, the one at exactly 1 s passes: 100 x 1/4 = 25 */
                 (1, 50, 0, 0),    /* no samples: the full 50 */
                 (2, 80, 0, 4),    /* every sample passes: the full 80 */
                 (3, 40, 2, 0),    /* every sample is short: 0 */
@@ -239,12 +292,12 @@ public sealed class AttentionWindowReadLiveTests
                 await RowAsync(connection, id++, server, at, "count", count, null, null, null, null, ct);
                 for (var i = 0; i < shortOnes; i++)
                 {
-                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", null, null, ct, durationUs: 25);
+                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", null, null, ct, durationUs: 4_000);
                 }
 
                 for (var i = 0; i < passing; i++)
                 {
-                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", "fp", "SELECT 1", ct, durationUs: minute == 4 ? null : 30_000_000);
+                    await RowAsync(connection, id++, server, at, "sample", 0, "db1", "app", "fp", "SELECT 1", ct, durationUs: minute == 4 ? null : minute == 0 ? 1_000_000 : 30_000_000);
                 }
             }
 
@@ -256,6 +309,9 @@ public sealed class AttentionWindowReadLiveTests
             await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", AttentionWindowSql.SsmsIntelliSensePrefix + " - Transact-SQL IntelliSense ", "fp", "SELECT 1", ct, durationUs: 30_000_000);
             await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", "VSCODE-mssql-ObjectExplorer", "fp", "SELECT 1", ct, durationUs: 30_000_000);
             await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", "app", "fp", "SELECT 1", ct, durationUs: 30_000_000);
+            /* #8877: a dbatools SMO read is left out of the baseline too, a dbatools query without the marker is not: 60 x 2/6 = 20. */
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", AttentionWindowSql.DbatoolsClientApp, "fp", "SELECT name FROM sys.schemas WHERE schema_id = @_msparam_0", ct, durationUs: 30_000_000);
+            await RowAsync(connection, id++, server, namedAt, "sample", 0, "db1", AttentionWindowSql.DbatoolsClientApp, "fp", "SELECT 1", ct, durationUs: 30_000_000);
 
             using var command = new NpgsqlCommand(AttentionWindowSql.BaselineMinutes("collection_log", "attention_events"), connection);
             command.Parameters.AddWithValue(NpgsqlDbType.Integer, server);
@@ -270,7 +326,7 @@ public sealed class AttentionWindowReadLiveTests
                 }
             }
 
-            Assert.Equal(new long[] { 25, 50, 80, 0, 10, 15 }, got.ToArray());
+            Assert.Equal(new long[] { 25, 50, 80, 0, 10, 20 }, got.ToArray());
         });
     }
 

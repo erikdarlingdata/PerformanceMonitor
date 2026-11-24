@@ -63,7 +63,7 @@ public sealed partial class ViewerDataService
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
                 'blocked-process-report' AS source
             FROM v_blocked_process_reports
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $4
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
@@ -78,7 +78,7 @@ public sealed partial class ViewerDataService
                 CAST(AVG(wait_time_ms) AS double precision) AS avg_duration_ms,
                 'DMV snapshot' AS source
             FROM v_dmv_blocking_snapshots
-            WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3
+            WHERE server_id = $1 AND event_time > $2 AND event_time <= $3
             AND   collection_time >= $4
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
             AND   {PerformanceMonitor.Common.BlockingWaits.NotSelfWaitSql}
@@ -113,7 +113,7 @@ public sealed partial class ViewerDataService
         });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new BlockingDurationStatsPoint(
@@ -151,7 +151,7 @@ public sealed partial class ViewerDataService
             deadlock_graph_xml
         FROM v_deadlocks
         WHERE server_id = $1
-        AND   deadlock_time >= $2
+        AND   deadlock_time > $2
         AND   deadlock_time <= $3
         AND   collection_time >= $4
         ORDER BY deadlock_time
@@ -173,7 +173,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddBlockingParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             graphs.Add((

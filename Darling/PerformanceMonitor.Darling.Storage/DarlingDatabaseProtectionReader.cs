@@ -32,7 +32,17 @@ public sealed record DatabaseProtectionFact(
     DateTime? LastFullBackupTime,
     string? FullBackupState,
     DateTime? LastLogBackupTime,
-    string? LogBackupState);
+    string? LogBackupState,
+    string? ErrorLogState = null,
+    string? ErrorLogMessage = null,
+    string? ErrorLogGrant = null,
+    bool? ErrorLogBackfillComplete = null,
+    string? ErrorLogSkippedArchives = null,
+    int? ErrorLogUnparsedLines = null,
+    DateTime? ErrorLogCheckDbTime = null,
+    string? ErrorLogCheckDbOptions = null,
+    int? ErrorLogCheckDbErrors = null,
+    bool? ReplicaReadable = null);
 
 /// <summary>What <see cref="DarlingDatabaseProtectionReader.ReadAsync"/> found: one entry per database in the newest capture, by name.</summary>
 /// <param name="Databases">The databases of the newest capture. Empty when the window holds no capture.</param>
@@ -54,12 +64,14 @@ public static class DarlingDatabaseProtectionReader
     /// <summary>The newest capture's rows. $1 server, $2 window start, $3 window end.</summary>
     public const string NewestCaptureSql = @"
 SELECT collection_time, database_name, state_desc, recovery_model_desc, create_date, replica_role, platform,
-       last_good_checkdb_time, checkdb_state, last_full_backup_time, full_backup_state, last_log_backup_time, log_backup_state
+       last_good_checkdb_time, checkdb_state, last_full_backup_time, full_backup_state, last_log_backup_time, log_backup_state,
+       errorlog_state, errorlog_message, errorlog_grant, errorlog_backfill_complete, errorlog_skipped_archives, errorlog_unparsed_lines,
+       errorlog_checkdb_time, errorlog_checkdb_options, errorlog_checkdb_errors, replica_readable
 FROM collect.database_protection
 WHERE server_id = $1
 AND   collection_time = (
         SELECT MAX(collection_time) FROM collect.database_protection
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3)
+        WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3)
 ORDER BY lower(database_name), database_name";
 
     /// <summary>Reads the newest capture of one server in the window <paramref name="start"/> to <paramref name="end"/> (UTC).</summary>
@@ -83,9 +95,13 @@ ORDER BY lower(database_name), database_name";
             newest = reader.GetDateTime(0);
             string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
             DateTime? Time(int i) => reader.IsDBNull(i) ? null : reader.GetDateTime(i);
+            bool? Flag(int i) => reader.IsDBNull(i) ? null : reader.GetBoolean(i);
+            int? Count(int i) => reader.IsDBNull(i) ? null : reader.GetInt32(i);
+            /* #8865: the error log facts (V278), NULL on a row written before it. */
             databases.Add(new DatabaseProtectionFact(
                 Text(1) ?? string.Empty, Text(2), Text(3), Time(4), Text(5), Text(6),
-                Time(7), Text(8), Time(9), Text(10), Time(11), Text(12)));
+                Time(7), Text(8), Time(9), Text(10), Time(11), Text(12),
+                Text(13), Text(14), Text(15), Flag(16), Text(17), Count(18), Time(19), Text(20), Count(21), Flag(22)));
         }
 
         return new DatabaseProtectionRead(databases, newest);

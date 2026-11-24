@@ -135,7 +135,10 @@ public sealed class LiteMcpResponseBudget8568Tests : IDisposable
         var root = AssertWithinBudget("get_top_queries_by_cpu", await McpQueryTools.GetTopQueriesByCpu(_service, _serverManager, ServerName));
         var rows = root.GetProperty("queries").EnumerateArray().ToList();
         Assert.Equal(20, rows.Count);
-        Assert.False(root.GetProperty("truncated").GetBoolean());
+        /* 120 queries ran and the page holds the heaviest 20: top left the rest out, and the budget cut nothing. */
+        Assert.True(root.GetProperty("truncated").GetBoolean(), "top 20 of 120 queries left queries out and truncated is false");
+        Assert.True(root.TryGetProperty("budget_truncated", out var defaultBudgetCut) && defaultBudgetCut.ValueKind == JsonValueKind.False,
+            "the default page fits the response budget, so budget_truncated is false");
         Assert.Equal(JsonValueKind.Null, root.GetProperty("budget_note").ValueKind);
         for (var i = 0; i < rows.Count; i++)
         {
@@ -152,6 +155,7 @@ public sealed class LiteMcpResponseBudget8568Tests : IDisposable
         var kept = wide.GetProperty("queries").EnumerateArray().ToList();
         Assert.InRange(kept.Count, 21, queries - 1);
         Assert.True(wide.GetProperty("truncated").GetBoolean());
+        Assert.True(wide.GetProperty("budget_truncated").GetBoolean());
         Assert.Contains("32,768-byte response budget", wide.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
         Assert.Contains($"{queries} queries were read; only {kept.Count} fit", wide.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
         Assert.Equal(Enumerable.Range(0, kept.Count).Select(QueryHash), kept.Select(r => r.GetProperty("query_hash").GetString()));

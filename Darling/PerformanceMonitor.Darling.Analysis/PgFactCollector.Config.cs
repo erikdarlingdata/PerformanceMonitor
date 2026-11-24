@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -20,7 +21,7 @@ public sealed partial class PgFactCollector
     // Latest value PER configuration_name (ROW_NUMBER, not LIMIT N): server_config accumulates
     // a row per capture, so LIMIT-N-ORDER-BY-time returns the newest N ROWS — which collapses to
     // one config when captures are frequent, silently dropping settings. Partition by name and
-    // take rn = 1 so each requested setting is its latest value.
+    // take rn = 1 so each requested setting is its latest value at or before $2, the analysis window's end.
     public const string ServerConfigSql = @"
 WITH latest AS (
     SELECT
@@ -29,6 +30,7 @@ WITH latest AS (
         ROW_NUMBER() OVER (PARTITION BY configuration_name ORDER BY capture_time DESC) AS rn
     FROM server_config
     WHERE server_id = $1
+    AND   capture_time <= $2
     AND   configuration_name IN (
         'cost threshold for parallelism',
         'max degree of parallelism',
@@ -50,10 +52,11 @@ WHERE rn = 1";
     /// </summary>
     private async Task CollectServerConfigFactsAsync(AnalysisContext context, List<Fact> facts)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(ServerConfigSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
         cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
 
         // max/min server memory are read alongside the rooted CONFIG_* facts so the
         // narrow-memory derivation below can compare them without a second query.
@@ -110,6 +113,7 @@ SELECT engine_edition,
        CAST(SPLIT_PART(product_version, '.', 1) AS INTEGER) AS major_version
 FROM server_properties
 WHERE server_id = $1
+AND   collection_time <= $2
 ORDER BY collection_time DESC
 LIMIT 1";
 
@@ -121,10 +125,11 @@ LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ServerMetadataSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;
@@ -159,7 +164,7 @@ WITH latest AS (
            ROW_NUMBER() OVER (PARTITION BY database_name ORDER BY capture_time DESC) AS rn
     FROM database_config
     WHERE server_id = $1
-    AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1)
+    AND   capture_time = (SELECT MAX(capture_time) FROM database_config WHERE server_id = $1 AND capture_time <= $2)
     /*SEC*/
 )
 SELECT
@@ -185,10 +190,11 @@ AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
         await AddQueryStoreErrorFactAsync(context, facts);
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(DatabaseConfigSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
             /* #5558: a database this node holds only as a secondary copy is the primary's to report (and drops out of
                every count here, database_count included). */
             PgSecondaryReplicaScope.Apply(cmd, context, "DB_CONFIG", "database_name");
@@ -259,7 +265,7 @@ ORDER BY database_name";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(QueryStoreErrorSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -332,7 +338,7 @@ ORDER BY trace_flag";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(TraceFlagsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -386,6 +392,7 @@ SELECT CASE WHEN engine_edition = 5 THEN vcore_count ELSE COALESCE(vcore_count, 
        lock_pages_in_memory, instant_file_initialization_enabled, memory_dump_count, engine_edition
 FROM server_properties
 WHERE server_id = $1
+AND   collection_time <= $2
 ORDER BY collection_time DESC
 LIMIT 1";
 
@@ -397,10 +404,11 @@ LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(ServerPropertiesSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
+            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(context.TimeRangeEnd, DateTimeKind.Unspecified));
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (!await reader.ReadAsync(context.CancellationToken)) return;

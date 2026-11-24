@@ -155,7 +155,7 @@ public sealed class DarlingManagedPostgres
     /// in the store's own <c>pg_stat_activity</c> — all four surfaces open store connections independently,
     /// and only the role name told them apart before this.
     /// </summary>
-    public const string ServiceApplicationName = "PerformanceMonitorDarling-Service";
+    public const string ServiceApplicationName = PerformanceMonitor.Darling.Storage.StoreSessionNames.ServicePrefix;
 
     /// <summary>The CLI verbs' store connections (#4479) — <c>darling.exe --add-server</c> and friends,
     /// each a one-shot process distinct from the running service.</summary>
@@ -2681,6 +2681,38 @@ public sealed class DarlingManagedPostgres
         var builder = new StringBuilder();
         builder.Append('\n');
         builder.Append(RandomPageCostSetting).Append(" = ").Append(RandomPageCostValue).Append('\n');
+        return builder.ToString();
+    }
+
+    /* ===================== lock-wait logging (#9267) ===================== */
+
+    /// <summary>PostgreSQL's setting for logging a session that waits on a lock longer than <c>deadlock_timeout</c>.</summary>
+    internal const string LogLockWaitsSetting = "log_lock_waits";
+
+    /// <summary>The value <see cref="BuildLogLockWaitsConfAppend"/> writes: <c>on</c>.</summary>
+    internal const string LogLockWaitsValue = "on";
+
+    /// <summary>
+    /// The lock-wait logging block (#9267): <c>log_lock_waits = on</c> only. Rendered into <c>darling-managed.conf</c> by
+    /// <see cref="ManagedConfFile.RenderBody"/> and not appended to <c>postgresql.conf</c> as a numbered legacy block: it has no
+    /// marker, like the planner page cost and telemetry lines, and it reaches an existing store the same way
+    /// (<see cref="ManagedConfFile.ManagedOnlyKeys"/>), with the same guard for an operator's own line above the include
+    /// (<see cref="ManagedConfFile.FindOperatorLinesAboveInclude"/>).
+    ///
+    /// <para><b>Why.</b> PostgreSQL's default is off. When a store write runs for seconds there is no way to tell from the log
+    /// whether it waited on a lock or on I/O. With the setting on, a session that waits on a lock longer than
+    /// <c>deadlock_timeout</c> (1 s by default) logs one line when the wait ends, and a wait that ends in a deadlock check logs
+    /// one while it waits. The cost is those lines, written only for a wait over the timeout.</para>
+    ///
+    /// <para><b>Context and precedence.</b> The setting is <c>superuser</c>-context, so a reload applies it. A value set with
+    /// <c>ALTER SYSTEM</c> lives in <c>postgresql.auto.conf</c>, which is read after this file and wins. Nothing here reads or
+    /// writes that file.</para>
+    /// </summary>
+    public static string BuildLogLockWaitsConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(LogLockWaitsSetting).Append(" = ").Append(LogLockWaitsValue).Append('\n');
         return builder.ToString();
     }
 

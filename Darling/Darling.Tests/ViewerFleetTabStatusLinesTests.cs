@@ -36,19 +36,20 @@ public sealed class ViewerFleetTabStatusLinesTests
 
     private static readonly BindingFlags Instance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-    /// <summary>The fleet tabs the window refreshes when they are selected, with the prefix of the failure line each raises when its
-    /// read fails. Fleet Sweeps runs three reads and the last to fail writes the line, so its prefix is the stem the three share; Job
-    /// History's best-effort choices reads can land after its grid read, so its prefix is the stem the two share.</summary>
+    /// <summary>The fleet tabs the window refreshes when they are selected, with the words of the failure line each raises when its
+    /// read fails (#9365: every tab says what did not load in plain words, so the line is found by that phrase). Fleet Sweeps runs three reads, Job History's
+    /// best-effort choices reads can land after its grid read, and Store Health runs three reads (tables, indexes, maintenance check), so the line is whichever failed last.</summary>
     public static IEnumerable<object[]> FleetTabs()
     {
-        yield return new object[] { "AlertsTab", "AlertsHistoryContent", "failed to load alert history: " };
-        yield return new object[] { "JobHistoryTabItem", "JobHistoryContent", "failed to load " };
-        yield return new object[] { "DatabaseProtectionTabItem", "DatabaseProtectionContent", "failed to load the server list for database protection: " };
-        yield return new object[] { "AgentAlertsTabItem", "AgentAlertsContent", "failed to load the server list for agent alerts: " };
-        yield return new object[] { "FleetSweepsTabItem", "FleetSweepsContent", "failed to load the fleet sweep" };
-        yield return new object[] { "IdentityCapacityTabItem", "IdentityCapacityContent", "failed to load the server list for identity capacity: " };
-        yield return new object[] { "AvailabilityGroupsTabItem", "AvailabilityGroupsContent", "Availability Groups failed to load: " };
-        yield return new object[] { "FinOpsTab", "FinOpsContent", "refresh failed: " };
+        yield return new object[] { "AlertsTab", "AlertsHistoryContent", " did not load" };
+        yield return new object[] { "JobHistoryTabItem", "JobHistoryContent", " did not load" };
+        yield return new object[] { "DatabaseProtectionTabItem", "DatabaseProtectionContent", " did not load" };
+        yield return new object[] { "AgentAlertsTabItem", "AgentAlertsContent", " did not load" };
+        yield return new object[] { "FleetSweepsTabItem", "FleetSweepsContent", " did not load" };
+        yield return new object[] { "StoreHealthTabItem", "StoreHealthContent", " did not load" };
+        yield return new object[] { "IdentityCapacityTabItem", "IdentityCapacityContent", " did not load" };
+        yield return new object[] { "AvailabilityGroupsTabItem", "AvailabilityGroupsContent", " did not load" };
+        yield return new object[] { "FinOpsTab", "FinOpsContent", " did not load" };
     }
 
     [Theory]
@@ -79,7 +80,7 @@ public sealed class ViewerFleetTabStatusLinesTests
                 await (Task)typeof(MainWindow).GetMethod("RefreshVisibleAsync", Instance)!.Invoke(w, null)!;
                 ClippedTextProbe.Settle(host);
 
-                if (!status.Text.StartsWith(failurePrefix, StringComparison.Ordinal))
+                if (!(failurePrefix.StartsWith(' ') ? status.Text.Contains(failurePrefix, StringComparison.Ordinal) : status.Text.StartsWith(failurePrefix, StringComparison.Ordinal)))
                 {
                     findings.Add($"with {tabName} on screen after its read failed the status bar reads \"{status.Text}\", not \"{failurePrefix}…\"");
                 }
@@ -117,6 +118,9 @@ public sealed class ViewerFleetTabStatusLinesTests
                 t.Initialize(service);
                 break;
             case FleetSweepsTab t:
+                t.Initialize(service);
+                break;
+            case StoreHealthTab t:
                 t.Initialize(service);
                 break;
             case IdentityCapacityTab t:

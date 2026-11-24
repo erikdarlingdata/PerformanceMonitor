@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// megabytes of temp files. It now adds the bucket totals straight off the binned rows and counts distinct queries in a separate step over
 /// (bucket, query_id) pairs alone. The test keeps the previous statement as a reference, seeds one table of 343,000 rows (rows with no
 /// query_id, rows with no interval start that are placed by collection time, an hour holding only rows with no query_id, rows on and just past
-/// the window's end), and checks that the two statements return the same lines (the seed's values are whole numbers, so the sums are exact in
+/// the window's end, which a window ending there leaves out), and checks that the two statements return the same lines (the seed's values are whole numbers, so the sums are exact in
 /// any order) and that, at a work_mem of 8 MB with no parallel workers, the new statement writes at most a third of the temp blocks the
 /// previous one wrote.
 /// </summary>
@@ -53,7 +53,7 @@ public sealed class QueryStoreSlicerTableShapeLiveTests
             FROM query_store_interval_wide
             WHERE server_id = $1
             AND   COALESCE(interval_start_time_utc, collection_time) >= $2
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $3
+            AND   COALESCE(interval_start_time_utc, collection_time) < $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
@@ -105,7 +105,7 @@ public sealed class QueryStoreSlicerTableShapeLiveTests
             (1, 'db1', NULL, timestamp '2026-09-20 05:00', timestamp '2026-09-20 05:03', timestamp '2026-09-20 04:00', 4, 11, 12, 13, 14, 15),
             (1, 'db1', NULL, NULL, timestamp '2026-09-20 05:30', timestamp '2026-09-20 04:00', 3, 21, 22, 23, 24, 25);
 
-        -- On the window's end, a whole microsecond past it (left out), and on its start.
+        -- On the window's end and a whole microsecond past it (both left out), and on its start.
         INSERT INTO public.query_store_interval_wide VALUES
             (1, 'db1', 90001, timestamp '2026-10-15 00:00', timestamp '2026-10-15 00:03', timestamp '2026-10-14 23:00', 5, 1, 2, 3, 4, 5),
             (1, 'db1', 90002, timestamp '2026-10-15 00:00:00.000001', timestamp '2026-10-15 00:03', timestamp '2026-10-14 23:00', 5, 1, 2, 3, 4, 5),
@@ -184,15 +184,16 @@ public sealed class QueryStoreSlicerTableShapeLiveTests
             var previous = await LinesAsync(connection, PreviousSlicerTableSql, ct);
             var current = await LinesAsync(connection, ViewerDataService.QueryStoreSlicerTableSql, ct);
 
-            Assert.Equal(721, previous.Count);
+            Assert.Equal(720, previous.Count);
             Assert.Equal(previous, current);
 
             /* The hour with no query_id: a bar with no queries and the work of its two rows (4 x 11 + 3 x 21 microseconds, in milliseconds). */
             var noIdHour = Assert.Single(current, l => l.StartsWith("2026-09-20T05:00:00", StringComparison.Ordinal));
             Assert.StartsWith("2026-09-20T05:00:00.0000000|0|0.107|", noIdHour, StringComparison.Ordinal);
-            /* The last bar: the 464 queries with an interval start on the window's end and the one row there, but not the row a microsecond past it,
-               and not the 9 rows with no interval start (placed by collection time, 3 minutes past the end). */
-            Assert.StartsWith("2026-10-15T00:00:00.0000000|465|", current[^1], StringComparison.Ordinal);
+            /* The last bar is the hour before the window's end: the 473 queries with an id (477, less the 4 without one). The hour that starts on the end
+               is not a bar, with its 464 queries, the one row on the end, the row a microsecond past it, and the 9 rows with no interval start (placed by
+               collection time, 3 minutes past the end). */
+            Assert.StartsWith("2026-10-14T23:00:00.0000000|473|", current[^1], StringComparison.Ordinal);
 
             var previousTemp = await TempBlocksWrittenAsync(connection, PreviousSlicerTableSql, ct);
             var currentTemp = await TempBlocksWrittenAsync(connection, ViewerDataService.QueryStoreSlicerTableSql, ct);

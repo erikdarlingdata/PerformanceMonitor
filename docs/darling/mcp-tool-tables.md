@@ -32,7 +32,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `backtest_custom_alert_rule` | The table that the rule's measure names. Also its hourly or daily aggregate, when the window uses one.<br>`config.custom_alert_rules` (when rule_id given)<br>`config.server_tags`<br>`config.server_tag_map`<br>`config.config_collector_schedules` |
 | `compare_analysis` | *SQL Server targets:*<br>`collect.wait_stats`<br>`collect.deadlocks`<br>`collect.blocked_process_reports`<br>`collect.dmv_blocking_snapshots`<br>`collect.query_stats`<br>`collect.query_store_stats`<br>`collect.query_store_interval_wide`<br>`collect.query_store_interval_latest`<br>`collect.query_store_text`<br>`collect.query_store_plan_map`<br>`collect.query_plan_dim`<br>`collect.query_text_dim`<br>`collect.plan_regression_daily`<br>`collect.procedure_stats`<br>`collect.plan_cache_stats`<br>`collect.query_snapshots`<br>`collect.running_jobs`<br>`collect.session_stats`<br>`collect.cpu_utilization_stats`<br>`collect.memory_stats`<br>`collect.memory_grant_stats`<br>`collect.memory_clerks`<br>`collect.memory_pressure_events`<br>`collect.perfmon_stats`<br>`collect.file_io_stats`<br>`collect.tempdb_stats`<br>`collect.database_size_stats`<br>`collect.database_config`<br>`collect.server_config`<br>`collect.server_properties`<br>`collect.trace_flags`<br>`collect.index_object_stats`<br>`collect.default_trace_events`<br>`collect.collection_log`<br>`collect.ag_replica_states`<br>`collect.ag_database_replica_states`<br>`collect.v_wait_stats`<br>`collect.v_deadlocks`<br>`collect.v_blocked_process_reports`<br>`collect.v_dmv_blocking_snapshots`<br>`collect.v_query_stats`<br>`collect.v_query_store_stats`<br>`collect.v_query_snapshots`<br>`collect.v_session_stats`<br>`collect.v_cpu_utilization_stats`<br>`collect.v_memory_stats`<br>`collect.v_memory_grant_stats`<br>`collect.v_perfmon_stats`<br>`collect.v_file_io_stats`<br>`collect.v_tempdb_stats`<br>`collect.v_database_size_stats`<br>`collect.v_database_config`<br>`collect.v_index_object_stats`<br>*Anomaly baselines:*<br>`collect.wait_stats` (through the continuous aggregate `collect.wait_stats_interval_baseline`)<br>`collect.wait_stats_baseline` (a retired continuous aggregate)<br>`collect.perfmon_stats` (through the continuous aggregate `collect.perfmon_interval_baseline`)<br>`collect.perfmon_baseline` (a retired continuous aggregate)<br>`collect.session_stats` (through the continuous aggregate `collect.session_stats_baseline`)<br>`collect.query_stats` (through the continuous aggregate `collect.query_stats_baseline`)<br>`collect.memory_stats` (through the continuous aggregate `collect.memory_baseline`)<br>`collect.blocked_process_reports` (through the continuous aggregate `collect.blocked_process_baseline`)<br>`collect.deadlock_baseline`<br>`collect.cpu_utilization_stats`<br>`collect.file_io_stats`<br>*PostgreSQL targets:*<br>`collect.pg_server_config`<br>`collect.pg_statement_stats`<br>`collect.pg_statement_text`<br>`collect.pg_database_stats`<br>`collect.pg_database_size_stats`<br>`collect.pg_wait_stats`<br>`collect.pg_wait_sampling`<br>`collect.pg_cpu_utilization`<br>`collect.pg_session_states`<br>`collect.pg_write_stats`<br>`collect.pg_extension_availability`<br>`collect.pg_plan_capture`<br>`collect.pg_plan_capture_readiness`<br>`collect.pg_io_stats`<br>`collect.pg_replication_stats`<br>`collect.pg_replication_slot_stats`<br>`collect.pg_log_events`<br>`collect.pg_kernel_stats`<br>`collect.pg_buffer_usage`<br>`collect.pg_blocking_edges`<br>`collect.pg_xmin_horizon`<br>`collect.pg_wraparound_stats`<br>`collect.pg_table_bloat_stats`<br>`collect.pg_index_bloat`<br>`collect.pg_predicate_stats`<br>`collect.pg_deadlocks`<br>`collect.pg_column_stats`<br>`collect.pg_autovacuum_stats` |
 | `find_database` | `collect.database_states`<br>`collect.servers` |
-| `find_queries_by_text` | `collect.query_store_text`<br>`collect.query_stats`<br>`collect.query_text_dim`<br>`collect.servers` |
+| `find_queries_by_text` | `collect.query_store_text`<br>`collect.query_store_text_seen`<br>`collect.query_stats`<br>`collect.query_text_dim`<br>`collect.servers` |
 | `find_schema_objects` | `collect.schema_objects`<br>`collect.schema_columns`<br>`collect.schema_constraints`<br>`collect.schema_indexes`<br>`collect.schema_capture_state`<br>`collect.ag_database_replica_states`<br>`collect.servers` |
 | `get_active_queries` | `collect.query_snapshots`<br>`config.query_tag_map` (only when tag given)<br>`config.query_tags` (only when tag given) |
 | `get_active_query_plan_xml` | `collect.query_snapshots` |
@@ -94,8 +94,9 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_memory_pressure_events` | `collect.memory_pressure_events` (through the view `collect.v_memory_pressure_events`) |
 | `get_memory_stats` | `collect.memory_stats`<br>`collect.v_memory_stats` |
 | `get_memory_trend` | `collect.memory_stats`<br>`collect.memory_grant_stats`<br>`collect.v_memory_stats`<br>`collect.v_memory_grant_stats` |
-| `get_object_definition` | `collect.schema_objects`<br>`collect.schema_columns`<br>`collect.schema_indexes`<br>`collect.schema_constraints`<br>`collect.schema_triggers`<br>`collect.schema_capture_state`<br>`collect.ag_database_replica_states`<br>`collect.servers` |
+| `get_object_definition` | `collect.schema_objects`<br>`collect.schema_columns`<br>`collect.schema_indexes`<br>`collect.schema_constraints`<br>`collect.schema_triggers`<br>`collect.schema_capture_state`<br>`collect.column_stats`<br>`collect.column_stats_runs`<br>`collect.column_stats_state`<br>`config.config_collector_schedules`<br>`collect.ag_database_replica_states`<br>`collect.servers` |
 | `get_object_locking` | `collect.index_object_stats` (through the view `collect.v_index_object_stats`)<br>`collect.database_config` |
+| `get_object_usage` | `collect.index_object_stats` (through the view `collect.v_index_object_stats`)<br>`collect.object_executions_daily`<br>`collect.object_executions_daily_databases`<br>`collect.object_inventory`<br>`collect.object_references_daily`<br>`collect.object_references_daily_databases`<br>`collect.object_dependencies`<br>`collect.server_properties` |
 | `get_perfmon_stats` | `collect.perfmon_stats`<br>`collect.v_perfmon_stats` |
 | `get_perfmon_trend` | `collect.perfmon_stats`<br>`collect.v_perfmon_stats` |
 | `get_pg_autovacuum_health` | `collect.pg_autovacuum_stats`<br>`collect.pg_log_events` |
@@ -181,12 +182,13 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `test_custom_alert_rule` | The table that the rule's measure names. Also its hourly or daily aggregate, when the window uses one.<br>`config.custom_alert_rules` (when rule_id given)<br>`config.server_tags`<br>`config.server_tag_map` (tag scope) |
 | `test_query_tag_rule` | `collect.query_tag_sightings`<br>`config.query_tag_rules`<br>`config.query_tags`<br>`config.query_tag_assignments`<br>`collect.servers` |
 
-## Tools about Darling itself (40)
+## Tools about Darling itself (41)
 
 | Tool | Store objects |
 |---|---|
 | `analyze_plan_xml` | None. It analyses the plan XML that you pass in. |
 | `describe_custom_view_catalog` | None. The catalog is built into the service. |
+| `find_tools` | None. It searches the tools the connection can call. |
 | `get_agent_changes` | `config.investigation_journal`<br>`config.config_alert_log`<br>`config.investigation_requests`<br>`config.investigation_evidence`<br>`config.config_service`<br>`collect.servers` |
 | `get_alert_settings` | `config.config_alert_settings`<br>`config.config_notification`<br>`config.config_threshold_overrides` |
 | `get_change_watches` | `config.change_watches`<br>`config.change_watch_changes` |
@@ -194,6 +196,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_collection_log` | `collect.collection_log`<br>`collect.servers`<br>`collect.v_collection_log` |
 | `get_collection_state` | `config.config_service`<br>`config.config_monitored_servers` |
 | `get_collector_cost` | `collect.collector_cost` |
+| `get_collector_readiness` | `collect.collection_log`<br>`collect.servers`<br>`collect.server_properties`<br>`collect.pg_extension_availability`<br>`config.config_collector_schedules`<br>`config.config_collector_run_times` |
 | `get_collector_schedules` | `config.config_collector_schedules`<br>`config.config_collector_run_times` |
 | `get_collector_stall_probes` | `collect.collector_stall_probes` |
 | `get_command_result` | `config.config_command`<br>`config.read_mcp_command_result` |
@@ -209,11 +212,14 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_read_latency` | `collect.read_latency` |
 | `get_server_actions` | `config.config_monitored_servers`<br>`config.config_server_actions`<br>`collect.servers` |
 | `get_server_settings` | `config.config_monitored_servers` |
+| `get_service_starts` | `collect.service_starts`<br>`collect.service_start_rungs` |
 | `get_slow_reads` | `collect.slow_reads` |
 | `get_store_host` | `collect.store_metrics` |
 | `get_store_log` | `collect.store_log_captures`<br>`collect.store_log_events` |
-| `get_store_metrics` | `collect.store_metrics`<br>`collect.query_store_compose_stamp_failures` |
-| `get_store_query_history` | `collect.store_statement_history`<br>`collect.store_statement_captures`<br>`config.store_statement_stats()` (function over pg_stat_statements) |
+| `get_store_checkpoints` | `collect.store_checkpoints` |
+| `get_store_metrics` | `collect.store_metrics`<br>`collect.query_store_compose_stamp_failures`<br>`collect.store_table_activity`<br>`collect.store_table_activity_baseline`<br>`collect.service_starts` (the build markers) |
+| `get_store_pass_steps` | `collect.store_pass_steps` |
+| `get_store_query_history` | `collect.store_statement_history`<br>`collect.store_statement_captures`<br>`collect.service_starts` (the build markers)<br>`config.store_statement_stats()` (function over pg_stat_statements) |
 | `get_store_query_stats` | `config.store_statement_stats()` (function over pg_stat_statements)<br>`config.store_statement_stats_info()` (function over pg_stat_statements_info) |
 | `get_tool_guide` | None. The guides are built into the service. |
 | `list_custom_alert_rules` | `config.custom_alert_rules`<br>`config.config_alert_log` |

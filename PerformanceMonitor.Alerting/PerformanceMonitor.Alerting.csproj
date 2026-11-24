@@ -18,6 +18,9 @@
          project references of its own, so this adds a leaf and no cycle, and every app that consumes this
          project already references Common directly. -->
     <ProjectReference Include="..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
+    <!-- #8884: the one mapper from the shared instance event judges (InstanceEvents) to InstanceEventInfo. Every app that consumes this project
+         already references Collectors directly, so this adds no assembly to any of them, and Collectors does not reference this project, so no cycle. -->
+    <ProjectReference Include="..\PerformanceMonitor.Collectors\PerformanceMonitor.Collectors.csproj" />
   </ItemGroup>
 
   <ItemGroup>

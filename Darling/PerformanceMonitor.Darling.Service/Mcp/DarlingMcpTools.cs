@@ -122,7 +122,8 @@ public sealed class DarlingMcpTools
                 return McpHelpers.Status(
                     "unavailable",
                     analysisService.WindowEmptyMessage +
-                    " Check get_collection_health to see when each collector last succeeded." +
+                    /* #8910: a window retention removed has nothing for collection health to say. */
+                    WindowEmptyText.HealthPointer(analysisService.WindowEmptyRemovedByRetention) +
                     (unobservedCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {unobservedCaveat}"),
                     unobservedCollection.Attach(new
                     {
@@ -357,6 +358,40 @@ public sealed class DarlingMcpTools
 
         try
         {
+            /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored fact: a quiet pass stores
+               nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
+            var noticeStart = windowEnd.AddHours(-hours_back);
+            async Task<McpWindowNotice> NoticeAsync(bool emptyAnswer, RetentionBoundary? retentionRemoved = null)
+            {
+                /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
+                var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
+                return await DarlingMcpWindowNotice.ReadAsync(
+                    () => DarlingMcpWindowNotice.Probe(postgres, coverageTable, resolved.ServerName, noticeStart, windowEnd, cancellationToken),
+                    noticeStart, windowEnd, coverageTable, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken, retentionRemoved: retentionRemoved);
+            }
+
+            /* #8910: a window that ends before the oldest row the store keeps was removed by retention, and an unavailable answer for it
+               must not blame collection. Read only for the two unavailable answers below; null when the window sits inside the span. */
+            async Task<RetentionBoundary?> RetentionRemovedAsync()
+            {
+                var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
+                var boundary = await analysisService.ReadRetentionBoundaryAsync(coverageTable, resolved.ServerId, cancellationToken);
+                return boundary is not null && boundary.RemovedWindow(windowEnd) ? boundary : null;
+            }
+
+            /* #9218: a replay whose whole window ends before the oldest row the store keeps was removed by retention, and no fact
+               statement can find anything in it (the coverage table the facts are windowed on starts there). Say so from the one MIN
+               and read no fact. A window that straddles the oldest row reads the facts as before. */
+            if (anchor is not null && await RetentionRemovedAsync() is { } removedBeforeRead)
+            {
+                return McpHelpers.Status(
+                    "unavailable",
+                    WindowEmptyText.RemovedFactsMessage(resolved.DisplayName, removedBeforeRead),
+                    DarlingMcpWindowNotice.AttachToHints(
+                        new CollectionCaveatState([], 0).Attach(new { secondary_replica_note = (string?)null, coverage = (object?)null }, McpHelpers.JsonOptions),
+                        await NoticeAsync(emptyAnswer: true, removedBeforeRead)));
+            }
+
             var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
                 resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken: cancellationToken);
 
@@ -370,32 +405,23 @@ public sealed class DarlingMcpTools
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
             var collectionCaveat = collection.Describe();
 
-            /* #7010: the window-floor notice, over the engine's coverage table (the data the analysis reads), never the oldest stored fact: a quiet pass stores
-               nothing, so a facts floor would call a quiet week truncated. Both unavailable answers carry it under hints. */
-            var noticeStart = windowEnd.AddHours(-hours_back);
-            async Task<McpWindowNotice> NoticeAsync(bool emptyAnswer)
-            {
-                /* #7194: the table is the engine's own (pg_database_stats on a PostgreSQL target), the one the analysis pass reads. */
-                var coverageTable = await DarlingEngineCapability.AnalysisCoverageTableAsync(postgres, resolved.ServerId, cancellationToken);
-                return await DarlingMcpWindowNotice.ReadAsync(
-                    () => DarlingMcpWindowNotice.Probe(postgres, coverageTable, resolved.ServerName, noticeStart, windowEnd, cancellationToken),
-                    noticeStart, windowEnd, coverageTable, emptyAnswer: emptyAnswer, cancellationToken: cancellationToken);
-            }
-
             if (facts.Count == 0)
             {
                 /* No scored facts means the underlying collectors produced nothing for the window —
                    not retrievable now rather than an all-clear (mirrors get_perfmon_trend's empty case).
                    #3691: a pass in which every family FAILED lands here too, and used to be told apart from
                    "no data" only by the service log; the caveat now says which families were not read. */
-                const string noFacts = "No facts collected. The collector may not have run yet, or no data exists in the requested time range.";
+                var removedWindow = await RetentionRemovedAsync();
+                var noFacts = removedWindow is null
+                    ? "No facts collected. The collector may not have run yet, or no data exists in the requested time range."
+                    : $"No facts were collected in the requested window. {removedWindow.Describe()} This is NOT an all-clear.";
                 var noFactsMessage = secondaryReplicaNote is null ? noFacts : $"{noFacts} {secondaryReplicaNote}";
                 return McpHelpers.Status(
                     "unavailable",
                     collectionCaveat is null ? noFactsMessage : $"{noFactsMessage} COLLECTION CAVEAT: {collectionCaveat}",
                     DarlingMcpWindowNotice.AttachToHints(
                         collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
-                        await NoticeAsync(emptyAnswer: true)));
+                        await NoticeAsync(emptyAnswer: true, removedWindow)));
             }
 
             if (coverage is null || !coverage.IsObserved)
@@ -406,15 +432,18 @@ public sealed class DarlingMcpTools
                    "wait stats as fraction-of-period, blocking rates"; none of those can be shown, so
                    this is the unavailable envelope, with the count of what COULD be read so a caller
                    after configuration alone knows audit_config still has it. */
+                var removedWindow = await RetentionRemovedAsync();
                 return McpHelpers.Status(
                     "unavailable",
-                    $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. " +
-                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those. " +
-                    "Check get_collection_health to see when each collector last succeeded." +
+                    (removedWindow is null
+                        ? $"The collector observed none of the requested window for {resolved.DisplayName}, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. "
+                        : $"{removedWindow.Describe()} The requested window for {resolved.DisplayName} is gone from the store, so no windowed fact (wait fractions, blocking or deadlock rates) exists to show. ") +
+                    $"{CountText.Plural(facts.Count, "point-in-time fact")} (configuration and current state) could still be read; audit_config reports those." +
+                    WindowEmptyText.HealthPointer(removedWindow is not null) +
                     (collectionCaveat is null ? string.Empty : $" COLLECTION CAVEAT: {collectionCaveat}"),
                     DarlingMcpWindowNotice.AttachToHints(
                         collection.Attach(new { secondary_replica_note = secondaryReplicaNote, coverage = coverage?.ToPayload() }, McpHelpers.JsonOptions),
-                        await NoticeAsync(emptyAnswer: true)));
+                        await NoticeAsync(emptyAnswer: true, removedWindow)));
             }
 
             var filtered = facts.AsEnumerable();
@@ -462,7 +491,7 @@ public sealed class DarlingMcpTools
 
             var dataNotice = await NoticeAsync(emptyAnswer: false);
             /* #8572: the ranked objects carry stored doubles; the reply is rounded as a whole. */
-            return DarlingMcpWindowNotice.Attach(McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(collection.Attach(new
+            var factsReply = DarlingMcpWindowNotice.Attach(McpHelpers.RoundFloatNoise(JsonSerializer.Serialize(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 total_facts = facts.Count,
@@ -481,6 +510,15 @@ public sealed class DarlingMcpTools
                 coverage = coverage.ToPayload(),
                 facts = result
             }, McpHelpers.JsonOptions), McpHelpers.JsonOptions)), dataNotice);
+
+            /* #9195: Lite's twin answered 33.1 to 33.5 KB at its default window with no key saying the answer was over the response budget
+               (#9140). The cut comes after the window notice so the notice's keys count against the budget. The facts are worst first, so the
+               cut drops the mildest, and budget_truncated and budget_note say so. total_facts, shown and coverage count what was scored, not
+               what fit. */
+            return McpResponseBudget.CapArrayInReply(
+                factsReply, "facts", "highest severity first", "facts",
+                _ => "Narrow the read with source or min_severity, or use a shorter hours_back, to see the rest. total_facts and shown count every fact that was scored.",
+                "budget_truncated", "budget_note");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -645,6 +683,9 @@ public sealed class DarlingMcpTools
                shared response target. Rows are already worse first, then better, then stable, so what is left off the end is
                the stable tail; summary and families above still count every fact. */
             var factRows = comparison.Rows.Select(r => r.ToPayload()).ToList();
+            string? CutNote(int factCount) => factCount < factRows.Count
+                ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
+                : null;
             return McpResponseBudget.FitPrefix(factRows.Count, factCount => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
@@ -679,9 +720,10 @@ public sealed class DarlingMcpTools
                 truncated = factCount < factRows.Count,
                 facts_returned = factCount,
                 facts_total = factRows.Count,
-                size_note = factCount < factRows.Count
-                    ? $"{factRows.Count - factCount} of {factRows.Count} fact rows were left off the end ({comparison.LeftOffNote}) to keep this answer within about 32 KB. summary and families above still count every fact. For the rest, compare a shorter hours_back, or read one window's facts with get_analysis_facts (source / min_severity filters)."
-                    : null,
+                size_note = CutNote(factCount),
+                /* #9195: the budget keys every other read carries (#9140), the same sentence as size_note, which stays for readers of the older key. */
+                budget_truncated = factCount < factRows.Count,
+                budget_note = CutNote(factCount),
                 facts = factRows.Take(factCount)
             }, McpHelpers.JsonOptions)).Json;
         }
@@ -1916,6 +1958,11 @@ internal static class ToolRecommendations
             new("audit_config", "Check server-level configuration"),
             new("get_blocking", "Check if RCSI-off databases have blocking")
         ],
+        ["TEMPDB_FILE_SETUP"] =
+        [
+            new("get_database_sizes", "See tempdb's files with their sizes and growth settings"),
+            new("get_wait_stats", "Check for PAGELATCH waits on tempdb allocation pages")
+        ],
         ["FILE_AUTOGROWTH_PERCENT"] =
         [
             new("get_database_sizes", "See per-file sizes and autogrowth settings"),
@@ -2050,14 +2097,14 @@ internal static class ToolRecommendations
         ],
         ["PAGELATCH_EX"] =
         [
-            new("get_waiting_tasks", "See the page and object the latch waits sit on"),
+            new("get_active_queries", "See the page and the indexes the latch waits sit on", new() { ["wait_type"] = "PAGELATCH_EX" }),
             new("get_wait_trend", "Track the PAGELATCH_EX wait over time", new() { ["wait_type"] = "PAGELATCH_EX" }),
             new("get_top_queries_by_cpu", "Find the queries hammering the hot page")
         ],
         ["PAGELATCH_UP"] =
         [
             new("get_tempdb_trend", "Check tempdb allocation pressure behind the UP-mode waits"),
-            new("get_waiting_tasks", "See the allocation page the waits sit on"),
+            new("get_active_queries", "See the allocation page the waits sit on", new() { ["wait_type"] = "PAGELATCH_UP" }),
             new("get_wait_trend", "Track the PAGELATCH_UP wait over time", new() { ["wait_type"] = "PAGELATCH_UP" })
         ],
         ["MISSING_INDEX"] =

@@ -79,6 +79,10 @@ public sealed class McpHostService : BackgroundService
         dataService.CollectorFrequencyMinutes = scheduleManager is null
             ? null
             : (serverId, collector) => scheduleManager.GetFrequencyForStorageServer(serverManager, serverId, collector);
+        /* #9139: the same schedule's enabled answer, so get_server_summary's CPU bound drops a switched-off collector's last reading at the floor. */
+        dataService.CollectorEnabled = scheduleManager is null
+            ? null
+            : (serverId, collector) => scheduleManager.IsCollectorEnabledForStorageServer(serverManager, serverId, collector);
     }
 
     /// <summary>
@@ -266,6 +270,11 @@ public sealed class McpHostService : BackgroundService
            policy so its instructions census (built there) counts only the tools this start offers. */
         services.AddMcpInvestigationPolicy(McpInvestigationPolicy.Served(allowInvestigations, allowWrites));
 
+        /* #9423: the per-tool figures and the slow-call rows. The timing filter (AddCallToolFilters) finds this singleton on each call; a host
+           that registers none passes every call straight through. */
+        services.AddSingleton<McpCallTimingRecorder>(sp => sp.GetService<LocalDataService>() is { } data ? new McpCallTimingRecorder(data) : null!);
+        services.AddSingleton<McpCallTimingLive>(sp => sp.GetService<McpCallTimingRecorder>() is { } recorder ? new McpCallTimingLive(recorder) : null!);
+
         /* #5820: mcp_data_detail, read once per start. McpDataDetailFilter (AddCallToolFilters) reads this singleton on
            every call; Full passes everything through. */
         services.AddSingleton(new McpDataDetailSetting(dataDetail));
@@ -295,6 +304,8 @@ public sealed class McpHostService : BackgroundService
                dropping the default keyword. The companion to stateless transport for issue #1074. */
             .WithGeminiCompatibleTools<McpDiscoveryTools>()
             .WithGeminiCompatibleTools<McpHealthTools>()
+            /* #8788: get_store_health, the health of Lite's own DuckDB store. */
+            .WithGeminiCompatibleTools<McpStoreHealthTools>()
             .WithGeminiCompatibleTools<McpWaitTools>()
             .WithGeminiCompatibleTools<McpBlockingTools>()
             /* #2028 get_plan_corrections — automatic plan correction activity + per-database
@@ -323,6 +334,8 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpServerInfoTools>()
             .WithGeminiCompatibleTools<McpSessionTools>()
             .WithGeminiCompatibleTools<McpObjectStatsTools>()
+            /* #8784: get_object_usage, table and module usage over a window for decommissioning decisions. */
+            .WithGeminiCompatibleTools<McpObjectUsageTools>()
             .WithGeminiCompatibleTools<McpLatchSpinlockTools>()
             .WithGeminiCompatibleTools<McpPlanCacheSchedulerTools>()
             .WithGeminiCompatibleTools<McpConfigHistoryTools>()
@@ -335,6 +348,10 @@ public sealed class McpHostService : BackgroundService
                at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Darling twin:
                DarlingMcpToolGuideTools. */
             .WithGeminiCompatibleTools<McpToolGuideTools>()
+            /* #9388: find_tools searches the tools this request serves (the served ToolCollection). Darling twin: DarlingMcpToolSearchTools. */
+            .WithGeminiCompatibleTools<McpToolSearchTools>()
+            /* #9423: get_slow_mcp_calls, the MCP calls that took 2 seconds or more and the per-tool figures. */
+            .WithGeminiCompatibleTools<McpSlowCallTools>()
             /* The unknown-argument guard (#3870): ONE call-tool filter, registered once, covering
                every tool with no per-tool change. A call carrying an argument no tool parameter
                declares is refused before dispatch — the refusal names the key and lists what the
@@ -478,6 +495,9 @@ public sealed class McpHostService : BackgroundService
                 InvestigationServerNameLookup.FromServerManager(_serverManager));
             /* #5820: the one investigation store MainWindow built, as a singleton, for the four tools and get_notification_routes. */
             builder.Services.AddSingleton<IInvestigationRequestStore>(_investigationStore);
+            /* #8788: get_store_health reads the store's size, the archive folder and the housekeeping history, through the same reader the
+               Store Health window uses. */
+            builder.Services.AddSingleton(new StoreHealthReader(_duckDb, new StoreHousekeepingHistory(StoreHousekeepingHistory.PathFor(_duckDb.DatabasePath))));
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
@@ -517,13 +537,25 @@ public sealed class McpHostService : BackgroundService
     }
 
     /// <summary>
-    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), the data-detail filter
-    /// (#5820, <c>mcp_data_detail</c>), then the statement filter (#4348). The same objects Darling's host registers, in
+    /// The call-tool filters, in registration order: the unknown-argument guard (#3870), the <c>database_name</c> resolution
+    /// (#9065), the data-detail filter (#5820, <c>mcp_data_detail</c>), then the statement filter (#4348). The same objects Darling's host registers, in
     /// its order, from <c>PerformanceMonitor.Common</c>, so the two SKUs cannot answer differently. Lite's write and
     /// investigation gates are not filters: an unserved tool is absent from the served collection. Registered through this one method so a test can start a server with the REAL list.
     /// </summary>
-    internal static void AddCallToolFilters(IMcpRequestFilterBuilder filters) => filters
+    internal static void AddCallToolFilters(IMcpRequestFilterBuilder filters) =>
+        AddCallToolFiltersWithLookupDeadline(filters, McpDatabaseNameFilter.LookupDeadline);
+
+    /// <summary>
+    /// The same list with the <c>database_name</c> lookup given <paramref name="lookupDeadline"/> (#9375). The host always passes
+    /// <see cref="McpDatabaseNameFilter.LookupDeadline"/>. A test that reads the store beside classes holding the process-wide
+    /// DuckDB lock for seconds passes a longer one, so a lookup queued behind such a hold is waited out instead of expiring and
+    /// letting the call run as given. Named apart from <see cref="AddCallToolFilters"/> because a test finds that one by name.
+    /// </summary>
+    internal static void AddCallToolFiltersWithLookupDeadline(IMcpRequestFilterBuilder filters, TimeSpan lookupDeadline) => filters
+        /* #9423: first, so it times the whole call, the other filters included. */
+        .AddCallToolFilter(McpCallTimingFilter.Instance)
         .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+        .AddCallToolFilter(McpDatabaseNameFilter.Using(McpDatabaseNames.CandidatesAsync, lookupDeadline))
         .AddCallToolFilter(McpDataDetailFilter.Instance)
         .AddCallToolFilter(SensitiveStatementOutputFilter.Instance);
 

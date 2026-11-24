@@ -53,8 +53,17 @@ public static class McpSchemaCompat
         TransformOptions = new AIJsonSchemaTransformOptions
         {
             TransformSchemaNode = CollapseGeminiUnsupportedKeywords
-        }
+        },
+        IncludeParameter = parameter => !IsRequestScoped(parameter.ParameterType)
     };
+
+    /// <summary>
+    /// #9388: the SDK's own request-scoped parameter types, which it binds from the request and never serves in a schema.
+    /// <c>find_tools</c> takes the request's <c>McpServer</c>. The SDK excludes it through the same identity-keyed table
+    /// <see cref="SchemaOptionsFor"/> describes, so this check by type keeps it out of the served schema even when that
+    /// lookup misses.
+    /// </summary>
+    private static bool IsRequestScoped(Type type) => type == typeof(McpServer);
 
     /// <summary>
     /// The four MCP entry-point tools (#3898 D10): list the monitored servers, size up the fleet, run
@@ -92,7 +101,7 @@ public static class McpSchemaCompat
     /// gets passed at invocation time) is unaffected — it consistently uses the first <c>GetParameters()</c>
     /// array — only the served SCHEMA is at risk. The SDK's own request-scoped parameter types (the ones
     /// <c>RequestServiceProvider.IsAugmentedWith</c> recognises) take the same double-<c>GetParameters()</c>
-    /// path and are NOT covered here; out of scope for #4075 (Darling/Lite tools take no such parameter today).
+    /// path, so <see cref="IsRequestScoped"/> excludes the one a tool takes (#9388: <c>McpServer</c>) by type as well.
     /// </summary>
     internal static AIJsonSchemaCreateOptions SchemaOptionsFor(IServiceProvider services)
     {
@@ -174,6 +183,10 @@ public static class McpSchemaCompat
                         Description = served,
                         Meta = alwaysLoad ? new JsonObject { ["anthropic/alwaysLoad"] = true } : null
                     });
+
+                /* #9065: a tool whose database_name the host's filter resolves says so in that parameter's served
+                   description. The one predicate (McpDatabaseNameResolver.Resolves) decides both, for every tool on both SKUs. */
+                McpDatabaseNameResolver.DescribeMatching(tool.ProtocolTool);
 
                 /* The CLR type and nullability of each parameter the caller supplies, for the call-tool guard
                    (McpUnknownArgumentGuard), which refuses a value the SDK's binder cannot read into that type. The

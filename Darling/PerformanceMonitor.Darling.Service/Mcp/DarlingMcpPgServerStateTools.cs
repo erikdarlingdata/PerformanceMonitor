@@ -172,7 +172,7 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
         [Description("Maximum rows to return. Default 50.")] int limit = 50,
-        [Description("One database, or omit for every database. Rows are (database x extension), so a multi-database host can exceed limit. Pass this to complete one database's full slice. See the tool's reading guide.")]
+        [Description("One database, or omit for all. Rows are (database x extension): pass this for one database's full slice. See the tool's reading guide.")]
             string? database_name = null,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         ILogger? logger = null,

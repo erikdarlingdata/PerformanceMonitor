@@ -109,6 +109,9 @@ public sealed partial class DarlingCollectorRunner
             ref _rdsPlans,
             () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
 
+    /// <summary>#8982: hands this runner the plan ingestor <see cref="PublishedRdsPlanIngestor"/> returns, so a test can see whether a run reached it.</summary>
+    internal void UseRdsPlanIngestorForTests(RdsPlanIngestor ingestor) => Volatile.Write(ref _rdsPlans, ingestor);
+
     /// <summary>The one deadlock ingestor of this runner, built the first time a target needs it.</summary>
     internal RdsDeadlockIngestor PublishedRdsDeadlockIngestor()
         => LazyInitializer.EnsureInitialized(
@@ -256,6 +259,15 @@ public sealed partial class DarlingCollectorRunner
     public async Task<CollectorRunResult> IngestRdsPlansAsync(
         ServerRuntime server, CancellationToken cancellationToken)
     {
+        /* #8982: a target whose newest readiness row says auto_explain is not loaded has no plan in its log to
+           find. Stand down with the readiness remedy instead of downloading the log for nothing and reporting
+           "no new plans", which reads as healthy and quiet. Checked before the target's log_destination read
+           too, so a stand-down run opens neither the target nor the AWS log API. */
+        if (await AutoExplainNotLoadedReasonAsync(server.ServerId, cancellationToken) is { } notLoaded)
+        {
+            throw new PgPlanCapturePreconditionException(notLoaded);
+        }
+
         var rdsPlans = PublishedRdsPlanIngestor();
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
@@ -280,6 +292,91 @@ public sealed partial class DarlingCollectorRunner
            different from every other target's. */
         return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
             RdsIngestNote(outcome, RdsPlanLogNotReachedNote, RdsPlanLogEmptyNote));
+    }
+
+    /// <summary>
+    /// #8982: how far back the newest <c>library_loaded</c> readiness row may be and still decide a plan-capture run.
+    /// Readiness runs hourly, so two days is many rows; a row older than that means readiness has stopped running
+    /// for this target, and a verdict nobody is refreshing must not keep plan capture switched off. The same
+    /// two days <c>PgTargetFactCollector.PlanStateLookbackDays</c> reads this facet over.
+    /// </summary>
+    internal static readonly TimeSpan AutoExplainReadinessLookback = TimeSpan.FromDays(2);
+
+    /* #8982: the newest library_loaded row inside the lookback, whatever its value. The value is judged in C#
+       after the pick, so a newest row with a NULL is_satisfied is "unknown" and is never skipped past to an
+       older FALSE. */
+    private const string AutoExplainReadinessSql = @"
+SELECT is_satisfied, observed, detail, collection_time
+FROM pg_plan_capture_readiness
+WHERE server_id = $1
+AND   facet = 'library_loaded'
+AND   collection_time >= $2
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// #8982: the stand-down sentence for <c>pg_plan_capture</c> when the target's newest <c>library_loaded</c>
+    /// readiness row (inside <see cref="AutoExplainReadinessLookback"/>) says <c>auto_explain</c> is NOT loaded, or
+    /// null to run as before. Null for no row, a NULL verdict (unknown, not false), a TRUE verdict, and a failed
+    /// store read, which fails toward today's behaviour the way <see cref="GetCollectorStateAsync"/> does. Nothing is
+    /// cached here: each run reads the stored row, so the first run after readiness sees the library loaded
+    /// downloads again.
+    /// </summary>
+    internal async Task<string?> AutoExplainNotLoadedReasonAsync(int serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
+            using var command = new NpgsqlCommand(AutoExplainReadinessSql, connection);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(serverId);
+            /* Unspecified at the bind: collection_time is a naive UTC timestamp, and a Utc kind would be inferred as
+               timestamptz and compared at the store session's TimeZone. */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow - AutoExplainReadinessLookback, DateTimeKind.Unspecified));
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.GetBoolean(0))
+            {
+                return null;
+            }
+
+            var observed = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var detail = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var checkedAt = reader.GetDateTime(3);
+
+            return AutoExplainNotLoadedSentence(observed, detail, checkedAt);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "Reading plan-capture readiness for server {ServerId} failed; pg_plan_capture runs as before", serverId);
+            return null;
+        }
+    }
+
+    /// <summary>#8982: the stored stand-down sentence: what readiness saw, its remedy, and when capture resumes.</summary>
+    internal static string AutoExplainNotLoadedSentence(string? observed, string? detail, DateTime checkedAtUtc)
+    {
+        var sb = new StringBuilder();
+        sb.Append("auto_explain is not loaded on this target, so its server log holds no plan to capture. ");
+        sb.Append("The plan-capture readiness check (facet library_loaded, ");
+        sb.Append(checkedAtUtc.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
+        sb.Append(" UTC) read shared_preload_libraries as '");
+        sb.Append(string.IsNullOrEmpty(observed) ? "(empty)" : observed);
+        sb.Append("'. ");
+        if (!string.IsNullOrWhiteSpace(detail))
+        {
+            sb.Append(detail.Trim());
+            if (!detail.TrimEnd().EndsWith('.'))
+            {
+                sb.Append('.');
+            }
+
+            sb.Append(' ');
+        }
+
+        sb.Append("The RDS log was not downloaded this run. Plan capture resumes on the first run after the readiness ");
+        sb.Append("check sees auto_explain loaded. This is a setup step, not 'no new plans'.");
+        return sb.ToString();
     }
 
     /// <summary>

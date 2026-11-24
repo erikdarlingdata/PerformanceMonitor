@@ -247,7 +247,7 @@ public class StartupFailureTriageTests
     /// The wall-clock cap is in the retry filter, not just declared.
     ///
     /// <para>Without it the attempt count is not a bound at all: an attempt that blocks behind a peer's
-    /// migration advisory lock can spend <c>MigrationLockWaitTimeoutSeconds</c> = 1500 s, so 25 of them is
+    /// migration advisory lock can spend <c>MigrationLockWaitTimeoutSeconds</c> = 2400 s, so 25 of them is
     /// over ten hours of retrying rather than the two minutes the constant is derived for, and the one
     /// definitive line arrives most of a day after the failure it describes. Measured on a live store: a
     /// second session holding that lock made a single attempt wait 38 s, silently.</para>
@@ -332,8 +332,8 @@ public class StartupFailureTriageTests
         var storeBudgetAt = source.IndexOf("var storeRetryBudget = System.Diagnostics.Stopwatch.StartNew();", StringComparison.Ordinal);
         Assert.True(storeBudgetAt > 0, "the store site's retry budget is gone");
         var loopAt = source.IndexOf("for (var attempt = 1; ; attempt++)", storeBudgetAt + 1, StringComparison.Ordinal);
-        var openAt = source.IndexOf("await postgres.OpenConnectionAsync(stoppingToken)", StringComparison.Ordinal);
-        var migrateAt = source.IndexOf("await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken)", StringComparison.Ordinal);
+        var openAt = source.IndexOf("await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken)", StringComparison.Ordinal);
+        var migrateAt = source.IndexOf("await PgMigrations.MigrateAsync(migrateConnection, _logger, startRecorder, stoppingToken)", StringComparison.Ordinal);
 
         Assert.True(loopAt > 0, "the retry loop around the migrate is gone");
         Assert.True(openAt > 0, "the store connection open is gone");

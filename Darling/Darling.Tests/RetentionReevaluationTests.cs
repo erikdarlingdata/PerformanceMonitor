@@ -360,7 +360,7 @@ public sealed class RetentionReevaluationTests
 
         /* Its own connection from the worker's pool — the startup connection is disposed with the setup
            block, which is the one thing the issue said to get right. */
-        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);", body, StringComparison.Ordinal);
+        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.RetentionReevaluate, budget.Token);", body, StringComparison.Ordinal);
 
         /* The Periodic pass, named explicitly, on the budget token. */
         Assert.Contains("TimescaleSupport.RetentionSweepPass.Periodic,", body, StringComparison.Ordinal);
@@ -532,7 +532,7 @@ public sealed class RetentionReevaluationLiveTests
 
         Assert.True(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct),
             "the dev fixture is expected to have TimescaleDB installed");
-        Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+        Assert.Equal(TimescaleSupport.ConvertedTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
         /* #3893: collection_log too, as the worker's "collection_log hypertable" step does before its aggregate ensure
            (pinned in StoreObjectConvergenceTests). The off-grid collection-health aggregate is sourced from it. On a
            store whose migrations ran before CREATE EXTENSION (CI's bundled PostgreSQL), it is still a plain table here,

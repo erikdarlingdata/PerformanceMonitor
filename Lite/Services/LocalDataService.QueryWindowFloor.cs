@@ -163,9 +163,9 @@ public partial class LocalDataService
             using var command = connection.CreateCommand();
             /* A server with a logged run of the relation's collector in the window counts as well as one with a row (a quiet collector stores none); the collector name is from the closed map. */
             var runs = collectorName is { } collector
-                ? $" UNION SELECT server_id FROM {(hot ? "collection_log" : "v_collection_log")} WHERE collector_name = '{collector}' AND collection_time >= $1 AND collection_time <= $2{scope}"
+                ? $" UNION SELECT server_id FROM {(hot ? "collection_log" : "v_collection_log")} WHERE collector_name = '{collector}' AND collection_time > $1 AND collection_time <= $2{scope}"
                 : "";
-            command.CommandText = $"SELECT server_id FROM (SELECT server_id FROM {(hot ? view.Substring(2) : view)} WHERE {timeColumn} >= $1 AND {timeColumn} <= $2{scope}{runs}) AS u GROUP BY server_id ORDER BY server_id";
+            command.CommandText = $"SELECT server_id FROM (SELECT server_id FROM {(hot ? view.Substring(2) : view)} WHERE {timeColumn} > $1 AND {timeColumn} <= $2{scope}{runs}) AS u GROUP BY server_id ORDER BY server_id";
             command.Parameters.Add(new DuckDBParameter { Value = startUtc });
             command.Parameters.Add(new DuckDBParameter { Value = endUtc });
             using var reader = await command.ExecuteReaderAsync();
@@ -345,10 +345,10 @@ public partial class LocalDataService
 
     /// <summary>
     /// Where this server's data starts for the requested window, as far as any caller needs to know it. NULL when
-    /// the server holds no row inside [<paramref name="startUtc"/>, <paramref name="endUtc"/>] at all (nothing was
+    /// the server holds no row after <paramref name="startUtc"/> and at or before <paramref name="endUtc"/> at all (nothing was
     /// read; for the coverage surfaces, Active Queries, Current Waits, Plan Corrections and Memory Pressure Events, no
     /// row and no logged run of the collector either).
-    /// <paramref name="startUtc"/> itself when the server also holds a row BEFORE the window (the window was
+    /// <paramref name="startUtc"/> itself when the server also holds a row AT OR BEFORE the window's start (the window was
     /// served whole). Otherwise the server's first row inside the window (the data starts late). ONE probe shared by
     /// every Queries-tab grid (<c>Lite/Controls/ServerTab.*</c>), the Active Queries, Current Waits, Plan Corrections,
     /// Query Heatmap and Memory Pressure Events banners and every MCP tool that reads one of the <see cref="QueryWindowRelation"/> relations
@@ -485,12 +485,12 @@ public partial class LocalDataService
 SELECT MIN({timeColumn})
 FROM {windowRelation}
 WHERE server_id = $1
-AND   {timeColumn} >= $2
+AND   {timeColumn} > $2
 AND   {timeColumn} <= $3{rowsFloorInline}"
                 : $@"
 SELECT LEAST(
-    (SELECT MIN({timeColumn}) FROM {windowRelation} WHERE server_id = $1 AND {timeColumn} >= $2 AND {timeColumn} <= $3{rowsFloorInline}),
-    (SELECT MIN(collection_time) FROM {windowLogRelation} WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time >= $2 AND collection_time <= $3))";
+    (SELECT MIN({timeColumn}) FROM {windowRelation} WHERE server_id = $1 AND {timeColumn} > $2 AND {timeColumn} <= $3{rowsFloorInline}),
+    (SELECT MIN(collection_time) FROM {windowLogRelation} WHERE server_id = $1 AND collector_name = '{collector}' AND collection_time > $2 AND collection_time <= $3))";
             windowCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
             windowCommand.Parameters.Add(new DuckDBParameter { Value = endUtc });
@@ -506,23 +506,24 @@ SELECT LEAST(
             return firstInWindow;
         }
 
-        /* #7256: the older-row probe asks the hot table first and stops at its first older row, so a server whose hot table holds
-           an older row never reads the archive. The view, which opens every archive file, is read when the archive's cached span
-           reaches back before the window start or is unknown. That span covers every server in the archive, so the view is
-           skipped only when the whole archive holds nothing older than the start. A server with no older row of its own still
-           reads the view when another server's archived rows are older. The answer is the same either way: a row older than the
-           start exists in the view exactly when it exists in the hot table or in the archive. */
+        /* #7256: the older-row probe asks the hot table first and stops at its first row at or before the start, so a server whose
+           hot table holds one never reads the archive. The view, which opens every archive file, is read when the archive's cached
+           span reaches back to the window start or is unknown. That span covers every server in the archive, so the view is
+           skipped only when the whole archive holds nothing at or before the start. A server with no such row of its own still
+           reads the view when another server's archived rows are that old. The answer is the same either way: a row at or before
+           the start exists in the view exactly when it exists in the hot table or in the archive. A row exactly at the start is
+           outside the window (start exclusive) and proves the window was served from its start. */
         if (archiveSpan is not null)
         {
-            if (await HasRowOlderThanAsync(connection, archiveTable, timeColumn, serverId, startUtc, cancellationToken))
+            if (await HasRowAtOrBeforeAsync(connection, archiveTable, timeColumn, serverId, startUtc, cancellationToken))
             {
                 return startUtc;
             }
         }
 
-        if (archiveSpan is null || (archiveSpan.Value.Oldest is DateTime archiveOldest && archiveOldest < startUtc))
+        if (archiveSpan is null || (archiveSpan.Value.Oldest is DateTime archiveOldest && archiveOldest <= startUtc))
         {
-            if (await HasRowOlderThanAsync(connection, view, timeColumn, serverId, startUtc, cancellationToken))
+            if (await HasRowAtOrBeforeAsync(connection, view, timeColumn, serverId, startUtc, cancellationToken))
             {
                 return startUtc;
             }
@@ -533,13 +534,13 @@ SELECT LEAST(
             return firstRow;
         }
 
-        /* No older row: an older run of the collector still proves the window is covered. */
-        return await HasCollectorRunBeforeAsync(connection, collector, serverId, startUtc) ? startUtc : firstRow;
+        /* No row at or before the start: a run of the collector at or before it still proves the window is covered. */
+        return await HasCollectorRunAtOrBeforeAsync(connection, collector, serverId, startUtc) ? startUtc : firstRow;
     }
 
-    /// <summary>Whether <paramref name="relation"/> (a table or a <c>v_</c> view) holds a row of the server older than <paramref name="startUtc"/>.
+    /// <summary>Whether <paramref name="relation"/> (a table or a <c>v_</c> view) holds a row of the server at or before <paramref name="startUtc"/>.
     /// It stops at the first one.</summary>
-    private static async Task<bool> HasRowOlderThanAsync(
+    private static async Task<bool> HasRowAtOrBeforeAsync(
         LockedConnection connection, string relation, string timeColumn, int serverId, DateTime startUtc, CancellationToken cancellationToken)
     {
         using var olderCommand = connection.CreateCommand();
@@ -547,16 +548,16 @@ SELECT LEAST(
 SELECT 1
 FROM {relation}
 WHERE server_id = $1
-AND   {timeColumn} < $2
+AND   {timeColumn} <= $2
 LIMIT 1";
         olderCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
         olderCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
         return await olderCommand.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
-    /// <summary>Whether the collector's runs in <c>v_collection_log</c> (<c>collection_time</c>, UTC) include one before
+    /// <summary>Whether the collector's runs in <c>v_collection_log</c> (<c>collection_time</c>, UTC) include one at or before
     /// <paramref name="startUtc"/>.</summary>
-    private static async Task<bool> HasCollectorRunBeforeAsync(LockedConnection connection, string collector, int serverId, DateTime startUtc)
+    private static async Task<bool> HasCollectorRunAtOrBeforeAsync(LockedConnection connection, string collector, int serverId, DateTime startUtc)
     {
         using var olderRunCommand = connection.CreateCommand();
         olderRunCommand.CommandText = $@"
@@ -564,7 +565,7 @@ SELECT 1
 FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = '{collector}'
-AND   collection_time < $2
+AND   collection_time <= $2
 LIMIT 1";
         olderRunCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
         olderRunCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
@@ -579,12 +580,12 @@ LIMIT 1";
     /// <item>The candidate rows are read over the grid's pre-filter: the server-local bounds of the UTC window, an hour wider
     /// on each side, which covers a daylight-saving change inside the span. Each row is converted to UTC through
     /// <paramref name="clock"/>, which takes the offset in force at the row's own date (#4766), and the converted times give
-    /// the earliest row inside [<paramref name="startUtc"/>, <paramref name="endUtc"/>] and whether a row sits before the
-    /// start. The scan reads the one column over a span the grid reads whole.</item>
+    /// the earliest row after <paramref name="startUtc"/> and at or before <paramref name="endUtc"/>, and whether a row sits at
+    /// or before the start. The scan reads the one column over a span the grid reads whole.</item>
     /// <item>The collector's runs in <c>v_collection_log</c> are UTC, so they are not converted: the earlier of the first run
     /// and the first row is taken here, in C#, not by one SQL <c>LEAST</c> over a wall-clock column and a UTC one.</item>
     /// <item>When that first time is after the start, the server holds an older row if the scan found one that converts to a
-    /// time before the start, or if any row sits below the pre-filter's lower bound (more than an hour before the start at
+    /// time at or before the start, or if any row sits below the pre-filter's lower bound (more than an hour before the start at
     /// any offset the clock holds, so it needs no conversion). Then an older run of the collector counts, as on the UTC path.</item>
     /// </list>
     /// </summary>
@@ -613,7 +614,7 @@ AND   {timeColumn} <= $3";
             while (await reader.ReadAsync())
             {
                 var eventUtc = clock.ToUtc(reader.GetDateTime(0));
-                if (eventUtc < startUtc)
+                if (eventUtc <= startUtc)
                 {
                     olderRowInPad = true;
                 }
@@ -633,7 +634,7 @@ SELECT MIN(collection_time)
 FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = '{collector}'
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3";
             runCommand.Parameters.Add(new DuckDBParameter { Value = serverId });
             runCommand.Parameters.Add(new DuckDBParameter { Value = startUtc });
@@ -674,7 +675,7 @@ LIMIT 1";
             }
         }
 
-        return collector is not null && await HasCollectorRunBeforeAsync(connection, collector, serverId, startUtc)
+        return collector is not null && await HasCollectorRunAtOrBeforeAsync(connection, collector, serverId, startUtc)
             ? startUtc
             : firstInWindow;
     }

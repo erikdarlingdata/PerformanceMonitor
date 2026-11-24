@@ -8,6 +8,8 @@
 
 using System;
 using PerformanceMonitor.Ui;
+using PerformanceMonitorLite.Mcp;
+using PerformanceMonitorLite.Services;
 using Velopack;
 using Velopack.Locators;
 
@@ -16,8 +18,23 @@ namespace PerformanceMonitorLite
     public static class Program
     {
         [STAThread]
-        public static void Main(string[] args)
+        public static int Main(string[] args)
         {
+            /* #9185: --print-mcp-token reads one Credential Manager entry and prints it. It runs before anything else: no Velopack
+               hook, no registry stamp, no WPF application, no log file, no single-instance lock, so a running Lite is not disturbed
+               and the token reaches nothing but standard output. */
+            if (LiteStartupPlan.FromArgs(args).PrintMcpToken)
+            {
+                return PrintMcpTokenCommand.RunProcess();
+            }
+
+            /* #9237: --add-server writes servers.json, this user's credential and host confirmation, and exits. Same early exit as the
+               token print: no Velopack hook, no WPF application, no log file, no single-instance lock. */
+            if (LiteStartupPlan.FromArgs(args).AddServer)
+            {
+                return AddServerCommand.RunProcess(args);
+            }
+
             VelopackApp.Build().Run();
 
             // #8430: Settings > Apps shows this install's full version, a nightly's tag included. The Setup.exe
@@ -27,7 +44,9 @@ namespace PerformanceMonitorLite
 
             var app = new App();
             app.InitializeComponent();
-            app.Run();
+            /* #9142: Run's return value is the process exit code (Shutdown(code)). --stop's 0/1/2 and a failed headless start's
+               nonzero code reach %ERRORLEVEL% and Task Scheduler's last run result only if Main returns it. */
+            return app.Run();
         }
     }
 }

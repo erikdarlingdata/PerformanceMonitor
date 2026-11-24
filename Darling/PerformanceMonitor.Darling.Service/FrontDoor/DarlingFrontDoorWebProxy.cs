@@ -34,8 +34,8 @@ namespace PerformanceMonitor.Darling.Service.FrontDoor;
 /// the Host guard and the session cookie are the web host's own and run before any route here: a request reaches this class only
 /// after it has passed them, and a read-only role never gets a change through.
 ///
-/// <para><b>Routes.</b> <c>/api/ping</c>, <c>/api/session</c>, <c>GET /api/front-door</c> and <c>GET /api/front-door/locate</c> are
-/// answered here. Every other <c>/api/*</c> call is forwarded to one store. <c>/auth/*</c> and the static pages are never forwarded.</para>
+/// <para><b>Routes.</b> <c>/api/ping</c>, <c>/api/session</c>, <c>/api/me</c>, <c>GET /api/front-door</c> and <c>GET /api/front-door/locate</c> are
+/// answered here, and every <c>/api/mcp-tokens</c> path is answered with a 404 (#8737). Every other <c>/api/*</c> call is forwarded to one store. <c>/auth/*</c> and the static pages are never forwarded.</para>
 ///
 /// <para><b>Which store.</b> The <c>X-Darling-Store</c> header (a configured name, else 400), then <c>?server=</c> through the
 /// directory, then the only configured store. A name found in more than one store is refused with 409 and nothing is sent. A change
@@ -76,7 +76,9 @@ internal sealed class DarlingFrontDoorWebProxy
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
     private readonly Func<CollectorRuntimeState.Snapshot?>? _collector;
+    private readonly bool? _oidcRoleMapping;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _lastLogged = new();
+    private readonly DateTimeOffset _processStart = DarlingFrontDoorVersion.ProcessStartUtc;
 
     /* Each store's own admin_writes_off and managed_store, as its /api/session last said (null: it did not say), and when. */
     private readonly ConcurrentDictionary<string, (DateTimeOffset At, StoreFlags Flags)> _storeFlags = new(StringComparer.OrdinalIgnoreCase);
@@ -85,12 +87,13 @@ internal sealed class DarlingFrontDoorWebProxy
     private static readonly TimeSpan StoreFlagsKeep = TimeSpan.FromSeconds(30);
 
     /// <summary>What a store's <c>/api/session</c> said about how it takes changes. A null is a flag the store did not report.</summary>
-    private readonly record struct StoreFlags(bool? AdminWritesOff, bool? ManagedStore);
+    private readonly record struct StoreFlags(bool? AdminWritesOff, bool? ManagedStore, string? Build = null);
 
     internal DarlingFrontDoorWebProxy(
         IFrontDoorDirectory directory, DarlingFrontDoorWebSession session, TimeSpan peerTimeout, ILogger logger, TimeProvider? time = null,
-        Func<CollectorRuntimeState.Snapshot?>? collector = null)
+        Func<CollectorRuntimeState.Snapshot?>? collector = null, bool? oidcRoleMapping = null)
     {
+        _oidcRoleMapping = oidcRoleMapping;
         _collector = collector;
         _directory = directory;
         _session = session;
@@ -102,13 +105,22 @@ internal sealed class DarlingFrontDoorWebProxy
     /// <summary>The proxy the service builds when it starts as a front door: <c>frontDoor.peerTimeoutSeconds</c> bounds each call.</summary>
     internal static DarlingFrontDoorWebProxy Create(
         IFrontDoorDirectory directory, IFrontDoorSecrets secrets, FrontDoorConfig config, ILogger logger,
-        Func<CollectorRuntimeState.Snapshot?>? collector = null)
+        Func<CollectorRuntimeState.Snapshot?>? collector = null, bool? oidcRoleMapping = null)
         => new(
             directory,
-            new DarlingFrontDoorWebSession(secrets),
+            new DarlingFrontDoorWebSession(secrets, logger: logger),
             config.EffectivePeerTimeout(),
             logger,
-            collector: collector);
+            collector: collector,
+            oidcRoleMapping: oidcRoleMapping);
+
+    /// <summary>#9431: whether this request is the unauthenticated <c>GET /version</c> (<see cref="DarlingFrontDoorVersion"/>). The web pipeline asks
+    /// before its sign-in gate and calls <see cref="WriteVersionAsync"/> when it is.</summary>
+    internal static bool IsVersionRequest(HttpRequest request) => DarlingFrontDoorVersion.IsVersionRequest(request);
+
+    /// <summary>#9431: answers <c>GET /version</c> with the build, the commit, the start time and how many stores are up.</summary>
+    internal Task WriteVersionAsync(HttpContext context)
+        => DarlingFrontDoorVersion.WriteAsync(context, _directory.Stores, _processStart);
 
     /// <summary>Maps every <c>/api/*</c> route. It runs where the dashboard's own endpoints would, after the sign-in and role gates.</summary>
     internal void AddRoutes(WebApplication app)
@@ -130,6 +142,11 @@ internal sealed class DarlingFrontDoorWebProxy
             return LocalGetAsync(context, SessionAsync);
         }
 
+        if (path.Equals("/api/me", StringComparison.OrdinalIgnoreCase))
+        {
+            return LocalGetAsync(context, MeAsync);
+        }
+
         if (path.Equals("/api/front-door", StringComparison.OrdinalIgnoreCase))
         {
             return LocalGetAsync(context, StoresAsync);
@@ -138,6 +155,15 @@ internal sealed class DarlingFrontDoorWebProxy
         if (path.Equals("/api/front-door/locate", StringComparison.OrdinalIgnoreCase))
         {
             return LocalGetAsync(context, LocateAsync);
+        }
+
+        /* #8737: a personal MCP token belongs to a store's owner connection and a person's seat there, and a store would see only the front
+           door's shared-token session, so these paths are never sent on. This is a local answer, not a missing route: the catch-all below would
+           forward them. */
+        if (path.Equals(DarlingWebEndpoints.PersonalTokensRoute, StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith(DarlingWebEndpoints.PersonalTokensRoute + "/", StringComparison.OrdinalIgnoreCase))
+        {
+            return WriteJsonAsync(context, StatusCodes.Status404NotFound, new JsonObject { ["error"] = DarlingWebEndpoints.PersonalTokensUnavailableCode });
         }
 
         /* The namespace is the front door's own: a name under it is never a store's route. */
@@ -213,13 +239,18 @@ internal sealed class DarlingFrontDoorWebProxy
             ["managed_store"] = false,
             ["admin_writes_off"] = false,
             ["front_door"] = true,
+            ["build"] = DarlingCliCommands.BuildText(),
         });
     }
 
+    /// <summary>#8737: the calling session's own identity, from the seat the front door's gate gave this request. No store is asked.</summary>
+    private Task MeAsync(HttpContext context) =>
+        WriteJsonAsync(context, StatusCodes.Status200OK, DarlingWebMe.Describe(DarlingWebSeat.FromContext(context), _oidcRoleMapping, personalTokensServed: false));
+
     /// <summary>The store list with each store's health, and, where the store said so, its <c>admin_writes_off</c> and <c>managed_store</c>: the
     /// page takes both from the store in use, as it does from the store's own <c>/api/session</c> when it is not behind a front door, so a
-    /// store running with Admin writes off draws no Admin write controls and names the right switch. A store that is down or did not say has
-    /// no such key.</summary>
+    /// store running with Admin writes off draws no Admin write controls and names the right switch. Each entry also carries the store's
+    /// <c>service_build</c> (#9203) when it said one. A store that is down or did not say has no such key.</summary>
     private async Task StoresAsync(HttpContext context)
     {
         var states = _directory.Stores;
@@ -245,6 +276,12 @@ internal sealed class DarlingFrontDoorWebProxy
             if (flags[i].ManagedStore is { } managed)
             {
                 entry["managed_store"] = managed;
+            }
+
+            /* #9203: the store's own build, so a mixed-version setup shows. A store that did not say has no key, not "unknown". */
+            if (flags[i].Build is { } build)
+            {
+                entry["service_build"] = build;
             }
 
             stores.Add(entry);
@@ -292,7 +329,7 @@ internal sealed class DarlingFrontDoorWebProxy
                     using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(linked.Token).ConfigureAwait(false));
                     if (document.RootElement.ValueKind == JsonValueKind.Object)
                     {
-                        flags = new StoreFlags(BoolOf(document.RootElement, "admin_writes_off"), BoolOf(document.RootElement, "managed_store"));
+                        flags = new StoreFlags(BoolOf(document.RootElement, "admin_writes_off"), BoolOf(document.RootElement, "managed_store"), BuildOf(document.RootElement));
                     }
                 }
 
@@ -308,6 +345,12 @@ internal sealed class DarlingFrontDoorWebProxy
         _storeFlags[store.Name] = (now, flags);
         return flags;
     }
+
+    /* The store's own `build` text from its /api/session, trimmed. Null when the store did not say (an older build) or said nothing. */
+    private static string? BuildOf(JsonElement root)
+        => root.TryGetProperty("build", out var value) && value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString())
+            ? value.GetString()!.Trim()
+            : null;
 
     private static bool? BoolOf(JsonElement root, string name)
         => root.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False ? value.GetBoolean() : null;

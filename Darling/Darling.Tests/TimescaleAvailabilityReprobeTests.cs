@@ -236,7 +236,7 @@ public sealed class TimescaleAvailabilityReprobeTests
 
         /* Its own connection out of the worker's pool: the start path's is scoped to the setup block and
            disposed with it, which is why this method exists rather than a line beside that call. */
-        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);", body, StringComparison.Ordinal);
+        Assert.Contains("await using var connection = await _postgres!.OpenConnectionAsync(StoreSessionNames.TimescaleReprobe, budget.Token);", body, StringComparison.Ordinal);
 
         /* #1922: the result is captured and nothing touches the connection after it. Asserted on the text
            AFTER the probe rather than on a count, because the property is about what follows the check. */

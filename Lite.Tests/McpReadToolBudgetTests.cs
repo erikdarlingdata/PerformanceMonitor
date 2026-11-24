@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using ModelContextProtocol.Server;
@@ -211,6 +212,120 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     /// ~20 keys including the null, false and 0 ones. A partial row now omits those, so a collector costs far fewer
     /// bytes. Lite's twin of Darling's CollectionHealthPayloadBudgetLiveTests.WorstCase_EveryCollectorNeedsALook_AnswersUnder75PercentOfTheBudget.
     /// </summary>
+    /// <summary>The event and snapshot reads whose page a caller can ask to be longer than the budget holds: the read, the array
+    /// its rows are in, and the key that counts them.</summary>
+    private static readonly (string Tool, string Rows, string Count)[] WidePageReads =
+    {
+        ("get_deadlocks", "deadlocks", "deadlocks_returned"),
+        ("get_blocked_process_reports", "reports", "reports_returned"),
+        ("get_long_query_completions", "completions", "completions_returned"),
+        ("get_plan_corrections", "recommendations", "recommendations_returned"),
+        ("get_active_queries", "queries", "snapshots_returned"),
+    };
+
+    /// <summary>
+    /// A caller who asks one of <see cref="WidePageReads"/> for more rows than the response budget holds gets the rows that fit,
+    /// whole, and is told: the answer is within <see cref="McpResponseBudget.DefaultBytes"/>, <c>budget_truncated</c> and
+    /// <c>truncated</c> are true, <c>budget_note</c> says how many fit, and the count beside the rows is the count of the rows kept.
+    /// </summary>
+    [Fact]
+    public async Task AnEventPageAskedForPastTheBudget_KeepsTheWholeRowsThatFit_AndSaysSo()
+    {
+        const int seeded = 150;
+        await SeedWidePagesAsync(seeded);
+
+        var analysisService = new AnalysisService(_duckDb) { MinimumDataHours = 0 };
+        var catalog = new McpToolGuideCatalog();
+        var methods = ReadToolMethods().ToDictionary(t => t.Name, t => t.Method, StringComparer.Ordinal);
+        var findings = new List<string>();
+
+        foreach (var (tool, rowsKey, countKey) in WidePageReads)
+        {
+            var args = BindArgs(methods[tool], _dataService, _serverManager, analysisService, catalog, new List<string>(), tool,
+                new Dictionary<string, object?> { ["limit"] = McpHelpers.MaxTop });
+            var json = await InvokeAsync(methods[tool], args);
+            var head = json[..Math.Min(json.Length, 300)];
+            if (McpHelpers.IsErrorEnvelope(json))
+            {
+                findings.Add($"{tool}: answered an error: {head}");
+                continue;
+            }
+
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (!root.TryGetProperty(rowsKey, out var rows) || rows.ValueKind != JsonValueKind.Array)
+            {
+                findings.Add($"{tool}: answered no {rowsKey}: {head}");
+                continue;
+            }
+
+            var kept = rows.GetArrayLength();
+            var bytes = Encoding.UTF8.GetByteCount(json);
+            if (bytes > McpResponseBudget.DefaultBytes)
+                findings.Add($"{tool}: limit {McpHelpers.MaxTop} answered {bytes:N0} bytes ({kept} rows), over the {McpResponseBudget.DefaultBytes:N0}-byte response budget");
+            if (kept < 1 || kept >= seeded)
+                findings.Add($"{tool}: {kept} of the {seeded} seeded rows came back; a cut page holds at least one and not all of them");
+            if (!root.TryGetProperty("budget_truncated", out var budgetCut) || budgetCut.ValueKind != JsonValueKind.True)
+                findings.Add($"{tool}: budget_truncated is not true on a page the budget cut");
+            if (!root.TryGetProperty("truncated", out var cut) || cut.ValueKind != JsonValueKind.True)
+                findings.Add($"{tool}: truncated is not true on a page that left rows out");
+            if (!root.TryGetProperty("budget_note", out var note) || note.ValueKind != JsonValueKind.String
+                || !note.GetString()!.Contains($"only {kept} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget", StringComparison.Ordinal))
+                findings.Add($"{tool}: budget_note does not say that {kept} rows fit the response budget");
+            if (!root.TryGetProperty(countKey, out var count) || count.ValueKind != JsonValueKind.Number || count.GetInt32() != kept)
+                findings.Add($"{tool}: {countKey} is not the {kept} rows the page kept");
+        }
+
+        Assert.True(findings.Count == 0, $"{findings.Count} finding(s):" + Environment.NewLine + string.Join(Environment.NewLine, findings));
+    }
+
+    /// <summary><paramref name="rowCount"/> wide rows, inside the last hour, in each table a read of <see cref="WidePageReads"/> lists.</summary>
+    private async Task SeedWidePagesAsync(int rowCount)
+    {
+        var now = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-1));
+        var seedConn = await SeedConnectionAsync();
+        using var batch = new SeedBatch(_duckDb, seedConn);
+        for (var i = 0; i < rowCount; i++)
+        {
+            var t = Naive(now.AddSeconds(-20 * i));
+            var db = $"TenantDb{i % DbCount:00}";
+            var xml = "<deadlock><victim-list><victimProcess id=\"process" + i + "a\"/></victim-list><process-list>" +
+                "<process id=\"process" + i + "a\" lockMode=\"X\"><inputbuf>" + PadBlock(300) + "</inputbuf></process>" +
+                "<process id=\"process" + i + "b\" lockMode=\"S\"><inputbuf>" + PadBlock(300) + "</inputbuf></process></process-list></deadlock>";
+            await ExecAsync(
+                "INSERT INTO deadlocks (deadlock_id, collection_time, server_id, server_name, deadlock_time, victim_process_id, victim_sql_text, deadlock_graph_xml) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                _nextId--, t, _serverId, ServerName, t, "process" + i + "a", "UPDATE dbo.Orders SET Note = N'" + PadBlock(1500) + "' WHERE OrderId = " + i, xml);
+            await ExecAsync(
+                @"INSERT INTO blocked_process_reports
+    (blocked_report_id, collection_time, server_id, server_name, event_time, database_name,
+     blocked_spid, blocking_spid, wait_time_ms, lock_mode, blocked_sql_text, blocking_sql_text, blocked_process_report_xml, contentious_object)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+                _nextId--, t, _serverId, ServerName, t, db, 50 + i, 1150 + i, 4000L + i, "X",
+                "UPDATE dbo.Orders SET Note = N'" + PadBlock(1200) + "' WHERE OrderId = " + i,
+                "SELECT * FROM dbo.Orders WHERE Note = N'" + PadBlock(1200) + "' AND OrderId = " + i,
+                "<blocked-process-report><blocked-process><process spid=\"" + (50 + i) + "\"/></blocked-process><blocking-process><process spid=\"" + (1150 + i) + "\"/></blocking-process></blocked-process-report>",
+                db + ".dbo.Orders");
+            await ExecAsync(
+                @"INSERT INTO plan_correction (collection_id, collection_time, server_id, server_name, database_name, recommendation_name, recommendation_state, score)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                _nextId--, t, _serverId, ServerName, db, "PR_" + i + "_" + PadBlock(300), i % 3 == 0 ? "Active" : "Superseded", 40 + (i % 50));
+            await ExecAsync(
+                @"INSERT INTO long_query_completions (long_query_completion_id, collection_time, server_id, server_name, event_time, event_type, database_name, duration_microseconds, statement_text)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                _nextId--, t, _serverId, ServerName, t, "sql_batch_completed", db,
+                (long)(i + 1) * 500_000, "EXEC dbo.usp_NightlyReconcile_" + i + " " + PadBlock(1500));
+            await ExecAsync(@"
+INSERT INTO query_snapshots
+    (collection_id, collection_time, server_id, server_name, session_id, database_name, query_text, status, blocking_session_id,
+     wait_type, cpu_time_ms, total_elapsed_time_ms, program_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                _nextId--, t, _serverId, ServerName, 100 + i, db, "SELECT " + i + " /* " + PadBlock(1500) + " */", "running", 0,
+                null, 1000L + i, 2000L + i, "MyOrderService.Worker");
+        }
+
+        batch.Commit();
+    }
+
     [Fact]
     public async Task CollectionHealthWorstCaseAnswersUnder75PercentOfTheBudget()
     {
@@ -285,6 +400,9 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
         name.StartsWith("analyze_", StringComparison.Ordinal) ||
         name.StartsWith("compare_", StringComparison.Ordinal) ||
         name == "audit_config" ||
+        /* #9388: find_tools reads the request's own served tool list through its McpServer, which a reflective call cannot give it. Its worst
+           case, full at its cap over the real registered tools, is measured in the McpToolSearch tests instead. */
+        name == "find_tools" ||
         WriteToolRoster.Contains(name);
 
     internal static (string Name, MethodInfo Method)[] ReadToolMethods() =>

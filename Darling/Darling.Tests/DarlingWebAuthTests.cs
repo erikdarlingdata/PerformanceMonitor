@@ -11,6 +11,18 @@ using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
+using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 
@@ -197,6 +209,85 @@ public sealed class DarlingWebAuthTests
         => Convert.ToBase64String(Encoding.UTF8.GetBytes(subject)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     [Fact]
+    public void TryValidateSessionCookie_ReportsTheSignedExpiry()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var expiry = now.AddHours(5).AddMilliseconds(321);
+        var cookie = DarlingWebHostService.BuildSessionCookieValue(Key, expiry, "erik@example.com");
+
+        Assert.True(DarlingWebHostService.TryValidateSessionCookie(cookie, Key, now, out _, out var expiresAt));
+        Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(expiry.ToUnixTimeSeconds()), expiresAt);
+    }
+
+    [Fact]
+    public void TryValidateSessionCookie_Refused_ReportsDefault()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var cookie = DarlingWebHostService.BuildSessionCookieValue(Key, now.AddHours(1));
+
+        Assert.False(DarlingWebHostService.TryValidateSessionCookie(cookie, OtherKey, now, out var subject, out var expiresAt));
+        Assert.Null(subject);
+        Assert.Equal(default, expiresAt);
+    }
+
+    /// <summary>The seat a request runs as carries the cookie's signed expiry, whichever seat the cookie names (shared token, named o3, named
+    /// web token t1), and a request admitted with no cookie (the tokenless loopback path) carries none.</summary>
+    [Theory]
+    [InlineData("shared")]
+    [InlineData("o3")]
+    [InlineData("t1")]
+    [InlineData("none")]
+    public async Task TheSeat_CarriesTheCookiesSignedExpiry(string kind)
+    {
+        const string probeRoute = "/__test/seat-expiry";
+        const string tokenName = "readers";
+        var tokenless = kind == "none";
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        await using var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        builder.Services.AddSingleton(postgres);
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+        await using var app = builder.Build();
+        var host = new DarlingWebHostService(
+            NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        var webTokens = kind == "t1"
+            ? DarlingWebNamedTokenTests.SetFor(DarlingWebNamedTokenTests.Entry(tokenName, DarlingWebNamedTokenTests.ReaderToken, "reader"))
+            : null;
+        host.ConfigurePipeline(app, postgres, networkMode: false, networkListenIp: null, allowedCidr: IPNetwork.Parse("127.0.0.1/32"),
+            accessToken: tokenless ? string.Empty : new string('t', 40), oidcClient: null, requireTokenWhenLoopbackOnly: !tokenless,
+            sessionSigningKeyForTests: Key, webTokens: webTokens);
+        app.MapGet(probeRoute, (HttpContext ctx) => DarlingWebSeat.FromContext(ctx).SessionExpiresAt?.ToUnixTimeSeconds().ToString() ?? "none");
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        using var server = app.GetTestServer();
+
+        var expiry = DateTimeOffset.UtcNow.AddHours(3).AddMilliseconds(777);
+        var subject = kind switch
+        {
+            "o3" => DarlingWebSeat.EncodeCookieSubject("viewer@example.test", WebOidcRole.Viewer, new string('k', DarlingWebSeat.OwnerKeyLength), "Vera Viewer", "Analysts"),
+            "t1" => DarlingWebSeat.EncodeTokenCookieSubject(tokenName),
+            _ => null,
+        };
+        var cookie = DarlingWebHostService.BuildSessionCookieValue(Key, expiry, subject);
+
+        var ctx = await server.SendAsync(c =>
+        {
+            c.Request.Method = "GET";
+            c.Request.Path = probeRoute;
+            c.Request.Headers.Host = "localhost";
+            c.Connection.RemoteIpAddress = IPAddress.Loopback;
+            if (!tokenless)
+            {
+                c.Request.Headers["Cookie"] = DarlingWebHostService.SessionCookieName + "=" + cookie;
+            }
+        }, TestContext.Current.CancellationToken);
+        var body = await new System.IO.StreamReader(ctx.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(200, ctx.Response.StatusCode);
+        Assert.Equal(tokenless ? "none" : expiry.ToUnixTimeSeconds().ToString(), body);
+    }
+
+    [Fact]
     public void SessionSubject_RoundTrips()
     {
         var now = DateTimeOffset.UtcNow;
@@ -282,7 +373,7 @@ public sealed class DarlingWebAuthTests
     }
 
     /// <summary>
-    /// Refuses rather than truncates. Truncation is the worse failure: two subjects sharing a 256-character
+    /// Refuses rather than truncates. Truncation is the worse failure: two subjects sharing a <see cref="DarlingWebHostService.MaxSessionSubjectLength"/>-character
     /// prefix would collapse into one seat, silently attributing one person's writes to another.
     /// </summary>
     [Fact]
@@ -405,5 +496,38 @@ public sealed class DarlingWebAuthTests
             withOidc, StringComparison.Ordinal);
         Assert.Contains("document.getElementById('return').value = location.pathname + location.search + location.hash;",
             withoutOidc, StringComparison.Ordinal);
+    }
+
+    /// <summary>#8735, #8737 (Erik): the dashboard's token sign-in knows nothing of personal MCP tokens. A real minted <c>dpt1_</c> value posted to
+    /// <c>/auth/login</c> is refused exactly like a random wrong token: the same status, the same redirect and body, and no session cookie.</summary>
+    [Fact]
+    public async Task Login_ValidPersonalToken_RefusedLikeAnyWrongToken()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        await using var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
+        builder.Services.AddSingleton(postgres);
+        DarlingWebHostService.ConfigureResponseCompression(builder.Services);
+        await using var app = builder.Build();
+        var host = new DarlingWebHostService(
+            NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), new CollectorRuntimeState(), new WebTlsCertificateState(), new BaselineCache());
+        host.ConfigurePipeline(app, postgres, networkMode: false, networkListenIp: null, allowedCidr: IPNetwork.Parse("127.0.0.1/32"),
+            accessToken: new string('t', 40), oidcClient: null, requireTokenWhenLoopbackOnly: true, sessionSigningKeyForTests: Key);
+        await app.StartAsync(TestContext.Current.CancellationToken);
+        using var server = app.GetTestServer();
+
+        var minted = PersonalTokenFormat.Mint().Value;
+        Assert.StartsWith("dpt1_", minted, StringComparison.Ordinal);
+
+        var wrong = await DarlingWebHostGateLiveTests.PostSignIn(server, "localhost", IPAddress.Loopback, "not-the-token-" + Guid.NewGuid().ToString("N"));
+        var personal = await DarlingWebHostGateLiveTests.PostSignIn(server, "localhost", IPAddress.Loopback, minted);
+
+        Assert.Equal(0, wrong.Response.Headers.SetCookie.Count);
+        Assert.Equal(0, personal.Response.Headers.SetCookie.Count);
+        Assert.Equal(wrong.Response.StatusCode, personal.Response.StatusCode);
+        Assert.Equal(wrong.Response.Headers.Location.ToString(), personal.Response.Headers.Location.ToString());
+        Assert.Equal(await new System.IO.StreamReader(wrong.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken),
+            await new System.IO.StreamReader(personal.Response.Body).ReadToEndAsync(TestContext.Current.CancellationToken));
     }
 }

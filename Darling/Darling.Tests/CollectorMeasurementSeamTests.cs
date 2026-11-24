@@ -593,6 +593,8 @@ public class CollectorMeasurementSeamTests
                 CollectorContext.StatementScrubTimeoutsMeasurement,
                 CollectorContext.StatementScrubUnjudgedMeasurement,
                 CollectorContext.StatementScrubMsMeasurement,
+                /* #8884: dumps that arrived since the previous stamp, measured by InstanceEvents.ObserveMemoryDumps on behalf of cpu_utilization. */
+                InstanceEvents.MemoryDumpsNewMeasurement,
                 /* #6441: SQL Server truncated the ring buffer's XML. Measured through RingBufferXml.MeasureTruncation on
                    behalf of system_health_events, long_query_completions, deadlocks and blocked_process_report, which
                    is why the consts live in RingBufferXml.cs. Written only on a truncated read. */
@@ -617,6 +619,10 @@ public class CollectorMeasurementSeamTests
                 SystemHealthEventsCollector.EventFileErrorMeasurement,
                 SystemHealthEventsCollector.EventFileBufferCutMeasurement,
                 SystemHealthEventsCollector.EventFileWildcardMeasurement,
+                /* #9107: the default trace is switched off on the server. Measured by default_trace_events' own ReadAsync from a const in
+                   DefaultTraceEventsCollector.cs; the expectation names the label the readers parse (DefaultTraceOffNote.Label), so the
+                   collector's const drifting from it fails here. */
+                PerformanceMonitor.Common.DefaultTraceOffNote.Label,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

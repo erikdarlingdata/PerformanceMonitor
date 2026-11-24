@@ -16,7 +16,7 @@ Serial classes are the ones whose xUnit collection is declared `DisableParalleli
 class's collection, and the declarations are read from the test sources (`--tests-dir`, default Lite.Tests at
 the repo root), so there is no hand-kept list to rot. Every class weighs at least MIN_WEIGHT, so a class whose tests were all skipped still moves a
 shard's load and no shard is left empty. A class with no timing history gets the MEAN weight of the known
-classes. When the timings are missing, unreadable, empty, all zero, or cover less than MIN_COVERAGE of the
+classes of its own kind (a LiveTests name or any other). When the timings are missing, unreadable, empty, all zero, or cover less than MIN_COVERAGE of the
 discovered classes, the assignment falls back to the class-name hash (SHA-256 first byte modulo N), the cut
 the workflow used before this script existed. A timed class the test sources no longer declare is left out, with
 one warning line each (#5833).
@@ -117,6 +117,19 @@ def load_collections(dirs):
 _SERIAL_DEF = re.compile(r"\[\s*CollectionDefinition\(\s*([^,)]+?)\s*,\s*DisableParallelization\s*=\s*true\b")
 
 
+def linked_texts():
+    """The Darling.Tests sources: Lite.Tests compiles some of them in (ApplicationThemeGuard.cs), so a collection name a
+    Lite.Tests declaration takes from a constant there is declared in this tree, not under Lite.Tests."""
+    out = []
+    for p in sorted(glob.glob(os.path.join(REPO_ROOT, "Darling", "Darling.Tests", "*.cs"))):
+        try:
+            with open(p, encoding="utf-8-sig") as f:
+                out.append(f.read())
+        except OSError:
+            continue
+    return out
+
+
 def serial_collection_names(tests_dir):
     """Names of the collections declared `[CollectionDefinition(name, DisableParallelization = true)]` under
     tests_dir, plus the declarations it could not resolve to a name. `name` is a string literal or a
@@ -132,6 +145,8 @@ def serial_collection_names(tests_dir):
     for text in texts:
         for m in _SERIAL_DEF.finditer(text):
             expr = m.group(1).strip()
+            if "\\" in expr or "{" in expr:
+                continue  # the text of an interpolated message string that quotes the attribute, not a declaration
             if len(expr) >= 2 and expr[0] == expr[-1] == '"':
                 names.add(expr[1:-1])
                 continue
@@ -140,7 +155,7 @@ def serial_collection_names(tests_dir):
             if holder:
                 pat = re.compile(r"\bclass\s+" + re.escape(holder.rpartition(".")[2]) + r"\b[\s\S]{0,400}?const\s+string\s+"
                                  + re.escape(member) + r'\s*=\s*"([^"]*)"')
-                for t in texts:
+                for t in texts + linked_texts():
                     mm = pat.search(t)
                     if mm:
                         found = mm.group(1)
@@ -195,6 +210,33 @@ def hash_shard(name, shards):
     return hashlib.sha256(name.encode("utf-8")).digest()[0] % shards
 
 
+LIVE_CLASS_SUFFIX = "LiveTests"
+
+
+def class_kind(name):
+    """The kind of a class, from its name alone: "live" when the simple name ends in LiveTests (a class that stands up a
+    PostgreSQL store, or a Lite class that reads a real one), else "other". #9262: the two kinds cost very different seconds,
+    so a class the weight tables do not know weighs the mean of its own kind, not one number for every class."""
+    return "live" if re.split(r"[.+/]", name)[-1].split("`")[0].endswith(LIVE_CLASS_SUFFIX) else "other"
+
+
+def _mean(values):
+    return sum(values) / len(values)
+
+
+def missing_class_weight(known):
+    """A function name -> weight for a class the table does not know (#9262): the MEAN of the known weights of that
+    class's kind. A kind with no known class takes the mean of all known weights. With nothing known it weighs 0. The mean,
+    not the median: packing adds weights, so the expected cost of an unknown class is the mean, and a few very heavy live
+    classes make the median of its kind far too low (Darling table: live median 1.38 s, mean 3.96 s)."""
+    by_kind = {}
+    for name, w in known.items():
+        by_kind.setdefault(class_kind(name), []).append(w)
+    overall = _mean(list(known.values())) if known else 0.0
+    means = {k: _mean(v) for k, v in by_kind.items()}
+    return lambda name: means.get(class_kind(name), overall)
+
+
 def class_weight(raw, is_serial):
     """Wall-clock cost of a class: a serial class's seconds, or a parallel class's seconds spread over the overlap."""
     return raw if is_serial else raw / PARALLEL_CONCURRENCY
@@ -202,11 +244,10 @@ def class_weight(raw, is_serial):
 
 def predicted_walls(assignment, weights, serial):
     """Modelled wall seconds per shard: parallel seconds / PARALLEL_CONCURRENCY + serial seconds. A class with no
-    timing counts at the mean of the timed classes, as `pack` places it (#5208)."""
+    timing counts at the mean of the timed classes of its kind, as `pack` places it (#5208, #9262)."""
     assigned = {c for shard in assignment for c in shard}
-    known = [weights[c] for c in assigned if c in weights]
-    default = sum(known) / len(known) if known else 0.0
-    return [sum(class_weight(weights.get(c, default), c in serial) for c in shard) for shard in assignment]
+    fill = missing_class_weight({c: weights[c] for c in assigned if c in weights})
+    return [sum(class_weight(weights[c] if c in weights else fill(c), c in serial) for c in shard) for shard in assignment]
 
 
 def shard_results(d):
@@ -306,10 +347,10 @@ def pack(classes, shards, weights, serial=frozenset()):
         for c in unique:
             out[hash_shard(c, shards)].append(c)
         return out, "hash"
-    default = sum(known.values()) / len(known)
+    fill = missing_class_weight(known)
     # The floor makes an empty shard impossible whenever there are at least as many classes as shards: a zero-time
     # class (every test skipped) would otherwise never move a shard's load off zero.
-    weight = {c: max(class_weight(known.get(c, default), c in serial), MIN_WEIGHT) for c in unique}
+    weight = {c: max(class_weight(known[c] if c in known else fill(c), c in serial), MIN_WEIGHT) for c in unique}
     load = [0.0] * shards
     for c in sorted(unique, key=lambda c: (-weight[c], c)):
         k = min(range(shards), key=lambda i: (load[i], i))

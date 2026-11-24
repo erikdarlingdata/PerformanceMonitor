@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -140,6 +141,20 @@ internal static class DarlingStoredPlanReader
         AND   COALESCE(request_id, 0) = $4
         AND   query_plan IS NOT NULL
         LIMIT 1
+        """;
+
+    /// <summary>The stored plan of each (capture, session, request) key given, in one statement (#9055): <see cref="QuerySnapshotPlanSql"/> for
+    /// many rows at once. The key is the active-query row's own natural key; a NULL request_id matches 0, as the single read does.
+    /// $1 server_id, $2 collection times, $3 session ids, $4 request ids (three parallel arrays).</summary>
+    public const string QuerySnapshotPlansBatchSql = """
+        SELECT q.collection_time, q.session_id, COALESCE(q.request_id, 0), q.query_plan
+        FROM unnest($2::timestamp[], $3::int[], $4::int[]) AS k(collection_time, session_id, request_id)
+        JOIN query_snapshots q
+          ON  q.server_id = $1
+          AND q.collection_time = k.collection_time
+          AND q.session_id = k.session_id
+          AND COALESCE(q.request_id, 0) = k.request_id
+        WHERE q.query_plan IS NOT NULL
         """;
 
     /// <summary>The live/actual plan twin of <see cref="QuerySnapshotPlanSql"/>; byte-equal to the Viewer's
@@ -676,6 +691,51 @@ internal static class DarlingStoredPlanReader
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = requestId });
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return result is string s ? s : null;
+    }
+
+    /// <summary>
+    /// The stored plans of several Active Queries snapshot rows in one statement (<see cref="QuerySnapshotPlansBatchSql"/>), keyed by
+    /// (collection_time, session_id, request_id or 0). A key whose request captured no plan is absent. Each collection time must be the
+    /// row's own, naive UTC with its microseconds, and is relabelled <c>Unspecified</c> so Npgsql binds a <c>timestamp</c> (the #1969 trap).
+    /// Read by get_active_queries to name what a page latch wait is on (#9055).
+    /// </summary>
+    public static async Task<Dictionary<(DateTime CollectionTime, int SessionId, int RequestId), string>> GetQuerySnapshotPlansAsync(
+        NpgsqlDataSource postgres, int serverId, IReadOnlyList<(DateTime CollectionTime, int SessionId, int RequestId)> keys,
+        int maxOutputChars = int.MaxValue, CancellationToken cancellationToken = default)
+    {
+        var filtered = new Dictionary<(DateTime CollectionTime, int SessionId, int RequestId), string>();
+        foreach (var (key, plan) in await GetQuerySnapshotPlansRawAsync(postgres, serverId, keys, cancellationToken))
+        {
+            var xml = SensitiveStatements.Xml(plan, maxOutputChars);
+            if (xml != null) filtered[key] = xml;
+        }
+
+        return filtered;
+    }
+
+    private static async Task<Dictionary<(DateTime CollectionTime, int SessionId, int RequestId), string>> GetQuerySnapshotPlansRawAsync(
+        NpgsqlDataSource postgres, int serverId, IReadOnlyList<(DateTime CollectionTime, int SessionId, int RequestId)> keys,
+        CancellationToken cancellationToken)
+    {
+        var plans = new Dictionary<(DateTime CollectionTime, int SessionId, int RequestId), string>();
+        if (keys.Count == 0) return plans;
+        await using var command = postgres.CreateCommand(QuerySnapshotPlansBatchSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
+            Value = keys.Select(k => DateTime.SpecifyKind(k.CollectionTime, DateTimeKind.Unspecified)).ToArray(),
+        });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = keys.Select(k => k.SessionId).ToArray() });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = keys.Select(k => k.RequestId).ToArray() });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            plans[(reader.GetDateTime(0), reader.GetInt32(1), reader.GetInt32(2))] = reader.GetString(3);
+        }
+
+        return plans;
     }
 
     /// <summary>

@@ -33,7 +33,8 @@ namespace PerformanceMonitorLite.Tests;
 /// realized: the empty-state sentence inside a grid, a chart's Y axis and its tick labels, the message in a card, an expander's header and
 /// its distance from the grid below it.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class OlderSkuEmptyStatesTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

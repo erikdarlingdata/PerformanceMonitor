@@ -74,7 +74,8 @@
         "existingSecret": { "type": "string" },
         "values": { "type": "object" },
         "webTokenKey": { "type": "string", "minLength": 1 },
-        "mcpTokenKey": { "type": "string", "minLength": 1 }
+        "mcpTokenKey": { "type": "string", "minLength": 1 },
+        "metricsTokenKey": { "type": "string", "minLength": 1 }
       }
     },
     "network": {
@@ -127,6 +128,25 @@
         }
       }
     },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "allowFrom": { "type": "array", "items": { "type": "string", "pattern": "^[^/\\s]+/[0-9]{1,3}$" } },
+        "serviceMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string", "minLength": 1, "pattern": "^(0|(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?)$" },
+            "labels": { "type": "object", "additionalProperties": { "type": "string" } },
+            "tlsConfig": { "type": "object" }
+          }
+        }
+      }
+    },
     "store": {
       "type": "object",
       "properties": {
@@ -170,6 +190,24 @@
               "connectionStringSecret": { "properties": { "name": { "type": "string", "minLength": 1 } }, "required": ["name"] }
             },
             "required": ["passwordSecret", "connectionStringSecret"]
+          }
+        },
+        "provisionRoles": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "login": {
+              "type": "object",
+              "properties": {
+                "passwordSecret": { "$ref": "#/definitions/secretRef" },
+                "connectionStringSecret": { "$ref": "#/definitions/secretRef" }
+              }
+            },
+            "rolePasswordsSecret": { "type": "string" },
+            "wireConnectionStrings": { "type": "boolean" },
+            "waitSeconds": { "type": "integer", "minimum": 1 },
+            "psqlImage": { "type": "string" },
+            "resources": { "type": "object" }
           }
         }
       },

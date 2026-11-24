@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -37,6 +38,10 @@ public static class QueryStoreBackfillState
 
     /// <summary>State key prefix for a recorded clamp hole (value: <see cref="EncodeHole"/>).</summary>
     public const string HoleKeyPrefix = "hole:";
+
+    /// <summary>State key prefix for the last clamped read a database landed (#9359, value: <see cref="EncodeLanded"/>). It
+    /// carries the in-memory clamp memory across a restart, so an idle database's first clamp after one opens no hole.</summary>
+    public const string LandedKeyPrefix = "landed:";
 
     /// <summary>
     /// The widest window a single backfill slice may hand the per-database query (#2102) — matched
@@ -155,6 +160,23 @@ public static class QueryStoreBackfillState
     public static string EncodeHole(DateTime fromUtc, DateTime toUtc)
         => fromUtc.ToString("o", CultureInfo.InvariantCulture) + "|" + toUtc.ToString("o", CultureInfo.InvariantCulture);
 
+    /// <summary>Encodes a landed clamped read as <c>raw|readThrough</c> in the same round-trip format as <see cref="EncodeHole"/> (#9359).</summary>
+    public static string EncodeLanded(DateTime rawUtc, DateTime readThroughUtc)
+        => rawUtc.ToString("o", CultureInfo.InvariantCulture) + "|" + readThroughUtc.ToString("o", CultureInfo.InvariantCulture);
+
+    /// <summary>Decodes <see cref="EncodeLanded"/>; false on any malformed value, which reads as "no entry": the first clamp after
+    /// a restart then reports as it did before the memory was stored (#9359).</summary>
+    public static bool TryDecodeLanded(string? encoded, out DateTime rawUtc, out DateTime readThroughUtc)
+    {
+        rawUtc = default;
+        readThroughUtc = default;
+
+        var split = encoded?.Split('|');
+        return split is { Length: 2 }
+            && DateTime.TryParseExact(split[0], "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out rawUtc)
+            && DateTime.TryParseExact(split[1], "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out readThroughUtc);
+    }
+
     /// <summary>Decodes <see cref="EncodeHole"/>; false on any malformed value, which the scan
     /// treats as "no hole recorded" — the conservative direction (the tail logic still runs).</summary>
     public static bool TryDecodeHole(string encoded, out DateTime fromUtc, out DateTime toUtc)
@@ -173,16 +195,145 @@ public static class QueryStoreBackfillState
             && fromUtc < toUtc;
     }
 
-    /// <summary>Merges a newly-clamped hole into whatever is already recorded — a repeat outage
-    /// WIDENS the range rather than overwriting it, so the earlier hole cannot be lost.</summary>
-    public static (DateTime FromUtc, DateTime ToUtc) MergeHole(string? existingEncoded, DateTime fromUtc, DateTime toUtc)
+    /// <summary>Separates the holes of a multi-hole value. A value of two or more holes has more than
+    /// one <c>|</c>, so <see cref="TryDecodeHole"/> (all an older build has) reads it as malformed, which the
+    /// scan treats as "no hole recorded": that build loses the backfill opportunity and writes nothing wrong.</summary>
+    public const char HoleSeparator = ',';
+
+    /// <summary>Decodes a hole value written by <see cref="EncodeHoles"/> (one hole or several), newest first.
+    /// False on any malformed part, the same "no hole recorded" verdict as <see cref="TryDecodeHole"/>.</summary>
+    public static bool TryDecodeHoles(string? encoded, out List<(DateTime FromUtc, DateTime ToUtc)> holes)
     {
-        if (existingEncoded is not null && TryDecodeHole(existingEncoded, out var f, out var t))
+        holes = [];
+        if (string.IsNullOrEmpty(encoded))
         {
-            return (fromUtc < f ? fromUtc : f, toUtc > t ? toUtc : t);
+            return false;
         }
 
-        return (fromUtc, toUtc);
+        foreach (var part in encoded.Split(HoleSeparator))
+        {
+            if (!TryDecodeHole(part, out var from, out var to))
+            {
+                holes = [];
+                return false;
+            }
+
+            holes.Add((from, to));
+        }
+
+        holes.Sort((a, b) => b.ToUtc.CompareTo(a.ToUtc));
+        return true;
+    }
+
+    /// <summary>The value for a set of holes: the <see cref="EncodeHole"/> text for one (so a single hole reads
+    /// exactly as it always did, on an older build too), the holes joined by <see cref="HoleSeparator"/> for
+    /// several. Null for none, which the caller turns into a deleted key.</summary>
+    public static string? EncodeHoles(IReadOnlyList<(DateTime FromUtc, DateTime ToUtc)> holes)
+    {
+        if (holes.Count == 0)
+        {
+            return null;
+        }
+
+        var parts = new List<string>(holes.Count);
+        foreach (var (from, to) in holes.OrderByDescending(h => h.ToUtc))
+        {
+            parts.Add(EncodeHole(from, to));
+        }
+
+        return string.Join(HoleSeparator, parts);
+    }
+
+    /// <summary>The newest hole of a recorded value, the one the dig services first. Its ceiling is the highest of
+    /// the set, so a caller that finds it at or below the horizon knows the whole value expired.</summary>
+    public static bool TryDecodeNewestHole(string encoded, out DateTime fromUtc, out DateTime toUtc)
+    {
+        fromUtc = default;
+        toUtc = default;
+        if (!TryDecodeHoles(encoded, out var holes))
+        {
+            return false;
+        }
+
+        (fromUtc, toUtc) = holes[0];
+        return true;
+    }
+
+    /// <summary>
+    /// Adds a newly clamped hole to whatever is already recorded (#9352). The dig works a hole from its ceiling
+    /// DOWN and saves the ceiling as it goes, so a hole mid-dig has filled everything above its ceiling. A clamp
+    /// hole always sits above the database's stored watermark. When its floor is at or above a pending hole's
+    /// saved ceiling, the span between the two is already stored, and widening one hole over both made the dig
+    /// walk that span again and store a second copy of every row in it. Such a hole is kept apart, and the dig
+    /// takes the newest one first and then resumes the older one at its own ceiling. A hole that overlaps or
+    /// touches a pending one is merged with it, as before. Nothing the older value covered is dropped.
+    /// A malformed existing value counts as none.
+    /// </summary>
+    public static string AddHole(string? existingEncoded, DateTime fromUtc, DateTime toUtc)
+    {
+        var holes = new List<(DateTime FromUtc, DateTime ToUtc)>();
+        if (existingEncoded is not null)
+        {
+            TryDecodeHoles(existingEncoded, out holes);
+        }
+
+        var from = fromUtc;
+        var to = toUtc;
+        var kept = new List<(DateTime FromUtc, DateTime ToUtc)>(holes.Count + 1);
+        foreach (var hole in holes)
+        {
+            if (from <= hole.ToUtc && hole.FromUtc <= to)
+            {
+                from = hole.FromUtc < from ? hole.FromUtc : from;
+                to = hole.ToUtc > to ? hole.ToUtc : to;
+            }
+            else
+            {
+                kept.Add(hole);
+            }
+        }
+
+        kept.Add((from, to));
+        return EncodeHoles(kept)!;
+    }
+
+    /// <summary>
+    /// Takes a range the dig just finished out of the recorded holes (#9352): <c>[dugFromUtc, dugToUtc]</c> is
+    /// removed from the hole it lies in, so a hole the live collector recorded while the slice ran keeps the part
+    /// the slice did not dig. What is left of that hole below the range is cut at <paramref name="floorUtc"/>, the
+    /// floor the slice used, and dropped when it ends at or below it. Holes the range does not touch are kept as
+    /// they are. Returns the value to save, or null when no hole is left and the key should go. For one hole and
+    /// a slice that dug from its ceiling, the result is the hole <c>(floorUtc, dugFromUtc)</c>, the value the dig
+    /// has always saved.
+    /// </summary>
+    public static string? RemoveDugRange(string? existingEncoded, DateTime dugFromUtc, DateTime dugToUtc, DateTime floorUtc)
+    {
+        if (existingEncoded is null || !TryDecodeHoles(existingEncoded, out var holes))
+        {
+            return null;
+        }
+
+        var remaining = new List<(DateTime FromUtc, DateTime ToUtc)>(holes.Count + 1);
+        foreach (var (from, to) in holes)
+        {
+            if (to <= dugFromUtc || from >= dugToUtc)
+            {
+                remaining.Add((from, to));
+                continue;
+            }
+
+            if (from < dugFromUtc && dugFromUtc > floorUtc)
+            {
+                remaining.Add((from > floorUtc ? from : floorUtc, dugFromUtc));
+            }
+
+            if (to > dugToUtc)
+            {
+                remaining.Add((dugToUtc, to));
+            }
+        }
+
+        return EncodeHoles(remaining);
     }
 
     /// <summary>

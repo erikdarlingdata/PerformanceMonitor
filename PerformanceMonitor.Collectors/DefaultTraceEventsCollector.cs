@@ -197,6 +197,11 @@ public sealed class DefaultTraceEventsCollector : CollectorDefinitionBase<Defaul
     /// </summary>
     public const string TraceSequenceStateKey = "trace_event_sequence";
 
+    /* #9107: the measurement label for a switched-off default trace. A literal on purpose (the measurement-label scan reads a
+       const string declared in this file); it must equal PerformanceMonitor.Common.DefaultTraceOffNote.Label, which the readers parse,
+       and the off-setting behaviour test runs this label through DefaultTraceOffNote.TryParse so a drift fails. */
+    private const string DefaultTraceOffMeasurementLabel = "default_trace_off";
+
     public sealed class Row
     {
         public DateTime? EventTime { get; set; }
@@ -280,14 +285,34 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 DECLARE
     @current_trace_path nvarchar(260),
     @current_trace_start datetime,
-    @trace_continues bit;
+    @trace_continues bit,
+    @default_trace_enabled int;
 
+/*#9107: the server setting, read BEFORE sys.traces. sys.configurations needs no special permission, so it answers on a
+  login that sys.traces refuses. NULL (no such row) is unknown and never reads as off.*/
 SELECT /* PerformanceMonitorLite */
-    @current_trace_path = t.path,
-    @current_trace_start = t.start_time
-FROM sys.traces AS t
-WHERE t.is_default = 1
-AND   t.status = 1;
+    @default_trace_enabled = CONVERT(int, c.value_in_use)
+FROM sys.configurations AS c
+WHERE c.name = N'default trace enabled';
+
+BEGIN TRY
+    SELECT /* PerformanceMonitorLite */
+        @current_trace_path = t.path,
+        @current_trace_start = t.start_time
+    FROM sys.traces AS t
+    WHERE t.is_default = 1
+    AND   t.status = 1;
+END TRY
+BEGIN CATCH
+    /*#9107: sys.traces refuses a login without ALTER TRACE (Msg 8189). With the default trace turned off there is
+      nothing to read, so the refusal is not the story and the run goes on to report the setting. With the trace on
+      the refusal is a real denial and is re-thrown unchanged (the PERMISSIONS answer).*/
+    IF ERROR_NUMBER() <> 8189
+    OR ISNULL(@default_trace_enabled, 1) <> 0
+    BEGIN
+        THROW;
+    END;
+END CATCH;
 
 /*#5644 W6: is the running trace the one the stored EventSequence came from? NULL = no stored identity (the
   sequence rule stays off, and the whole rollover set is read); 1 = the same trace; 0 = a new trace, whose
@@ -339,7 +364,10 @@ DECLARE
         end_time datetime NULL
     );
 
+/*#9107: no running default trace (off, or sys.traces refused a login while the trace is off) leaves nothing to read, and the read
+  below would hit the same refusal again. Skipping the loop returns the same empty answer a trace-off server with the grant returned.*/
 WHILE @read_attempt <= 6
+AND   @current_trace_path IS NOT NULL
 BEGIN
     BEGIN TRY
         DELETE @default_trace_events;
@@ -481,7 +509,8 @@ FROM @default_trace_events;
 
 SELECT /* PerformanceMonitorLite */
     current_trace_path = @current_trace_path,
-    current_trace_start = @current_trace_start;";
+    current_trace_start = @current_trace_start,
+    default_trace_enabled = @default_trace_enabled;";
 
     public override string Name => "default_trace_events";
 
@@ -579,27 +608,23 @@ SELECT /* PerformanceMonitorLite */
     /// Server-level curated events carry a NULL DatabaseName; a bare <c>NOT IN (...)</c> evaluates NULL to
     /// UNKNOWN and would silently drop the WHOLE category whenever any database is excluded, so this keeps
     /// NULL rows (<c>ft.DatabaseName IS NULL OR ...</c>) — matching the Dashboard's id-based, NULL-safe
-    /// exclusion. The shared <see cref="DatabaseExclusionFilter"/> is deliberately NOT reused here: its
-    /// other callers filter a non-nullable name column and must keep emitting the bare form.
+    /// exclusion. The shared <see cref="DatabaseExclusionFilter"/> clause is deliberately NOT used as is: its
+    /// other callers filter a non-nullable name column and must keep emitting the bare form. Only its terms are
+    /// reused, so a name and a #9050 pattern mean the same here as in every other collector.
     /// </summary>
-    private static (string Clause, List<CollectorParameter> Parameters) BuildNullSafeDatabaseExclusion(
+    internal static (string Clause, List<CollectorParameter> Parameters) BuildNullSafeDatabaseExclusion(
         IReadOnlyList<string> excludedDatabaseNames)
     {
-        if (excludedDatabaseNames.Count == 0)
+        /* The shared builder's terms (exact names and #9050 patterns), wrapped in the NULL arm. A list with no
+           pattern is one term, so its text is what it was before patterns existed. */
+        var (terms, parameters) = DatabaseExclusionFilter.BuildTerms(excludedDatabaseNames, "ft.DatabaseName");
+        if (terms.Count == 0)
         {
-            return (string.Empty, new List<CollectorParameter>());
+            return (string.Empty, parameters);
         }
 
-        var paramNames = new List<string>(excludedDatabaseNames.Count);
-        var parameters = new List<CollectorParameter>(excludedDatabaseNames.Count);
-        for (int i = 0; i < excludedDatabaseNames.Count; i++)
-        {
-            var p = $"@excl_db_{i}";
-            paramNames.Add(p);
-            parameters.Add(new CollectorParameter(p, excludedDatabaseNames[i], CollectorParameterType.NVarChar128));
-        }
-
-        return ($"AND (ft.DatabaseName IS NULL OR ft.DatabaseName NOT IN ({string.Join(", ", paramNames)}))", parameters);
+        var kept = terms.Count == 1 ? terms[0] : "(" + string.Join(" AND ", terms) + ")";
+        return ($"AND (ft.DatabaseName IS NULL OR {kept})", parameters);
     }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -667,9 +692,21 @@ SELECT /* PerformanceMonitorLite */
            notice its trace rolled. A missing/NULL path (no running default trace) records nothing, which
            leaves the next cycle on the safe fallback. */
         DateTime? traceStart = null;
-        if (await reader.NextResultAsync(cancellationToken)
-            && await reader.ReadAsync(cancellationToken)
-            && !reader.IsDBNull(0))
+        var haveTail = await reader.NextResultAsync(cancellationToken)
+            && await reader.ReadAsync(cancellationToken);
+
+        /* #9107: no running default trace, and the server's own setting says it is turned off (a third column; a tail without it, or a
+           NULL, is unknown and says nothing). A count, not a verdict: the readers derive "needs setup" from it on every call. */
+        if (haveTail
+            && reader.IsDBNull(0)
+            && reader.FieldCount > 2
+            && !reader.IsDBNull(2)
+            && Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture) == 0)
+        {
+            context.Measure(DefaultTraceOffMeasurementLabel, 1);
+        }
+
+        if (haveTail && !reader.IsDBNull(0))
         {
             context.PendingState[LastTraceFilePathStateKey] = reader.GetString(0);
 

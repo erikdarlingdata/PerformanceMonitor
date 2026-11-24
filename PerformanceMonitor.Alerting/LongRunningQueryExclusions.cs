@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Alerting;
 
@@ -228,6 +229,14 @@ public sealed record LongRunningQueryExclusions(IReadOnlyList<string> ProgramNam
     /// wildcard — <c>LIKE</c> is used only so the match is case-insensitive (<c>ILIKE</c>) on both stores.</summary>
     public static string ToExactLikeOperand(string value) => EscapeLike(value);
 
+    /// <summary>A database entry as a <c>LIKE</c> operand for <c>ESCAPE ''</c> (#9050): an exact name as
+    /// <see cref="ToExactLikeOperand"/> writes it, and an entry holding <c>*</c> with each <c>*</c> as <c>%</c> and
+    /// every other character literal, the rule <see cref="DatabaseNamePattern"/> matches in C#. <c>[</c> is not
+    /// escaped: neither PostgreSQL's nor DuckDB's LIKE reads it as a class, and DuckDB refuses an escape before a
+    /// character that is not special.</summary>
+    public static string ToDatabaseLikeOperand(string entry) =>
+        DatabaseNamePattern.ToLikePattern(entry, escapeBracket: false);
+
     private static string EscapeLike(string literal) =>
         literal
             .Replace("\\", "\\\\", StringComparison.Ordinal)
@@ -268,7 +277,8 @@ public sealed record LongRunningQueryExclusions(IReadOnlyList<string> ProgramNam
     /// positional operands into the same <c>candidates</c> CTE; and the Long-Running Query reads must agree
     /// across two stores about what an entry means. One builder returning ONE operand list in ONE binding order
     /// is what makes it impossible for a read to splice the three predicates and bind their operands in two
-    /// different orders. The database arm is the login arm's rule — EXACT, case-insensitive, one
+    /// different orders. (#9050: an entry holding <c>*</c> is a pattern, written by <see cref="ToDatabaseLikeOperand"/>; an
+    /// entry without one is exact, as below.) The database arm is the login arm's rule — EXACT, case-insensitive, one
     /// <c>COALESCE(col, '') ILIKE $n ESCAPE '\'</c> term per entry, <see cref="ToExactLikeOperand"/> for the
     /// operand — because <c>excludedDatabases</c> has always been an exact, case-insensitive name comparison
     /// (<c>StringComparison.OrdinalIgnoreCase</c> in every C# filter that ever applied it), and because the
@@ -327,8 +337,14 @@ public sealed record LongRunningQueryExclusions(IReadOnlyList<string> ProgramNam
         {
             foreach (var database in Normalize(excludedDatabases))
             {
+                /* An entry made only of * is ignored everywhere else (#9050); here it would be LIKE '%'. */
+                if (DatabaseNamePattern.IsMatchAll(database))
+                {
+                    continue;
+                }
+
                 databaseTerms.Add($"COALESCE({databaseNameColumn}, '') ILIKE ${ordinal++} ESCAPE '\\'");
-                operands.Add(ToExactLikeOperand(database));
+                operands.Add(ToDatabaseLikeOperand(database));
             }
         }
 
@@ -363,8 +379,8 @@ public enum LongRunningQueryExclusionArm
 /// </summary>
 /// <param name="ProgramPrefixPredicate">True for a row whose <c>program_name</c> starts with any configured prefix.</param>
 /// <param name="LoginPredicate">True for a row whose <c>login_name</c> equals any configured login.</param>
-/// <param name="DatabasePredicate">True for a row whose <c>database_name</c> equals any excluded database
-/// (exact, case-insensitive; a row with no database name never matches).</param>
+/// <param name="DatabasePredicate">True for a row whose <c>database_name</c> equals any excluded database, or matches
+/// an excluded pattern (an entry holding <c>*</c>, #9050), case-insensitively; a row with no database name never matches.</param>
 /// <param name="Operands">The <c>LIKE</c> operands, in <c>$n</c> order.</param>
 public sealed record LongRunningQueryExclusionSql(string ProgramPrefixPredicate, string LoginPredicate, string DatabasePredicate, IReadOnlyList<string> Operands);
 

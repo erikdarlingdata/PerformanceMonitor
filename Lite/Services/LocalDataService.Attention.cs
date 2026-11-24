@@ -41,7 +41,8 @@ public partial class LocalDataService
                 r.IsDBNull(2) ? null : r.GetString(2),
                 r.GetInt64(3),
                 r.GetInt64(4),
-                r.GetInt64(5)));
+                r.GetInt64(5),
+                r.GetInt64(6)));
         /* Round 2 of #5714 (L6): the card's top lists cover the samples inside the covered span, not the whole lookback (the span is
            a few minutes; the lookback an hour). A span that kept no samples falls back to the lookback and says so. */
         var (topFloor, topsFromLookback) = AttentionEvaluator.TopListFloor(runs, groups, floor);
@@ -89,7 +90,8 @@ public partial class LocalDataService
                 r.IsDBNull(2) ? null : r.GetString(2),
                 r.GetInt64(3),
                 r.GetInt64(4),
-                r.GetInt64(5)));
+                r.GetInt64(5),
+                r.GetInt64(6)));
         /* The top lists and the sampled events cover exactly the rows ReadSpan counts (#5640): the span boundary (exclusive) to the
            newest run plus the skew, never the base run's samples from before the span. No span (fewer than two runs) is "not
            observed", whose answer never shows the detail, so it is not read. */
@@ -120,7 +122,8 @@ public partial class LocalDataService
                 r.IsDBNull(7) ? null : r.GetString(7),
                 r.IsDBNull(8) ? null : r.GetString(8),
                 r.GetBoolean(9),
-                r.GetBoolean(10)));
+                r.GetBoolean(10),
+                r.GetBoolean(11)));
 
         return (new AttentionWindow(runs, counts, groups, statements, databases, applications, TopHosts: hosts), samples);
     }

@@ -51,6 +51,20 @@ public class DarlingFrontDoorDirectoryTests
     }
 
     [Fact]
+    public async Task A_server_disabled_in_one_store_and_collecting_in_another_routes_to_the_collecting_store()
+    {
+        /* #9087: list_servers lists a Disabled server. A server moved between split stores is Disabled on the old one and enabled on the
+           new one; the directory skips the Disabled row, so the name has one hit and is not ambiguous. */
+        await using var use1 = await FakeMcpPeer.StartAsync(Array.Empty<string>());
+        use1.AddDisabledServer("SQL01");
+        await using var use2 = await FakeMcpPeer.StartAsync(new[] { "SQL01" });
+        await using var rig = new FrontDoorRig(new[] { ("use1", use1), ("use2", use2) });
+        await rig.Directory.RefreshAsync(Ct);
+
+        Assert.Equal(new FrontDoorRoute.ToStore("use2"), rig.Directory.ResolveServer("SQL01"));
+    }
+
+    [Fact]
     public async Task A_primary_in_one_store_and_its_replica_in_another_make_a_partial_name_ambiguous()
     {
         await using var use1 = await FakeMcpPeer.StartAsync(new[] { "PROD-SQL01" });

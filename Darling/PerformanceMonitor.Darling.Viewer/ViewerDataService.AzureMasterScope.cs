@@ -89,7 +89,7 @@ WHERE s.is_enabled
             {
                 command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
                 command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-                if (await command.ExecuteScalarAsync(cancellationToken) is null)
+                if (await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken)) is null)
                 {
                     return Array.Empty<string>();
                 }
@@ -113,7 +113,7 @@ WHERE s.is_enabled
         var rows = new List<(int, string, string?, bool, bool)>();
         await using var command = _dataSource.CreateCommand(SeparatelyMonitoredTargetsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add((
@@ -161,7 +161,7 @@ WHERE s.is_enabled
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(end, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = separate.ToArray() });
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(start) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return (0, 0);
@@ -177,7 +177,7 @@ WHERE s.is_enabled
         int serverId, DateTime start, DateTime end, IReadOnlyList<string> separate, CancellationToken cancellationToken)
     {
         await ScopeReadStageAsync("deadlocks");
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         return await PgFactCollector.CountDeadlocksSkippingSeparateAsync(
             connection, PgFactCollector.DeadlockOutsideCountSql, PgFactCollector.DeadlockGraphsSql,
             serverId, start, end, separate, cancellationToken, ViewerCommandDeadlines.CurrentInteractiveReadSeconds);
@@ -188,14 +188,14 @@ WHERE s.is_enabled
 WITH " + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "xe_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_blocked_process_reports
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4") + "," + BlockingWaits.WaitsCteSql(
+    WHERE server_id = $1 AND event_time > $2 AND event_time <= $3 AND collection_time >= $4") + "," + BlockingWaits.WaitsCteSql(
         BlockingWaits.SqlDialect.Postgres, "dmv_waits",
         @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND collection_time >= $4") + @"
+    WHERE server_id = $1 AND event_time > $2 AND event_time <= $3 AND collection_time >= $4") + @"
 SELECT
     (SELECT COUNT(*) FROM xe_waits),
     (SELECT COUNT(*) FROM dmv_waits),
-    (SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3 AND collection_time >= $4)";
+    (SELECT COUNT(*) FROM v_deadlocks WHERE server_id = $1 AND deadlock_time > $2 AND deadlock_time <= $3 AND collection_time >= $4)";
 
     /// <summary>
     /// What the fleet totals over-count for the Azure SQL Database masters that have separately monitored
@@ -212,7 +212,7 @@ SELECT
             await using (var command = _dataSource.CreateCommand(FleetMasterCandidatesSql))
             {
                 command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
                 while (await reader.ReadAsync(cancellationToken))
                 {
                     masters.Add(reader.GetInt32(0));
@@ -256,7 +256,7 @@ SELECT
                     command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(startUtc, DateTimeKind.Unspecified) });
                     command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
                     command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = EventWindowFloor.For(startUtc) });
-                    await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                    await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
                     if (!await reader.ReadAsync(cancellationToken))
                     {
                         continue;

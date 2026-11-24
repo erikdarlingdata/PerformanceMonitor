@@ -28,17 +28,24 @@
   are cheap and a corrupted cache self-heals. Extract/assemble directories are rebuilt from
   scratch every run.
 
-  HASH PROVENANCE: the PostgreSQL pin was computed 2026-09-22 from the EDB PG18.6 zip at the
-  exact URL pinned here (343,808,005 bytes); EDB publishes no checksum, so the pin is only as good
+  HASH PROVENANCE: the PostgreSQL pin was computed 2026-11-20 from the EDB PG18.7 zip at the
+  exact URL pinned here (389,515,503 bytes); EDB publishes no checksum, so the pin is only as good
   as the download it came from. The TimescaleDB pins match the sha256 digests GitHub publishes for
-  those release assets: 2.30.1-for-PG18 (8,594,902 bytes, computed 2026-09-22) and the carried
-  2.28.1-for-PG18 (7,794,443 bytes, computed 2026-07-08).
+  those release assets: 2.32.1-for-PG18 (9,874,412 bytes, computed 2026-11-20) and the carried
+  2.32.0-for-PG18 (9,639,648 bytes, computed 2026-11-16), 2.30.1-for-PG18 (8,594,902 bytes,
+  computed 2026-09-22) and 2.28.1-for-PG18 (7,794,443 bytes, computed 2026-07-08).
   Bumping a version means updating URL + hash TOGETHER, from a fresh download you hashed yourself.
 
-  WHY THESE VERSIONS (#3906): PostgreSQL 18.6 (2026-08-13; 18.5 was never released) fixes 23 CVEs
-  that 18.4 carries. A PostgreSQL minor release is security servicing more often than not, so the
-  pin tracks the newest minor of its major; the weekly runtime-currency workflow fails when it
-  falls behind. A minor bump is safe for field stores: same data directory, no pg_upgrade.
+  WHY THESE VERSIONS (#3906): PostgreSQL 18.7 (2026-11-12) fixes about 52 CVEs, among them a
+  bypass of view row restrictions by INSERT ... ON CONFLICT and many memory-safety bugs. A PostgreSQL
+  minor release is security servicing more often than not, so the pin tracks the newest minor of its
+  major; the weekly runtime-currency workflow fails when it falls behind. A minor bump is safe for
+  field stores: same data directory, no pg_upgrade.
+
+  TimescaleDB 2.32.1 (#8858, 2026-11-19): it fixes background jobs that fail on PostgreSQL 18.7 and
+  later (timescale/timescaledb#11015), and several permission checks that ran as the catalog owner
+  instead of the calling user. TimescaleDB 2.32.0 had to stay on PostgreSQL 18.6 for the first reason,
+  so the two move together here.
 
   TimescaleDB 2.30.1 (#3908): 2.29.1 fixed GHSA-hcfx-29v5-2rcw (missing permission checks in the
   internal chunk functions). Moving it moves every field store's extension, which the store upgrade
@@ -100,17 +107,19 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 }
 
 # ---- Pinned artifacts (update URL + SHA256 together; see HASH PROVENANCE above) -------------
-$pgVersion = '18.6'
-$pgUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.6-1-windows-x64-binaries.zip'
-$pgSha256 = 'FBE23DA234EE31547BF8A36D29DFD81E82B849DF2D2B78D2EECB43D360252F8C'
+$pgVersion = '18.7'
+$pgUrl = 'https://get.enterprisedb.com/postgresql/postgresql-18.7-1-windows-x64-binaries.zip'
+$pgSha256 = 'EAD0BBC27FB678FA24DCF86B738981323042ABD073C744103BF7F3AED23F9A33'
 
-$tsVersion = '2.30.1'
-$tsUrl = 'https://github.com/timescale/timescaledb/releases/download/2.30.1/timescaledb-postgresql-18-windows-amd64.zip'
-$tsSha256 = '297EA2C079FF39C1BA6EB310E44717EF60B67EE24DEEECEB34C0C362694B84A9'
+$tsVersion = '2.32.1'
+$tsUrl = 'https://github.com/timescale/timescaledb/releases/download/2.32.1/timescaledb-postgresql-18-windows-amd64.zip'
+$tsSha256 = 'FD0387A77C11080B865E2F584287604AE6EF34C5698721E1202CF0C3D0A0A49C'
 
 # Every TimescaleDB version a Darling release ever installed on PostgreSQL 18 (see CARRIED BUILDS).
 $tsCarried = @(
     @{ Version = '2.28.1'; Url = 'https://github.com/timescale/timescaledb/releases/download/2.28.1/timescaledb-postgresql-18-windows-amd64.zip'; Sha256 = '533D1554F3EDFF1E0E86087E8A76A9EEFF253A9FEE17392FC17FAC1C85F7CF0F' }
+    @{ Version = '2.30.1'; Url = 'https://github.com/timescale/timescaledb/releases/download/2.30.1/timescaledb-postgresql-18-windows-amd64.zip'; Sha256 = '297EA2C079FF39C1BA6EB310E44717EF60B67EE24DEEECEB34C0C362694B84A9' }
+    @{ Version = '2.32.0'; Url = 'https://github.com/timescale/timescaledb/releases/download/2.32.0/timescaledb-postgresql-18-windows-amd64.zip'; Sha256 = '309EBA6BB24C3562B9ECFD279FF1BBE0EB638EAED8B16395C839047C670A9C45' }
 )
 # ----------------------------------------------------------------------------------------------
 

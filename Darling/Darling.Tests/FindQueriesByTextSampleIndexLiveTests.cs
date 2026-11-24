@@ -111,6 +111,10 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea, Value = digests });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 21 });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Floor() });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(1), DateTimeKind.Unspecified) });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = Array.Empty<int>() });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string>() });
+        explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = Array.Empty<string>() });
         return Convert.ToString(await explain.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture)!;
     }
 
@@ -237,6 +241,12 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         var tracker = new QueryTextTrigramIndexTracker();
         tracker.Configure(true);
         Assert.True((await DigestsOfAsync(data, "dbo.Orders_", ct)).Length > ProbeDigestCap(), "the fixture's pattern must match more texts than the cap");
+        /* #9150: the join runs a span at a time, and a span of a store nobody has analyzed yet is planned as a few rows, which the planner joins to the matched texts one text at a time. */
+        await using (var c = await data.OpenConnectionAsync(ct))
+        {
+            await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE collect.query_text_dim");
+            await DarlingMcpTestData.ExecAsync(c, ct, "ANALYZE query_stats");
+        }
 
         var reply = JsonDocument.Parse(await RunTool(data, "dbo.Orders_", tracker, DarlingMcpFindQueriesByTextTools.MaxLimit, ct)).RootElement;
 

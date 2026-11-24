@@ -455,41 +455,64 @@ internal static class DarlingWebOidc
     /// </summary>
     internal static WebOidcRole MapRole(
         IReadOnlyList<string> claimValues, IReadOnlyList<string>? adminRoles, IReadOnlyList<string>? viewerRoles)
+        => MapRoleWithGrant(claimValues, adminRoles, viewerRoles).Role;
+
+    /// <summary>Whether a role mapping is configured at all (<c>adminRoles</c> or <c>viewerRoles</c> non-empty): the test
+    /// <see cref="MapRole"/> uses for "no mapping, everyone is an admin".</summary>
+    internal static bool HasRoleMapping(IReadOnlyList<string>? adminRoles, IReadOnlyList<string>? viewerRoles)
+        => adminRoles is { Count: > 0 } || viewerRoles is { Count: > 0 };
+
+    /// <summary>
+    /// <see cref="MapRole"/>'s decision plus the configured role value that granted the seat: the first entry
+    /// of the matching list (in configured order) that the claim set carries. Null when no mapping is
+    /// configured and when the answer is <see cref="WebOidcRole.Denied"/>. Display-only; nothing authorizes
+    /// on it.
+    /// </summary>
+    internal static (WebOidcRole Role, string? GrantedBy) MapRoleWithGrant(
+        IReadOnlyList<string> claimValues, IReadOnlyList<string>? adminRoles, IReadOnlyList<string>? viewerRoles)
     {
         var hasAdmin = adminRoles is { Count: > 0 };
         var hasViewer = viewerRoles is { Count: > 0 };
-        if (!hasAdmin && !hasViewer)
+        if (!HasRoleMapping(adminRoles, viewerRoles))
         {
-            return WebOidcRole.Admin;
+            return (WebOidcRole.Admin, null);
         }
 
-        if (hasAdmin && Intersects(claimValues, adminRoles!))
+        if (hasAdmin && FirstMatch(claimValues, adminRoles!) is { } admin)
         {
-            return WebOidcRole.Admin;
+            return (WebOidcRole.Admin, admin);
         }
 
-        if (hasViewer && Intersects(claimValues, viewerRoles!))
+        if (hasViewer && FirstMatch(claimValues, viewerRoles!) is { } viewer)
         {
-            return WebOidcRole.Viewer;
+            return (WebOidcRole.Viewer, viewer);
         }
 
-        return WebOidcRole.Denied;
+        return (WebOidcRole.Denied, null);
     }
 
-    private static bool Intersects(IReadOnlyList<string> values, IReadOnlyList<string> against)
+    /// <summary>The ID token's <c>name</c> claim, trimmed, for display only. Null when absent, empty, not a
+    /// string, or carrying a control character (the same refusal as a subject).</summary>
+    internal static string? DisplayNameClaim(JsonObject payload)
     {
-        foreach (var value in values)
+        var name = NonEmptyStringClaim(payload, "name")?.Trim();
+        return string.IsNullOrEmpty(name) || SubjectCarriesControlCharacters(name) ? null : name;
+    }
+
+    private static string? FirstMatch(IReadOnlyList<string> values, IReadOnlyList<string> configured)
+    {
+        foreach (var candidate in configured)
         {
-            foreach (var candidate in against)
+            foreach (var value in values)
             {
                 if (string.Equals(value, candidate, StringComparison.Ordinal))
                 {
-                    return true;
+                    return candidate;
                 }
             }
         }
 
-        return false;
+        return null;
     }
 
     /* ---------------------------------------------------------------------------------------------------

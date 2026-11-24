@@ -65,7 +65,7 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         var serverId = ParseServerKey(serverKey);
         /* On collection_time, unlike the grids: the alert read is a delivery cursor ("rows collected since the
            last sweep"), so a report collected late still alerts once it lands. */
-        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack, windowOnCollectionTime: true), cancellationToken);
+        var rows = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(serverId, hoursBack, windowOnCollectionTime: true, excludeMonitorOnlyPairs: true), cancellationToken);
         return new List<BlockedProcessAlertRow>(rows);
     }
 
@@ -190,6 +190,14 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
         return await Task.Run(() => _dataService.GetPvsPressureAsync(serverId), cancellationToken);
     }
 
+    /// <summary>#8882: the newest tempdb file collection, for the TempDB Growth Won't Fit alert.</summary>
+    public async Task<List<TempDbFileInfo>> GetTempDbFilesAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetTempDbFilesAsync(serverId), cancellationToken);
+    }
+
     public async Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(
         string serverKey, CancellationToken cancellationToken = default)
     {
@@ -237,6 +245,14 @@ public sealed class LiteAlertReadAdapter : IAlertReadAdapter
     {
         var serverId = ParseServerKey(serverKey);
         return await Task.Run(() => _dataService.GetDatabaseStateDeviationsAsync(serverId), cancellationToken);
+    }
+
+    /// <summary>#8884: the restart and memory dump rise the store holds, from <c>collector_state</c>.</summary>
+    public async Task<InstanceEventInfo> GetInstanceEventsAsync(
+        string serverKey, CancellationToken cancellationToken = default)
+    {
+        var serverId = ParseServerKey(serverKey);
+        return await Task.Run(() => _dataService.GetInstanceEventsAsync(serverId), cancellationToken);
     }
 
     /// <summary>

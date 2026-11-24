@@ -74,7 +74,7 @@ public sealed class DrillDownSqlTests
 
         /* The ranked read binds $1 server, $2 and $3 window, and both readers add exactly those three. */
         var topCpu = CommonText("TopCpuQueries");
-        Assert.Contains("WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3", topCpu, StringComparison.Ordinal);
+        Assert.Matches(@"WHERE server_id = \$1 AND collection_time >=? \$2 AND collection_time <= \$3", topCpu);
         Assert.DoesNotContain("$4", topCpu, StringComparison.Ordinal);
         Assert.DoesNotContain("$5", topCpu, StringComparison.Ordinal);
     }

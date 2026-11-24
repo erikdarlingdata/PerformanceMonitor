@@ -65,7 +65,10 @@ public sealed class PgSchemaGeneratorTests
         /* 76 since #6873: database_protection (V223), also a plain table, so the hypertable count stays 71. */
         /* 77 since #6875: identity_capacity (V224), also a plain table, so the hypertable count stays 71. */
         /* 78 since #7643: schema_objects (V256, the pass log schema_capture_passes), also a plain table, so the hypertable count stays 71. */
-        Assert.Equal(78, CollectorCatalog.All.Count);
+        /* 79 since #8784: object_inventory (V268), also a plain table, so the hypertable count stays 71. */
+        /* 80 since #8798: column_stats (V272, the run log column_stats_runs), also a plain table, so the hypertable count stays 71. */
+        /* 81 since #8784 part 2: object_dependencies (V297), also a plain table, so the hypertable count stays 71. */
+        Assert.Equal(81, CollectorCatalog.All.Count);
 
         /* Uniqueness is asserted AGAINST THE COUNT rather than against a second literal. The literals here
            had drifted to 45 while the real figure tracked the count, so the test that exists to catch a
@@ -849,7 +852,7 @@ public sealed class PgSchemaGeneratorTests
         var keptColumnsByView = new (string View, string[] KeptColumns)[]
         {
             (TimescaleSupport.QueryStoreStatsHourlyView, new[] { "server_id", "server_name" }),
-            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, new[] { "server_id", "server_name" }),
+            (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, new[] { "server_name" }),
             (TimescaleSupport.QueryStoreStatsDailyView, new[] { "server_id" }),
             (TimescaleSupport.QueryStoreStatsCorrectedDailyView, new[] { "server_id" }),
             (TimescaleSupport.QueryStoreStatsIntervalDailyView, new[] { "server_id" }),

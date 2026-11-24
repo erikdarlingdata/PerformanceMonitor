@@ -220,7 +220,9 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (i) 
             await seed.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
-        await new ArchiveService(initializer, _archiveDir).ArchiveOldDataAsync(hotDataDays: 7);
+        /* The export is compacted before this returns, and a sorted table's merge writes large groups (#9407): ask for the small size so
+           the file still has several groups to read. */
+        await new ArchiveService(initializer, _archiveDir) { SortedRowGroupSizeOverride = ParquetCompaction.ArchiveRowGroupSize }.ArchiveOldDataAsync(hotDataDays: 7);
 
         var file = Directory.GetFiles(_archiveDir, "*_collection_log.parquet").Single().Replace('\\', '/');
         Assert.Equal(SeededRows, await ScalarAsync($"SELECT count(*) FROM read_parquet('{file}')"));
@@ -260,11 +262,12 @@ SELECT count(*) FROM g a JOIN g b ON a.row_group_id < b.row_group_id AND a.mn <=
         {
             await connection.OpenAsync(TestContext.Current.CancellationToken);
             using var write = connection.CreateCommand();
-            write.CommandText = $"COPY (SELECT i AS log_id, TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (i) SECOND AS collection_time FROM range(1, {SeededRows + 1}) t(i)) TO '{source}' (FORMAT PARQUET)";
+            write.CommandText = $"COPY (SELECT i AS log_id, 1 AS server_id, TIMESTAMP '2026-01-01 00:00:00' + INTERVAL (i) SECOND AS collection_time FROM range(1, {SeededRows + 1}) t(i)) TO '{source}' (FORMAT PARQUET)";
             await write.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
-        ParquetCompaction.MergeBatchToFile("collection_log", [source], output, _tempDir.Replace('\\', '/'));
+        /* A table that merges unsorted: a sorted table writes SortedArchiveRowGroupSize rows per group (#9407). */
+        ParquetCompaction.MergeBatchToFile("other_table", [source], output, _tempDir.Replace('\\', '/'));
 
         var groups = await ScalarAsync($"SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{output}')");
         Assert.True(groups > 1, $"compaction wrote {groups} row group(s)");

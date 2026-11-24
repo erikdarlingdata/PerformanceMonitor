@@ -70,6 +70,8 @@ public sealed class StoreConfigViewPropagationTests
         "QueryStoreBackfillEnabled",
         "QueryStoreFetchTopN",
         "QueryStoreTextBudgetMb",
+        "QueryStoreTextTrigramIndexStoreValue",
+        "QueryTextTrigramIndexStoreValue",
     };
 
     [Fact]
@@ -215,6 +217,8 @@ public sealed class StoreConfigViewPropagationTests
     private static object[] ProbeValues(Type type, string name)
     {
         if (type == typeof(bool)) return new object[] { true, false };
+        /* A tri-state store value (#8978): NULL is a value the store carries (the file governs), so it is probed too. */
+        if (type == typeof(bool?)) return new object[] { true, false, null! };
         if (type == typeof(int)) return new object[] { 137, 268 };
         if (type == typeof(long)) return new object[] { 137L, 268L };
         if (type == typeof(double)) return new object[] { 1.25d, 0.75d };

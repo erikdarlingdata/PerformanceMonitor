@@ -19,7 +19,8 @@
 // time-honesty pair (#3653 item 13): sample_time_utc on cpu_utilization_stats and time_zone_id on
 // server_properties, and the v64 Query Store capture-mode pair (#3796): query_capture_mode and
 // wait_stats_capture_mode on query_store_health, and the v66 Query Store interval end (#4765):
-// interval_end_time_utc on query_store_stats.
+// interval_end_time_utc on query_store_stats, and the v83 tempdb log eleven (#8881): log_total_mb through
+// holder_log_bytes_reserved on tempdb_stats.
 // </auto-generated>
 
 using System.Collections.Generic;
@@ -138,7 +139,18 @@ internal static class GoldenCollectorSchema
     total_sessions_using_tempdb BIGINT,
     top_session_id INTEGER,
     top_session_tempdb_mb DECIMAL(18,2),
-    max_size_mb DECIMAL(18,2)
+    max_size_mb DECIMAL(18,2),
+    log_total_mb DECIMAL(18,2),
+    log_used_mb DECIMAL(18,2),
+    log_used_percent DECIMAL(5,2),
+    log_reuse_wait_desc VARCHAR,
+    log_truncation_holdup_reason VARCHAR,
+    holder_session_id INTEGER,
+    holder_login_name VARCHAR,
+    holder_program_name VARCHAR,
+    holder_begin_time TIMESTAMP,
+    holder_log_bytes_used BIGINT,
+    holder_log_bytes_reserved BIGINT
 )",
         ["memory_grant_stats"] = @"CREATE TABLE IF NOT EXISTS memory_grant_stats (
     collection_id BIGINT PRIMARY KEY,
@@ -510,7 +522,8 @@ internal static class GoldenCollectorSchema
     volume_free_mb DECIMAL(19,2),
     is_percent_growth BOOLEAN,
     growth_pct INTEGER,
-    vlf_count INTEGER
+    vlf_count INTEGER,
+    is_autogrow_all_files BOOLEAN
 )",
         ["index_object_stats"] = @"CREATE TABLE IF NOT EXISTS index_object_stats (
     collection_id BIGINT PRIMARY KEY,
@@ -574,7 +587,9 @@ internal static class GoldenCollectorSchema
     is_padded BOOLEAN,
     allow_page_locks BOOLEAN,
     allow_row_locks BOOLEAN,
-    is_indexed_view BOOLEAN
+    is_indexed_view BOOLEAN,
+    answering_server_name VARCHAR,
+    is_memory_optimized BOOLEAN
 )",
         ["query_stats"] = @"CREATE TABLE IF NOT EXISTS query_stats (
     collection_id BIGINT PRIMARY KEY,

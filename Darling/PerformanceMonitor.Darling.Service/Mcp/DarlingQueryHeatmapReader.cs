@@ -195,7 +195,7 @@ internal static class DarlingQueryHeatmapReader
                     delta_execution_count
                 FROM query_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   ($4::text[] IS NULL OR database_name = ANY($4))
                 AND   delta_execution_count > 0
@@ -282,10 +282,293 @@ internal static class DarlingQueryHeatmapReader
                 SELECT 1
                 FROM query_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
             ) AS has_in_window
         """;
+
+    /// <summary>The bin width, in minutes, from which the heat map reads whole hours from the hourly rollup (#8570).</summary>
+    public const int RollupMinBucketMinutes = 60;
+
+    /// <summary>The source name a reply carries when the heat map read the raw <c>query_stats</c> rows only.</summary>
+    public const string SourceRaw = "raw";
+
+    /// <summary>The source name a reply carries when whole hours came from the hourly rollup (#8570). The hours the rollup does
+    /// not cover yet, and the partial hours at either end of the window, are still read raw.</summary>
+    public const string SourceHourlyRollup = "hourly_rollup";
+
+    /// <summary>Whether the hourly rollup carries what <paramref name="metric"/> needs. It holds the elapsed time, the CPU time and the
+    /// execution count of each hour, so the two per-execution time metrics can be rebuilt from it. It holds no logical reads or writes, and
+    /// the execution count metric is a per-sample figure that an hour's sum cannot give back, so those three read raw at every bin width.</summary>
+    public static bool RollupServes(HeatmapMetric metric) => metric is HeatmapMetric.Duration or HeatmapMetric.Cpu;
+
+    /// <summary>
+    /// #8570: where the rollup stands in for the raw rows. <see cref="HourlyRelation"/> is the stitched FROM item (aliased <c>f</c>),
+    /// <see cref="FromUtc"/> the first whole hour of the window the rollup serves, <see cref="ToUtc"/> the bucket bound (exclusive): the
+    /// earlier of the window's last whole hour and the rollup's own materialization ceiling. Hours before
+    /// <see cref="FromUtc"/> and from <see cref="ToUtc"/> on are read raw.
+    /// </summary>
+    internal sealed record HeatmapRollupPlan(string HourlyRelation, DateTime FromUtc, DateTime ToUtc);
+
+    /// <summary>What one heat map read answered: the cells, and the source that served them (<see cref="SourceRaw"/> or
+    /// <see cref="SourceHourlyRollup"/>) with the span the rollup served.</summary>
+    internal sealed record HeatmapRead(List<HeatmapCellRow> Rows, string Source, HeatmapRollupPlan? Rollup);
+
+    /// <summary>
+    /// #8570: the plan for a read, or null (read raw, as before) unless every condition holds. A bin of 60 minutes or more, a metric the rollup
+    /// carries (<see cref="RollupServes"/>), a measured materialization ceiling (an unknown ceiling means the rollup may not be used), a measured
+    /// floor, and at least one whole hour between the later of the window's start and the floor and the earlier of the window's last whole hour and
+    /// the ceiling. The window is cut to whole hours: a partial hour at either end is read raw, so a row is read from the rollup or from raw and never from both.
+    /// </summary>
+    internal static HeatmapRollupPlan? PlanRollup(RollupCoverage coverage, HeatmapMetric metric, int bucketMinutes, DateTime startUtc, DateTime endUtc)
+    {
+        if (bucketMinutes < RollupMinBucketMinutes || !RollupServes(metric))
+        {
+            return null;
+        }
+
+        if (coverage.HourlyEndCeiling(TimescaleSupport.QueryStatsHourlyView, startUtc) is not DateTime ceiling
+            || coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView).HourlyFloorUtc is not DateTime floor)
+        {
+            return null;
+        }
+
+        var from = CeilingHour(startUtc > floor ? startUtc : floor);
+        var lastWholeHour = new DateTime(endUtc.Year, endUtc.Month, endUtc.Day, endUtc.Hour, 0, 0, DateTimeKind.Unspecified);
+        var to = lastWholeHour < ceiling ? lastWholeHour : ceiling;
+        if (to <= from)
+        {
+            return null;
+        }
+
+        return new HeatmapRollupPlan(
+            coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly),
+            DateTime.SpecifyKind(from, DateTimeKind.Unspecified),
+            DateTime.SpecifyKind(to, DateTimeKind.Unspecified));
+    }
+
+    private static DateTime CeilingHour(DateTime t)
+    {
+        var hour = new DateTime(t.Year, t.Month, t.Day, t.Hour, 0, 0, DateTimeKind.Unspecified);
+        return hour == t ? hour : hour.AddHours(1);
+    }
+
+    /// <summary>
+    /// The window-floor probe's sources for a rollup read: the raw table, plus the hourly relations the read's FROM item names. A successor
+    /// a stitch takes only from the stitch floor up carries that floor, as the compose route's data-start probe does.
+    /// </summary>
+    internal static IReadOnlyList<DataWindowFloor.Source> NoticeSources(RollupCoverage coverage, HeatmapRollupPlan plan, DateTime startUtc)
+    {
+        var sources = new List<DataWindowFloor.Source> { DataWindowFloor.Source.ForCollectorTable("query_stats") };
+        var successor = TimescaleSupport.SuccessorOf(TimescaleSupport.QueryStatsHourlyView);
+        var stitchFloor = coverage.StitchFloor(TimescaleSupport.QueryStatsHourlyView, RollupCoverage.StitchTier.Hourly, startUtc);
+        foreach (var relation in new[] { TimescaleSupport.QueryStatsHourlyView, successor })
+        {
+            if (relation is null || !plan.HourlyRelation.Contains("collect." + relation + " ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            DateTime? lowerBound = stitchFloor is not null && string.Equals(relation, successor, StringComparison.Ordinal) ? stitchFloor : null;
+            if (DataWindowFloor.Source.TryForRollup(relation, out var rollup, lowerBound))
+            {
+                sources.Add(rollup);
+            }
+        }
+
+        return sources;
+    }
+
+    /// <summary>
+    /// #8570: the heat map over the hourly rollup, for bins of <see cref="RollupMinBucketMinutes"/> minutes or more. Same parameters as
+    /// <see cref="BuildQueryHeatmapSql"/> ($1 to $6), plus $7 the first whole hour the rollup serves and $8 the bucket bound (exclusive).
+    /// <para>Three arms feed one <c>base</c>: the raw rows before $7, the rollup's whole hours from $7 to $8, and the raw rows from $8. A rollup hour
+    /// is one row per (database, query_hash, sql_handle) and counts as one sample: its metric is the hour's sum over the hour's executions, so a cell
+    /// counts each query's hourly average where the raw read counts every sample. With one sample per query per hour the two reads agree cell for cell.
+    /// An hour counts in the bin that holds its start: at a bin width that is not a multiple of 60 minutes a bin edge can fall inside an hour, and the hour
+    /// is still counted once, in the bin it starts in.</para>
+    /// <para>The rollup carries no statement text. The top query of each winning cell (and only those, after the cap) takes the text of its hash's
+    /// newest raw row through <c>idx_query_stats_server_hash_time</c>, falling back to <c>query_text_dim</c>. A hash whose raw rows have all aged
+    /// out reads an empty text.</para>
+    /// </summary>
+    public static string BuildQueryHeatmapRollupSql(HeatmapMetric metric, string hourlyRelation)
+    {
+        var rawMetric = MetricExpression(metric);
+        var hourlyMetric = metric == HeatmapMetric.Cpu
+            ? "(f.worker_time_sum / 1000.0) / NULLIF(f.execution_count_sum, 0)"
+            : "(f.elapsed_time_sum / 1000.0) / NULLIF(f.execution_count_sum, 0)";
+        return $"""
+            WITH base AS (
+                SELECT
+                    date_bin(($5::integer * INTERVAL '1 minute'), collection_time, TIMESTAMP '1970-01-01 00:00:00') AS time_bin,
+                    {rawMetric} AS metric_value,
+                    query_hash,
+                    delta_execution_count
+                FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time > $2
+                AND   collection_time < $7
+                AND   collection_time <= $3
+                AND   ($4::text[] IS NULL OR database_name = ANY($4))
+                AND   delta_execution_count > 0
+                AND   {rawMetric} IS NOT NULL
+                UNION ALL
+                SELECT
+                    date_bin(($5::integer * INTERVAL '1 minute'), f.bucket, TIMESTAMP '1970-01-01 00:00:00') AS time_bin,
+                    {hourlyMetric} AS metric_value,
+                    f.query_hash,
+                    f.execution_count_sum AS delta_execution_count
+                FROM {hourlyRelation}
+                WHERE f.server_id = $1
+                AND   f.bucket >= $7
+                AND   f.bucket < $8
+                AND   ($4::text[] IS NULL OR f.database_name = ANY($4))
+                AND   f.execution_count_sum > 0
+                AND   {hourlyMetric} IS NOT NULL
+                UNION ALL
+                SELECT
+                    date_bin(($5::integer * INTERVAL '1 minute'), collection_time, TIMESTAMP '1970-01-01 00:00:00') AS time_bin,
+                    {rawMetric} AS metric_value,
+                    query_hash,
+                    delta_execution_count
+                FROM query_stats
+                WHERE server_id = $1
+                AND   collection_time >= $8
+                AND   collection_time > $2
+                AND   collection_time <= $3
+                AND   ($4::text[] IS NULL OR database_name = ANY($4))
+                AND   delta_execution_count > 0
+                AND   {rawMetric} IS NOT NULL
+            ),
+            binned AS (
+                SELECT
+                    time_bin,
+                    CASE
+                        WHEN metric_value < 1 THEN 0
+                        WHEN metric_value < 10 THEN 1
+                        WHEN metric_value < 100 THEN 2
+                        WHEN metric_value < 1000 THEN 3
+                        WHEN metric_value < 10000 THEN 4
+                        WHEN metric_value < 100000 THEN 5
+                        ELSE 6
+                    END AS bucket_index,
+                    query_hash,
+                    delta_execution_count
+                FROM base
+            ),
+            hashed AS (
+                SELECT
+                    time_bin,
+                    bucket_index,
+                    query_hash,
+                    delta_execution_count,
+                    ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index, query_hash ORDER BY delta_execution_count DESC) AS hash_rn
+                FROM binned
+            ),
+            ranked AS (
+                SELECT
+                    time_bin,
+                    bucket_index,
+                    query_hash,
+                    SUM(CASE WHEN hash_rn = 1 THEN 1 ELSE 0 END) OVER (PARTITION BY time_bin, bucket_index) AS query_count,
+                    ROW_NUMBER() OVER (PARTITION BY time_bin, bucket_index ORDER BY delta_execution_count DESC) AS rn
+                FROM hashed
+            ),
+            winners AS (
+                SELECT time_bin, bucket_index, query_count, query_hash
+                FROM ranked
+                WHERE rn = 1
+                ORDER BY time_bin DESC, bucket_index
+                LIMIT $6
+            )
+            SELECT
+                w.time_bin,
+                w.bucket_index,
+                w.query_count,
+                w.query_hash AS top_query_hash,
+                COALESCE(l.query_text, d.query_text) AS top_query_text
+            FROM winners AS w
+            LEFT JOIN LATERAL
+            (
+                (
+                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    FROM query_stats AS q
+                    WHERE w.query_hash IS NOT NULL
+                    AND   q.server_id = $1
+                    AND   q.query_hash = w.query_hash
+                    AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                    ORDER BY q.collection_time DESC
+                    LIMIT 1
+                )
+                UNION ALL
+                (
+                    SELECT q.query_text, q.query_text_digest, q.collection_time
+                    FROM query_stats AS q
+                    WHERE w.query_hash IS NULL
+                    AND   q.server_id = $1
+                    AND   q.query_hash IS NULL
+                    AND   (q.query_text IS NOT NULL OR EXISTS (SELECT 1 FROM query_text_dim AS d0 WHERE d0.digest = q.query_text_digest))
+                    ORDER BY q.collection_time DESC
+                    LIMIT 1
+                )
+                ORDER BY collection_time DESC
+                LIMIT 1
+            ) AS l ON TRUE
+            LEFT JOIN query_text_dim AS d ON d.digest = l.query_text_digest
+            ORDER BY w.time_bin DESC, w.bucket_index
+            """;
+    }
+
+    /// <summary>
+    /// #8570: <see cref="GetQueryHeatmapAsync"/> with the rollup route. Reads whole hours from the hourly rollup when <see cref="PlanRollup"/> allows
+    /// it (a bin of 60 minutes or more, a metric the rollup carries, a store whose rollup has measured coverage) and raw otherwise, and says which.
+    /// </summary>
+    internal static async Task<HeatmapRead> GetQueryHeatmapRoutedAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, HeatmapMetric metric, DateTime startUtc, DateTime endUtc,
+        DatabaseFilter databases, int bucketMinutes, int limit, int previewLength, CancellationToken cancellationToken = default)
+    {
+        var plan = PlanRollup(coverage, metric, bucketMinutes, startUtc, endUtc);
+        if (plan is null)
+        {
+            return new HeatmapRead(
+                await GetQueryHeatmapAsync(postgres, serverId, metric, startUtc, endUtc, databases, bucketMinutes, limit, previewLength, cancellationToken),
+                SourceRaw,
+                null);
+        }
+
+        var rows = new List<HeatmapCellRow>();
+        await using var command = postgres.CreateCommand(BuildQueryHeatmapRollupSql(metric, plan.HourlyRelation));
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddWindow(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(databases.Parameter());
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = limit });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.FromUtc, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.ToUtc, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp });
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadCell(reader, previewLength));
+        }
+
+        return new HeatmapRead(rows, SourceHourlyRollup, plan);
+    }
+
+    /// <summary>One cell row, in the column order both statements return. The statement text comes back WHOLE and the statement filter judges
+    /// it before the preview is cut (#5320); a named statement is the placeholder (no cut).</summary>
+    private static HeatmapCellRow ReadCell(NpgsqlDataReader reader, int previewLength)
+    {
+        var fetchedText = SensitiveStatements.Text(reader.IsDBNull(4) ? "" : reader.GetString(4)) ?? "";
+        var truncated = fetchedText.Length > previewLength;
+        return new HeatmapCellRow(
+            reader.GetDateTime(0),
+            reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
+            reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
+            reader.IsDBNull(3) ? "" : reader.GetString(3),
+            truncated ? fetchedText[..McpHelpers.TextElementCutLength(fetchedText, previewLength)] : fetchedText,
+            truncated);
+    }
 
     /// <summary>Runs <see cref="BuildQueryHeatmapSql"/>. Rows come back newest bin first. Judges
     /// each cell's whole query text (#5320), then cuts it to <paramref name="previewLength"/> before it reaches
@@ -305,17 +588,7 @@ internal static class DarlingQueryHeatmapReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            /* #5320: the top statement comes back WHOLE and the statement filter judges it before the preview is cut, so
-               no cut ends inside a value whose naming text lies past it. A named statement is the placeholder (no cut). */
-            var fetchedText = SensitiveStatements.Text(reader.IsDBNull(4) ? "" : reader.GetString(4)) ?? "";
-            var truncated = fetchedText.Length > previewLength;
-            rows.Add(new HeatmapCellRow(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1)),
-                reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2)),
-                reader.IsDBNull(3) ? "" : reader.GetString(3),
-                truncated ? fetchedText[..McpHelpers.TextElementCutLength(fetchedText, previewLength)] : fetchedText,
-                truncated));
+            rows.Add(ReadCell(reader, previewLength));
         }
 
         return rows;

@@ -660,19 +660,20 @@ ORDER BY ordinal_position", connection))
             }
         }
 
-        /// <summary>The tool's own payload for an event read over a window, then the data-start note: what the web mirror answers.</summary>
+        /// <summary>The tool's own payload for an event read over a window, then the data-start note: what the web mirror answers. The
+        /// three reads the MCP server holds to its response budget are asked for whole rows, as their web routes ask.</summary>
         public async Task<JsonObject> AskEventReadAsync(string read, string server, int hours, CancellationToken ct)
         {
             var payload = read switch
             {
                 "get_blocked_process_xml" => await DarlingMcpBlockingTools.GetBlockedProcessXml(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
-                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_long_query_completions" => await DarlingMcpLongQueryTools.GetLongQueryCompletions(DataSource, server, hours, 100, null, DatabaseFilter.All, null, ct, responseByteBudget: null),
                 "get_memory_pressure_events" => await DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(DataSource, server_name: server, hours_back: hours, cancellationToken: ct),
                 "get_default_trace_events" => await DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
                 "get_pg_deadlocks" => await DarlingMcpPgDeadlockTools.GetPgDeadlocks(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
                 "get_pg_log_events" => await DarlingMcpPgLogEventTools.GetPgLogEvents(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
-                "get_blocking" => await DarlingMcpBlockingTools.GetBlocking(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
-                "get_deadlocks" => await DarlingMcpBlockingTools.GetDeadlocks(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
+                "get_blocking" => await DarlingMcpBlockingTools.GetBlocking(DataSource, server, hours, 100, null, false, null, DatabaseFilter.All, DarlingMcpBlockingTools.WebSqlTextPreviewLength, cancellationToken: ct, responseByteBudget: null),
+                "get_deadlocks" => await DarlingMcpBlockingTools.GetDeadlocks(DataSource, server, hours, 100, null, null, null, null, ct, responseByteBudget: null),
                 "get_deadlock_detail" => await DarlingMcpBlockingTools.GetDeadlockDetail(DataSource, server_name: server, hours_back: hours, limit: 100, cancellationToken: ct),
                 _ => throw new ArgumentOutOfRangeException(nameof(read), read, "not an event read"),
             };

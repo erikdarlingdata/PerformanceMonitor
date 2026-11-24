@@ -430,11 +430,11 @@ public sealed class PayloadDimensionTests
 
         /* ON CONFLICT is the entire dedup mechanism: the second and every later sighting of the same
            content writes no new row. */
-        Assert.Contains("ON CONFLICT (digest) DO UPDATE", sql, StringComparison.Ordinal);
+        Assert.Contains("ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen", sql, StringComparison.Ordinal);
 
-        /* The churn guard, now 6 hours (#4503, widened from 1 to cut non-HOT WAL on the indexed
-           last_seen column). Without it, every referenced dim row takes an UPDATE every collection cycle —
-           a dead tuple per row per minute — to maintain a watermark whose only consumer (the GC) has a
+        /* The churn guard, now 6 hours (#4503, widened from 1 to cut non-HOT WAL on the then-indexed
+           last_seen column), tested on the stamp table since V298 (#9304). Without it, every referenced dim row
+           takes a write every collection cycle to maintain a watermark whose only consumer (the GC) has a
            multi-day horizon. */
         Assert.Contains("INTERVAL '6 hours'", sql, StringComparison.Ordinal);
 
@@ -447,12 +447,12 @@ public sealed class PayloadDimensionTests
             "SELECT u.digest, u.payload, $3\n" +
             "FROM unnest($1::bytea[], $2::text[]) AS u(digest, payload)\n" +
             "WHERE NOT EXISTS (\n" +
-            "    SELECT 1 FROM query_text_dim d\n" +
-            "    WHERE d.digest = u.digest\n" +
-            "    AND   d.last_seen >= $3 - INTERVAL '6 hours')\n" +
+            "    SELECT 1 FROM query_text_dim_seen s\n" +
+            "    WHERE s.digest = u.digest\n" +
+            "    AND   s.last_seen >= $3 - INTERVAL '6 hours')\n" +
             "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
-            "WHERE query_text_dim.last_seen < EXCLUDED.last_seen - INTERVAL '6 hours'",
+            "WHERE query_text_dim.last_seen < EXCLUDED.last_seen - interval '24 hours'",
             sql);
 
         /* #4249: the pre-filter is a plain MVCC read (no lock) that keeps an already-fresh digest from
@@ -473,12 +473,12 @@ public sealed class PayloadDimensionTests
             "SELECT u.digest, u.payload, $3\n" +
             "FROM unnest($1::bytea[], $2::bytea[]) AS u(digest, payload)\n" +
             "WHERE NOT EXISTS (\n" +
-            "    SELECT 1 FROM query_plan_dim d\n" +
-            "    WHERE d.digest = u.digest\n" +
-            "    AND   d.last_seen >= $3 - INTERVAL '6 hours')\n" +
+            "    SELECT 1 FROM query_plan_dim_seen s\n" +
+            "    WHERE s.digest = u.digest\n" +
+            "    AND   s.last_seen >= $3 - INTERVAL '6 hours')\n" +
             "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
-            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '6 hours'",
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - interval '24 hours'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable));
 
         /* #2171: compressContent false routes the plan dim through the TEXT branch - query_plan_xml
@@ -489,12 +489,12 @@ public sealed class PayloadDimensionTests
             "SELECT u.digest, u.payload, $3\n" +
             "FROM unnest($1::bytea[], $2::text[]) AS u(digest, payload)\n" +
             "WHERE NOT EXISTS (\n" +
-            "    SELECT 1 FROM query_plan_dim d\n" +
-            "    WHERE d.digest = u.digest\n" +
-            "    AND   d.last_seen >= $3 - INTERVAL '6 hours')\n" +
+            "    SELECT 1 FROM query_plan_dim_seen s\n" +
+            "    WHERE s.digest = u.digest\n" +
+            "    AND   s.last_seen >= $3 - INTERVAL '6 hours')\n" +
             "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
-            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '6 hours'",
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - interval '24 hours'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: false));
 
         /* Explicit true is byte-identical to the default - the parameter cannot drift the gzip shape. */
@@ -525,8 +525,11 @@ public sealed class PayloadDimensionTests
         Assert.False(string.IsNullOrEmpty(body),
             "could not locate UpsertSql -- this guard must fail rather than silently pass on a parse miss");
 
+        /* Since V298 (#9304) the ORDER BY lives in one tail both branches append, so it is written once and both
+           branches must end with that tail. */
         var occurrences = System.Text.RegularExpressions.Regex.Matches(body, "ORDER BY u.digest").Count;
-        Assert.Equal(2, occurrences);
+        Assert.Equal(1, occurrences);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(body, "freshStamp;").Count);
     }
 
     // ── the gzip codec (#2069) ──
@@ -1022,15 +1025,19 @@ public sealed class PayloadDimensionTests
         var root = FindRepoRoot();
         Assert.True(root is not null, RepoRootNotFound);
 
+        /* The pin reads the partial that holds the batch write (WriteBatchAsync), not the whole runner.
+           Other partials hold other transactions, so joining them would make the counts below cover code
+           this pin does not guard. */
         var path = Path.Combine(
-            root!, "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
-        Assert.True(File.Exists(path), $"Expected the collector runner at '{path}'.");
+            root!, "Darling", "PerformanceMonitor.Darling.Service",
+            "DarlingCollectorRunner.StoreWriteAndWatermarks.cs");
+        Assert.True(File.Exists(path), $"Expected the batch-write partial at '{path}'.");
 
-        var source = RepoFile.ReadRepoFile(path);
+        var source = File.ReadAllText(path);
 
-        /* Exactly one of each, so comparing positions is unambiguous. If a second COPY or a second commit
-           ever appears in this file, this pin must be rescoped to the method body rather than quietly
-           comparing the wrong pair. */
+        /* Exactly one of each within the batch-write partial, so comparing positions is unambiguous. If a
+           second COPY or a second commit ever appears in this partial, this pin must be rescoped to the
+           method body rather than quietly comparing the wrong pair. */
         foreach (var call in new[]
         {
             "importer.CompleteAsync(",

@@ -28,7 +28,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// the daily summary's approximate ones.</para>
 ///
 /// <para>Rows are grouped by (database, query_id, query_hash), so a query's plans, replica roles and outcome rows fold into one
-/// line. $1 server_id, $2 window start, $3 window end (naive UTC), $4 row cap, $5 databases (<c>text[]</c>, NULL for all).</para>
+/// line. $1 server_id, $2 window start, $3 window end (naive UTC; the window is <c>[$2, $3)</c> by the interval's start, so the interval that starts at $3 belongs to the next window), $4 row cap, $5 databases (<c>text[]</c>, NULL for all).</para>
 /// </summary>
 internal static class DarlingQueryStoreAbortsReader
 {
@@ -54,7 +54,7 @@ internal static class DarlingQueryStoreAbortsReader
             /* #7814: placed by the interval's start and bounded by collection_time for chunk exclusion only, as the top read's raw dedupe is
                (DarlingDataReader.QueryStoreTopSql), so this read and get_query_store_top list the same intervals for one window. */
             AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} < $3
             AND   collection_time >= $2 - {{QueryStoreIntervalWide.CollectionFloorSlackSql}}
             AND   collection_time <= $3 + {{QueryStoreIntervalWide.CollectionCeilingSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
@@ -71,10 +71,21 @@ internal static class DarlingQueryStoreAbortsReader
             WHERE server_id = $1
             /* #7814: placed by the interval's start, as the top read's table head is (DarlingDataReader.QueryStoreTopTablePrefix). */
             AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} >= $2
-            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} <= $3
+            AND   {{QueryStoreIntervalWide.IntervalStartExpressionSql}} < $3
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.IntervalStartFirstExecMarginSql}}
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        ),
+        """;
+
+    /// <summary><see cref="TablePrefix"/> as the top read's split (#9276, <see cref="DarlingDataReader.QueryStoreTopTableSplitSql"/>): two arms, each
+    /// with the <c>first_execution_time</c> floor that holds for its rows, for a store whose
+    /// <see cref="QueryStoreBackgroundIndexes.WideNullStartFirstExec"/> is built. The same rows and parameters.</summary>
+    private static readonly string TableSplitPrefix = $$"""
+        WITH deduped AS (
+        {{QueryStoreIntervalWide.IntervalStartSplitSql(
+            "database_name, query_id, query_hash, execution_type_desc, execution_count, avg_duration_us, last_execution_time, 1 AS rn",
+            "            AND   ($5::text[] IS NULL OR database_name = ANY($5))")}}
         ),
         """;
 
@@ -164,16 +175,21 @@ internal static class DarlingQueryStoreAbortsReader
 
     internal static readonly string TableSql = TablePrefix + "\n" + Tail;
 
+    /// <summary><see cref="TableSql"/> over <see cref="TableSplitPrefix"/>, read when the NULL-start partial index is built (#9276).</summary>
+    internal static readonly string TableSplitSql = TableSplitPrefix + "\n" + Tail;
+
     /// <summary>
     /// Reads <paramref name="limit"/> rows. The caller asks for one more than it shows so a cut page is observed, not inferred.
-    /// The interval table is tried first under <c>get_query_store_top</c>'s own gate (<see cref="DarlingDataReader.QueryStoreTopMayReadTable"/>
-    /// and <see cref="QueryStoreIntervalWide.ResolveReadAsync"/>); a gate that says raw, or any fault before the rows are read, reads the raw tier.
+    /// The interval table is tried first under <c>get_query_store_top</c>'s own gate (<see cref="DarlingDataReader.QueryStoreTopMayReadTableFor"/>
+    /// and <see cref="QueryStoreIntervalWide.ResolveReadAsync"/> with no literal end and <see cref="DarlingDataReader.QueryStoreTopTableMinWindow"/>),
+    /// so this page and its measured-zero probe (<see cref="DarlingDataReader.QueryStoreWindowHasRowsAsync"/>) read the same tier for one window;
+    /// a gate that says raw, or any fault before the rows are read, reads the raw tier.
     /// </summary>
     internal static async Task<AbortsRead> ReadAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int limit, DatabaseFilter databases,
         CancellationToken cancellationToken)
     {
-        if (DarlingDataReader.QueryStoreTopMayReadTable(startUtc, endUtc))
+        if (DarlingDataReader.QueryStoreTopMayReadTableFor(startUtc, endUtc, databases))
         {
             var table = await TryReadTableAsync(postgres, serverId, startUtc, endUtc, limit, databases, cancellationToken);
             if (table is { } served)
@@ -215,8 +231,11 @@ internal static class DarlingQueryStoreAbortsReader
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
 
+            /* No literal end (UseTable's clause 4 is skipped), as the top read asks: the raw read places its window by the interval's
+               start and reads every snapshot up to the collection ceiling, so for an end before applied_through it already counts each
+               interval's newest snapshot, the row the table holds. */
             var plan = await QueryStoreIntervalWide.ResolveReadAsync(
-                connection, serverId, startUtc, endUtc, endUtc, DarlingDataReader.QueryStoreTopMinWindow,
+                connection, serverId, startUtc, endUtc, literalWindowEnd: null, DarlingDataReader.QueryStoreTopTableMinWindow(databases),
                 McpCommandDeadlines.ReadSeconds, ReadScope.Current?.Logger, legacyRows: QueryStoreIntervalWide.LegacyRows.Allow, cancellationToken);
             if (!plan.UseTable)
             {
@@ -229,7 +248,10 @@ internal static class DarlingQueryStoreAbortsReader
             }
 
             gateDecided = true;
-            var sql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(connection, transaction, McpCommandDeadlines.ReadSeconds, TableSql, cancellationToken);
+            var splitBuilt = await QueryStoreBackgroundIndexes.IsBuiltAsync(
+                connection, transaction, QueryStoreBackgroundIndexes.WideNullStartFirstExec, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            var sql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
+                connection, transaction, McpCommandDeadlines.ReadSeconds, splitBuilt ? TableSplitSql : TableSql, cancellationToken);
             var edgeMargin = await QueryStoreIntervalWide.ResolveEdgeMarginAsync(
                 connection, serverId, plan.ReadStart, endUtc, McpCommandDeadlines.ReadSeconds, cancellationToken);
             if (edgeMargin < QueryStoreIntervalWide.PurgeEdgeMargin)

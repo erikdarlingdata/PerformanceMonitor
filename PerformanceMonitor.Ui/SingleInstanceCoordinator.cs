@@ -77,6 +77,9 @@ namespace PerformanceMonitor.Ui
         }
     }
 
+    /// <summary>Creates or opens the named mutex. The real one is <c>new Mutex(true, name, out createdNew)</c>.</summary>
+    public delegate Mutex MutexFactory(string name, out bool createdNew);
+
     /// <summary>App-supplied dialogs for the handoff. Implemented per app (WPF MessageBox), kept out of
     /// the coordinator so the orchestration stays testable and the UI stays in the app.</summary>
     public interface IHandoffPrompts
@@ -120,6 +123,18 @@ namespace PerformanceMonitor.Ui
         /// <summary>Injectable for tests; defaults to <see cref="Win32ProcessInspector"/>.</summary>
         public IProcessInspector? Inspector { get; set; }
 
+        /// <summary>Injectable for tests (a mutex that is denied); defaults to <c>new Mutex(true, name, out createdNew)</c>.</summary>
+        public MutexFactory? CreateMutex { get; set; }
+
+        /// <summary>
+        /// Injectable for tests: the session id of a candidate process, or null when it cannot be read. Defaults to
+        /// <c>Process.SessionId</c>, null on access denied.
+        /// </summary>
+        public Func<Process, int?>? SessionIdOf { get; set; }
+
+        /// <summary>Injectable for tests: this process's session id. Defaults to the current process's <c>SessionId</c>.</summary>
+        public int? CurrentSessionId { get; set; }
+
         /// <summary>Optional diagnostic logging.</summary>
         public Action<string>? Log { get; set; }
     }
@@ -144,6 +159,7 @@ namespace PerformanceMonitor.Ui
         private readonly IProcessInspector _inspector;
         private Mutex? _mutex;
         private bool _ownsMutex;
+        private string? _mutexFailure;
         private SingleInstanceSignal? _exitSignal;
         private bool _disposed;
 
@@ -158,6 +174,15 @@ namespace PerformanceMonitor.Ui
         }
 
         /// <summary>
+        /// Set when <see cref="TryBecomeOwner"/> returned false because the start FAILED (#9197): the single-instance mutex
+        /// could not be created or opened, and no other instance is running to hand off to. The text names the cause. Null
+        /// for every other false result (a peer was found and surfaced, the user declined, an elevated relaunch started),
+        /// which are not failures. The app reports it: Lite headless exits with its init-failed code, a windowed start shows
+        /// one dialog.
+        /// </summary>
+        public string? FailureReason { get; private set; }
+
+        /// <summary>
         /// True if this instance should proceed with startup (it now owns the single-instance slot).
         /// False if the caller should <c>Shutdown()</c> immediately (it surfaced an existing instance,
         /// raised an integrity error, declined, or relaunched elevated).
@@ -166,7 +191,10 @@ namespace PerformanceMonitor.Ui
         {
             try
             {
-                _mutex = new Mutex(true, _options.MutexName, out var createdNew);
+                bool createdNew;
+                _mutex = _options.CreateMutex is { } create
+                    ? create(_options.MutexName, out createdNew)
+                    : new Mutex(true, _options.MutexName, out createdNew);
                 if (createdNew)
                 {
                     BecomeOwner();
@@ -181,10 +209,12 @@ namespace PerformanceMonitor.Ui
                    the actionable error (+ "Restart as administrator"). The handoff null-guards the
                    absent mutex; after elevation the equal-integrity relaunch acquires it normally. */
                 _mutex = null;
+                _mutexFailure = "could not create or open the single-instance mutex: access denied";
             }
-            catch (System.IO.IOException)
+            catch (System.IO.IOException ex)
             {
                 _mutex = null;
+                _mutexFailure = $"could not create or open the single-instance mutex: {ex.Message}";
             }
 
             /* Another instance holds the mutex — decide whether to surface it (today's behavior) or
@@ -197,6 +227,15 @@ namespace PerformanceMonitor.Ui
             var others = FindOtherInstances();
             if (others.Count == 0)
             {
+                if (_mutex is null)
+                {
+                    /* #9197: the mutex could not be created or opened (a restricted or filtered token, a name owned by
+                       another account) and no peer process exists to hand off to. Surfacing a window that is not there
+                       would end the start in silence with exit code 0, so it is a failed start that says why. */
+                    FailureReason = _mutexFailure ?? "could not create or open the single-instance mutex";
+                    return false;
+                }
+
                 /* Mutex held but no peer process found — a race or an abandoned mutex. Try to grab it. */
                 return TryAcquireAfterRelease() || SurfaceAndExit();
             }
@@ -315,6 +354,19 @@ namespace PerformanceMonitor.Ui
             _exitSignal = new SingleInstanceSignal(_options.ExitEventName, _options.GracefulSelfExit);
         }
 
+        /// <summary>
+        /// Closes the "exit for upgrade" channel again, so a later <see cref="EnableUpgradeHandoff"/> can open it anew. The
+        /// listener and its named event are gone when this returns, so a newer build that launches afterwards finds nobody
+        /// listening and surfaces instead of signaling/killing us. A headless start that retries its store open uses this to
+        /// keep the channel shut while an attempt runs (#9184). No-op when the channel is not open.
+        /// </summary>
+        public void DisableUpgradeHandoff()
+        {
+            var signal = _exitSignal;
+            _exitSignal = null;
+            signal?.Dispose();
+        }
+
         private bool SurfaceAndExit()
         {
             try { _options.SurfaceRunningInstance(); }
@@ -349,15 +401,23 @@ namespace PerformanceMonitor.Ui
             }
         }
 
+        /// <summary>
+        /// The other processes of this app that run in THIS session. The mutex and the show-window and exit events have no
+        /// Global prefix, so they are session-local: a peer in another session (a headless Lite under a dedicated account
+        /// while a user runs Lite on the desktop) cannot hold our mutex, hear the events, or be surfaced, so it is not a peer
+        /// (#9197). A process whose session id cannot be read counts as another session. Dropped processes are disposed.
+        /// </summary>
         private List<Process> FindOtherInstances()
         {
             var self = Environment.ProcessId;
             var result = new List<Process>();
             try
             {
+                var mySession = _options.CurrentSessionId ?? CurrentProcessSessionId();
+                var sessionOf = _options.SessionIdOf ?? ReadSessionId;
                 foreach (var proc in Process.GetProcessesByName(_options.ProcessName))
                 {
-                    if (proc.Id == self)
+                    if (proc.Id == self || mySession is null || sessionOf(proc) != mySession)
                     {
                         proc.Dispose();
                         continue;
@@ -370,6 +430,18 @@ namespace PerformanceMonitor.Ui
                 _options.Log?.Invoke($"Enumerate instances failed: {ex.Message}");
             }
             return result;
+        }
+
+        private static int? ReadSessionId(Process proc)
+        {
+            try { return proc.SessionId; }
+            catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException) { return null; }
+        }
+
+        private static int? CurrentProcessSessionId()
+        {
+            using var me = Process.GetCurrentProcess();
+            return ReadSessionId(me);
         }
 
         private static List<Process> WaitForExit(List<Process> procs, int totalBudgetMs)

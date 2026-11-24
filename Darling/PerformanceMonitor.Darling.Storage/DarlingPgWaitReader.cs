@@ -56,6 +56,11 @@ public static class DarlingPgWaitReader
     /// are nullable because their lookups are LEFT JOINed, and an event Aurora reports but does not
     /// name is exactly the new-wait-type case an operator should see. They get a synthetic label built
     /// from the numeric ids so the row is still identifiable.</para>
+    /// <para><b>The generic <c>Extension</c> / <c>Extension</c> event ranks after every other wait</b> (#8916). Background workers
+    /// (the pg_cron launcher, the TimescaleDB scheduler) sleep in it around the clock, so by wait time alone it would crowd out the
+    /// waits of real sessions. This arm is system-wide with no backend type, so the read cannot tell a worker's sleep from an
+    /// extension's real wait and ranks it last instead of dropping it. The row stays in the grid, and a page cap cuts it before it
+    /// cuts a real wait. (<c>Activity</c>, <c>Client</c> and <c>Timeout</c> never reach the table: the collector drops them.)</para>
     /// <para>$1 server_id, $2/$3 window (naive UTC, matching every other read in this store), $4 row cap.</para>
     /// <para>The cap is a PARAMETER, not a literal. It was <c>LIMIT 50</c> while the tool advertised a
     /// caller-supplied limit and then applied it with <c>Take(limit)</c> — so a caller asking for more than 50
@@ -83,13 +88,15 @@ public static class DarlingPgWaitReader
             SUM(SUM(delta_wait_time_us)) OVER () / 1000.0 AS window_total_wait_time_ms
         FROM pg_wait_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY
             COALESCE(wait_type, 'unknown_type_' || wait_type_id::text),
             COALESCE(wait_event, 'unknown_event_' || wait_event_id::text)
         HAVING SUM(delta_wait_time_us) > 0
-        ORDER BY SUM(delta_wait_time_us) DESC
+        ORDER BY (COALESCE(wait_type, 'unknown_type_' || wait_type_id::text) = 'Extension'
+                  AND COALESCE(wait_event, 'unknown_event_' || wait_event_id::text) = 'Extension'),
+                 SUM(delta_wait_time_us) DESC
         LIMIT $4
         """;
 

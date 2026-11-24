@@ -104,8 +104,18 @@ internal static class DarlingSessionReader
     /// WAITFOR trim and the database, blocking_only and wait_type filters at $5, $6 and $7). Shared by the row read below and the
     /// snapshot list below (#6302), so a snapshot the picker lists holds exactly the rows the table then shows.
     /// </summary>
-    private static readonly string ActiveQueriesPopulationCtes = $$"""
-        WITH window_rows AS (
+    private static readonly string ActiveQueriesPopulationCtes = PopulationCtes("MATERIALIZED");
+
+    /// <summary>
+    /// The snapshot list's population (#9148): the same CTEs with <c>window_rows</c> left inlined. The list keeps only the capture time
+    /// and a count, but <c>window_rows</c> is read by three CTEs, so the planner materialized every row of the window with all of
+    /// its columns, the query text among them, and a week of that spilled to temp files before a count was taken. Inlined, each read
+    /// takes only the columns it uses, the text is decompressed once for the trim, and nothing spills. The rows are the same.
+    /// </summary>
+    private static readonly string ActiveQuerySnapshotsPopulationCtes = PopulationCtes("NOT MATERIALIZED");
+
+    private static string PopulationCtes(string windowRowsMaterialization) => $$"""
+        WITH window_rows AS {{windowRowsMaterialization}} (
             SELECT
                 collection_time,
                 session_id,
@@ -137,7 +147,7 @@ internal static class DarlingSessionReader
                 (live_query_plan IS NOT NULL) AS has_live_query_plan
             FROM query_snapshots
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         heads AS (
@@ -360,7 +370,7 @@ internal static class DarlingSessionReader
     /// is the population's whole count above the cap (the #3613 idiom).
     /// </summary>
     public static readonly string ActiveQuerySnapshotsSql = $$"""
-        {{ActiveQueriesPopulationCtes}}
+        {{ActiveQuerySnapshotsPopulationCtes}}
         , snapshots AS (
             SELECT
                 collection_time,
@@ -467,7 +477,7 @@ internal static class DarlingSessionReader
             END AS blocking_session_ids
         FROM waiting_tasks
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   wait_type IS NOT NULL
         {{DatabaseFilter.All.Clause("database_name", 5)}}

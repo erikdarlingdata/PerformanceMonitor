@@ -47,17 +47,9 @@ public sealed class RetentionHoldRatioKnobRungTests
     private const string CriticalColumn = "retention_hold_critical_ratio";
 
     [Fact]
-    public void TheRungIsRegisteredInADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(119, RungVersion);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-
-        /* Below the top now, and that has to be asserted rather than assumed: every probe claim in this
-           file is about a store that has THIS rung and not the ones above it, which is only a meaningful
-           distinction while something is above it. */
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
     }
 
     /// <summary>

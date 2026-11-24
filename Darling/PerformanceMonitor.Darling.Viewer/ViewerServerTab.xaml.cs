@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -94,6 +95,28 @@ public partial class ViewerServerTab : UserControl
 
     private bool _refreshInFlight;
     private bool _refreshRequested;
+
+    /// <summary>#9365: set by a loader whose chart read failed after its retry while the grid read held ("The time-range chart did not load.
+    /// The grid is current."), so the load's status line says so in place of a plain "refreshed". Cleared at the start of each load.</summary>
+    private string? _partialFailureText;
+
+    /// <summary>#9365: the partial-failure text the last load left, for a test to read.</summary>
+    internal string? PartialFailureText => _partialFailureText;
+
+    /// <summary>#9365: the status line a finished load writes. A load whose chart read failed names what did not load and keeps the stamp
+    /// the grid was read at; any other load says "refreshed" and the stamp.</summary>
+    internal static string RefreshedStatus(string serverName, string? partialFailure, string stamp) =>
+        partialFailure is null ? $"{serverName}: refreshed {stamp}" : $"{serverName}: {partialFailure} ({stamp})";
+
+    /* #9194: the cancellation of the sub-tab load now running, and that sub-tab's name. Null between loads. A pick of another sub-tab
+       cancels it, so the picked tab's read starts at once instead of waiting behind the one being left. */
+    private CancellationTokenSource? _loadPass;
+    private string? _loadPassName;
+    private string? _loadPassSurface;
+
+    /// <summary>Test hook (#9194): awaited at the start of each sub-tab load, inside the load's cancellation scope, with the inner tab index
+    /// and the token a pick of another sub-tab cancels. Holds a load without a store.</summary>
+    internal Func<int, CancellationToken, Task>? LoadStartHook { get; set; }
 
     /* #8549: when the refresh now queued (_refreshRequested) was first asked for, as a Stopwatch timestamp. The queued load's clock starts there. */
     private long _refreshQueuedAt;
@@ -184,10 +207,11 @@ public partial class ViewerServerTab : UserControl
            right-click "Show Active Queries at This Time" drill-down (every lane: CPU / Wait Stats /
            Blocking / Buffer Pool / I/O Latency) to the Active Queries loader — the lanes plot X as the
            UTC instant, so the event's argument is already naive UTC, the centre
-           OnActiveQueriesDrillDown reads its window around. ThemeManager is fixed to Dark, so the shared
-           chart chrome applies without any per-control theme plumbing. */
+           OnActiveQueriesDrillDown reads its window around. A later theme change reaches the lanes through
+           OnThemeChanged (#8898). */
         OverviewLanes.Initialize(_dataService, _server.ServerId);
         OverviewLanes.ShowActiveQueriesRequested += OnActiveQueriesDrillDown;
+        ThemeManager.ThemeChanged += OnThemeChanged; // #8898: released in Dispose
 
         /* CPU + tempdb inner-tab charts (copied from Lite): theme up front + wire hover. */
         InitializeCpuTempDbCharts();
@@ -366,15 +390,39 @@ public partial class ViewerServerTab : UserControl
             return;
         }
 
-        await RefreshActiveInnerTabAsync();
+        await RefreshAfterSubTabPickAsync();
+    }
+
+    /// <summary>
+    /// #9194: a sub-tab pick while another sub-tab's load runs. That load's reads are cancelled, so the picked tab's own read starts as
+    /// soon as they unwind and the click does not wait for the whole load it left. The load unwinds with no slow-load line and no
+    /// error, and the tab loads again when the reader returns to it, because the pick back is a refresh like this one. A read that
+    /// runs without a token (a shared fetch, or a reader outside the Viewer's data service) is not cut short: the status line names
+    /// the refresh the pick waits for.
+    /// </summary>
+    private string SubTabSurface() =>
+        $"{InnerTabs.SelectedIndex}/{QueriesSubTabControl.SelectedIndex}/{FileIoSubTabs.SelectedIndex}/{BlockingSubTabs.SelectedIndex}/{SystemEventsSubTabControl.SelectedIndex}";
+
+    private Task RefreshAfterSubTabPickAsync()
+    {
+        /* A selection event that leaves the surface as it was (a sub-tab's own first selection, raised when its content is first shown) is no
+           pick: it must not cancel the load of the tab it is on. */
+        if (_loadPass is { } pass && _loadPassName is { } leaving && _loadPassSurface != SubTabSurface())
+        {
+            pass.Cancel();
+            StatusChanged?.Invoke($"{_server.DisplayName}: waiting for the {leaving} refresh to finish");
+        }
+
+        return RefreshActiveInnerTabAsync();
     }
 
     /// <summary>
     /// Loads the ACTIVE inner tab, with the overlap guard mirroring MainWindow's aggregate-tab loop.
     /// If the inner tab switches while a load is in flight, the triggering event bounces off the guard,
     /// so after each load we loop when the selection moved on and load again — leaving no inner tab
-    /// stranded. A trigger that arrives mid-load (the auto-refresh tick, an inner-tab switch) sets
-    /// <see cref="_refreshRequested"/> instead of being dropped, so the running loop reloads once more.
+    /// stranded. A trigger that arrives mid-load (a range pick, an inner-tab switch, a filter change) sets
+    /// <see cref="_refreshRequested"/> instead of being dropped, so the running loop reloads once more. The auto-refresh tick is not
+    /// such a trigger: it is dropped before it gets here while a load runs (<see cref="AutoRefreshTickAsync"/>, #8810).
     /// <para>The load runs through <see cref="Dispatcher.Invoke{TResult}(Func{TResult})"/>, which on this tab's own thread runs it at once
     /// with the dispatcher's synchronization context installed, so the code after each of its awaits resumes on this thread whatever
     /// context the caller's thread had. The app's UI thread has that context already, and the load runs as it would without the call. A
@@ -442,6 +490,9 @@ public partial class ViewerServerTab : UserControl
                 int loadedTab;
                 do
                 {
+                    /* #9194: a pass after a sub-tab switch reads what was asked for up to now, so the switch's own ask is served by it
+                       and does not load the picked tab a second time. */
+                    _refreshRequested = false;
                     loadedTab = InnerTabs.SelectedIndex;
                     ShowFirstPaintLoading(); // #8647: also the landing sub-tab of the first open, which has no selection event
                     /* L3: a tab switched to during this load changes the page on screen, so its note is set here too, not only
@@ -449,7 +500,23 @@ public partial class ViewerServerTab : UserControl
                     await Timed(timer, "collection interval read", UpdateSampleIntervalAsync());
                     /* The first pass hands this refresh's clock on, so the sub-tab's reads land in the same line; a second pass
                        (the reader switched tabs mid-load) is an ordinary load on its own clock. */
-                    await LoadInnerTabAsync(loadedTab, timer);
+                    using (var pass = new CancellationTokenSource())
+                    {
+                        _loadPass = pass;
+                        _loadPassSurface = SubTabSurface();
+                        _loadPassName = InnerTabLoadName(loadedTab, (InnerTabs.Items[loadedTab] as TabItem)?.Header);
+                        try
+                        {
+                            await LoadInnerTabAsync(loadedTab, timer, pass.Token);
+                        }
+                        finally
+                        {
+                            _loadPass = null;
+                            _loadPassName = null;
+                            _loadPassSurface = null;
+                        }
+                    }
+
                     timer = null;
                     /* #8647: whatever on the sub-tab still says "Loading..." after its read was never filled; it must not outlive the read. */
                     if (InnerTabs.SelectedIndex == loadedTab) FirstPaint.Resolve((InnerTabs.SelectedItem as TabItem)?.Content as DependencyObject);
@@ -569,11 +636,23 @@ public partial class ViewerServerTab : UserControl
 
     /// <param name="tabIndex">The inner tab to load.</param>
     /// <param name="loadTimer">The load's phase clock; null starts a new one. A test hands in its own to read the phases the load booked (#8549).</param>
-    internal async Task LoadInnerTabAsync(int tabIndex, ViewerLoadTimer? loadTimer = null)
+    /// <param name="cancel">#9194: cancelled when the reader picks another sub-tab. The store reads the load starts take it (<see cref="ViewerReadScope"/>),
+    /// and a load it cancels ends with no status, no slow-load line and no draw after the cancel.</param>
+    internal async Task LoadInnerTabAsync(int tabIndex, ViewerLoadTimer? loadTimer = null, CancellationToken cancel = default)
     {
         var timer = loadTimer ?? new ViewerLoadTimer();
+        var cancelled = false;
+        _partialFailureText = null;
+        ViewerReadScope.Enter(cancel);
         try
         {
+            /* #9426: the slow-load line names the range this load asked for. */
+            timer.Window = WindowText();
+            if (LoadStartHook is { } hook)
+            {
+                await hook(tabIndex, cancel);
+            }
+
             /* #6155: a PostgreSQL panel's healthy sentence needs to know whether the server is offline before it is written. */
             if (_server.IsPostgres)
             {
@@ -583,7 +662,7 @@ public partial class ViewerServerTab : UserControl
             switch (tabIndex)
             {
                 case WaitStatsInnerTabIndex:
-                    await LoadWaitStatsAsync();
+                    await LoadWaitStatsAsync(timer);
                     break;
                 case LatchSpinlockInnerTabIndex:
                     await LoadLatchSpinlockAsync(timer);
@@ -597,22 +676,22 @@ public partial class ViewerServerTab : UserControl
                        default Overview reload, and so the auto-refresh timer leaves any open plan tabs alone. */
                     break;
                 case BlockingInnerTabIndex:
-                    await LoadBlockingAsync();
+                    await LoadBlockingAsync(timer);
                     break;
                 case PerfmonInnerTabIndex:
                     await LoadPerfmonAsync(timer);
                     break;
                 case SessionStatsInnerTabIndex:
-                    await LoadSessionStatsAsync();
+                    await LoadSessionStatsAsync(timer);
                     break;
                 case RunningJobsInnerTabIndex:
-                    await LoadRunningJobsAsync();
+                    await LoadRunningJobsAsync(timer);
                     break;
                 case ConfigurationInnerTabIndex:
-                    await LoadConfigurationAsync();
+                    await LoadConfigurationAsync(timer);
                     break;
                 case ConfigChangesInnerTabIndex:
-                    await LoadConfigChangesAsync();
+                    await LoadConfigChangesAsync(timer);
                     break;
                 case DailySummaryInnerTabIndex:
                     await LoadDailySummaryAsync(timer);
@@ -621,19 +700,19 @@ public partial class ViewerServerTab : UserControl
                     await LoadHealthAsync(timer);
                     break;
                 case CpuInnerTabIndex:
-                    await LoadCpuAsync();
+                    await LoadCpuAsync(timer);
                     break;
                 case MemoryInnerTabIndex:
-                    await LoadMemoryAsync();
+                    await LoadMemoryAsync(timer);
                     break;
                 case TempDbInnerTabIndex:
-                    await LoadTempDbAsync();
+                    await LoadTempDbAsync(timer);
                     break;
                 case FileIoInnerTabIndex:
                     await LoadFileIoAsync(timer);
                     break;
                 case SystemEventsInnerTabIndex:
-                    await LoadSystemEventsAsync();
+                    await LoadSystemEventsAsync(timer);
                     break;
                 case LongQueriesInnerTabIndex:
                     await LoadLongQueriesAsync(timer);
@@ -645,25 +724,25 @@ public partial class ViewerServerTab : UserControl
                    at a PostgreSQL server and paint four permanently empty lanes, which is the exact defect
                    this issue is about. */
                 case PgOverviewInnerTabIndex:
-                    await LoadPgOverviewAsync();
+                    await LoadPgOverviewAsync(timer);
                     break;
                 case PgActivityInnerTabIndex:
-                    await LoadPgActivityAsync();
+                    await LoadPgActivityAsync(timer);
                     break;
                 case PgVacuumInnerTabIndex:
-                    await LoadPgVacuumAsync();
+                    await LoadPgVacuumAsync(timer);
                     break;
                 case PgWaitsInnerTabIndex:
-                    await LoadPgWaitsAsync();
+                    await LoadPgWaitsAsync(timer);
                     break;
                 case PgIoInnerTabIndex:
-                    await LoadPgIoAsync();
+                    await LoadPgIoAsync(timer);
                     break;
                 case PgReplicationInnerTabIndex:
-                    await LoadPgReplicationAsync();
+                    await LoadPgReplicationAsync(timer);
                     break;
                 case PgStorageInnerTabIndex:
-                    await LoadPgStorageAsync();
+                    await LoadPgStorageAsync(timer);
                     break;
 
                 case OverviewInnerTabIndex:
@@ -672,29 +751,66 @@ public partial class ViewerServerTab : UserControl
                     break;
             }
 
+            /* #9426: wait for the layout and render pass the load's binds queued (the dispatcher's Background priority, behind render and ahead
+               of idle), so the line's render share ends when the panel is drawn and not when the loader's own code returned. */
+            await timer.SettleLayoutAsync(Dispatcher);
+
+            /* A loader that swallowed the cancel (a read it treats as best-effort) must not stamp or write a line either. */
+            cancel.ThrowIfCancellationRequested();
+
             /* #8549: a refresh queued behind this one reads the window the picker names now, and this load read the one before it,
                so it does not stamp "refreshed" over a header that already says the new range. The queued load stamps. */
             if (ViewerRangeRefreshStatus.StampsRefreshed(_refreshRequested))
             {
-                StatusChanged?.Invoke($"{_server.DisplayName}: refreshed {ViewerTimeHelper.RefreshedStamp()}");
+                /* #9365: a chart read that failed after its retry leaves the grid current. The line says which part did not load, with the
+                   stamp the rest was read at, instead of a bare "refreshed" that reads as if nothing had gone wrong. */
+                StatusChanged?.Invoke(RefreshedStatus(_server.DisplayName, _partialFailureText, ViewerTimeHelper.RefreshedStamp()));
             }
+        }
+        catch (Exception) when (cancel.IsCancellationRequested)
+        {
+            /* #9194: the reader picked another sub-tab. Not an error, and the half-read tab is read again when they come back. */
+            cancelled = true;
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"refresh failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            var failed = timer.FailedRead(ex);
+            var surface = string.IsNullOrEmpty(timer.Surface) ? InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header) : timer.Surface;
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: {surface}", failed?.Phase, failed?.Ms ?? timer.ElapsedMs, ex));
         }
         finally
         {
             /* Walk finding D15: a slow load (over ViewerLoadTimer.SlowLoadThresholdMs) names its tab and where the time went. */
-            var slow = timer.Finish(InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header));
+            var surfaceName = InnerTabLoadName(tabIndex, (tabIndex >= 0 && tabIndex < InnerTabs.Items.Count ? InnerTabs.Items[tabIndex] as TabItem : null)?.Header);
             /* #5555: this load's clock is a local handed down to the loaders this method calls (Walk finding D15: a loader wraps each
                store read in Timed(timer, ...)), not a field. A read that starts outside this load (a Daily Summary drill into
                Top Queries, a slicer drag) passes null, so it cannot append its phases to this load's line, finished or live, or
                rename it. */
-            if (slow is not null)
+            if (cancelled)
             {
-                SlowLoadSink($"[{_server.DisplayName}] {slow}");
+                /* #9426: a load the reader replaced stops its clock and writes nothing, so no line carries a total that includes the wait for the newer one. */
+                timer.Finish(surfaceName);
             }
+            else
+            {
+                timer.FinishAndLog(surfaceName, slow => SlowLoadSink($"[{_server.DisplayName}] {slow}"));
+            }
+        }
+    }
+
+    /// <summary>#9426: the range the load reads, as the text the slow-load line shows: both bounds in UTC, never a server's own value.</summary>
+    private string WindowText()
+    {
+        try
+        {
+            var (startUtc, endUtc) = GetWindowUtc();
+            return string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{startUtc:yyyy-MM-dd HH:mm} to {endUtc:yyyy-MM-dd HH:mm} UTC");
+        }
+        catch (Exception)
+        {
+            /* A diagnostic: a picker that cannot say its range leaves the line without one and never fails the load. */
+            return "";
         }
     }
 

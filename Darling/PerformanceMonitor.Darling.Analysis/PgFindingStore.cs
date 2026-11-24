@@ -18,6 +18,7 @@ using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Darling.Analysis;
@@ -165,7 +166,7 @@ SELECT finding_id, analysis_time, server_id, server_name, database_name,
        incident_id, remediation_action_json, drill_down_json
 FROM analysis_findings
 WHERE server_id = $1
-AND   analysis_time >= $2
+AND   analysis_time > $2
 AND   analysis_time <= $3
 ORDER BY analysis_time DESC, severity DESC
 LIMIT $4";
@@ -389,7 +390,7 @@ ORDER BY local_bucket, story_path_hash";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
             var mutedHashes = await GetMutedHashesAsync(connection, context.ServerId, context.CancellationToken);
 
             foreach (var story in stories)
@@ -521,7 +522,7 @@ ORDER BY local_bucket, story_path_hash";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
 
             /* #2448: one transaction for the whole set — the batch commits complete or not at all.
                No token check between rows: see the note above. */
@@ -613,7 +614,7 @@ ORDER BY local_bucket, story_path_hash";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, context.CancellationToken);
 
             /* #4737: the target's clock over the read window, resolved the way the baselines resolve theirs — the
                zone id when the server reports one (SQL Server 2022 and later, Azure), else its one offset for every
@@ -698,7 +699,7 @@ ORDER BY local_bucket, story_path_hash";
                zone-shifted. */
             var windowEnd = DateTime.SpecifyKind(asOfUtc ?? DateTime.UtcNow, DateTimeKind.Unspecified);
 
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, cancellationToken);
             using var command = new NpgsqlCommand(GetRecentFindingsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(windowEnd.AddHours(-hoursBack));
@@ -735,7 +736,7 @@ ORDER BY local_bucket, story_path_hash";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, CancellationToken.None);
             using var command = new NpgsqlCommand(GetStoryPathsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(rootFactKey);
@@ -770,7 +771,7 @@ ORDER BY local_bucket, story_path_hash";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, CancellationToken.None);
             using var command = new NpgsqlCommand(GetLatestFindingsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
 
@@ -824,7 +825,7 @@ ORDER BY local_bucket, story_path_hash";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, CancellationToken.None);
             using var command = new NpgsqlCommand(MuteStorySql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(CollectionIdGenerator.Next());
             // serverId 0 is the MCP "mute across all servers" sentinel; persist it as NULL, the
@@ -876,7 +877,7 @@ ORDER BY local_bucket, story_path_hash";
            to int, so roughly half of all real ids are negative and a `> 0` test here would silently count half the
            fleet's scoped mutes fleet-wide. */
         var scoped = serverId is not (null or 0);
-        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, cancellationToken);
         using var command = new NpgsqlCommand(scoped ? CountFindingsWithHashForServerSql : CountFindingsWithHashSql, connection)
         {
             CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds,
@@ -906,7 +907,7 @@ ORDER BY local_bucket, story_path_hash";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, CancellationToken.None);
             using var command = new NpgsqlCommand(UnmuteStorySql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(muteId);
             await command.ExecuteNonQueryAsync();
@@ -941,7 +942,7 @@ ORDER BY local_bucket, story_path_hash";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, CancellationToken.None);
             using var command = new NpgsqlCommand(GetMutedStoriesSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
 
@@ -981,7 +982,7 @@ ORDER BY local_bucket, story_path_hash";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, CancellationToken.None);
             using var command = new NpgsqlCommand(CleanupOldFindingsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(NaiveUtcNow().AddDays(-retentionDays));
             await command.ExecuteNonQueryAsync();
@@ -1002,7 +1003,7 @@ ORDER BY local_bucket, story_path_hash";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFindings, cancellationToken);
             return await GetMutedHashesAsync(connection, serverId, cancellationToken);
         }
         catch (Exception ex)

@@ -29,9 +29,9 @@ namespace PerformanceMonitor.Common;
 /// WINDOWING — every diff takes BOTH window edges (<paramref name="startUtc"/>, <paramref name="endUtc"/>) and
 /// applies them to the computed <c>change_time</c>, NOT to the snapshot read. Callers deliberately keep the
 /// snapshot immediately BEFORE the window as the diff baseline (the reads upper-bound at the window end but
-/// never lower-bound), so a change landing on the first in-window snapshot is still detected — mirroring the
-/// Dashboard, whose <c>report.*_changes</c> views LAG over the full history and then filter
-/// <c>change_time &gt;= @from AND change_time &lt;= @to</c>. The headless MCP tools, which read the full
+/// never lower-bound), so a change landing on the first in-window snapshot is still detected. A change belongs to
+/// the window when its <c>change_time</c> is after the start and at or before the end, so two windows that meet
+/// at an instant report a change at that instant once, in the earlier one. The headless MCP tools, which read the full
 /// unbounded history and only lower-bound, pass <see cref="DateTime.MaxValue"/> as the upper edge (a no-op)
 /// so this both-edges algorithm reproduces their prior lower-bound-only behavior exactly.
 /// </para>
@@ -149,12 +149,58 @@ public static class ConfigChangeDiff
         "is_accelerated_database_recovery_on", "is_memory_optimized_enabled", "is_optimized_locking_on",
     };
 
+    /// <summary>
+    /// #9270: the <c>state_desc</c> values of a database that is not settled. A capture taken while a database is in one of these
+    /// holds engine defaults for most of its settings (a restoring database reads snapshot isolation OFF, for one), so the capture is
+    /// never a side of a settings comparison.
+    /// </summary>
+    public static readonly IReadOnlyList<string> TransitionalDatabaseStates = new[] { "RESTORING", "RECOVERING", "RECOVERY_PENDING" };
+
+    /// <summary>#9270: whether <paramref name="stateDesc"/> is one of <see cref="TransitionalDatabaseStates"/> (any letter case; null is settled).</summary>
+    public static bool IsTransitionalDatabaseState(string? stateDesc)
+    {
+        if (stateDesc is null)
+        {
+            return false;
+        }
+
+        foreach (var transitional in TransitionalDatabaseStates)
+        {
+            if (string.Equals(stateDesc, transitional, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>#9270: where <c>state_desc</c> sits in <see cref="DatabaseConfigChangeSettingNames"/> and so in a snapshot's values, found by name so a reorder of the list cannot turn the transitional skip off.</summary>
+    private const string StateSettingName = "state_desc";
+
+    private static readonly int StateIndex = IndexOfSetting(StateSettingName);
+
+    private static string? StateOf(DatabaseConfigSnapshot snapshot) => StateIndex < snapshot.Values.Count ? snapshot.Values[StateIndex] : null;
+
+    private static int IndexOfSetting(string name)
+    {
+        for (var i = 0; i < DatabaseConfigChangeSettingNames.Count; i++)
+        {
+            if (string.Equals(DatabaseConfigChangeSettingNames[i], name, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return int.MaxValue;
+    }
+
     /* ─────────────────────────── C# snapshot diffs (pure, unit-testable, no live store) ─────────────────────────── */
 
     /// <summary>
     /// Diffs the sys.configurations snapshots into a change per (configuration_name) whose configured or in-use
     /// value moved between two consecutive captures (every config row is present in every snapshot, so a
-    /// per-name walk is the whole story). Emits changes whose newer capture falls in [<paramref name="startUtc"/>,
+    /// per-name walk is the whole story). Emits changes whose newer capture falls in (<paramref name="startUtc"/>,
     /// <paramref name="endUtc"/>], newest first.
     /// </summary>
     public static List<ServerConfigChange> DiffServerConfigChanges(
@@ -168,7 +214,7 @@ public static class ConfigChangeDiff
             {
                 if (prev is not null
                     && (prev.ValueConfigured != cur.ValueConfigured || prev.ValueInUse != cur.ValueInUse)
-                    && cur.CaptureTime >= startUtc && cur.CaptureTime <= endUtc)
+                    && cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
                 {
                     changes.Add(new ServerConfigChange(
                         cur.CaptureTime, cur.ConfigurationName, prev.ValueConfigured, cur.ValueConfigured,
@@ -185,8 +231,15 @@ public static class ConfigChangeDiff
     /// <summary>
     /// Diffs the sys.databases snapshots into a change per (database, setting) whose value moved between two
     /// consecutive captures — the WIDE row is UNPIVOTed against <see cref="DatabaseConfigChangeSettingNames"/> so
-    /// the setting_name is the literal column name. Emits changes in [<paramref name="startUtc"/>,
+    /// the setting_name is the literal column name. Emits changes in (<paramref name="startUtc"/>,
     /// <paramref name="endUtc"/>], newest first.
+    /// <para>#9270: a capture of a database in a transitional state (<see cref="IsTransitionalDatabaseState"/>) holds engine defaults for
+    /// its other settings, so it never supplies them: every setting but <c>state_desc</c> compares a settled capture with the newest settled
+    /// one before it, and a setting changed across a restoring capture still shows. A run of transitional captures (consecutive, after a
+    /// settled one) that ends before it is stuck (<see cref="TransitionalDatabaseRuns.StuckAfter"/> after its first capture), such as the
+    /// minutes after a restart or failover, gives no row. A stuck run gives a <c>state_desc</c> row from the settled state to the
+    /// transitional one, stamped at the capture that made it stuck, and a settled capture that ends it gives one from the run's last
+    /// transitional state to the settled state. A database transitional since it was first seen gives no row.</para>
     /// </summary>
     public static List<DatabaseConfigChange> DiffDatabaseConfigChanges(
         IReadOnlyList<DatabaseConfigSnapshot> snapshots, DateTime startUtc, DateTime endUtc)
@@ -195,12 +248,47 @@ public static class ConfigChangeDiff
         foreach (var dbGroup in snapshots.GroupBy(s => s.DatabaseName))
         {
             DatabaseConfigSnapshot? prev = null;
+            DatabaseConfigSnapshot? runFirst = null;
+            DatabaseConfigSnapshot? runLast = null;
+            var stuck = false;
             foreach (var cur in dbGroup.OrderBy(s => s.CaptureTime))
             {
-                if (prev is not null && cur.CaptureTime >= startUtc && cur.CaptureTime <= endUtc)
+                if (StateIndex < cur.Values.Count && IsTransitionalDatabaseState(cur.Values[StateIndex]))
+                {
+                    if (prev is null)
+                    {
+                        continue;
+                    }
+
+                    runFirst ??= cur;
+                    runLast = cur;
+                    if (!stuck && cur.CaptureTime - runFirst.CaptureTime >= TransitionalDatabaseRuns.StuckAfter)
+                    {
+                        stuck = true;
+                        if (cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
+                        {
+                            changes.Add(new DatabaseConfigChange(
+                                cur.CaptureTime, cur.DatabaseName, StateSettingName, StateOf(prev), StateOf(cur), prev.CaptureTime));
+                        }
+                    }
+
+                    continue;
+                }
+
+                if (stuck && runLast is not null && cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
+                {
+                    changes.Add(new DatabaseConfigChange(
+                        cur.CaptureTime, cur.DatabaseName, StateSettingName, StateOf(runLast), StateOf(cur), runLast.CaptureTime));
+                }
+
+                if (prev is not null && cur.CaptureTime > startUtc && cur.CaptureTime <= endUtc)
                 {
                     for (var i = 0; i < DatabaseConfigChangeSettingNames.Count; i++)
                     {
+                        /* A stuck run's two state rows were emitted above; the settled states themselves are not compared again. */
+                        if (stuck && i == StateIndex)
+                            continue;
+
                         var oldVal = i < prev.Values.Count ? prev.Values[i] : null;
                         var newVal = i < cur.Values.Count ? cur.Values[i] : null;
                         if (!string.Equals(oldVal, newVal, StringComparison.Ordinal))
@@ -219,6 +307,9 @@ public static class ConfigChangeDiff
                 }
 
                 prev = cur;
+                runFirst = null;
+                runLast = null;
+                stuck = false;
             }
         }
 
@@ -275,7 +366,7 @@ public static class ConfigChangeDiff
         }
 
         return result
-            .Where(c => c.ChangeTime >= startUtc && c.ChangeTime <= endUtc)
+            .Where(c => c.ChangeTime > startUtc && c.ChangeTime <= endUtc)
             .OrderByDescending(c => c.ChangeTime)
             .ThenBy(c => c.DatabaseName, StringComparer.Ordinal)
             .ThenBy(c => c.SettingName, StringComparer.Ordinal)
@@ -285,7 +376,7 @@ public static class ConfigChangeDiff
     /// <summary>
     /// Set-diffs consecutive full trace-flag snapshots: a flag present in the newer capture but not the older =
     /// <c>enabled</c>; present in the older but not the newer = <c>disabled</c>; present in both with a changed
-    /// status/scope = <c>modified</c>. Emits changes in [<paramref name="startUtc"/>, <paramref name="endUtc"/>],
+    /// status/scope = <c>modified</c>. Emits changes in (<paramref name="startUtc"/>, <paramref name="endUtc"/>],
     /// newest first.
     /// </summary>
     public static List<TraceFlagChange> DiffTraceFlagChanges(
@@ -315,7 +406,7 @@ public static class ConfigChangeDiff
         for (var i = 1; i < byCapture.Count; i++)
         {
             var changeTime = byCapture[i].Key;
-            if (changeTime < startUtc || changeTime > endUtc)
+            if (changeTime <= startUtc || changeTime > endUtc)
             {
                 continue;
             }

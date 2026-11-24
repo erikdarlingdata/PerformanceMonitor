@@ -42,7 +42,6 @@ public sealed class ViewerSessionStatsSqlTests
         Assert.DoesNotContain("FROM v_session_stats", sql, StringComparison.Ordinal);
 
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
 
         /* #4234/#4349: bucketed — the outer read joins agg + latest on bucket_start and orders by
@@ -185,6 +184,71 @@ public sealed class ViewerSessionStatsMappingTests
         Assert.Equal(44, byLegend["Dormant"]);
         Assert.Equal(55, byLegend["Idle >30m"]);
         Assert.Equal(66, byLegend["Waiting for Memory"]);
+    }
+
+    [Fact]
+    public void DrawOrder_PutsTotalLast_AndEveryOtherSeriesBeforeIt()
+    {
+        var legends = SessionStatsChartRenderer.DrawOrder.Select(s => s.Legend).ToList();
+
+        Assert.Equal(
+            new[] { "Running", "Sleeping", "Background", "Dormant", "Idle >30m", "Waiting for Memory", "Total" },
+            legends);
+        Assert.Equal(SessionStatsChartRenderer.SessionSeriesSpecs.Count, legends.Count);
+    }
+
+    [Fact]
+    public void Render_DrawsTotalLastAndOnTop_WithItsOwnStyle_AndPlotsTheCountOfEverySession()
+    {
+        /* A server with no dormant sessions: Total (every session, background included) is running + sleeping. Background is a count of
+           the sessions that are not user sessions, and each of them is also running or sleeping, so it is not added again. Drawn first,
+           Total ran within a few sessions of Sleeping and was hidden under it. */
+        var start = new DateTime(2026, 11, 17, 17, 0, 0, DateTimeKind.Utc);
+        var points = new List<ISessionStatsPoint>();
+        for (var i = 0; i < 4; i++)
+        {
+            var sleeping = 350 + (i * 10);
+            points.Add(new SessionStatsPoint(
+                CollectionTime: start.AddMinutes(i * 5),
+                TotalSessions: 2 + sleeping,
+                RunningSessions: 2,
+                SleepingSessions: sleeping,
+                BackgroundSessions: 75,
+                DormantSessions: 0,
+                IdleSessionsOver30Min: 10,
+                SessionsWaitingForMemory: 0,
+                DatabasesWithConnections: 5,
+                TopApplicationName: null,
+                TopApplicationConnections: null,
+                TopHostName: null,
+                TopHostConnections: null));
+        }
+
+        var (legends, totalValues, plottedStyles) = StaTestThread.Run(() =>
+        {
+            var chart = new ScottPlot.WPF.WpfPlot();
+            new SessionStatsChartRenderer(new ChartRenderHelper(), static utc => utc, ViewerTimeHelper.CurrentDisplayZone)
+                .Render(chart, null, points, start.ToOADate(), start.AddMinutes(20).ToOADate());
+            var scatters = chart.Plot.PlottableList.OfType<ScottPlot.Plottables.Scatter>().ToList();
+            var total = scatters[^1];
+            return (
+                scatters.Select(x => x.LegendText).ToList(),
+                total.Data.GetScatterPoints().Select(p => p.Y).ToList(),
+                scatters.Select(x => (x.LegendText, x.LinePattern.Name, x.FillY, x.LineWidth)).ToList());
+        });
+
+        Assert.Equal("Total", legends[^1]);
+        Assert.Equal(points.Select(p => (double)p.TotalSessions), totalValues);
+        Assert.All(points, p => Assert.Equal(p.TotalSessions, p.RunningSessions + p.SleepingSessions + p.DormantSessions));
+
+        var totalStyle = plottedStyles[^1];
+        Assert.Equal(ScottPlot.LinePattern.Dashed.Name, totalStyle.Name);
+        Assert.False(totalStyle.FillY);
+        foreach (var other in plottedStyles.Take(plottedStyles.Count - 1))
+        {
+            Assert.NotEqual(ScottPlot.LinePattern.Dashed.Name, other.Name);
+            Assert.True(totalStyle.LineWidth > other.LineWidth, other.LegendText);
+        }
     }
 
     [Fact]

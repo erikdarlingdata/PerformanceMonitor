@@ -631,4 +631,155 @@ public sealed class MemoryPressureEventsCollectorDefinitionTests
         var row = Assert.Single(rows);
         Assert.Equal("RESOURCE_MEMPHYSICAL_HIGH", row.MemoryNotification);
     }
+
+    /* #8981: what the host does around a collector, in one place. A restart is a fresh server id (the memory of the
+       collector is per process and keyed by it), the watermark is the newest stored stamp, and the state the previous
+       process left comes back through the context. The host saves the state only after the rows are written. */
+    private sealed class RestartingHost
+    {
+        public readonly List<MemoryPressureEventsCollector.Row> Stored = new();
+        public readonly Dictionary<string, string> State = new();
+
+        public async Task<List<MemoryPressureEventsCollector.Row>> RestartAndReadAsync(IEnumerable<object[]> ring)
+        {
+            var context = CollectorTestContext.Make(
+                s_deltas,
+                watermark: Stored.Count == 0 ? null : Stored.Max(r => r.SampleTime),
+                serverId: NewServer(),
+                state: new Dictionary<string, string>(State));
+            using var reader = new FakeCollectorDataReader(ring.ToArray());
+            var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+            Stored.AddRange(rows);
+            foreach (var (key, value) in context.PendingState)
+            {
+                State[key] = value;
+            }
+
+            return rows;
+        }
+    }
+
+    private static readonly DateTime s_boot = new(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>
+    /// A ring buffer record as a read at <paramref name="readTime"/> returns it. The stamp is SYSUTCDATETIME() minus the ticks
+    /// since the record, and the two clocks run about 60 ppm apart, so the same record reads higher the later after boot it
+    /// is read: a second read 95 days after the first stamps it about 8 minutes higher.
+    /// </summary>
+    private static object[] RingRecord(DateTime eventTime, DateTime readTime, string notification = "RESOURCE_MEMPHYSICAL_LOW", int process = 2)
+        => Rec(eventTime + TimeSpan.FromTicks((long)((readTime - s_boot).Ticks * 60e-6)), notification, process, 0, (long)(eventTime - s_boot).TotalMilliseconds);
+
+    /// <summary>
+    /// #8981: a quiet server whose last burst of memory pressure notifications (40, 15 s apart) was stored in August. After
+    /// a service restart in November the ring buffer returns each of them about 8 minutes above the stamp it was stored
+    /// with (60 ppm of 95 days). The watermark is the stamp of the newest one, so every record of the burst that sat within
+    /// 8 minutes of the newest now reads ABOVE the watermark. The cold-start guess spares the one row nearest the watermark and
+    /// stored the rest again, months-old records with a new sample_time. With the position persisted, none of them is stored
+    /// again, and the two records that really are new, 10 s apart and right behind them in the buffer, are stored once.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_RestartMonthsAfterABurst_StoresNoneOfItAgain_AndTheNewRecordsOnce()
+    {
+        var host = new RestartingHost();
+        var burstStart = new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc);
+        var burst = Enumerable.Range(0, 40).Select(i => burstStart.AddSeconds(15 * i)).ToArray();
+
+        var firstRead = new DateTime(2026, 8, 19, 13, 0, 0, DateTimeKind.Utc);
+        var stored = await host.RestartAndReadAsync(burst.Select(t => RingRecord(t, firstRead)));
+        Assert.Equal(40, stored.Count);
+
+        var secondRead = new DateTime(2026, 11, 14, 5, 35, 0, DateTimeKind.Utc);
+        var again = await host.RestartAndReadAsync(burst.Select(t => RingRecord(t, secondRead)));
+        Assert.Empty(again);
+
+        var fresh = new[] { new DateTime(2026, 11, 14, 4, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 14, 4, 0, 10, DateTimeKind.Utc) };
+        var thirdRead = new DateTime(2026, 11, 15, 14, 17, 0, DateTimeKind.Utc);
+        var kept = await host.RestartAndReadAsync(burst.Concat(fresh).Select(t => RingRecord(t, thirdRead)));
+        Assert.Equal(2, kept.Count);
+
+        var fourthRead = new DateTime(2026, 11, 17, 16, 22, 0, DateTimeKind.Utc);
+        Assert.Empty(await host.RestartAndReadAsync(burst.Concat(fresh).Select(t => RingRecord(t, fourthRead))));
+        Assert.Equal(42, host.Stored.Count);
+    }
+
+    /// <summary>
+    /// #8981: one old record and a neighbour 150 ms before it, read after twelve service restarts a few hours apart. Each read
+    /// stamps both 0.1 to 0.2 s higher than the one before (the copies of the October record in the field differ by that much).
+    /// Each is stored once.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_TwelveRestartsOverOneOldRecord_StoreItOnce()
+    {
+        var host = new RestartingHost();
+        var held = new DateTime(2026, 10, 14, 9, 30, 0, DateTimeKind.Utc);
+        var neighbour = held.AddMilliseconds(-150);
+
+        for (var restart = 0; restart < 13; restart++)
+        {
+            var read = new DateTime(2026, 10, 14, 10, 0, 0, DateTimeKind.Utc).AddHours(4 * restart);
+            await host.RestartAndReadAsync(new[] { RingRecord(neighbour, read, "RESOURCE_MEM_STEADY", 0), RingRecord(held, read) });
+        }
+
+        Assert.Equal(2, host.Stored.Count);
+    }
+
+    /// <summary>
+    /// #8981: a restart of the SQL Server instance makes the raw timestamps a new, smaller series. The position saved before it
+    /// must not hide the new records, which are all kept.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_SqlServerRestartedBetweenServiceRestarts_KeepsEveryNewRecord()
+    {
+        var host = new RestartingHost();
+        var event1 = new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc);
+        await host.RestartAndReadAsync(new[] { RingRecord(event1, new DateTime(2026, 8, 19, 13, 0, 0, DateTimeKind.Utc)) });
+
+        var newStart = s_startTime.AddDays(60);
+        var newest = host.Stored.Max(r => r.SampleTime);
+        var rows = await host.RestartAndReadAsync(new[]
+        {
+            Rec(newest.AddMinutes(3), "RESOURCE_MEMPHYSICAL_HIGH", 0, 0, raw: 1_000, startTime: newStart),
+            Rec(newest.AddMinutes(4), "RESOURCE_MEMPHYSICAL_LOW", 2, 0, raw: 2_000, startTime: newStart),
+        });
+
+        Assert.Equal(2, rows.Count);
+    }
+
+    /// <summary>
+    /// #8981: a store that lost the rows the saved position stands for (no watermark) gets them back. The position counts as
+    /// stored only when the watermark has moved past the read that returned it.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_SavedPositionButTheStoreHoldsNothing_ReturnsTheRowsAgain()
+    {
+        var host = new RestartingHost();
+        var burstStart = new DateTime(2026, 8, 19, 12, 0, 0, DateTimeKind.Utc);
+        var ring = Enumerable.Range(0, 5).Select(i => RingRecord(burstStart.AddSeconds(15 * i), burstStart.AddHours(1))).ToArray();
+        Assert.Equal(5, (await host.RestartAndReadAsync(ring)).Count);
+
+        host.Stored.Clear();
+        Assert.Equal(5, (await host.RestartAndReadAsync(ring)).Count);
+    }
+
+    /// <summary>#8981: a saved value that is not ours (an edited row, an older format) is no state. The read does not throw and dedupes as it did before the state existed.</summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("garbage")]
+    [InlineData("1|2|3")]
+    [InlineData("x|1||")]
+    [InlineData("99999999999999999999|1||")]
+    public async Task ReadAsync_UnreadableSavedPosition_FallsBackToTheColdStartGuess(string saved)
+    {
+        var watermark = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+        using var reader = new FakeCollectorDataReader(
+            Rec(watermark.AddMilliseconds(8), "RESOURCE_MEM_STEADY", 0, 0),
+            Rec(watermark.AddMinutes(20), "RESOURCE_MEMPHYSICAL_LOW", 2, 0));
+        var state = new Dictionary<string, string> { [MemoryPressureEventsCollector.MemoryStateKey] = saved };
+
+        var rows = await MemoryPressureEventsCollector.Instance.ReadAsync(
+            reader, CollectorTestContext.Make(s_deltas, watermark: watermark, serverId: NewServer(), state: state), CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("RESOURCE_MEMPHYSICAL_LOW", row.MemoryNotification);
+    }
 }

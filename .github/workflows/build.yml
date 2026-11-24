@@ -91,9 +91,13 @@ jobs:
               - 'PerformanceMonitor.Ui/**/!(*.md)'
             # The Darling export tool (Exporter/). It reads PerformanceMonitor.PlanAnalysis (and Common through it), so a change
             # there reaches it too. pr.yml's exporter job reads this filter through ci-select.py. The root files are covered
-            # by the `root` filter above.
+            # by the `root` filter above. Its store-column guard (StoreColumnCoverageTests) builds a real store schema from the
+            # migrations, whose tables come from the migration ladder and the collectors' column lists, so a change to either
+            # reaches it too.
             exporter:
               - 'Exporter/**/!(*.md)'
+              - 'Darling/PerformanceMonitor.Darling.Storage/**/!(*.md)'
+              - 'PerformanceMonitor.Collectors/**/!(*.md)'
               - 'PerformanceMonitor.PlanAnalysis/**/!(*.md)'
               - 'PerformanceMonitor.Common/**/!(*.md)'
             lite:
@@ -388,142 +392,15 @@ jobs:
           dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-restore
           dotnet build Darling/PerformanceMonitor.Darling.Viewer/PerformanceMonitor.Darling.Viewer.csproj -c Release --no-restore
 
-      # RELEASE-ONLY here since #3887; on pull requests and pushes the suite runs in the lite-tests
-      # matrix job below, four shards cut over CLASS NAMES (balanced by recorded duration since #5208,
-      # the class-name hash otherwise), because this one step had grown to
-      # ~9½ of the build job's ~15 minutes — 62% of the PR wall's critical path. The name cut is the
-      # deliberate opposite of the SEMANTIC split this step's history retired: it was split into
-      # fast / analysis-heavy halves when the seven analysis classes rebuilt the full DuckDB schema
-      # inside every test and their subset alone cost ~9 minutes; after the shared class fixtures
-      # (#1693, #1698) and batched seeding (#1694) that subset ran in ~1 minute, so the split — and
-      # the narrower lite_analysis path gate that let non-analysis Lite changes skip it — stopped
-      # earning its second test-host spin-up and its FILTER-DRIFT RISK. A cut over class names
-      # cannot drift: every class lands in exactly one shard (by arithmetic for the hash, by a
-      # proof for the duration cut), a class added tomorrow included, and no list anywhere has
-      # to be maintained. Releases keep this single unsharded
-      # pass so the artifact-producing run still executes the suite whole, in one log.
-      - name: Run Lite tests
-        if: github.event_name == 'release'
-        run: dotnet run --project Lite.Tests/Lite.Tests.csproj -c Release --no-build -- -xml TestResults/lite-timing-release.xml
-
-      # #5208: per-test timings of the unsharded release pass, same shape as the lite-tests shards.
-      - name: Lite test timing summary
-        if: always() && github.event_name == 'release'
-        continue-on-error: true
-        run: python .github/scripts/lite-timing-top.py TestResults
-
-      - name: Upload Lite test timings
-        if: always() && github.event_name == 'release'
-        continue-on-error: true
-        uses: actions/upload-artifact@v6
-        with:
-          name: lite-tests-timing-release
-          path: |
-            TestResults/lite-timing-*.xml
-            TestResults/lite-timing-*.xml.cpu.json
-          retention-days: 7
-          if-no-files-found: ignore
-
-      # #5459 cut 3b: the PostgreSQL shards run EVERY Darling.Tests class, with a live store, whenever the Darling
-      # gate matches (the same .github/darling-paths-filter.yml the darling-pg job reads). This no-store pass would
-      # repeat their non-live classes, so while the shards run it keeps only the Stage=Guard classes. Where the gate
-      # does not match (a Lite-only change, a root build file) and on a release it still runs the whole suite.
-      # .github/scripts/ci-select.py holds the rule (darling_scope); the replay of the failure corpus checks it.
-      - name: Detect the Darling PostgreSQL gate
-        id: darling-gate
-        if: github.event_name != 'release' && (steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true')
-        uses: dorny/paths-filter@v4
-        with:
-          base: ${{ github.event_name == 'push' && github.event.before || '' }}
-          filters: .github/darling-paths-filter.yml
-
-      - name: Decide the Darling test scope
-        id: darling-scope
-        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          GATE: ${{ steps.darling-gate.outputs.darling }}
-          FULL: ${{ steps.filter.outputs.darling_full }}
-          CORE: ${{ steps.filter.outputs.core }}
-          ROOT: ${{ steps.filter.outputs.root }}
-        run: |
-          set -euo pipefail
-          python .github/scripts/ci-select.py darling-scope --event "${EVENT_NAME}" --gate "${GATE:-false}"             --full "${FULL:-false}" --core "${CORE:-false}" --root "${ROOT:-false}" | tee -a "$GITHUB_OUTPUT"
-
-      - name: Run Darling tests
-        id: darling-tests
-        if: steps.filter.outputs.darling == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
-        env:
-          DARLING_SCOPE_FILTER: ${{ steps.darling-scope.outputs.filter }}
-          DARLING_SCOPE: ${{ steps.darling-scope.outputs.scope }}
-          # #5459 change 5: the slow-skip lookup reads the pull request's file list through the API.
-          GH_TOKEN: ${{ github.token }}
-          SLOW_EVENT: ${{ github.event_name }}
-          SLOW_PR: ${{ github.event.pull_request.number }}
-          SLOW_REPO: ${{ github.repository }}
-          # #5459: a pull request into main runs everything, Cost=Slow classes too (ci-select.py narrows).
-          SLOW_BASE_REF: ${{ github.base_ref }}
-        shell: pwsh
-        run: |
-          # An empty filter is the whole suite; `-trait Stage=Guard` is the Guard stage alone.
-          $scopeArgs = @($env:DARLING_SCOPE_FILTER -split ' ' | Where-Object { $_ })
-          # #5459 change 5: the whole-suite pass on a pull request leaves out the Cost=Slow classes the change does
-          # not reach (ci-select.py slow_skip). The Guard-only pass has none of them (a Guard class is never Slow).
-          $slowArgs = @()
-          if ($env:SLOW_EVENT -eq 'pull_request' -and $scopeArgs.Count -eq 0) {
-              $slowArgs = @(python .github/scripts/ci-select.py slow-skip --suite darling --event $env:SLOW_EVENT "--base-ref=$env:SLOW_BASE_REF" --repo $env:SLOW_REPO --pr $env:SLOW_PR | Where-Object { $_ } | ForEach-Object { '-class-'; "*.$_" })
-          }
-          # #5961: the `-trait Reads=Lite` part of a scope is the classes ci-select.py's source scan says read a Lite path, run
-          # by `-class`. xunit ANDs filters of different kinds, so it is a second run (without the Guard classes the first
-          # run already ran). An EMPTY scan skips it: a runner given no -class argument runs the whole suite, and the
-          # empty trait filter it replaces ran nothing.
-          $readsLite = $false
-          $restArgs = @()
-          for ($i = 0; $i -lt $scopeArgs.Count; $i++) {
-              if ($scopeArgs[$i] -eq '-trait' -and ($i + 1) -lt $scopeArgs.Count -and $scopeArgs[$i + 1] -eq 'Reads=Lite') { $readsLite = $true; $i++ }
-              else { $restArgs += $scopeArgs[$i] }
-          }
-          $exitCode = 0
-          if (-not $readsLite -or $restArgs.Count -gt 0) {
-              dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @restArgs @slowArgs
-              if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
-          }
-          if ($readsLite) {
-              $readsArgs = @(python .github/scripts/ci-select.py reads-classes --suite darling --args | Where-Object { $_ })
-              if ($LASTEXITCODE -ne 0) { Write-Host 'ci-select.py reads-classes failed'; exit 1 }
-              if ($readsArgs.Count -gt 0) {
-                  Write-Host "Lite-reads scan: $($readsArgs.Count / 2) Darling.Tests classes read a Lite path"
-                  dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- @readsArgs -trait- Stage=Guard
-                  if ($LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
-              }
-              else { Write-Host '::warning title=Lite-reads scan is empty::No Darling.Tests class reads a Lite path, so only the Guard stage runs here.' }
-          }
-          if ($exitCode -ne 0) { exit $exitCode }
-
-      # #5320: the statement-filter release gate. StatementCensus_PendingEntries_BlockARelease fails
-      # while any statement-column census entry or watched writer is pending, in every normal Darling
-      # test run (the step above), so a pull request that adds an unjudged column fails on its own.
-      # This step stays as the release-time backstop: it sets DARLING_RELEASE_CUT=1 and runs the one
-      # test by name, ahead of every publish and package step below, and only on the release event,
-      # so a release cannot ship an unhooked column even if the step above was skipped.
-      # ReleaseStatementGateWorkflowTests pins both halves, and that no other workflow sets the
-      # variable. Darling.Tests is already built (Release) by the build step above, so this runs
-      # the one test by name and nothing else.
-      - name: Statement filter release gate
-        if: github.event_name == 'release'
-        env:
-          DARLING_RELEASE_CUT: '1'
-        shell: pwsh
-        run: |
-          # A -method filter that matches nothing exits 0 with "Total: 0", so a renamed test would pass this gate
-          # without running. Fail unless the runner's own summary shows exactly the one test, with nothing failed,
-          # errored, skipped or not run. ReleaseStatementGateWorkflowTests binds the name to the test with nameof.
-          dotnet run --project Darling/Darling.Tests/Darling.Tests.csproj -c Release --no-build -- -method "*StatementCensus_PendingEntries_BlockARelease*" 2>&1 | Tee-Object -FilePath statement-gate.log
-          if ($LASTEXITCODE -ne 0) { throw "The statement filter release gate failed (exit $LASTEXITCODE)." }
-          if (-not (Select-String -Path statement-gate.log -Pattern 'Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0' -SimpleMatch -Quiet)) {
-            throw "The statement filter release gate did not run exactly one passing test; the summary above is not 'Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0'."
-          }
+      # The release build does not run the Lite or Darling test suites (#8756). Both ran here after the release was
+      # published, on the tree the release pull request's CI had already tested in the same Release configuration, so
+      # a failure could only be seen after users could download the build. The release pull request (dev into main) is
+      # the full test gate before the tag: pr.yml plans every area for a base other than dev and runs every class of
+      # both suites with no Cost=Slow skip. The statement filter release gate (#5320) runs there too, before the tag,
+      # so no check in this job can block a release after it is published.
+      # The Lite timing artifact this job used to upload (lite-tests-timing-release, #5208) had no reader: the test
+      # legs take their weights from the committed lite-shard-weights.json and darling-shard-weights.json, and the
+      # nightly uploads its own shard timings.
 
       - name: Get version
         if: steps.fastpath.outputs.engaged != 'true'
@@ -559,6 +436,28 @@ jobs:
       - name: Publish Lite (self-contained for Velopack)
         if: github.event_name == 'release'
         run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-x64 --self-contained -o publish/Lite-velopack
+
+      # #9256: the same two Lite publishes for win-arm64, release events only (a pull request or a push does not
+      # pay for them). Both need `win-arm64` in the project's RuntimeIdentifiers, which is what keeps the committed
+      # lock file and the locked-mode restore above in step. The assert step checks the machine type of every native
+      # file in each tree: a self-contained publish bundles the .NET runtime and every package's native libraries,
+      # and one x64-only library in the tree would only fail when the app loads it on a native ARM64 machine.
+      - name: Publish Lite (win-arm64)
+        if: github.event_name == 'release'
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-arm64 --self-contained -o publish/Lite-arm64
+
+      - name: Publish Lite (win-arm64, self-contained for Velopack)
+        if: github.event_name == 'release'
+        run: dotnet publish Lite/PerformanceMonitorLite.csproj -c Release -r win-arm64 --self-contained -o publish/Lite-arm64-velopack
+
+      - name: Assert every native file in the Lite win-arm64 publishes is ARM64
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          python3 .github/scripts/assert_pe_machine.py --machine arm64 publish/Lite-arm64 --list
+          if ($LASTEXITCODE -ne 0) { throw "publish/Lite-arm64 holds a native file that is not ARM64." }
+          python3 .github/scripts/assert_pe_machine.py --machine arm64 publish/Lite-arm64-velopack
+          if ($LASTEXITCODE -ne 0) { throw "publish/Lite-arm64-velopack holds a native file that is not ARM64." }
 
       # #6471: the Windows service and the viewer\ folder inside the Darling zip are self-contained, as Lite and
       # the viewer Setup.exe already are, so a stock Windows Server needs no .NET Runtime, ASP.NET Core Runtime or
@@ -614,6 +513,10 @@ jobs:
           # users at Setup.exe (Velopack); this ZIP is the explicit fallback.
           Compress-Archive -Path 'publish/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
 
+          # #9256: the win-arm64 portable ZIP, for Windows on ARM (Snapdragon laptops, Windows VMs on Apple Silicon).
+          # The x64 ZIP above keeps its name; this one adds the CPU.
+          Compress-Archive -Path 'publish/Lite-arm64/*' -DestinationPath "releases/PerformanceMonitorLite-$version-win-arm64.zip" -Force
+
       # upload-artifact is deliberately HELD at v6 (#1653): every signing step below consumes
       # `steps.upload-*.outputs.artifact-id`, and v7 changes artifact archiving semantics (the
       # `archive` parameter). The signing path only executes on `release: [published]`, so a broken
@@ -626,6 +529,14 @@ jobs:
         with:
           name: Lite-unsigned
           path: publish/Lite/
+
+      - name: Upload Lite win-arm64 for signing
+        if: github.event_name == 'release'
+        id: upload-lite-arm64
+        uses: actions/upload-artifact@v6
+        with:
+          name: Lite-arm64-unsigned
+          path: publish/Lite-arm64/
 
       - name: Stage Darling for signing
         if: github.event_name == 'release'
@@ -679,6 +590,22 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: 'signed/Lite'
 
+      # #9256: the win-arm64 tree has the same layout as the x64 one (files at the root), and the 'Lite' artifact
+      # configuration matches that layout and not the CPU type, so it signs this upload too (the x64 Velopack
+      # upload below already reuses it the same way). No new configuration on signpath.io.
+      - name: Sign Lite win-arm64
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'Lite'
+          github-artifact-id: '${{ steps.upload-lite-arm64.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/Lite-arm64'
+
       - name: Sign Darling
         if: github.event_name == 'release'
         uses: signpath/github-action-submit-signing-request@v3
@@ -715,6 +642,8 @@ jobs:
           # Re-zip signed files into release archives
           Remove-Item "releases/PerformanceMonitorLite-$version.zip" -ErrorAction SilentlyContinue
           Compress-Archive -Path 'signed/Lite/*' -DestinationPath "releases/PerformanceMonitorLite-$version.zip" -Force
+          Remove-Item "releases/PerformanceMonitorLite-$version-win-arm64.zip" -ErrorAction SilentlyContinue
+          Compress-Archive -Path 'signed/Lite-arm64/*' -DestinationPath "releases/PerformanceMonitorLite-$version-win-arm64.zip" -Force
 
       - name: Package Darling (signed)
         if: github.event_name == 'release'
@@ -806,6 +735,14 @@ jobs:
           name: Lite-Velopack-unsigned
           path: publish/Lite-velopack/
 
+      - name: Upload Lite win-arm64 (Velopack) for signing
+        if: github.event_name == 'release'
+        id: upload-lite-arm64-velopack
+        uses: actions/upload-artifact@v6
+        with:
+          name: Lite-arm64-Velopack-unsigned
+          path: publish/Lite-arm64-velopack/
+
       - name: Upload Darling Viewer (Velopack) for signing
         if: github.event_name == 'release'
         id: upload-darlingviewer-velopack
@@ -826,6 +763,19 @@ jobs:
           github-artifact-id: '${{ steps.upload-lite-velopack.outputs.artifact-id }}'
           wait-for-completion: true
           output-artifact-directory: 'signed/Lite-Velopack'
+
+      - name: Sign Lite win-arm64 (Velopack)
+        if: github.event_name == 'release'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
+          project-slug: 'PerformanceMonitor'
+          signing-policy-slug: 'release-signing'
+          artifact-configuration-slug: 'Lite'
+          github-artifact-id: '${{ steps.upload-lite-arm64-velopack.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: 'signed/Lite-arm64-Velopack'
 
       # The remote-seat viewer (#1555) has its OWN 'DarlingViewer' artifact configuration — the
       # co-located-zip 'Darling' slug signs a service+viewer\ tree layout, which does not match
@@ -857,6 +807,7 @@ jobs:
           # "Velopack library version is greater than vpk version").
           dotnet tool install -g vpk --version 1.2.161
           New-Item -ItemType Directory -Force -Path releases/velopack-lite
+          New-Item -ItemType Directory -Force -Path releases/velopack-lite-arm64
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
 
           # #6506: `vpk download github` logs "No releases found" and EXITS 0 when the GitHub
@@ -889,6 +840,16 @@ jobs:
           Invoke-VpkChannelDownload 'lite' 'releases/velopack-lite'
           vpk pack -u PerformanceMonitorLite -v $env:VERSION -p signed/Lite-Velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite --channel lite --packTitle "Performance Monitor Lite" --packAuthors "Darling Data, LLC"
           if ($LASTEXITCODE -ne 0) { throw "vpk pack for channel 'lite' failed (exit $LASTEXITCODE)." }
+
+          # #9256: Lite for Windows on ARM, its own channel ('lite-arm64') so an ARM64 install updates from ARM64
+          # packages and an x64 install keeps updating from 'lite'. The same pack id, so both land in the same
+          # install folder and one Start Menu entry. `--runtime win-arm64` is what makes vpk bundle its ARM64
+          # Setup and Update binaries; without it vpk takes this x64 runner's own RID. The channel's first release
+          # has no earlier package: Invoke-VpkChannelDownload's last line covers that case, because it fails only
+          # when an earlier release already carries releases.lite-arm64.json.
+          Invoke-VpkChannelDownload 'lite-arm64' 'releases/velopack-lite-arm64'
+          vpk pack -u PerformanceMonitorLite -v $env:VERSION -p signed/Lite-arm64-Velopack -e PerformanceMonitorLite.exe -o releases/velopack-lite-arm64 --channel lite-arm64 --runtime win-arm64 --packTitle "Performance Monitor Lite" --packAuthors "Darling Data, LLC"
+          if ($LASTEXITCODE -ne 0) { throw "vpk pack for channel 'lite-arm64' failed (exit $LASTEXITCODE)." }
 
           # Darling Viewer remote-seat installer (#1555): download previous + pack (from the SIGNED
           # velopack output). Its own 'darlingviewer' channel/delta feed, separate from the co-located
@@ -923,7 +884,7 @@ jobs:
         if: github.event_name == 'release'
         shell: pwsh
         run: |
-          python3 .github/scripts/postpack_signing.py collect --stage postpack/unsigned --manifest postpack/manifest.json --product lite=releases/velopack-lite --product darlingviewer=releases/velopack-darlingviewer
+          python3 .github/scripts/postpack_signing.py collect --stage postpack/unsigned --manifest postpack/manifest.json --product lite=releases/velopack-lite --product lite-arm64=releases/velopack-lite-arm64 --product darlingviewer=releases/velopack-darlingviewer
 
       - name: Upload the Velopack-generated executables for signing
         if: github.event_name == 'release'
@@ -1102,6 +1063,17 @@ jobs:
           $files = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '\.nupkg$' -or $_.Name -like '*-Setup.exe' -or $_.Name -like '*-Portable.zip' -or $_.Name -eq 'releases.lite.json' }).FullName
           gh release upload "${{ github.event.release.tag_name }}" $files --clobber
 
+      - name: Upload Lite win-arm64 Velopack artifacts
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # See the Lite step above for why this uses gh instead of `vpk upload github --merge` (#9256).
+          $dir = "releases/velopack-lite-arm64"
+          $files = @(Get-ChildItem -LiteralPath $dir -File | Where-Object { $_.Name -match '\.nupkg$' -or $_.Name -like '*-Setup.exe' -or $_.Name -like '*-Portable.zip' -or $_.Name -eq 'releases.lite-arm64.json' }).FullName
+          gh release upload "${{ github.event.release.tag_name }}" $files --clobber
+
       - name: Upload Darling Viewer Velopack artifacts
         if: github.event_name == 'release'
         shell: pwsh
@@ -1260,32 +1232,8 @@ jobs:
             exit 1
           fi
           # #6123: the Compose files are their own release asset, because no other download holds Darling/compose/.
-          # The packed copy names THIS release's image tag instead of :latest, so a release's files pull that
-          # release's image (darling-linux-publish pushes the ghcr :<version> tag). Only tracked files ship:
-          # the checkout has no local secrets. The archive opens into one folder so a user can extract it and
-          # cd into it. Line endings are made LF, because .gitattributes checks text out as CRLF.
-          compose_dir="PerformanceMonitorDarling-compose-${version}"
-          compose_stage="$(mktemp -d)"
-          mkdir -p "${compose_stage}/${compose_dir}"
-          cp -R Darling/compose/. "${compose_stage}/${compose_dir}/"
-          find "${compose_stage}/${compose_dir}" -type f -exec sed -i 's/\r$//' {} +
-          compose_file="${compose_stage}/${compose_dir}/docker-compose.yml"
-          sed -i "s|\(image: ghcr\.io/erikdarlingdata/performancemonitor-darling\):latest|\1:${version}|" "${compose_file}"
-          if [ "$(grep -c "image: ghcr\.io/erikdarlingdata/performancemonitor-darling:${version}$" "${compose_file}")" != "1" ] || grep -q "performancemonitor-darling:latest" "${compose_file}"; then
-            echo "::error::The packed compose file does not name the darling image at :${version}."
-            exit 1
-          fi
-          # #6140: setup.sh is the quickstart's first step, so it must open with its execute bit. The checkout holds it as
-          # mode 755 already, and chmod makes that certain. The tar listing below must show it executable and the
-          # script must parse under a POSIX shell, so a bad pack fails this job and not the user's first command.
-          chmod 755 "${compose_stage}/${compose_dir}/setup.sh"
-          sh -n "${compose_stage}/${compose_dir}/setup.sh"
-          tar -C "${compose_stage}" -czf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" "${compose_dir}"
-          tar -tzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
-          if ! tar -tvzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" | grep -Eq '^-rwxr-xr-x .* '"${compose_dir}"'/setup\.sh$'; then
-            echo "::error::setup.sh is missing from the compose archive or lacks its execute bit (#6140)."
-            exit 1
-          fi
+          # #9333: .github/scripts/pack-compose.sh packs it, and nightly.yml calls the same script.
+          bash .github/scripts/pack-compose.sh "${version}" releases
           # The export tool's Linux zip. zip keeps the execute bit of darling-export, and the listing check fails the job without it.
           export_zip="PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
           (cd publish/DarlingExport-linux && zip -q -r -X "${GITHUB_WORKSPACE}/releases/${export_zip}" .)
@@ -1389,10 +1337,12 @@ jobs:
       # workflow identity). SignPath's cosign support is edition-gated, and this path needs no keys or
       # subscription at all. Verify:
       #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:<version> \
-      #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
+      #     --certificate-identity 'https://github.com/erikdarlingdata/PerformanceMonitor/.github/workflows/build.yml@refs/tags/v<version>' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+      # The identity is exact (#8871): this workflow file at the release tag, the one identity that signs a released image. An
+      # unanchored --certificate-identity-regexp is a substring match that another repository's workflow can satisfy.
       # The v4 action installs cosign v3, which stores the signature as a Sigstore bundle referrer (#7037).
-      # Checked: cosign 2.6.5 and 3.0.6 both verify it with the command above.
+      # Checked: cosign 2.6.5 and 3.0.6 both read that bundle, and cosign 3.1.3 verifies the released image with the command above.
       - name: Install cosign
         if: github.event_name == 'release'
         uses: sigstore/cosign-installer@v4.1.3

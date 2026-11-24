@@ -118,6 +118,13 @@ public sealed partial class DarlingWorker
            job and no reloptions. No rung uses CREATE INDEX CONCURRENTLY or any other statement that
            cannot be transacted. */
         var storeRetryBudget = System.Diagnostics.Stopwatch.StartNew();
+        /* #9415: this start's row in the store's start history, and a row per migration rung it tries. The recorder hears the runner as it goes and
+           holds what it hears until the history's tables exist (a rung makes them). It flushes when the store is ready, after a failed attempt (so a
+           start that dies in a rung shows it), once a minute for the ERROR and WARN counts, and once more at shutdown. Never fails or delays the start. */
+        using var startRecorder = ServiceStartRecorder.ForThisProcess(ServiceLogTally.Shared, ProcessStartUtc());
+        /* Declared after the recorder and the data source it reads through, so EVERY exit of this method (a return, an exception, the store-retry
+           wait's cancellation) stops the loop, runs its last flush and awaits it before either is disposed. */
+        await using var startHistory = startRecorder.StartFlushLoop(postgres, _logger, stoppingToken);
         /* #4508: set once, the first time the fast budget above runs out on a failure that is still
            retryable — see the arm below. Gates CRITICAL-once/WARNING-per-retry the same way the config
            and bootstrap sites' single terminal LogCritical already is "once": this is the sustained arm's
@@ -128,14 +135,16 @@ public sealed partial class DarlingWorker
         {
             try
             {
-                await using var migrateConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                await using var migrateConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
                 /* MigrateAsync (logger overload) also best-effort sets the database-default search_path to
                    collect/config for every future connection (V8 security split); a least-privilege BYO
                    login that cannot ALTER DATABASE is warned, not failed — the managed connection strings
                    carry Search Path regardless. */
-                var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, stoppingToken);
+                var applied = await PgMigrations.MigrateAsync(migrateConnection, _logger, startRecorder, stoppingToken);
                 _logger.LogInformation("Postgres store ready (schema v{Version}, {Applied} migration(s) applied)",
                     StorageVersion.SchemaVersion, applied);
+                startRecorder.StoreReady();
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
                 /* #4961: this install's id, made (or read back) now that the schema is current and before any worker
                    starts. Inside this try, on the same connection, so a failure to make it is retried and triaged exactly
                    like a failed migration. The CLI and the Viewer only read the row. */
@@ -167,6 +176,7 @@ public sealed partial class DarlingWorker
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException
@@ -206,6 +216,7 @@ public sealed partial class DarlingWorker
 
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts, sustained: true);
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
                 await Task.Delay(next.Delay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -215,6 +226,9 @@ public sealed partial class DarlingWorker
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
                 _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store);
+                /* #9415: the flush loop's last flush writes the failed rung, if the history's tables exist, before the service stands down and the
+                   data source goes. */
+                await startHistory.StopAsync();
                 return;
             }
         }
@@ -225,6 +239,19 @@ public sealed partial class DarlingWorker
            gated on TimescaleDB — the scrub works the same on plain PostgreSQL, it just has fewer chunks to
            reason about. Drained with the other background startup work below. */
         var settingScrub = RunPgSettingScrubAsync(postgres, stoppingToken);
+
+        /* #9224: the migrations are done, so the hosts' store table health passes may start (one pass of each part for the data source each
+           host reads through). Never before this point: no pass runs during a migration. */
+        StoreHealthWarmGate.Shared.MarkStoreReady();
+
+        /* #9374: the newest measured relation sizes, kept in the store for the Viewer's first open. The worker's own cache takes the pass and
+           writes it, on the store's size cadence. Drained at shutdown with the other background startup work. */
+        var relationSizesWriter = StoreRelationSizesWriter.RunAsync(
+            postgres,
+            DarlingStoreTableHealthCache.For(postgres),
+            () => DarlingConfig.ClampStoreHealthSizesInterval(config.StoreHealthSizesIntervalMinutes),
+            _logger,
+            stoppingToken);
 
         /* #5097: the slow-read writer, drained at shutdown. Failure-isolated inside; it never ends before shutdown. */
         var slowReadWriter = _slowReads is null ? Task.CompletedTask : _slowReads.RunAsync(postgres, _logger, stoppingToken);
@@ -276,15 +303,16 @@ public sealed partial class DarlingWorker
            (QueryStoreSelfKeys explains the gate). Once per start, a no-op once the state row exists, and it never throws. */
         var queryStoreSelfKeys = QueryStoreSelfKeys.RunDelayedAsync(postgres, _logger, QueryStoreBackgroundIndexes.StartDelay, stoppingToken);
 
-        /* #7674: the opt-in trigram index on the plan-cache text. Off by default; when on it is built CONCURRENTLY in this background
-           task QueryTextTrigramIndex.StartDelay after start (a build is a whole-table read), and when off an existing one is dropped at
-           once. Never inside a migration rung, never awaited on the startup path, and RunAsync never throws. A failed build drops its
-           leftover and waits longer before each retry; a login that cannot create pg_trgm is reported by get_store_metrics and not asked
-           again. Drained with the other background work. */
-        var queryTextTrigramIndex = QueryTextTrigramIndex.RunAsync(
-            postgres, config.QueryTextTrigramIndexEnabled, QueryTextTrigramIndexTracker.Shared, _logger,
-            config.QueryTextTrigramIndexEnabled ? QueryTextTrigramIndex.StartDelay : TimeSpan.Zero,
-            QueryTextTrigramIndex.PassInterval, stoppingToken);
+        /* #8967: the older attention rows. V277 swapped a populated plain collect.attention_events to collect.attention_events_legacy with a rename,
+           and this copies the rows still inside retention into the new table in short, paced batches, then drops the legacy table. It runs
+           whenever the legacy table exists, whatever the TimescaleDB mode, resumes at its last committed batch after a restart, never throws, and a
+           store with no legacy table finishes it at once. Drained with the other background work. */
+        var attentionLegacyCopy = AttentionLegacyCopy.RunDelayedAsync(
+            postgres, _logger, QueryStoreBackgroundIndexes.StartDelay,
+            () => DarlingRetention.EffectivePurgeRetentionDays(
+                "attention", StoreConfigProvider.ResolveFleetRetentionDays("attention", _scheduleOverrides)),
+            async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(postgres, _logger, token)),
+            stoppingToken);
 
         /* #4957: one rollup-coverage probe in the background RollupCoverageWarmup.ServiceStartDelay after start, so
            the first MCP or web call finds each rollup's floor already measured and does not wait ~10 s on the
@@ -409,7 +437,7 @@ public sealed partial class DarlingWorker
 
         try
         {
-            await using var timescaleConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var timescaleConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
             _timescaleAvailable = await TimescaleSupport.TryEnableAsync(timescaleConnection, _logger, stoppingToken);
             if (_timescaleAvailable)
             {
@@ -535,7 +563,7 @@ public sealed partial class DarlingWorker
            them. */
         try
         {
-            await using var fallbackConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var fallbackConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
             /* #3817: segment three of the one convergence list — the two baseline steps, in the same order,
                off the same list, so the hourly pass runs them too. The UNGATED property is a property of this
                CALL SITE (after the TimescaleDB block's catch, on every path), not of the list: the steps are
@@ -559,7 +587,7 @@ public sealed partial class DarlingWorker
            fatal (the same optional-feature discipline as the TimescaleDB block above). */
         try
         {
-            await using var tuningConnection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var tuningConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
             /* #3817: segment four — the tuning pass, off the same list. The whole-block wrap the issue names
                (one failure costing every index in the pass) is unchanged HERE and unchanged on the hourly
                pass, because it is inside PgTableTuning.ApplyAsync's own per-statement isolation rather than
@@ -656,6 +684,9 @@ public sealed partial class DarlingWorker
             {
                 initialServers = initialView.EnabledServers;
             }
+
+            /* #8978: the trigram index options as the store resolves them, so get_store_metrics follows the store before the first pass. */
+            ConfigureTrigramIndexTrackers(config);
         }
 
         /* #1560/#1562: publish the effective MCP + web enable/port (store-authoritative when the view loaded,
@@ -680,6 +711,27 @@ public sealed partial class DarlingWorker
         }
         /* #5812 (L1): the PLAN_REGRESSION candidate cache evicts the entries of servers outside this set on its next store. */
         PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RetainServers(initialServers.Select(s => s.ServerId));
+
+        /* #7674: the opt-in trigram index on the plan-cache text. Off by default; when on it is built CONCURRENTLY in this background
+           task QueryTextTrigramIndex.StartDelay after start (a build is a whole-table read), and when off an existing one is dropped at
+           once. Never inside a migration rung, never awaited on the startup path, and RunAsync never throws. A failed build drops its
+           leftover and waits longer before each retry; a login that cannot create pg_trgm is reported by get_store_metrics and not asked
+           again. Drained with the other background work. #8978: launched after the first store read, and the option is read live at
+           every pass: config_service.query_text_trigram_index_enabled when it holds a value, else darling.json. The start delay follows
+           the resolved value at start, so a build waits out the post-restart IO burst and an option that is off drops at once. */
+        var queryTextTrigramIndex = QueryTextTrigramIndex.RunAsync(
+            postgres, () => config.QueryTextTrigramIndexResolved, QueryTextTrigramIndexTracker.Shared, _logger,
+            config.QueryTextTrigramIndexResolved ? QueryTextTrigramIndex.StartDelay : TimeSpan.Zero,
+            QueryTextTrigramIndex.PassInterval, stoppingToken);
+
+        /* #8570: the opt-in trigram index on the Query Store text, under its own option and tracker, with the same pass rules as the
+           plan-cache index above: built CONCURRENTLY in the background StartDelay after start, dropped at once when the option is off,
+           never awaited on the startup path, and drained with the other background work. #8978: read live at every pass, as above, from
+           config_service.query_store_text_trigram_index_enabled when it holds a value, else darling.json. */
+        var queryStoreTextTrigramIndex = QueryStoreTextTrigramIndex.RunAsync(
+            postgres, () => config.QueryStoreTextTrigramIndexResolved, QueryStoreTextTrigramIndex.SharedTracker, _logger,
+            config.QueryStoreTextTrigramIndexResolved ? QueryStoreTextTrigramIndex.StartDelay : TimeSpan.Zero,
+            QueryStoreTextTrigramIndex.PassInterval, stoppingToken);
 
         /* Capture-plans is read live (() => config.CapturePlans) so a store reload of
            config_service.capture_plans is honored on the next collector cycle without rebuilding.
@@ -740,7 +792,9 @@ public sealed partial class DarlingWorker
             /* #8146: clamped and logged once here, because darling.json is read once at start. */
             xeRingBufferMaxEvents: StoreConfigProvider.ClampXeRingBufferMaxEvents(config.XeRingBufferMaxEvents, _logger),
             /* #7643: the schema pass reads the cadence the dispatch schedules it at, live over the same overrides. */
-            collectorFrequencyMinutes: (name, serverId) => StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides).FrequencyMinutes);
+            collectorFrequencyMinutes: (name, serverId) => StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides).FrequencyMinutes,
+            /* #8798: column_stats reads only where schema_objects is on, by the same Enabled the dispatch skips a disabled collector by. */
+            collectorEnabled: (name, serverId) => StoreConfigProvider.ResolveSchedule(name, serverId, _scheduleOverrides).Enabled);
         /* #7067: one gate, one clock, for the worker's and the runner's repeated warnings. */
         runner.RepeatLog = RepeatLog;
         _runner = runner;
@@ -785,7 +839,7 @@ public sealed partial class DarlingWorker
             InvestigationDispatcher.WithLockTimeout(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(
-                        DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName))));
+                        DarlingStoreConnection.EnsureStoreSearchPath(storeConnectionString), StoreSessionNames.Investigation))));
         var investigationStore = new InvestigationRequestStore(
             investigationPostgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds);
         /* #5821: the generic webhook's {{investigation_json}} masks the stored brief at the level the MCP tools serve; an
@@ -917,6 +971,8 @@ public sealed partial class DarlingWorker
             identityCapacityCriticalPercent: () => alertSettings.IdentityCapacityCriticalPercent,
             resolveThreshold: (wire, serverKey, database, global) => _thresholdOverrides.ResolveWire(wire, serverKey, database, global),
             digestWindowReason: muteRuleService.DigestWindowReason,
+            /* #9000: the Store Growth switch and its two floors, read live. */
+            storeGrowthSettings: () => new StoreGrowthSettings(alertSettings.SelfStoreGrowthEnabled, alertSettings.SelfStoreGrowthFloorGb, alertSettings.SelfStoreGrowthObjectFloorGb),
             /* #6874: the Agent Alert Gaps switch, read live. Off until an operator turns it on. */
             agentAlertSetupEnabled: () => alertSettings.AgentAlertGapsEnabled,
             /* #6873: the three database protection switches, read live. Off until an operator turns each on. */
@@ -1179,7 +1235,8 @@ public sealed partial class DarlingWorker
             warm: (serverId, name, token) => DailySummaryWarmer.WarmAsync(postgres, serverId, name, _registryState, _logger, token),
             enabled: () => config.DailySummaryWarmerEnabled && ShouldRunCollection(_paused) && !_materializationHoleRepairRunning && (config.Web.Enabled || config.Mcp.Enabled),
             readAdmission: _readAdmission,
-            logger: _logger);
+            logger: _logger,
+            registered: token => DailySummaryWarmer.RegisteredServerIdsAsync(postgres, token));
         var dailySummaryWarmLoop = dailySummaryWarmer.RunAsync(stoppingToken);
 
         /* #5450 proposal 2: the outbound heartbeat, on its own task and connection so a slow or dead URL never touches
@@ -2015,6 +2072,13 @@ public sealed partial class DarlingWorker
             /* Expected on shutdown. */
         }
 
+        /* And the relation sizes writer (#9374): it ends at shutdown and never throws. */
+        await relationSizesWriter;
+
+        /* And the start history's flush loop (#9415): it ends at shutdown with one last flush, bounded at five seconds, and never throws. Any other
+           exit of this method stops it when the scope ends. */
+        await startHistory.StopAsync();
+
         /* And the slow-read writer (#5097): a record still queued at shutdown is dropped. */
         try
         {
@@ -2061,8 +2125,14 @@ public sealed partial class DarlingWorker
         /* And the self-statement key backfill (#6750), which absorbs its own failures. */
         await queryStoreSelfKeys;
 
+        /* And the attention legacy copy (#8967), which absorbs its own failures. */
+        await attentionLegacyCopy;
+
         /* And the trigram index pass (#7674): shutdown cancels a build in progress, and the next start drops its leftover. */
         await queryTextTrigramIndex;
+
+        /* And the Query Store text trigram index pass (#8570), on the same terms. */
+        await queryStoreTextTrigramIndex;
 
         /* And the rollup-coverage warm (#4957), which also absorbs its own failures. */
         await rollupCoverageWarm;
@@ -2132,6 +2202,7 @@ public sealed partial class DarlingWorker
 
         /* #8539: kept with the time it started waiting for as long as it waits, a cancelled wait included, so a due
            scheduled analysis pass gives way once this wait is long enough to cost a collection slot. */
+        var holdMark = SlotHolds.Mark();
         var waiter = SlotWaiters.Enter(DateTime.UtcNow);
         try
         {
@@ -2143,9 +2214,18 @@ public sealed partial class DarlingWorker
         }
 
         var gateWaited = Stopwatch.GetElapsedTime(gateWaitStarted);
+        if (GateWaitedForTests is { } statedWait)
+        {
+            gateWaited = statedWait(gateWaited);
+        }
+
         _fleetGateStats?.RecordQueueWait(gateWaited);
         server.LastGateWaitMs = (long)gateWaited.TotalMilliseconds;
         server.LastGateWaitAnalysisHolders = Volatile.Read(ref _analysisPassesInSlot);
+
+        /* #9192: the bodies that held slots while this one waited, for the row that blames the wait. Set on every body so a
+           short wait clears an earlier body's holder. */
+        server.LastGateWaitHolder = SlotHolds.HolderSince(holdMark, server.LastGateWaitMs);
 
         /* The permit is held: this body has STOPPED queueing and STARTED running. Stamp the run start so the
            outer launch loop's watchdog can tell a genuine hang from a body that was merely waiting its turn.
@@ -2217,6 +2297,10 @@ public sealed partial class DarlingWorker
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
             /* Shutdown (a body-internal await observed the token) — quiet and expected. */
+        }
+        catch (Exception ex) when (IsStopping(ex, stoppingToken))
+        {
+            /* #9392: a dependency the host disposed while this body was still using it, once the service is stopping. */
         }
         catch (OperationCanceledException ex)
         {
@@ -2847,7 +2931,7 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.BaselineBackfill, stoppingToken);
             var backfilled = await TimescaleSupport.BackfillBaselineAggregatesAsync(connection, _logger, stoppingToken);
             /* #8549: the daily wait totals, on the same connection and the same off-the-start-path run. */
             await TimescaleSupport.BackfillWaitStatsDailyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
@@ -2878,7 +2962,7 @@ public sealed partial class DarlingWorker
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RollupWarm, stoppingToken);
             await TimescaleSupport.WarmCollectionHealthHourlyAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -2933,7 +3017,7 @@ public sealed partial class DarlingWorker
         _materializationHoleRepairRunning = true;
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.HoleRepair, stoppingToken);
 
             /* #4299: read BEFORE the repair runs, so the value stamped on a clean finish is the postmaster
                start this repair actually ran under, not whatever it is by the time the repair returns. A

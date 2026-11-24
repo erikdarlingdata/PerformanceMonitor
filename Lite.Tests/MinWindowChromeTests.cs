@@ -30,7 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 /// test (it is never shown, so its load, which opens the store and starts collection, does not run). Every number is read from
 /// a rendered control.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class MinWindowChromeTests
 {
     /* The rail the sidebar collapses to (the column's MinWidth in MainWindow.xaml) and its open width. */

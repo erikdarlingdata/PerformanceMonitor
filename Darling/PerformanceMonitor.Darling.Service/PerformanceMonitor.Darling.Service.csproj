@@ -32,7 +32,7 @@
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <!-- #5802: lifts the transitive System.Security.Cryptography.Pkcs off SqlClient's vulnerable 9.0.18; see Directory.Packages.props. -->
     <PackageReference Include="System.Security.Cryptography.Pkcs" />
-    <!-- #8650: lifts the transitive System.Formats.Cbor off CborProtocol's 9.0.5; see Directory.Packages.props. -->
+    <!-- #8650: AWSSDK 4.1 CBOR protocol needs System.Formats.Cbor 11.0.0; see Directory.Packages.props. -->
     <PackageReference Include="System.Formats.Cbor" />
     <!-- #3838: the Entra (Active Directory) authentication providers were split OUT of the core
          Microsoft.Data.SqlClient package in 7.x, so a project that sets

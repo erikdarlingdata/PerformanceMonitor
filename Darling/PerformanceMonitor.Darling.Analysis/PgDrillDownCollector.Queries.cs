@@ -101,7 +101,7 @@ LIMIT 5";
     private async Task CollectQueriesAtSpike(AnalysisFinding finding, AnalysisContext context)
     {
         // Find the peak CPU time, then get queries active within 2 minutes of it
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         // Step 1: Find when the spike occurred
         using var peakCmd = new NpgsqlCommand(SpikePeakSql, connection);
@@ -195,7 +195,7 @@ LIMIT 5";
 
     private async Task CollectTopCpuQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(TopCpuQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -246,7 +246,7 @@ LIMIT 5";
 
     private async Task CollectTopSpillingQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(TopSpillingQueriesSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -488,7 +488,7 @@ WHERE digest = ANY($1)";
     /// </summary>
     private async Task CollectParameterSensitiveQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         var windowStart = AsNaive(context.TimeRangeStart);
         using var cmd = new NpgsqlCommand(ParameterSensitiveSql, connection);
@@ -648,6 +648,22 @@ WHERE digest = ANY($1)";
     }
 
     public static string RegressedQueriesSql => RegressedQueriesHead + RegressedQueriesRawMiddle + RegressedQueriesTail;
+
+    /// <summary>
+    /// A regressed-queries statement for a pass anchored at an instant (<c>AnalysisContext.AsOfUtc</c>): each read of Query
+    /// Store snapshots also ends at <c>$4</c>, the window's end, which every variant already binds, so no snapshot stored
+    /// after that instant is read. Throws when the statement carries none of the snapshot filters this ends.
+    /// </summary>
+    internal static string EndingAtTheWindow(string sql)
+    {
+        var bounded = sql
+            .Replace("AND   collection_time >= $2 - interval '1 day'", "AND   collection_time >= $2 - interval '1 day' AND collection_time <= $4", StringComparison.Ordinal)
+            .Replace("AND   collection_time >= $7", "AND   collection_time >= $7 AND collection_time <= $4", StringComparison.Ordinal)
+            .Replace("AND   q.collection_time >= $7::timestamp", "AND   q.collection_time >= $7::timestamp AND q.collection_time <= $4::timestamp", StringComparison.Ordinal);
+        return bounded.Length == sql.Length
+            ? throw new InvalidOperationException("The regressed-queries statement has no snapshot filter to end at the window.")
+            : bounded;
+    }
 
     /// <summary>
     /// The regressed-queries read over the latest-snapshot interval table (#3953): <see cref="RegressedQueriesSql"/>
@@ -1233,7 +1249,7 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
     /// </summary>
     private async Task CollectRegressedQueries(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         /* #3953: the source the fact read this pass, so the drill-down can reproduce it; when the fact did not
            decide, the same decision the fact makes, over the same bound. */
@@ -1252,6 +1268,8 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
             ? await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, context.CancellationToken)
             : null;
         var builtDays = new List<PlanRegressionDaily.BuiltDay>();
+        /* A pass anchored at an instant reads nothing stored after its window's end, as the fact it follows does. */
+        var anchored = context.AsOfUtc is not null;
         if (snapshot is not null)
         {
             await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, snapshot) { CommandTimeout = DrillDownCommandTimeoutSeconds })
@@ -1262,6 +1280,12 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
             builtDays = await QueryStoreIntervalLatest.ReadBuiltDaysAsync(
                 connection, snapshot, context.ServerId, windowStart, DrillDownCommandTimeoutSeconds, _logger,
                 ex => AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken), context.CancellationToken);
+            if (anchored)
+            {
+                /* The fact's own rule: only the days that were whole by the window's end are read from their totals. */
+                var wholeBy = AsNaive(context.TimeRangeEnd).AddDays(-PgFactCollector.PlanRegressionSkewMarginDays);
+                builtDays = builtDays.Where(b => b.ThroughOrDayEnd <= wholeBy).ToList();
+            }
         }
 
         var readsDays = builtDays.Count > 0;
@@ -1279,6 +1303,11 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
         var regressedSql = await QueryStoreSelfKeys.WithStoredTextKeyTestWhenReadyAsync(
             connection, readsDays ? snapshot : null, DrillDownCommandTimeoutSeconds,
             readsDays ? RegressedQueriesDailySql : readsTable ? RegressedQueriesTableSql : RegressedQueriesSql, context.CancellationToken);
+        if (anchored)
+        {
+            regressedSql = EndingAtTheWindow(regressedSql);
+        }
+
         using var cmd = new NpgsqlCommand(
             regressedSql,
             connection,
@@ -1402,7 +1431,7 @@ ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(BadActorDetailSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
@@ -1456,7 +1485,7 @@ LIMIT 5";
 
     private async Task CollectPendingGrants(AnalysisFinding finding, AnalysisContext context)
     {
-        await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
 
         using var cmd = new NpgsqlCommand(PendingGrantsSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;

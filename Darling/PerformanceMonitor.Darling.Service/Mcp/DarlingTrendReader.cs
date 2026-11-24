@@ -181,7 +181,7 @@ internal static class DarlingTrendReader
             CAST(plan_cache_mb AS double precision) AS plan_cache_mb
         FROM v_memory_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY collection_time
         """;
@@ -426,7 +426,7 @@ internal static class DarlingTrendReader
                         FROM v_perfmon_stats
                         WHERE server_id = $1
                         AND   counter_name = $2
-                        AND   collection_time >= $3
+                        AND   collection_time > $3
                         AND   collection_time <= $4
                         AND   {{isWaitStatistics}}
                         WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
@@ -446,7 +446,7 @@ internal static class DarlingTrendReader
                         FROM v_perfmon_stats
                         WHERE server_id = $1
                         AND   counter_name = $2
-                        AND   collection_time >= $3
+                        AND   collection_time > $3
                         AND   collection_time <= $4
                         AND   NOT ({{isWaitStatistics}})
                     ) AS raw
@@ -563,7 +563,7 @@ internal static class DarlingTrendReader
         SELECT DISTINCT counter_name, lower(counter_name) AS name_key
         FROM v_perfmon_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         ORDER BY lower(counter_name), counter_name
         """;
@@ -621,7 +621,7 @@ internal static class DarlingTrendReader
                 ) AS series_rank
             FROM v_file_io_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   (delta_reads > 0 OR delta_writes > 0)
@@ -689,7 +689,7 @@ internal static class DarlingTrendReader
                 (delta_reads > 0 OR delta_writes > 0) AS active
             FROM v_file_io_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
             AND   sample_interval_seconds IS DISTINCT FROM 0
@@ -926,7 +926,7 @@ internal static class DarlingTrendReader
     /// view, by alias (#3897), which at a 60-minute width is the viewer's hourly statement's figures hour for
     /// hour and wider gathers whole hours into one point. The mechanism (why the denominator is the bucket width
     /// and not a LAG, why an hour the collector covered only partly reads LOW and never high, why the series
-    /// trails the clock by up to two hours) is documented once, on
+    /// trails the clock by up to three hours) is documented once, on
     /// <see cref="DurationTrendRouting.BuildHourlyTrendSql"/>. What is this reader's to add: the payload STATES
     /// that trade (<c>aggregate_note</c>) rather than hiding it. The routed read builds this text from the
     /// route's resolved relation; the constant is the builder over the legacy view, which every store has.
@@ -1160,6 +1160,15 @@ internal static class DarlingTrendReader
         DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true, withProcedureFilter: true);
 
     /// <summary>
+    /// #8570: <see cref="ProcedureDurationTrendOneProcedureSql"/> for a store that has <see cref="ProcedureStatsNameIndex"/>, same
+    /// parameters and same rows. The collections and their interval come from the per-collection totals and the procedure's own rows,
+    /// read by name through the index, are joined to them, so a collection in which this procedure ran nothing is still zero work
+    /// over its real seconds.
+    /// </summary>
+    public static readonly string ProcedureDurationTrendOneProcedureByNameSql =
+        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true, withProcedureFilter: true, procedureRowsByName: true);
+
+    /// <summary>
     /// The Query Store duration trend - the viewer's <c>QueryStoreDurationTrendSql</c>, verbatim apart from
     /// the database filter, INCLUDING the #1841 tier-2 interval placement and its legacy arm.
     /// <para>Copied rather than simplified. The two arms are not decoration: arm 1 dedups each runtime
@@ -1234,7 +1243,7 @@ internal static class DarlingTrendReader
                    collection_time here put a point outside the range the caller asked for, and dropped
                    the range's final interval because its closing fetch had not happened yet. */
                 AND   interval_start_time_utc >= $2
-                AND   interval_start_time_utc <= $3
+                AND   interval_start_time_utc < $3
                 /* Chunk-exclusion bounds only. */
                 AND   collection_time >= $2 - interval '1 day'
                 AND   collection_time <= $3 + interval '30 days'
@@ -1257,7 +1266,7 @@ internal static class DarlingTrendReader
             FROM query_store_stats
             WHERE server_id = $1
             AND   collection_time >= $2
-            AND   collection_time <= $3
+            AND   collection_time < $3
             AND   interval_start_time_utc IS NULL{armTwoFilter}
         ),
         raw AS
@@ -1345,13 +1354,32 @@ internal static class DarlingTrendReader
     /// <summary>
     /// #6303: the procedure-stats duration trend of ONE procedure (<paramref name="procedureFullName"/>, the grid's <c>full_name</c>)
     /// in the chosen database(s), down <paramref name="route"/> (raw or the hourly rollup, which groups by schema and object).
+    /// #8570: on the raw tier the text follows the store. With <see cref="ProcedureStatsNameIndex"/> the procedure's rows are read by
+    /// name (<see cref="ProcedureDurationTrendOneProcedureByNameSql"/>); without it (a store whose start has not built it) the read is
+    /// <see cref="ProcedureDurationTrendOneProcedureSql"/>, which needs no index. Both return the same rows.
     /// </summary>
-    public static Task<DurationTrendResult> GetProcedureDurationTrendAsync(
+    public static async Task<DurationTrendResult> GetProcedureDurationTrendAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, DurationTrendRoute route,
         int bucketMinutes, DatabaseFilter databases, string procedureFullName, CancellationToken cancellationToken = default)
-        => ReadRoutedDurationTrendAsync(
-            ProcedureDurationTrendOneProcedureSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken,
-            procedureFullName);
+    {
+        ArgumentNullException.ThrowIfNull(route);
+        var rawSql = route.Tier == RetentionTier.Raw
+            ? await OneProcedureRawSqlAsync(postgres, cancellationToken)
+            : ProcedureDurationTrendOneProcedureSql;
+        return await ReadRoutedDurationTrendAsync(
+            rawSql, postgres, serverId, startUtc, endUtc, route, bucketMinutes, databases, cancellationToken, procedureFullName);
+    }
+
+    /// <summary>
+    /// The raw-tier text of the one-procedure trend for the store behind <paramref name="postgres"/>:
+    /// <see cref="ProcedureDurationTrendOneProcedureByNameSql"/> when the store has <see cref="ProcedureStatsNameIndex"/>,
+    /// <see cref="ProcedureDurationTrendOneProcedureSql"/> when it does not. Without the index the by-name text is the slower of the
+    /// two: its name predicate sends the planner down the time index, one heap fetch per stored row of the server.
+    /// </summary>
+    public static async ValueTask<string> OneProcedureRawSqlAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken) =>
+        await ProcedureStatsNameIndex.IsPresentAsync(postgres, cancellationToken)
+            ? ProcedureDurationTrendOneProcedureByNameSql
+            : ProcedureDurationTrendOneProcedureSql;
 
     /// <summary>
     /// #6303: the average CPU per execution (ms) of ONE procedure per bucket, in the buckets of the one-procedure
@@ -1608,7 +1636,7 @@ internal static class DarlingTrendReader
                 WHERE qs.server_id = $1
                 AND   qs.database_name = $2
                 AND   qs.query_hash = $3
-                AND   qs.collection_time >= $4
+                AND   qs.collection_time > $4
                 AND   qs.collection_time <= $5
             ) AS q
         ) AS b
@@ -1685,8 +1713,10 @@ internal static class DarlingTrendReader
     /// <para><b>Tier by the age of the window's oldest point, not by its width</b> — the same rule
     /// <c>ComposeSourceRouter</c> applies, and for the same reason: retention drops chunks by wall-clock age, so
     /// the oldest point is the only thing that decides whether raw can answer. A window that reaches past the
-    /// raw horizon is served ENTIRELY from the hourly aggregate rather than stitched, because a series whose
-    /// bucket width changes partway is a worse answer than a coarser consistent one.</para>
+    /// raw horizon is served at the hourly aggregate's width throughout, because a series whose bucket width
+    /// changes partway is a worse answer than a coarser consistent one. #8801: the hours past
+    /// <paramref name="hourlyCeilingUtc"/>, the rollup's measured end, are summed from the raw rows into the same
+    /// buckets, so the series reaches the window's end.</para>
     ///
     /// <para><paramref name="nowUtc"/> defaults to the real clock and exists so a test can pin the boundary.
     /// It is deliberately NOT defaulted to <paramref name="endUtc"/>: a caller asking for a historical window
@@ -1703,9 +1733,17 @@ internal static class DarlingTrendReader
     public static async Task<QueryHistoryResult> GetQueryHistoryAsync(
         NpgsqlDataSource postgres, int serverId, string databaseName, string queryHash, DateTime startUtc, DateTime endUtc,
         DateTime? nowUtc = null, bool hourlyAvailable = true, TierCoverage coverage = default, string? hourlyRelation = null,
-        int bucketMinutes = 1, CancellationToken cancellationToken = default)
+        int bucketMinutes = 1, DateTime? hourlyCeilingUtc = null, CancellationToken cancellationToken = default)
     {
         var tier = ResolveTier(startUtc, nowUtc ?? DateTime.UtcNow, hourlyAvailable, coverage);
+
+        /* #8801: the rollup holds no hour past its measured end (RollupCoverage.HourlyEndCeiling), so the hourly tier reads
+           the rest of the window from the raw rows and sums both into the same buckets. A caller that measured no end reads
+           the rollup alone: no measured end is no bound on the rollup, so raw adds nothing. */
+        var hourlySource = hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView;
+        DateTime? rawTailFromUtc = tier != RetentionTier.Raw && hourlyCeilingUtc is { } ceiling && ceiling <= endUtc
+            ? (ceiling > startUtc ? ceiling : startUtc)
+            : null;
 
         /* #3653 (Q12): the caller that probed the store passes the hourly relation it resolved
            (RollupCoverage.HourlyRelationFor — the interval-honest successor where it reaches as far as the
@@ -1714,8 +1752,10 @@ internal static class DarlingTrendReader
            raised to the rollup's hour on the hourly tier), and the default of one minute leaves each collection, or each
            rollup hour, its own point. */
         var items = tier == RetentionTier.Raw
-            ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, cancellationToken)
-            : await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlyRelation ?? TimescaleSupport.QueryStatsHourlyView), serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, cancellationToken);
+            ? await ReadQueryHistoryAsync(postgres, QueryHistorySql, serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, null, cancellationToken)
+            : rawTailFromUtc is null
+                ? await ReadQueryHistoryAsync(postgres, QueryHistoryHourlySqlFor(hourlySource), serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, null, cancellationToken)
+                : await ReadQueryHistoryAsync(postgres, DurationTrendRouting.BuildQueryHistoryHourlyWithRawTailSql(hourlySource), serverId, databaseName, queryHash, startUtc, endUtc, bucketMinutes, rawTailFromUtc, cancellationToken);
 
         /* #7416 item 21: the aged-out reason only when the start is older than what the answering tier keeps. The coverage
            begins at the first collection the store held (#8063), not at the first bucket's stamp, which is clamped to the
@@ -1735,7 +1775,7 @@ internal static class DarlingTrendReader
 
     private static async Task<List<QueryHistoryPoint>> ReadQueryHistoryAsync(
         NpgsqlDataSource postgres, string sql, int serverId, string databaseName, string queryHash,
-        DateTime startUtc, DateTime endUtc, int bucketMinutes, CancellationToken cancellationToken)
+        DateTime startUtc, DateTime endUtc, int bucketMinutes, DateTime? rawTailFromUtc, CancellationToken cancellationToken)
     {
         var items = new List<QueryHistoryPoint>();
         await using var command = postgres.CreateCommand(sql);
@@ -1746,6 +1786,11 @@ internal static class DarlingTrendReader
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, endUtc);
         DarlingMcpReadParameters.AddInt(command, bucketMinutes);
+        if (rawTailFromUtc is { } rawTailFrom)
+        {
+            DarlingMcpReadParameters.AddTimestamp(command, rawTailFrom);
+        }
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

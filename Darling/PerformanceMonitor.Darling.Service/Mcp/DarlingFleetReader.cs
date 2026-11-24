@@ -404,7 +404,7 @@ AND   {SqlServerCollectedTargetSql}";
 WITH xe_reports AS (
     SELECT server_id, blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_blocked_process_reports
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   collection_time >= $3
     AND   " + BlockingWaits.NotSelfWaitSql + serverWhere + xeWhere + @"
@@ -419,7 +419,7 @@ dmv_src AS (
 dmv_reports AS (
     SELECT server_id, blocked_spid, blocking_spid, event_time, collection_time, wait_time_ms
     FROM dmv_src
-    WHERE event_time >= $1
+    WHERE event_time > $1
     AND   event_time <= $2
     AND   " + BlockingWaits.NotSelfWaitSql + @"
 )," + BlockingWaits.WaitsCteSql(
@@ -459,7 +459,7 @@ FULL OUTER JOIN snapshot_gated AS g ON b.server_id = g.server_id";
     public const string FleetDeadlockSql = @"
 SELECT server_id, COUNT(*) AS cnt, MAX(deadlock_time) AS last_seen
 FROM v_deadlocks
-WHERE deadlock_time >= $1
+WHERE deadlock_time > $1
 AND   deadlock_time <= $2
 AND   collection_time >= $3
 GROUP BY server_id";
@@ -728,100 +728,12 @@ AND   s.server_id <> 0";
     /// <see cref="FleetLastCollectionSql"/> gives, and one further one that is specific to this read: the
     /// rows there are NOT collector runs, so banding them through <c>CollectorHealth.HealthStatus</c> would
     /// apply a staleness ladder built for a per-server cadence to a fleet-wide maintenance pass that has
-    /// none.</para></summary>
-    public const string FleetCollectionHealthSql = $@"
-SELECT
-    server_id,
-    collector_name,
-    COUNT(*) AS total_runs,
-    -- #2926: SUCCESS excludes an abandonment that predates #2803, so the Success column beside
-    -- Abandoned cannot count the same run twice. Post-#2803 rows need no exclusion - ABANDONED
-    -- is not SUCCESS - and an ordinary empty run stays counted, which is what the COALESCE in
-    -- the shared predicate is for: NULL under this NOT would have dropped it.
-    SUM(CASE WHEN status = 'SUCCESS'
-              AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql}
-             THEN 1 ELSE 0 END) AS success_count,
-    SUM(CASE WHEN status = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
-    MAX(CASE WHEN status IN ('SUCCESS', 'SKIPPED') THEN collection_time END) AS last_success_time,
-    SUM(CASE WHEN status = 'PERMISSIONS' THEN 1 ELSE 0 END) AS permission_denied_count,
-    MAX(collection_time) AS last_run_time,
-    -- #2804: the fleet rollup bands through the SAME CollectorHealth.HealthStatus as the per-server
-    -- grid, so it has to feed the classifier the same inputs. Left unselected, AbandonedCount would
-    -- default to 0 here and this count alone would keep calling a partially-abandoning collector
-    -- HEALTHY while every other surface called it WARNING -- and it would COMPILE, because the
-    -- default is silent. That is the #2779/#2784 failure shape: one surface fixed, its sibling
-    -- quietly left on the old reading.
-    --
-    -- #2926: keyed on the ROW, not on the status alone. collection_log is append-only, so a
-    -- window can still hold cycles written before #2803 gave abandonment its own status:
-    -- status = 'SUCCESS' beside rows_collected = 0 and the budget note. Counted by status
-    -- alone this read 0 for them, and the collector banded HEALTHY while losing cycles - a
-    -- filter correct against current writes and silently wrong against older ones, failing in
-    -- the reassuring direction. The pattern is one LIKE because the budget is INTERPOLATED and
-    -- the shipped values differ (120 s for procedure_stats/query_stats/plan_correction, 600 s
-    -- for query_store), so equality against one rendered sentence matches one collector.
-    SUM(CASE WHEN {EnumeratedCollectorDriver.AbandonedRunPredicateSql}
-             THEN 1 ELSE 0 END) AS abandoned_count,
-    -- #3240: same reasoning as abandoned_count above — this rollup bands through the SAME shared
-    -- classifier as the per-server surfaces, and an unselected count defaults to 0, COMPILES, and
-    -- would band an extension-missing collector FAILING here (no success, staleness path) while every
-    -- other surface says EXTENSION_MISSING. APPENDED, read positionally.
-    SUM(CASE WHEN status = 'EXTENSION_MISSING' THEN 1 ELSE 0 END) AS extension_missing_count,
-    -- #3819: the two instants that, with last_run_time above, say whether this collector STOPPED
-    -- producing rather than never having produced here. The fleet card counts the rows where they do
-    -- (regressed_collector_count), so an install that flips a productive collector to a named skip is a
-    -- NUMBER on the card and in the install countersign rather than a status word nobody re-reads.
-    --
-    -- Both are plain aggregates, which is the whole reason the fleet read can ask this at all: the
-    -- per-server twin resolves the same predicate through its existing ranked subquery, but this
-    -- statement has none, and adding one to hold a window function would put a sort of the fleet's whole
-    -- 7-day collection_log in front of a GROUP BY that hashes today. #3735 memoized this read because
-    -- three concurrent copies of it crossed the mcp role's 15 s statement_timeout; buying a boolean with
-    -- a fleet-wide sort would spend that headroom again. Nothing here needs the streak's WIDTH, only
-    -- whether the newest run is inside one, and two MAX()es answer that.
-    --
-    -- A NULL status counts as non-skip, like the per-server twin: it is not one of the declared skip
-    -- words, and reading it as one would let an unwritten status manufacture a streak. APPENDED, read
-    -- positionally.
-    MAX(CASE WHEN status IS NULL
-              OR status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
-             THEN collection_time END) AS last_non_skip_time,
-    MAX(CASE WHEN rows_collected > 0 THEN collection_time END) AS last_productive_time,
-    -- #3885: the instant the current zero-row-SUCCESS streak began after -- the newest run that was NOT a
-    -- success storing nothing. With last_run_time above and the collector's shipped cadence, this is what
-    -- CollectorHealthClassifier.EstimateTrailingZeroRowSuccessRuns turns into the run count the
-    -- produced-then-stopped predicate reads, so the fleet's regressed_collector_count includes a collector
-    -- that stopped PRODUCING and not only one that started SKIPPING. The measured case is the reason the
-    -- card needs it: job_history went dark on 41 of 43 servers, every run SUCCESS, and the number on the
-    -- card an install countersign reads stayed 0 for a fortnight.
-    --
-    -- ONE plain aggregate, deliberately, and an ESTIMATE downstream rather than the per-server read's exact
-    -- width: that one counts runs off a ranked subquery it already has, and this statement has none. Adding
-    -- one to hold a window function would put a sort of the fleet's whole 7-day collection_log in front of
-    -- a GROUP BY that hashes today -- and #3735 memoized this read precisely because three concurrent
-    -- copies of it crossed the mcp role's 15 s statement_timeout. The estimate's error direction and its
-    -- bound are documented on the classifier; it reads HIGH across a saturated sweep, never low, which is
-    -- the only direction safe for a count whose job is to stop this class hiding under HEALTHY.
-    --
-    -- The abandonment exclusion is success_count's own (#2926): a pre-#2803 abandoned cycle is stored as
-    -- SUCCESS with zero rows plus the budget note, and that is data loss rather than a quiet source.
-    -- APPENDED, read positionally.
-    MAX(CASE WHEN NOT (status = 'SUCCESS'
-                       AND COALESCE(rows_collected, 0) = 0
-                       AND NOT {EnumeratedCollectorDriver.AbandonedByNotePredicateSql})
-             THEN collection_time END) AS last_zero_row_streak_break_time,
-    -- #4812: the fleet rollup bands through the SAME CollectorHealth.HealthStatus as the per-server grid, whose
-    -- ladder ends by reading the newest run note (a cycle that lost half its databases still records SUCCESS,
-    -- and the note is the only record). Left unselected, LatestRunNote would default to null here, COMPILE,
-    -- and band that collector HEALTHY beside a tab saying WARNING - the #2804/#3240 shape again. Plain
-    -- aggregates only (an ordered aggregate would replace the hash aggregate with a sort of the week); the
-    -- rollup keeps the same value per hour. APPENDED, read positionally.
-    {CollectionHealthRollupSupport.LatestRunNoteRawSql}
-FROM v_collection_log
-WHERE collection_time >= $1
-AND   server_id <> 0
-AND   {CollectionCycleRow.NotCycleRowSql}
-GROUP BY server_id, collector_name";
+    /// none.</para>
+    ///
+    /// <para>The statement itself, its two-level form and the reasons for each aggregate (#8570) are
+    /// <see cref="CollectionHealthRollupSupport.FleetCollectionHealthRawSql"/>, which the viewer's
+    /// <c>FleetCollectionHealthByServerSql</c> shares.</para></summary>
+    public const string FleetCollectionHealthSql = CollectionHealthRollupSupport.FleetCollectionHealthRawSql;
 
     /* ─────────── #3893 arm 2: the same read, composed from the hourly aggregate + a raw head slice ───────────
        Moved to CollectionHealthRollupSupport in Storage (#4226) so the viewer's ViewerDataService reads the
@@ -1098,7 +1010,12 @@ GROUP BY server_id, collector_name";
     /// over the whole table is never used, so a fleet load does not walk the 90-day table. Like <see cref="FleetCpuSql"/> and its siblings it
     /// skips a disabled server and a PostgreSQL target, which never write this table, so they get no probe (the filter sits after the lateral, the
     /// form the siblings use, and the planner applies it to <c>servers</c> before the lateral runs). A skip row (<c>skip_reason</c> set) is not a
-    /// scan marker. $1 is the window start, $2 the percent of the warning bar.
+    /// scan marker. $1 is the window start.
+    ///
+    /// <para><b>#8818.</b> Every kept column comes back, not only those at the warning percent: a column filling fast is graded warning or critical on
+    /// its days left (<see cref="IdentityCapacityMath.Grade"/>) whatever its percent. The oldest sample of each column in the window (<c>f</c>, the
+    /// first row of the server's <c>idx_identity_capacity_time</c> range that matches the column) gives the rate, as <see cref="DarlingIdentityCapacityReader.ScanSql"/>
+    /// does for the tool.</para>
     ///
     /// <para><b>Measured (EXPLAIN (ANALYZE, BUFFERS), PostgreSQL 18.6 scratch store, 60 registered servers of which 41 enabled SQL Server targets wrote rows,
     /// 265,680 rows over 90 days, six databases each).</b> Without the filter the lateral ran 60 times (19 probes for servers that never write this
@@ -1110,7 +1027,7 @@ GROUP BY server_id, collector_name";
     /// </summary>
     internal const string FleetIdentityCapacitySql = $@"
 SELECT c.server_id, c.percent_used, c.database_name, c.schema_name, c.table_name, c.column_name, c.data_type, c.type_precision,
-       c.last_value::text, c.seed_value::text, c.increment_value::text, c.collection_time
+       c.last_value::text, c.seed_value::text, c.increment_value::text, c.collection_time, f.collection_time, f.last_value
 FROM servers AS s
 CROSS JOIN LATERAL
 (
@@ -1125,22 +1042,30 @@ CROSS JOIN LATERAL
 JOIN collect.identity_capacity AS c
   ON c.server_id = s.server_id AND c.collection_time = n.collection_time AND c.database_name = n.database_name
   AND c.collection_time >= $1
+LEFT JOIN LATERAL
+(
+    SELECT w.collection_time, w.last_value::text AS last_value
+    FROM collect.identity_capacity AS w
+    WHERE w.server_id = s.server_id AND w.collection_time >= $1
+    AND   w.database_name = c.database_name AND w.schema_name = c.schema_name AND w.table_name = c.table_name AND w.column_name = c.column_name
+    ORDER BY w.collection_time
+    LIMIT 1
+) AS f ON true
 WHERE s.is_enabled
 AND   {SqlServerCollectedTargetSql}
-AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
+AND   c.column_name IS NOT NULL";
 
     /// <summary>The worst band and the count of columns at warning or critical per server, for the servers that have any (#6875). The band is
-    /// <see cref="IdentityCapacityMath.Band(double)"/>.</summary>
+    /// <see cref="IdentityColumnFact.Graded"/>: the worse of the percent grade and the days-left grade (#8818).</summary>
     internal static async Task<Dictionary<int, FleetIdentityCapacity>> ReadIdentityCapacityAsync(
         NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken, ILogger? logger = null)
     {
-        var counts = new Dictionary<int, (int Columns, int CriticalColumns, IdentityColumnFact? Worst, double WorstPercent)>();
+        var counts = new Dictionary<int, (int Columns, int CriticalColumns, int ExhaustedColumns, IdentityColumnFact? Worst, double WorstPercent, int WorstRank)>();
         var rows = new List<(int ServerId, double Percent, string Band, IdentityColumnFact Column, DateTime ScannedAt)>();
         await using (var command = postgres.CreateCommand(FleetIdentityCapacitySql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.AddWithValue(DateTime.SpecifyKind(nowUtc - IdentityCapacityWindow, DateTimeKind.Unspecified));
-            command.Parameters.AddWithValue(IdentityCapacityMath.WarningPercent);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1149,14 +1074,15 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                     continue;
                 }
 
-                var band = IdentityCapacityMath.Band(reader.GetDouble(1));
+                var percent = reader.GetDouble(1);
+                var column = ColumnOf(reader, percent);
+                var band = column.Band ?? IdentityCapacityMath.BandOk;
                 if (band == IdentityCapacityMath.BandOk)
                 {
                     continue;
                 }
 
-                var percent = reader.GetDouble(1);
-                rows.Add((reader.GetInt32(0), percent, band, ColumnOf(reader, percent, nowUtc), reader.GetDateTime(11)));
+                rows.Add((reader.GetInt32(0), percent, band, column, reader.GetDateTime(11)));
             }
         }
 
@@ -1167,15 +1093,18 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         foreach (var (serverId, percent, band, column, _) in rows)
         {
             counts.TryGetValue(serverId, out var seen);
-            /* #7416: the fullest column, so the tile can name it. The first of a tie wins, as the order of the rows decides. */
-            var isWorst = seen.Worst is null || percent > seen.WorstPercent;
+            /* #7416: the fullest column, so the tile can name it. #8818: a column at the critical band outranks a fuller one at warning, so the tile
+               names the column that bands the server. The first of a tie wins, as the order of the rows decides. */
+            var rank = IdentityCapacityMath.Rank(band);
+            var isWorst = seen.Worst is null || rank > seen.WorstRank || (rank == seen.WorstRank && percent > seen.WorstPercent);
             counts[serverId] = (seen.Columns + 1, seen.CriticalColumns + (band == IdentityCapacityMath.BandCritical ? 1 : 0),
-                isWorst ? column : seen.Worst, isWorst ? percent : seen.WorstPercent);
+                seen.ExhaustedColumns + (band == IdentityCapacityMath.BandCritical && column.AtLimit ? 1 : 0),
+                isWorst ? column : seen.Worst, isWorst ? percent : seen.WorstPercent, isWorst ? rank : seen.WorstRank);
         }
 
         return counts.ToDictionary(
             c => c.Key,
-            c => FleetIdentityCapacity.Of(c.Value.CriticalColumns > 0 ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.CriticalColumns, c.Value.Worst));
+            c => FleetIdentityCapacity.Of(c.Value.CriticalColumns > 0 ? IdentityCapacityMath.BandCritical : IdentityCapacityMath.BandWarning, c.Value.Columns, c.Value.CriticalColumns, c.Value.Worst, c.Value.ExhaustedColumns));
     }
 
     /// <summary>#7647: each SQL Server target's database states, through the Database State alert's own statement
@@ -1200,13 +1129,13 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         return map;
     }
 
-    private static IdentityColumnFact ColumnOf(NpgsqlDataReader reader, double percent, DateTime nowUtc)
+    private static IdentityColumnFact ColumnOf(NpgsqlDataReader reader, double percent)
     {
         string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
         System.Numerics.BigInteger? Big(int i) => reader.IsDBNull(i) ? null : System.Numerics.BigInteger.Parse(reader.GetString(i), CultureInfo.InvariantCulture);
         return new IdentityColumnFact(
             Text(2) ?? "", Text(3), Text(4), Text(5), Text(6), reader.IsDBNull(7) ? null : reader.GetInt32(7),
-            Big(8), Big(9), Big(10), percent, nowUtc, null, null);
+            Big(8), Big(9), Big(10), percent, reader.GetDateTime(11), Big(13), reader.IsDBNull(12) ? null : reader.GetDateTime(12));
     }
 
     internal static FleetServerCard BuildCard(
@@ -1275,8 +1204,10 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         var cpuSource = FleetCpuProvenance.ClassifyCpuSource(cpuPercent, instanceCpuPercent, isPostgres, isAurora);
         var cpuForAlert = totalCpu ?? cpuPercent;
 
+        /* Never below 0: current workers include idle pooled workers and the workers of system tasks, which the
+           ceiling leaves out, so the count can pass it on a server where nothing waits (#8778). */
         var availableThreads = threads.TotalThreads.HasValue
-            ? threads.TotalThreads.Value - (threads.CurrentWorkers ?? 0)
+            ? Math.Max(0, threads.TotalThreads.Value - (threads.CurrentWorkers ?? 0))
             : (int?)null;
 
         var hasMemoryPressure = pressure.WaiterCount > 0 || pressure.TimeoutCount > 0 || pressure.ForcedCount > 0;
@@ -1468,7 +1399,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
                The whole threads block is null there, as the tool description says. */
             ThreadsWaitingForCpu = threads.TotalThreads.HasValue ? threads.RunnableTasks : null,
             RequestsWaitingForThreads = threads.TotalThreads.HasValue ? threads.WorkQueue : null,
-            ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, availableThreads, threads.RunnableTasks, threads.WorkQueue),
+            ThreadsSeverity = ServerHealthClassifier.ThreadsSeverity(threads.TotalThreads, threads.RunnableTasks, threads.WorkQueue),
             /* #6874: set only when the Agent alert setup has a gap. The Band below is not read from it. */
             AgentAlertGaps = agentAlertGaps is { Count: > 0 } ? agentAlertGaps : null,
             /* #6873: set only when something is overdue. The Band below is not read from it. */
@@ -1684,9 +1615,11 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
 
         if (c.ThreadsSeverity >= HealthSeverity.Warning)
         {
+            /* #8825: the figure that set the band, in the chip's words. Starved requests set Critical, 20 or more
+               runnable tasks set Warning (ServerHealthClassifier.ThreadsSeverity), so a Warning here is the runnable count. */
             parts.Add(c.RequestsWaitingForThreads > 0
                 ? $"Threads {c.RequestsWaitingForThreads} starved"
-                : "Threads low");
+                : $"Threads {c.ThreadsWaitingForCpu ?? 0} runnable");
         }
 
         if (c.MemorySeverity >= HealthSeverity.Warning && c.HasMemoryPressure == true)
@@ -1732,7 +1665,7 @@ AND   c.column_name IS NOT NULL AND c.percent_used >= $2";
         /* #7561: the identity tile's own words. A critical column bands the server; a warning one and the two setup tiles only list it. */
         if (c.IdentityCapacity is { ColumnsAtBar: > 0 } identity)
         {
-            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns));
+            parts.Add(ServerHealthClassifier.IdentityCapacityReason(identity.ColumnsAtBar, identity.CriticalColumns, identity.ExhaustedColumns));
         }
 
         /* #7647: the database-state tile's own words. A Critical state bands the server (and says so), any other deviation only lists it. */
@@ -2004,7 +1937,9 @@ AND   {SqlServerCollectedTargetSql}";
     /// and disabled servers, so neither pays a lateral probe on each fleet read. $1 is the window start.</summary>
     internal const string FleetDatabaseProtectionSql = $@"
 SELECT d.server_id, d.collection_time, d.database_name, d.state_desc, d.recovery_model_desc, d.create_date, d.replica_role, d.platform,
-       d.last_good_checkdb_time, d.checkdb_state, d.last_full_backup_time, d.full_backup_state, d.last_log_backup_time, d.log_backup_state
+       d.last_good_checkdb_time, d.checkdb_state, d.last_full_backup_time, d.full_backup_state, d.last_log_backup_time, d.log_backup_state,
+       d.errorlog_state, d.errorlog_message, d.errorlog_grant, d.errorlog_backfill_complete, d.errorlog_skipped_archives, d.errorlog_unparsed_lines,
+       d.errorlog_checkdb_time, d.errorlog_checkdb_options, d.errorlog_checkdb_errors, d.replica_readable
 FROM servers AS s
 CROSS JOIN LATERAL
 (
@@ -2021,6 +1956,29 @@ AND   {SqlServerCollectedTargetSql}";
     /// <see cref="DatabaseProtectionBands.OverdueFacts"/>, the one the alerts, the tool and the Viewer use; this only batches the read.
     /// A platform-managed server has none, by that judgment.</summary>
     internal static async Task<Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>> ReadDatabaseProtectionOverdueAsync(
+        NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var captures = await ReadDatabaseProtectionCapturesAsync(postgres, nowUtc, cancellationToken);
+        var map = new Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>();
+        /* #7611: each database is judged against its own ages, the same resolution the alerts, the tool and the Viewer use. */
+        var resolverFor = captures.Count > 0
+            ? await DatabaseProtectionThresholdSettings.ReadFleetAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken)
+            : null;
+        foreach (var (serverId, (at, facts)) in captures)
+        {
+            var overdue = DatabaseProtectionBands.OverdueFacts(facts, at, resolverFor!(serverId).ForDatabase);
+            if (overdue.Count > 0)
+            {
+                map[serverId] = overdue.Select(o => new FleetDatabaseProtectionOverdue(
+                    o.Kind, o.Database, o.State, o.Age is { } age ? (long)age.TotalSeconds : null, o.Label + ": " + o.Text)).ToList();
+            }
+        }
+
+        return map;
+    }
+
+    /// <summary>The newest capture per server and its facts, as stored (#8865: split from the banding so a test can see what the fleet read carries).</summary>
+    internal static async Task<Dictionary<int, (DateTime At, List<DatabaseProtectionFact> Facts)>> ReadDatabaseProtectionCapturesAsync(
         NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
     {
         var captures = new Dictionary<int, (DateTime At, List<DatabaseProtectionFact> Facts)>();
@@ -2040,28 +1998,17 @@ AND   {SqlServerCollectedTargetSql}";
 
                 string? Text(int i) => reader.IsDBNull(i) ? null : reader.GetString(i);
                 DateTime? Time(int i) => reader.IsDBNull(i) ? null : reader.GetDateTime(i);
+                bool? Flag(int i) => reader.IsDBNull(i) ? null : reader.GetBoolean(i);
+                int? Count(int i) => reader.IsDBNull(i) ? null : reader.GetInt32(i);
+                /* #8865: the error log facts (V278), NULL on a row written before it. */
                 capture.Facts.Add(new DatabaseProtectionFact(
                     Text(2) ?? string.Empty, Text(3), Text(4), Time(5), Text(6), Text(7),
-                    Time(8), Text(9), Time(10), Text(11), Time(12), Text(13)));
+                    Time(8), Text(9), Time(10), Text(11), Time(12), Text(13),
+                    Text(14), Text(15), Text(16), Flag(17), Text(18), Count(19), Time(20), Text(21), Count(22), Flag(23)));
             }
         }
 
-        var map = new Dictionary<int, IReadOnlyList<FleetDatabaseProtectionOverdue>>();
-        /* #7611: each database is judged against its own ages, the same resolution the alerts, the tool and the Viewer use. */
-        var resolverFor = captures.Count > 0
-            ? await DatabaseProtectionThresholdSettings.ReadFleetAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken)
-            : null;
-        foreach (var (serverId, (at, facts)) in captures)
-        {
-            var overdue = DatabaseProtectionBands.OverdueFacts(facts, at, resolverFor!(serverId).ForDatabase);
-            if (overdue.Count > 0)
-            {
-                map[serverId] = overdue.Select(o => new FleetDatabaseProtectionOverdue(
-                    o.Kind, o.Database, o.State, o.Age is { } age ? (long)age.TotalSeconds : null, o.Label + ": " + o.Text)).ToList();
-            }
-        }
-
-        return map;
+        return captures;
     }
 
     private static async Task<Dictionary<int, CpuRow>> ReadCpuAsync(NpgsqlDataSource postgres, DateTime nowUtc, CancellationToken cancellationToken)
@@ -2515,30 +2462,35 @@ AND   {SqlServerCollectedTargetSql}";
         var headEnd = CeilingHour(windowStart);
         var plan = await CollectionHealthRollupPlanAsync(postgres, headEnd, cancellationToken);
         var composedSql = plan.Usable ? CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthSql, plan.HoleHours) : null;
-        await using var command = postgres.CreateCommand(composedSql ?? FleetCollectionHealthSql);
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        AddTimestamp(command, windowStart);
-        if (plan.Usable)
-        {
-            AddTimestamp(command, headEnd);
-            if (plan.HoleHours.Count > 0)
-            {
-                command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
-            }
-        }
         var rows = new List<(int ServerId, CollectorHealth Health)>();
-        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         {
-            while (await reader.ReadAsync(cancellationToken))
+            /* #8570: the read runs in a short transaction of its own with a larger work_mem (as #5812 does), so a store left at the
+               4 MB default does not pick a sort-based aggregate for the grouping; the scope is disposed after the reader closes. */
+            await using var workMemScope = await CollectionHealthRollupSupport.OpenWorkMemReadAsync(postgres, McpCommandDeadlines.ReadSeconds, cancellationToken);
+            await using var command = workMemScope.CreateCommand(composedSql ?? FleetCollectionHealthSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddTimestamp(command, windowStart);
+            if (plan.Usable)
             {
-                var serverId = reader.GetInt32(0);
-                if (!overridesByServer.TryGetValue(serverId, out var serverOverrides))
+                AddTimestamp(command, headEnd);
+                if (plan.HoleHours.Count > 0)
                 {
-                    serverOverrides = scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList();
-                    overridesByServer[serverId] = serverOverrides;
+                    command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
                 }
+            }
+            await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+            {
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var serverId = reader.GetInt32(0);
+                    if (!overridesByServer.TryGetValue(serverId, out var serverOverrides))
+                    {
+                        serverOverrides = scheduleOverrides.Where(o => o.ServerId is null || o.ServerId == serverId).ToList();
+                        overridesByServer[serverId] = serverOverrides;
+                    }
 
-                rows.Add((serverId, MapFleetHealthRow(reader, serverId, serverOverrides)));
+                    rows.Add((serverId, MapFleetHealthRow(reader, serverId, serverOverrides)));
+                }
             }
         }
 
@@ -3514,22 +3466,29 @@ public sealed record FleetIdentityCapacity(
     [property: JsonPropertyName("columns_at_bar")] int ColumnsAtBar,
     /* #7561: how many of those are at the critical bar, so the reason can say "1 at its limit, 4 near it" rather than call all five critical. */
     [property: JsonPropertyName("critical_columns")] int CriticalColumns,
+    /* #8928: how many of the critical columns have no values left. Only those are "at their limit" in the reason. Required, so a site that forgets it does not
+       compile and print "near it" for a full column. */
+    [property: JsonPropertyName("exhausted_columns")] int ExhaustedColumns,
     /* #7416: the fullest column and its figures, so the tile names what to open. Table is schema.table. Remaining is digits (an identity bigint
        does not fit a JSON number) and null when the collector did not store the value. */
     [property: JsonPropertyName("worst_database")] string? WorstDatabase = null,
     [property: JsonPropertyName("worst_table")] string? WorstTable = null,
     [property: JsonPropertyName("worst_column")] string? WorstColumn = null,
     [property: JsonPropertyName("worst_percent_used")] double? WorstPercentUsed = null,
-    [property: JsonPropertyName("worst_values_remaining")] string? WorstValuesRemaining = null)
+    [property: JsonPropertyName("worst_values_remaining")] string? WorstValuesRemaining = null,
+    /* #8818: which grade set the worst column's band (percent or days) and its days left, null with one sample, so a column banded on days reads as intended. */
+    [property: JsonPropertyName("worst_band_reason")] string? WorstBandReason = null,
+    [property: JsonPropertyName("worst_days_to_exhaustion")] double? WorstDaysToExhaustion = null)
 {
-    internal static FleetIdentityCapacity Of(string band, int columns, int criticalColumns, IdentityColumnFact? worst) =>
+    internal static FleetIdentityCapacity Of(string band, int columns, int criticalColumns, IdentityColumnFact? worst, int exhaustedColumns) =>
         worst is null
-            ? new FleetIdentityCapacity(band, columns, criticalColumns)
+            ? new FleetIdentityCapacity(band, columns, criticalColumns, exhaustedColumns)
             : new FleetIdentityCapacity(
-                band, columns, criticalColumns, worst.DatabaseName,
+                band, columns, criticalColumns, exhaustedColumns, worst.DatabaseName,
                 string.IsNullOrEmpty(worst.SchemaName) ? worst.TableName : worst.SchemaName + "." + worst.TableName,
                 worst.ColumnName, worst.StoredPercent,
-                worst.ValuesRemaining?.ToString(CultureInfo.InvariantCulture));
+                worst.ValuesRemaining?.ToString(CultureInfo.InvariantCulture),
+                worst.BandReason, worst.Exhaustion?.DaysLeft is double days ? Math.Round(days, 1) : null);
 }
 
 /// <summary>One tag on a fleet card — read-only, for the web pills (#2020). Serialized snake_case like the card.

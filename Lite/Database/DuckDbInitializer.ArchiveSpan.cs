@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -51,6 +52,23 @@ public partial class DuckDbInitializer
         string table, string timeColumn, CancellationToken cancellationToken,
         ArchiveReadLimiter? limiter = null, Func<ReadPhaseTimer?, CancellationToken, Task<LockedConnection>>? open = null)
     {
+        /* #9195: the call's timing line says how much of it went to the span. */
+        var tally = ReadLockWaitTally.Current;
+        var started = tally is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            return await ReadArchiveSpanAsync(table, timeColumn, limiter, open, cancellationToken);
+        }
+        finally
+        {
+            tally?.RecordArchiveSpan(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        }
+    }
+
+    private async Task<ArchiveSpan?> ReadArchiveSpanAsync(
+        string table, string timeColumn,
+        ArchiveReadLimiter? limiter, Func<ReadPhaseTimer?, CancellationToken, Task<LockedConnection>>? open, CancellationToken cancellationToken)
+    {
         if (ArchiveViewDedups(table))
         {
             return null;
@@ -67,6 +85,8 @@ public partial class DuckDbInitializer
                     return new ArchiveSpan(null, null);
                 }
 
+                /* #9423: the files this read opens, for the slow-call row. A cache hit opens none, so only a miss counts them. */
+                ReadLockWaitTally.Current?.RecordArchiveFiles(ArchiveParquetFileCount(table));
                 var timer = Helpers.QueryExecutionContext.CurrentPhases;
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
                 using var slot = await (limiter ?? ArchiveReadLimiter.Shared).EnterAsync(cancellationToken);
@@ -98,6 +118,19 @@ public partial class DuckDbInitializer
             AppLogger.Warn("ArchiveSpan", $"Could not read the span of the {table} archive ({ex.GetType().Name}: {ex.Message}); reading the archive view instead");
             return null;
         }
+    }
+
+    /// <summary>How many archive files <paramref name="table"/> has right now, over the two name shapes <see cref="ArchiveParquetGlobs"/> reads.</summary>
+    internal int ArchiveParquetFileCount(string table)
+    {
+        if (!Directory.Exists(_archivePath))
+        {
+            return 0;
+        }
+
+        var exact = new EnumerationOptions { MatchType = MatchType.Simple, MatchCasing = MatchCasing.CaseInsensitive, AttributesToSkip = 0 };
+        return new[] { $"*_{table}.parquet", $"*_{table}_pt???.parquet" }
+            .Sum(pattern => Directory.EnumerateFiles(_archivePath, pattern, exact).Count());
     }
 
     private async Task<LockedConnection> OpenSpanConnectionAsync(CancellationToken cancellationToken)
@@ -179,7 +212,11 @@ internal sealed class ArchiveReadPlan
     /// <summary>The tables this plan reads as the hot table, while the generation holds.</summary>
     internal bool IsHot(string table) => _hot.Contains(table) && _duckDb.ArchiveViewGeneration == _generation;
 
-    /// <summary><paramref name="sql"/> with each hot table's <c>v_</c> view replaced by the hot table. The view names are
+    /// <summary>What a statement reads for <paramref name="table"/>: its hot rows when the plan reads it as hot (the table, or the
+    /// <c>vh_</c> view for one whose query text is kept in a dimension, #9241), else its <c>v_</c> view.</summary>
+    internal string SourceFor(string table) => IsHot(table) ? LiteTextDimensions.HotSource(table) : "v_" + table;
+
+    /// <summary><paramref name="sql"/> with each hot table's <c>v_</c> view replaced by the hot table (its <c>vh_</c> view when its query text is kept in a dimension, #9241). The view names are
     /// distinct whole words in the statement's text, so a plain replace is exact. Call it with the read lock held.</summary>
     internal string Apply(string sql)
     {
@@ -190,7 +227,7 @@ internal sealed class ArchiveReadPlan
 
         foreach (var table in _hot)
         {
-            sql = sql.Replace("v_" + table, table, StringComparison.Ordinal);
+            sql = sql.Replace("v_" + table, LiteTextDimensions.HotSource(table), StringComparison.Ordinal);
         }
 
         return sql;

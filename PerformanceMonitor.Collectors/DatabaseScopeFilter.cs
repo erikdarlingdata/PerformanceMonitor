@@ -72,6 +72,19 @@ public static class DatabaseScopeFilter
     /// both lists stays OUT, because composing the coarse veto under the fine scope would quietly
     /// turn a per-collector knob into an override of a server-level decision.
     /// </summary>
+    /// <summary>
+    /// The collector whose database scope <paramref name="collectorName"/> runs under: itself, except <c>object_inventory</c> and
+    /// <c>object_dependencies</c> (#8784 part 2), which take <c>index_object_stats</c>'s (#8784). The object list and the usage counters are read together by <c>get_object_usage</c>, and a
+    /// database with one and not the other reads wrongly either way: counters with no list hide the modules that never ran, and a list
+    /// with no counters shows modules beside no table evidence. A host resolves the scope through this, so scoping
+    /// <c>index_object_stats</c> scopes both and a scope set on <c>object_inventory</c> itself has no effect.
+    /// </summary>
+    public static string ScopeOwner(string collectorName) =>
+        string.Equals(collectorName, "object_inventory", System.StringComparison.OrdinalIgnoreCase)
+        || string.Equals(collectorName, "object_dependencies", System.StringComparison.OrdinalIgnoreCase)
+            ? "index_object_stats"
+            : collectorName;
+
     public static (string Clause, List<CollectorParameter> Parameters) BuildEnumerationPredicate(
         CollectorContext context, string columnExpression)
     {

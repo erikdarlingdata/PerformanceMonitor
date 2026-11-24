@@ -57,6 +57,7 @@ public sealed class CollectionHealthFleetLiveTests
         await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE servers SET is_enabled = FALSE WHERE server_id = $1", ids["fl-off"]);
 
         await RunAsync(connection, ids["fl-a"], "fl-a", "query_store", "SUCCESS", TimeSpan.FromHours(3), null, ct);
+        await RunAsync(connection, ids["fl-a"], "fl-a", "query_store", "PERMISSIONS", TimeSpan.FromHours(2), "older denial", ct);
         await RunAsync(connection, ids["fl-a"], "fl-a", "query_store", "ERROR", TimeSpan.FromHours(1), "denied", ct);
         await RunAsync(connection, ids["fl-b"], "fl-b", "query_store", "SUCCESS", TimeSpan.FromHours(2), null, ct);
         await RunAsync(connection, ids["fl-b"], "fl-b", "query_store", "SKIPPED", TimeSpan.FromMinutes(5), null, ct);
@@ -67,9 +68,12 @@ public sealed class CollectionHealthFleetLiveTests
         var servers = root.GetProperty("servers").EnumerateArray().ToDictionary(s => s.GetProperty("server_name").GetString()!);
         Assert.Equal(new[] { "fl-a", "fl-b", "fl-c" }, servers.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
         Assert.Equal("failing_since_last_success", servers["fl-a"].GetProperty("outcome").GetString());
+        Assert.Equal("ERROR", servers["fl-a"].GetProperty("last_failure_status").GetString());
         Assert.Equal("denied", servers["fl-a"].GetProperty("last_failure_message").GetString());
         Assert.Equal("succeeding", servers["fl-b"].GetProperty("outcome").GetString());
         Assert.Equal(JsonValueKind.Null, servers["fl-b"].GetProperty("last_failure_at").ValueKind);
+        Assert.Equal(JsonValueKind.Null, servers["fl-b"].GetProperty("last_failure_status").ValueKind);
+        Assert.Equal(JsonValueKind.Null, servers["fl-b"].GetProperty("last_failure_message").ValueKind);
         Assert.Equal("no_run_in_window", servers["fl-c"].GetProperty("outcome").GetString());
 
         var refused = JsonDocument.Parse(await DarlingMcpDataTools.GetCollectionHealth(dataSource, "*", cancellationToken: ct)).RootElement;

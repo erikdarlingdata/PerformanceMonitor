@@ -190,6 +190,90 @@ public sealed class ComposeHourlyEdgesLedgerGuardLiveTests
         }
     }
 
+    /// <summary>
+    /// #9357: the runner runs the guard for the candidate's own source. A procedure_stats candidate reads the procedure ledger: a covered,
+    /// empty window gives a verdict for that source, an uncovered one notes LedgerUncovered, and a store below V300 (its two tables gone)
+    /// notes GateFailed from the schema version with no guard run and no log line, while a query_stats candidate on the same store still
+    /// gets its verdict, because that source's rung is V164.
+    /// </summary>
+    [Fact]
+    public async Task AProcedureStatsCandidate_ReadsTheProcedureLedger_AndAStoreBelowV300_FailsTheGateQuietly_WhileQueryStatsStillGetsItsVerdict()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await CreateScratchAsync(ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PrepareStoreAsync(connection, ct);
+        var procedure = new ComposeHourlyEdgesCandidate("procedure_stats", TimescaleSupport.ProcedureStatsIntervalHourlyView, H1, H2);
+
+        var bodySucceeded = false;
+        try
+        {
+            await ExecuteAsync(connection, $"UPDATE {ProcedureStatsHourLedger.StateTable} SET counted_since = '2000-01-01'", ct);
+            await using (var covered = await BeginSnapshotAsync(connection, ct))
+            {
+                using var scope = ReadScope.Open(new CapturingTestLogger());
+                var verdict = await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, procedure, null, 30, ct);
+                Assert.NotNull(verdict);
+                Assert.Equal("procedure_stats", verdict!.SourceTable);
+                Assert.Null(scope.Fallback);
+                await covered.RollbackAsync(ct);
+            }
+
+            /* Only the procedure ledger decides: a query_stats ledger that starts late does not uncover a procedure window. */
+            await QueryStatsLedgerSeed.SetCountedSinceAsync(connection, H1.AddHours(1), ct);
+            await using (var other = await BeginSnapshotAsync(connection, ct))
+            {
+                using var scope = ReadScope.Open(new CapturingTestLogger());
+                Assert.NotNull(await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, procedure, null, 30, ct));
+                Assert.Null(scope.Fallback);
+                await other.RollbackAsync(ct);
+            }
+
+            await ExecuteAsync(connection, $"UPDATE {ProcedureStatsHourLedger.StateTable} SET counted_since = '{H1.AddHours(1):yyyy-MM-dd HH:mm:ss}'", ct);
+            await using (var uncovered = await BeginSnapshotAsync(connection, ct))
+            {
+                var logger = new CapturingTestLogger();
+                using var scope = ReadScope.Open(logger);
+                Assert.Null(await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, procedure, null, 30, ct));
+                Assert.Equal(ReadFallback.LedgerUncovered, scope.Fallback);
+                Assert.True(logger.Lines.Count == 0, "an uncovered ledger logs nothing: " + logger.Joined);
+                await uncovered.RollbackAsync(ct);
+            }
+
+            /* A store before V300: no procedure ledger tables and the schema version says so. */
+            await ExecuteAsync(connection, $"DROP TABLE {ProcedureStatsHourLedger.StateTable}", ct);
+            await ExecuteAsync(connection, $"DROP TABLE {ProcedureStatsHourLedger.LedgerTable}", ct);
+            await ExecuteAsync(connection, $"DELETE FROM darling_schema_version WHERE version >= {ProcedureStatsHourLedger.RungVersion}", ct);
+            await QueryStatsLedgerSeed.SetCountedSinceAsync(connection, QueryStatsLedgerSeed.Low, ct);
+            await using (var below = await BeginSnapshotAsync(connection, ct))
+            {
+                var logger = new CapturingTestLogger();
+                using var scope = ReadScope.Open(logger);
+                Assert.Null(await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, procedure, null, 30, ct));
+                Assert.Equal(ReadFallback.GateFailed, scope.Fallback);
+                Assert.True(logger.Lines.Count == 0, "a store below the rung logs nothing: " + logger.Joined);
+                await below.RollbackAsync(ct);
+            }
+
+            await using (var query = await BeginSnapshotAsync(connection, ct))
+            {
+                using var scope = ReadScope.Open(new CapturingTestLogger());
+                var verdict = await ComposePanelRunner.ResolveHourlyEdgesVerdictAsync(connection, Candidate, null, 30, ct);
+                Assert.NotNull(verdict);
+                Assert.Equal("query_stats", verdict!.SourceTable);
+                Assert.Null(scope.Fallback);
+                await query.RollbackAsync(ct);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanupAsync(scratch, bodySucceeded);
+        }
+    }
+
     private static async Task<ScratchPostgres> CreateScratchAsync(CancellationToken ct)
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");

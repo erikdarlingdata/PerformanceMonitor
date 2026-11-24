@@ -141,6 +141,56 @@ public sealed class IdentityExhaustionTests
         Assert.Null(fact.ValuesRemaining);
         Assert.Null(fact.Exhaustion);
     }
+
+    /// <summary>
+    /// #8818: the issue's column, an int 67 percent used with about 17 days to exhaustion, read "ok" because only the percent was graded. It is
+    /// warning on its days now, the reason says so, and a column with no rate keeps its percent grade alone.
+    /// </summary>
+    [Fact]
+    public void AnIntColumn_With17DaysLeft_At67Percent_IsWarning_OnDays()
+    {
+        /* 1,443,000,000 of 2,147,483,647 issued, 120 million of them over the last 3 days (40 million a day): about 17.6 days left. */
+        var fact = new IdentityColumnFact("Db", "dbo", "Orders", "Id", "int", 10, 1_443_000_000, 1, 1, null, T0, 1_323_000_000, T0.AddDays(-3));
+
+        Assert.True(fact.PercentUsed < 70);
+        Assert.InRange(fact.Exhaustion!.Value.DaysLeft, 16, 30);
+        Assert.Equal("warning", fact.Band);
+        Assert.Equal("days", fact.BandReason);
+
+        var noRate = new IdentityColumnFact("Db", "dbo", "Orders", "Id", "int", 10, 1_443_000_000, 1, 1, null, T0, null, null);
+        Assert.Equal("ok", noRate.Band);
+        Assert.Null(noRate.BandReason);
+    }
+
+    [Theory]
+    [InlineData(10, null, "ok", null)]
+    [InlineData(10, 30.0, "ok", null)]
+    [InlineData(10, 29.9, "warning", "days")]
+    [InlineData(10, 7.0, "warning", "days")]
+    [InlineData(10, 6.9, "critical", "days")]
+    [InlineData(10, 0.0, "critical", "days")]
+    [InlineData(70, null, "warning", "percent")]
+    [InlineData(70, 400.0, "warning", "percent")]
+    [InlineData(70, 10.0, "warning", "percent")]
+    [InlineData(70, 3.0, "critical", "days")]
+    [InlineData(90, 400.0, "critical", "percent")]
+    [InlineData(90, 3.0, "critical", "percent")]
+    [InlineData(95, 20.0, "critical", "percent")]
+    public void TheBand_IsTheWorseOfThePercentGradeAndTheDaysGrade_AndNamesTheOneThatSetIt(double percent, double? days, string band, string? reason)
+    {
+        var graded = IdentityCapacityMath.Grade(percent, days);
+
+        Assert.Equal(band, graded.Band);
+        Assert.Equal(reason, graded.Reason);
+    }
+
+    [Fact]
+    public void AMovedPercentBar_GradesThePercentOnly_TheDaysBarsStayWhereTheyAre()
+    {
+        Assert.Equal(new IdentityBand("ok", null), IdentityCapacityMath.Grade(80, 100, warningPercent: 85, criticalPercent: 95));
+        Assert.Equal(new IdentityBand("warning", "percent"), IdentityCapacityMath.Grade(86, null, warningPercent: 85, criticalPercent: 95));
+        Assert.Equal(new IdentityBand("critical", "days"), IdentityCapacityMath.Grade(20, 5, warningPercent: 85, criticalPercent: 95));
+    }
 }
 
 /// <summary>
@@ -260,7 +310,7 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             await Column(c, ct, "Sales", "Audit", "int", 10, "1990000000", "1", "1", 92.6, oldAt);
             await Column(c, ct, "Sales", "Reseeded", "int", 10, "2000000000", "1", "1", 93.1, oldAt);
             await Column(c, ct, "Sales", "Gone", "int", 10, "1700000000", "1", "1", 79.2, oldAt);
-            await Column(c, ct, "Sales", "Orders", "int", 10, "1400000000", "1", "1", 65.2, oldAt);
+            await Column(c, ct, "Sales", "Orders", "int", 10, "1499000000", "1", "1", 69.8, oldAt);
             await Marker(c, ct, DataId, DataServer, "Clean", oldAt);
             await Marker(c, ct, DataId, DataServer, "Down", oldAt);
             await Column(c, ct, "Down", "Countdown", "smallint", 5, "-30000", "-1", "-1", 91.6, oldAt);
@@ -454,6 +504,127 @@ VALUES ($1,$2,$3,$4,$5,'dbo',$6,'Id',$7,$8,$9::numeric,$10::numeric,$11::numeric
             var card = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct);
             Assert.Equal(1, card[DataId].ColumnsAtBar);
             Assert.Equal(IdentityCapacityMath.BandCritical, card[DataId].WorstBand);
+        });
+    }
+
+    /// <summary>
+    /// #8818: the band is the worse of the percent grade and the days-left grade on every reader. A column 67 percent used with 17 days left is
+    /// warning on days, one 47 percent used with under 7 days left is critical on days, one 75 percent used going nowhere is warning on percent, and
+    /// a column below 70 percent with one sample stays ok. The tool, the fleet card and the Viewer card agree, and the cards name the column that
+    /// bands the server, not the fullest.
+    /// </summary>
+    [Fact]
+    public async Task TheBand_GradesDaysLeftBesidePercent_OnTheTool_TheFleetCard_AndTheViewerCard()
+    {
+        var now = DateTime.UtcNow;
+        var oldAt = now.AddDays(-3);
+        var newAt = now.AddHours(-1);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await Marker(c, ct, DataId, DataServer, "Sales", oldAt);
+            await Marker(c, ct, DataId, DataServer, "Sales", newAt);
+            /* 67.2 percent, 120 million in about 2.96 days: about 17 days left. */
+            await Column(c, ct, "Sales", "Racing", "int", 10, "1323000000", "1", "1", 61.6, oldAt);
+            await Column(c, ct, "Sales", "Racing", "int", 10, "1443000000", "1", "1", 67.2, newAt);
+            /* 46.6 percent, 600 million in about 2.96 days: about 5.6 days left. */
+            await Column(c, ct, "Sales", "Burning", "int", 10, "400000000", "1", "1", 18.6, oldAt);
+            await Column(c, ct, "Sales", "Burning", "int", 10, "1000000000", "1", "1", 46.6, newAt);
+            /* 75 percent, 3,000 in 3 days: warning on percent. */
+            await Column(c, ct, "Sales", "Steady", "int", 10, "1610000000", "1", "1", 75.0, oldAt);
+            await Column(c, ct, "Sales", "Steady", "int", 10, "1610003000", "1", "1", 75.0, newAt);
+            /* 69 percent with one sample: no rate, so the percent grades it alone. */
+            await Column(c, ct, "Sales", "NoRate", "int", 10, "1480000000", "1", "1", 68.9, newAt);
+        }, async (postgres, ct) =>
+        {
+            var root = Parse(await DarlingMcpIdentityCapacityTools.GetIdentityCapacity(postgres, DataServer, 168, null, null, 200, null, ct));
+            var columns = root.GetProperty("columns").EnumerateArray().ToDictionary(x => x.GetProperty("table").GetString()!);
+            Assert.Equal("warning", columns["Racing"].GetProperty("band").GetString());
+            Assert.Equal("days", columns["Racing"].GetProperty("band_reason").GetString());
+            Assert.Equal("critical", columns["Burning"].GetProperty("band").GetString());
+            Assert.Equal("days", columns["Burning"].GetProperty("band_reason").GetString());
+            Assert.Equal("warning", columns["Steady"].GetProperty("band").GetString());
+            Assert.Equal("percent", columns["Steady"].GetProperty("band_reason").GetString());
+            Assert.Equal("ok", columns["NoRate"].GetProperty("band").GetString());
+            Assert.Equal(JsonValueKind.Null, columns["NoRate"].GetProperty("band_reason").ValueKind);
+            var summary = root.GetProperty("summary");
+            Assert.Equal(1, summary.GetProperty("critical").GetInt32());
+            Assert.Equal(2, summary.GetProperty("warning").GetInt32());
+            /* The fullest column (Steady) is only warning: the summary's worst band is the worst of all of them. */
+            Assert.Equal("critical", summary.GetProperty("worst_band").GetString());
+
+            var card = await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct);
+            var fleet = Assert.Single(card).Value;
+            Assert.Equal("critical", fleet.WorstBand);
+            Assert.Equal(3, fleet.ColumnsAtBar);
+            Assert.Equal(1, fleet.CriticalColumns);
+            Assert.Equal("Burning", fleet.WorstTable?.Split('.').Last());
+            Assert.Equal("days", fleet.WorstBandReason);
+            Assert.InRange(fleet.WorstDaysToExhaustion!.Value, 5, 7);
+            /* By hand: 600,000,000 values in 71 hours is 202,816,901.4 a day, and 1,147,483,647 left at that rate is 5.658 days. The card and the tool read the same oldest sample. */
+            Assert.Equal(5.7, fleet.WorstDaysToExhaustion!.Value);
+            Assert.Equal(5.7, columns["Burning"].GetProperty("days_to_exhaustion").GetDouble());
+            Assert.Equal(202816901.4, columns["Burning"].GetProperty("rate_per_day").GetDouble());
+            Assert.Equal(17.4, columns["Racing"].GetProperty("days_to_exhaustion").GetDouble());
+
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
+            var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
+            Assert.Equal("critical", viewerCard!.WorstBand);
+            Assert.Equal(3, viewerCard.ColumnsAtBar);
+            Assert.Equal("Burning", viewerCard.Worst!.TableName);
+            Assert.Equal("days", viewerCard.Worst.BandReason);
+        });
+    }
+
+    [Fact]
+    public async Task ACriticalColumnWithValuesLeft_IsNearItAndNotAtItsLimit_OnTheFleetCardAndTheViewerCard()
+    {
+        var now = DateTime.UtcNow;
+        var newAt = now.AddHours(-1);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await Marker(c, ct, DataId, DataServer, "Sales", newAt);
+            /* 92.8 percent used with 153,994,682 values left: in the critical band, and an insert still works. */
+            await Column(c, ct, "Sales", "Orders", "int", 10, "1993488965", "1", "1", 92.8, newAt);
+        }, async (postgres, ct) =>
+        {
+            var fleet = Assert.Single(await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct)).Value;
+            Assert.Equal(1, fleet.CriticalColumns);
+            Assert.Equal(0, fleet.ExhaustedColumns);
+            Assert.Equal("153994682", fleet.WorstValuesRemaining);
+            Assert.Equal("Identity capacity critical (1 column near its limit)", ServerHealthClassifier.IdentityCapacityReason(fleet.ColumnsAtBar, fleet.CriticalColumns, fleet.ExhaustedColumns));
+
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
+            var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
+            Assert.Equal(0, viewerCard!.ExhaustedColumns);
+            Assert.Equal(fleet.ExhaustedColumns, viewerCard.ExhaustedColumns);
+        });
+    }
+
+    [Fact]
+    public async Task AFullColumnBesideACriticalOneWithValuesLeft_IsCountedAtItsLimit_OnTheFleetCardAndTheViewerCard()
+    {
+        var now = DateTime.UtcNow;
+        var newAt = now.AddHours(-1);
+        await WithStoreAsync(async (c, ct) =>
+        {
+            await Marker(c, ct, DataId, DataServer, "Sales", newAt);
+            /* No value left: the next insert fails. */
+            await Column(c, ct, "Sales", "Full", "int", 10, "2147483647", "1", "1", 100.0, newAt);
+            await Column(c, ct, "Sales", "Orders", "int", 10, "1993488965", "1", "1", 92.8, newAt);
+            await Column(c, ct, "Sales", "Warm", "int", 10, "1600000000", "1", "1", 74.5, newAt);
+        }, async (postgres, ct) =>
+        {
+            var fleet = Assert.Single(await DarlingFleetReader.ReadIdentityCapacityAsync(postgres, now, ct)).Value;
+            Assert.Equal(3, fleet.ColumnsAtBar);
+            Assert.Equal(2, fleet.CriticalColumns);
+            Assert.Equal(1, fleet.ExhaustedColumns);
+            Assert.Equal("Identity capacity critical (1 column at its limit, 2 near it)", ServerHealthClassifier.IdentityCapacityReason(fleet.ColumnsAtBar, fleet.CriticalColumns, fleet.ExhaustedColumns));
+
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(_storeConnectionString);
+            var viewerCard = await viewer.GetIdentityCapacityCardAsync(DataId, now, ct);
+            Assert.Equal(3, viewerCard!.ColumnsAtBar);
+            Assert.Equal(2, viewerCard.CriticalColumns);
+            Assert.Equal(1, viewerCard.ExhaustedColumns);
         });
     }
 

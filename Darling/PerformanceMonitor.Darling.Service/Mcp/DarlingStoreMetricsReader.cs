@@ -1246,7 +1246,8 @@ FROM unnest($1::text[], $2::text[]) AS s (object_kind, object_name)";
             SELECT 1 FROM pg_roles r WHERE r.rolname = s.object_name)
         WHEN '{StoreSelfMetrics.OtherObjectKind}' THEN true
         WHEN '{StoreSelfMetrics.SystemObjectKind}' THEN true
-        WHEN '{StoreSelfMetrics.CheckpointerObjectKind}' THEN true";
+        WHEN '{StoreSelfMetrics.CheckpointerObjectKind}' THEN true
+        WHEN '{StoreWalFigures.WalObjectKind}' THEN true";
 
     /// <summary>
     /// Reads <see cref="ObjectExistenceSql"/> (or its plain variant, by the same
@@ -1438,6 +1439,101 @@ AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
 AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
 ORDER BY pg_total_relation_size(c.oid) DESC, 1
 LIMIT $1";
+
+    /// <summary>
+    /// The un-enumerated relations whose name matches <c>$1</c> (#8817), over the SAME census predicate as
+    /// <see cref="LargestUnenumeratedSql"/>, so every relation that list names can be asked for by the name it gives.
+    /// The match is on <c>relname</c> or on <c>schema.relation</c>, case-insensitive: an exact one wins and is the only
+    /// answer, otherwise every relation whose qualified name contains it is returned, the same order the store rows use
+    /// (<see cref="SelectObjects"/>). <c>strpos</c> and not <c>LIKE</c>, so a name with an underscore or a percent sign
+    /// matches itself and not a pattern. Columns: relation, relkind, total_bytes, matched (the count before the limit).
+    /// TimescaleDB variant. $1 the name, $2 the limit.
+    /// </summary>
+    public const string UnenumeratedByNameSql = $@"
+WITH m AS (
+    SELECT
+        n.nspname || '.' || c.relname AS relation,
+        c.relkind::text AS relkind,
+        pg_total_relation_size(c.oid) AS total_bytes,
+        (lower(c.relname) = lower($1) OR lower(n.nspname || '.' || c.relname) = lower($1)) AS is_exact
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+    AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
+    AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
+    AND   {StoreSelfMetrics.TimescaleInventoriedPredicateSql}
+    AND   strpos(lower(n.nspname || '.' || c.relname), lower($1)) > 0
+)
+SELECT relation, relkind, total_bytes, count(*) OVER ()::integer AS matched
+FROM m
+WHERE is_exact OR NOT EXISTS (SELECT 1 FROM m WHERE is_exact)
+ORDER BY total_bytes DESC, relation
+LIMIT $2";
+
+    /// <summary>The plain-PostgreSQL variant of <see cref="UnenumeratedByNameSql"/>, minus the TimescaleDB catalogs it cannot name.</summary>
+    public const string UnenumeratedByNamePlainSql = $@"
+WITH m AS (
+    SELECT
+        n.nspname || '.' || c.relname AS relation,
+        c.relkind::text AS relkind,
+        pg_total_relation_size(c.oid) AS total_bytes,
+        (lower(c.relname) = lower($1) OR lower(n.nspname || '.' || c.relname) = lower($1)) AS is_exact
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE {StoreSelfMetrics.CensusRelationPredicateSql}
+    AND   NOT {StoreSelfMetrics.SystemSchemaPredicateSql}
+    AND   NOT {StoreSelfMetrics.NamedRelationPredicateSql}
+    AND   strpos(lower(n.nspname || '.' || c.relname), lower($1)) > 0
+)
+SELECT relation, relkind, total_bytes, count(*) OVER ()::integer AS matched
+FROM m
+WHERE is_exact OR NOT EXISTS (SELECT 1 FROM m WHERE is_exact)
+ORDER BY total_bytes DESC, relation
+LIMIT $2";
+
+    /// <summary>Un-enumerated relations matching a name: the page (largest first) and how many matched before the limit.</summary>
+    public sealed record UnenumeratedMatches(IReadOnlyList<UnenumeratedRelation> Relations, int Matched);
+
+    /// <summary>
+    /// Looks <paramref name="name"/> up among the un-enumerated relations (#8817), live. A name the self-metrics rows do not
+    /// carry may still be a relation the inventory names in <c>largest_unenumerated</c>, which the series never has a row for.
+    /// Failure-isolated to NULL, never to "no match", for the reason <see cref="GetLargestUnenumeratedAsync"/> gives.
+    /// </summary>
+    public static async Task<UnenumeratedMatches?> GetUnenumeratedByNameAsync(
+        NpgsqlDataSource postgres,
+        JobExecutionLoggingReading logging,
+        string name,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        if (logging is null)
+        {
+            throw new ArgumentNullException(nameof(logging));
+        }
+
+        try
+        {
+            var rows = new List<UnenumeratedRelation>();
+            var matched = 0;
+            await using var command = postgres.CreateCommand(
+                logging.Status == JobExecutionLoggingStatus.NotRegistered ? UnenumeratedByNamePlainSql : UnenumeratedByNameSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(name);
+            command.Parameters.AddWithValue(limit);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(new UnenumeratedRelation(reader.GetString(0), reader.GetString(1), reader.GetInt64(2)));
+                matched = reader.GetInt32(3);
+            }
+
+            return new UnenumeratedMatches(rows, matched);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>One un-enumerated relation, sized live.</summary>
     public sealed record UnenumeratedRelation(string Relation, string RelKind, long TotalBytes);

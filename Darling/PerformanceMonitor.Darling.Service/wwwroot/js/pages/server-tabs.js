@@ -40,7 +40,7 @@
  */
 
 import { el, makeActivatable, captionStrip, daysText } from "../util.js";
-import { worstFirst } from "../panels.js";
+import { worstFirst, emptyShare } from "../panels.js";
 import { evictionNoteShort } from "../pg-grid-text.js";
 import { memoryGrantChartPanels } from "./memory-grant-charts.js";
 import { statsHistoryColumn } from "./stats-history.js";
@@ -528,6 +528,9 @@ export const SERVER_TABS = [
         format: "mb",
         span: 2,
         emptyText: "No tempdb samples in this window.",
+        /* #8881: no "Log used" line while no point has a log reading, and one plain line on the oldest open tempdb log transaction when the newest collection has a holder. */
+        hideEmptySeries: true,
+        captionKey: "log_holder_note",
       }),
       /* `noteKey` carries the read's own note when a Hyperscale log file is in the snapshot: its size is n/a
          (log service) and it is left out of these totals, so the page says so instead of looking short. */
@@ -598,6 +601,7 @@ export const SERVER_TABS = [
           span: 2,
           /* #7692: rows exist only where queries ran, so the gap rule needs the reply's bucket. */
           bucketKey: "bucket_minutes",
+          noteKind: "summed",
           emptyText: "No query duration samples in this window.",
         },
         {
@@ -609,6 +613,7 @@ export const SERVER_TABS = [
           series: EXECUTION_RATE_SERIES,
           span: 2,
           bucketKey: "bucket_minutes",
+          noteKind: "summed",
           emptyText: "No query executions recorded in this window.",
         },
       ]),
@@ -624,6 +629,7 @@ export const SERVER_TABS = [
           format: "ms",
           span: 2,
           bucketKey: "bucket_minutes",
+          noteKind: "summed",
           emptyText:
             "No stored-procedure activity in this window. A server that runs no stored procedures shows nothing here.",
         }
@@ -742,6 +748,8 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "databases",
           floorKey: "window",
+          /* #9382: the window block carries a span per arm. This panel's plan churn is the arm that can be cut here, so a cut wait arm draws nothing. */
+          armSpan: { key: "plan_churn_effective_hours_back", subject: "Plan churn" },
           columns: QS_CLUTTER_COLUMNS,
           noteKey: "server_note",
           /* #7538, #7651: the read leaves out databases the server dropped; the strip names them. */
@@ -758,6 +766,7 @@ export const SERVER_TABS = [
           viz: "table",
           rowsKey: "qs_overhead.wait_stats.included",
           floorKey: "window",
+          armSpan: { key: "wait_effective_hours_back", subject: "The QDS wait table" },
           columns: QS_OVERHEAD_WAIT_COLUMNS,
           /* #7729: a wait with no delta in the window is left out, so the empty sentence prints when none has one. */
           orderRows: qsWaitsWithDelta,
@@ -952,6 +961,9 @@ export const SERVER_TABS = [
   {
     id: "activity",
     label: "Activity",
+    /* #9220: Running Jobs words its empty state by the fleet card's is_online (ctx.offline), so a card that flips it repaints this tab's
+       panels. No other tab reads ctx.offline, and a first visit on one of them keeps the reads it started before the card arrived. */
+    readsOffline: true,
     build: (server, ctx) => [
       perfmonPanel(server, ctx),
       sessionStatsTrendPanel(server, ctx),
@@ -1898,10 +1910,13 @@ export const POSTGRES_TABS = [
         "replicas",
         PG_REPLICATION_STATS_COLUMNS,
         ctx.label + ", worst-in-window beside latest; lag is spiky and one sample catches one instant",
-        "No replica was connected in this window. Expected on a server with no replicas - but if one is supposed to be attached, check the slots panel above: a slot with nothing connected to it retains WAL indefinitely.",
+        ctx.aurora === true
+          ? AURORA_NO_REPLICA_TEXT
+          : "No replica was connected in this window. Expected on a server with no replicas - but if one is supposed to be attached, check the slots panel above: a slot with nothing connected to it retains WAL indefinitely.",
         2, null, null, null, null, null, null, false, null, false,
-        /* #7410: on this tab the message would send a reader to "the Slots section of the Replication tab", so the page says the one sentence and the message is behind "More detail". */
-        { emptyLine: "No replica was connected in this window. That is expected on a server with no replicas. If one should be attached, look at the Slots panel above, because a slot with nothing connected to it keeps WAL." }
+        /* #7410: on this tab the message would send a reader to "the Slots section of the Replication tab", so the page says the one sentence and the message is behind "More detail".
+           #9117: on an Aurora writer there is no such sentence: the read's own Aurora answer is the visible line, because the Slots advice does not apply there. */
+        ctx.aurora === true ? {} : { emptyLine: "No replica was connected in this window. That is expected on a server with no replicas. If one should be attached, look at the Slots panel above, because a slot with nothing connected to it keeps WAL." }
       ),
     ],
   },
@@ -1916,7 +1931,11 @@ export const POSTGRES_TABS = [
   {
     id: "storage",
     label: "Storage",
-    build: (server, ctx) => [
+    build: (server, ctx) => {
+      /* #8840: the two Index Bloat panels are two reads, so the shared-empty pointer the fanout panels use cannot see across them. This is
+         what lets the second say "Empty for the same reason as Index Bloat (estimated)." when both reads come back with one message. */
+      const bloatEmpty = emptyShare();
+      return [
       ...fanout("get_pg_table_bloat", { server, hours: ctx.hours, limit: 25 }, [
         {
           title: "Bloat Estimates",
@@ -1983,7 +2002,7 @@ export const POSTGRES_TABS = [
         "Nothing recorded for this server yet. It is collected once a day, so a short window or a new install is empty here.",
         2,
         "note", null, null, null, null, null, false, null,
-        false, INDEX_BLOAT_PLAIN
+        false, { ...INDEX_BLOAT_PLAIN, emptyShare: { holder: bloatEmpty, leads: true } }
       ),
       /* THE ANSWERS, REACHED (#3434). The panel above keeps #3278's answerless-first order, and on a census
          whose answerless population outnumbers 25 that page is 100% of them - structurally rather than by
@@ -2010,9 +2029,10 @@ export const POSTGRES_TABS = [
         "Nothing recorded for this server in this window. It is collected once a day.",
         2,
         "note", null, null, null, null, null, false, null,
-        false, INDEX_BLOAT_PLAIN
+        false, { ...INDEX_BLOAT_PLAIN, emptyShare: { holder: bloatEmpty, leads: false } }
       ),
-    ],
+      ];
+    },
   },
 
   /* #2658. The eighth tab, and the header's argument for seven admits it: what that argument rejects is
@@ -2092,6 +2112,11 @@ export function findServerTab(id, tabs) {
   const registry = tabs || SERVER_TABS;
   return registry.find((t) => t.id === id) || registry[0];
 }
+
+/** #9117: the Connected Replicas panel's own text on an Aurora writer, shown when the table has no rows. Aurora readers use the shared
+ *  storage volume and never appear in pg_stat_replication, so the Slots advice (a slot with nothing connected keeps WAL) does not apply. The visible line of an empty
+ *  answer there is the read's own Aurora message (no `emptyLine`). */
+const AURORA_NO_REPLICA_TEXT = "No replica was connected in this window. Aurora readers use the shared storage volume instead of streaming replication, so they never appear here. That is not a replication fault.";
 
 /** What Running Jobs says when nothing is listed. "The normal state for most servers" is a claim about a server that is
  *  collecting; a server whose collection is stale (the fleet card's is_online false, the same signal the page header's

@@ -50,7 +50,16 @@ public sealed class CredentialManagerCollectionCensusTests
         @"new CredentialService\(|new CredentialStore\(|\.CredentialService\b|App\.(SaveWebhookUrl|GetWebhookUrl|GetSmtpPassword|SaveSmtpPassword)\(|RouteSecretAccess\.CredentialManager\(|\b(CredentialStore|CredentialService)\b[^;{}]{0,160}?\bnew\s*\(",
         RegexOptions.CultureInvariant | RegexOptions.Singleline);
 
+    /* #8754: a class on the in-memory credential store (InMemoryCredentialsAttribute) gives every new CredentialService() an in-memory
+       backend, so it need not run in the collection. It still needs the collection if it builds a real CredentialStore itself, or
+       takes the real store through RouteSecretAccess.CredentialManager(): the attribute does not reach those. */
+    private static readonly Regex s_directRealStore = new(
+        @"new CredentialStore\(|RouteSecretAccess\.CredentialManager\(|\bCredentialStore\b[^;{}]{0,160}?\bnew\s*\(",
+        RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
     private const string Membership = "[Collection(\"credential-manager\")]";
+
+    private const string InMemoryMarker = "[InMemoryCredentials]";
 
     /* The seven classes the census found when it was written; fewer means the scan stopped seeing them. */
     private const int MemberFloor = 7;
@@ -63,6 +72,8 @@ public sealed class CredentialManagerCollectionCensusTests
         /* Subfolders are scanned too (Helpers/ holds .cs files); build output under bin/ and obj/ is not source. */
         var reaching = Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
             .Where(f => !string.Equals(Path.GetFileName(f), thisFile, StringComparison.OrdinalIgnoreCase))
+            /* #8754: the file that defines the in-memory backend names the real types to stand in for them; it reaches nothing. */
+            .Where(f => !string.Equals(Path.GetFileName(f), "InMemoryCredentials.cs", StringComparison.OrdinalIgnoreCase))
             .Where(f => !Path.GetRelativePath(root, f).Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                 .SkipLast(1).Any(seg => seg.Equals("bin", StringComparison.OrdinalIgnoreCase) || seg.Equals("obj", StringComparison.OrdinalIgnoreCase)))
             .Select(f => (File: Path.GetRelativePath(root, f), Text: File.ReadAllText(f)))
@@ -71,6 +82,7 @@ public sealed class CredentialManagerCollectionCensusTests
 
         var outside = reaching
             .Where(f => !f.Text.Contains(Membership, StringComparison.Ordinal))
+            .Where(f => !f.Text.Contains(InMemoryMarker, StringComparison.Ordinal) || s_directRealStore.IsMatch(f.Text))
             .Select(f => f.File)
             .OrderBy(f => f, StringComparer.Ordinal)
             .ToList();
@@ -79,7 +91,7 @@ public sealed class CredentialManagerCollectionCensusTests
             outside.Count == 0,
             "A Lite.Tests class reaches the real Windows Credential Manager outside the credential-manager collection (#5785). "
           + "Windows can lose a read of one entry while another thread writes or deletes a different one, so a unique target "
-          + "name does not isolate it. Add " + Membership + " above the class:\n  " + string.Join("\n  ", outside));
+          + "name does not isolate it. Add " + Membership + " above the class, or " + InMemoryMarker + " (#8754) if it does not test credential storage:\n  " + string.Join("\n  ", outside));
 
         Assert.True(
             reaching.Count >= MemberFloor,

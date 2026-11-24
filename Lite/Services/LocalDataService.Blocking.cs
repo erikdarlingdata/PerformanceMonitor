@@ -122,7 +122,7 @@ SELECT
 FROM " + StoredEventCopies.Deadlocks(
             windowOnCollectionTime
                 ? "server_id = $1 AND collection_time <= $3" + graphClause
-                : "server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3" + graphClause,
+                : "server_id = $1 AND deadlock_time > $2 AND deadlock_time <= $3" + graphClause,
             windowOnCollectionTime ? "$2" : null) + @" AS dl
 ORDER BY deadlock_time DESC
 LIMIT $4";
@@ -183,7 +183,7 @@ SELECT
     COALESCE(SUM(writes), 0) AS total_writes
 FROM v_query_snapshots
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3" + dbClause + @"
 GROUP BY " + bucket + @"
 ORDER BY bucket";
@@ -290,7 +290,7 @@ LEFT JOIN (
     SELECT DISTINCT collection_time AS head_time, blocking_session_id AS head_session
     FROM v_query_snapshots
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   blocking_session_id > 0
     AND   blocking_session_id <> session_id
@@ -298,7 +298,7 @@ LEFT JOIN (
   ON  h.head_time = w.collection_time
   AND h.head_session = w.session_id
 WHERE w.server_id = $1
-AND   w.collection_time >= $2
+AND   w.collection_time > $2
 AND   w.collection_time <= $3" + dbClause + @"
 AND   (w.query_text NOT LIKE 'WAITFOR%' OR h.head_session IS NOT NULL)
 ORDER BY w.collection_time DESC, w.cpu_time_ms DESC";
@@ -532,10 +532,11 @@ WITH window_rows AS (
         program_name,
         open_transaction_count,
         percent_complete,
-        query_hash
+        query_hash,
+        request_id
     FROM v_query_snapshots
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
 ),
 heads AS (
@@ -595,7 +596,8 @@ SELECT
         WHERE q.collection_time = p.collection_time
         AND   q.session_id = p.blocking_session_id
     ) AS blocker_in_population,
-    COUNT(*) OVER () AS population_count
+    COUNT(*) OVER () AS population_count,
+    p.request_id
 FROM population p
 ORDER BY p.collection_time DESC, p.cpu_time_ms DESC
 LIMIT $4";
@@ -652,6 +654,7 @@ LIMIT $4";
                 IsHeadBlocker = !reader.IsDBNull(25) && reader.GetBoolean(25),
                 BlockerInCapture = !reader.IsDBNull(26) && reader.GetBoolean(26),
                 BlockerInPopulation = !reader.IsDBNull(27) && reader.GetBoolean(27),
+                RequestId = reader.IsDBNull(29) ? 0 : reader.GetInt32(29),
             });
             populationCount = Convert.ToInt64(reader.GetValue(28));
         }
@@ -689,21 +692,21 @@ LIMIT $4";
 WITH " + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.DuckDb, "xe_waits",
             @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev") + "," + BlockingWaits.WaitsCteSql(
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3") + @" AS ev") + "," + BlockingWaits.WaitsCteSql(
             BlockingWaits.SqlDialect.DuckDb, "dmv_waits",
             @"SELECT blocked_spid, blocking_spid, event_time, wait_time_ms
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3") + @"
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3") + @"
 SELECT
     COALESCE(NULLIF((SELECT COUNT(*) FROM xe_waits), 0), (SELECT COUNT(*) FROM dmv_waits)) AS blocking_count,
-    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3) AS deadlock_count,
+    (SELECT " + StoredEventCopies.DeadlockDistinctCount + @" FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time > $2 AND deadlock_time <= $3) AS deadlock_count,
     (SELECT MAX(t) FROM (
-        SELECT MAX(event_time) AS t FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3") + @" AS ev
+        SELECT MAX(event_time) AS t FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3") + @" AS ev
         UNION ALL
         SELECT MAX(event_time) AS t FROM v_dmv_blocking_snapshots
-        WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
+        WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3
         UNION ALL
-        SELECT MAX(deadlock_time) AS t FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+        SELECT MAX(deadlock_time) AS t FROM v_deadlocks AS dl WHERE server_id = $1 AND deadlock_time > $2 AND deadlock_time <= $3
     )) AS latest_event_time";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -738,8 +741,8 @@ SELECT
     /// DMV arm entirely (a DMV snapshot never has one) — the population <c>get_blocked_process_xml</c> pages
     /// over, so its <c>limit</c> counts reports rather than rows it would have to discard.</para>
     /// </summary>
-    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false) =>
-        (await ReadRecentBlockedProcessReportsAsync(serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc, limit, xmlOnly, windowOnCollectionTime)).Rows;
+    public async Task<List<BlockedProcessReportRow>> GetRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false, bool excludeMonitorOnlyPairs = false) =>
+        (await ReadRecentBlockedProcessReportsAsync(serverId, hoursBack, fromDate, toDate, databaseNames, asOfUtc, limit, xmlOnly, windowOnCollectionTime, excludeMonitorOnlyPairs)).Rows;
 
     /// <summary>The Blocked Process Reports grid's row cap: the default <c>limit</c> of
     /// <see cref="GetRecentBlockedProcessReportsAsync"/> and <see cref="ReadRecentBlockedProcessReportsAsync"/>, and the
@@ -758,7 +761,7 @@ SELECT
     /// before the merge (<see cref="FilledPageStart"/>) and <see cref="BlockedProcessReportsRead.CappedSourceStartUtc"/> names
     /// the oldest event time of the read that filled its page (the later one when both did).
     /// </summary>
-    public async Task<BlockedProcessReportsRead> ReadRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false)
+    public async Task<BlockedProcessReportsRead> ReadRecentBlockedProcessReportsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int limit = BlockedProcessReportGridCap, bool xmlOnly = false, bool windowOnCollectionTime = false, bool excludeMonitorOnlyPairs = false)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -771,13 +774,17 @@ SELECT
 AND   blocked_process_report_xml IS NOT NULL
 AND   blocked_process_report_xml <> ''"
             : string.Empty;
+        /* #9340: the alert read leaves out a pair whose two sessions are both the monitor's own (see the predicate); the grids keep them. */
+        var pairClause = excludeMonitorOnlyPairs
+            ? " AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate
+            : string.Empty;
 
         /* The XE arm windows on event_time; the DMV arm stays on collection_time because
            dmv_blocking_snapshots.event_time IS its collection time. The alert engine opts out (see GetRecentDeadlocksAsync),
            and only that collection_time window needs the look-back collectedFrom adds. */
         var xeRows = windowOnCollectionTime
-            ? StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3" + xmlClause + dbClause, collectedFrom: "$2")
-            : StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + xmlClause + dbClause);
+            ? StoredEventCopies.BlockedProcessReports("server_id = $1 AND collection_time <= $3" + xmlClause + pairClause + dbClause, collectedFrom: "$2")
+            : StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3" + xmlClause + pairClause + dbClause);
 
         command.CommandText = @"
 SELECT
@@ -889,7 +896,7 @@ LIMIT $4";
         // Skipped under xmlOnly: a DMV snapshot never carries a report, so it has nothing to add to that page.
         DateTime? dmvFilledPageStart = null;
         if (!xmlOnly)
-            dmvFilledPageStart = await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit);
+            dmvFilledPageStart = await AppendDmvBlockedProcessGridRowsAsync(connection.CreateCommand, items, serverId, startTime, endTime, databaseNames, limit, excludeMonitorOnlyPairs);
 
         return new BlockedProcessReportsRead(items, LaterOf(xeFilledPageStart, dmvFilledPageStart));
     }
@@ -930,7 +937,7 @@ LIMIT $4";
     /// <paramref name="items"/> — see <see cref="GetRecentBlockedProcessReportsAsync"/> for why.
     /// </summary>
     private static async Task<DateTime?> AppendDmvBlockedProcessGridRowsAsync(
-        Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames, int cap)
+        Func<DuckDBCommand> createCommand, List<BlockedProcessReportRow> items, int serverId, DateTime startTime, DateTime endTime, IReadOnlyList<string>? databaseNames, int cap, bool excludeMonitorOnlyPairs = false)
     {
         var dmvItems = new List<BlockedProcessReportRow>();
         /* The DMV read's own cap: the grid's cap plus the XE rows in hand. */
@@ -949,7 +956,7 @@ SELECT
     blocking_login_name, blocking_host_name, blocking_client_app,
     blocking_login_time, blocking_last_request_end_time, blocking_open_transaction_count, blocking_tran_log_bytes_used
 FROM v_dmv_blocking_snapshots
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"
+WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3" + (excludeMonitorOnlyPairs ? " AND " + PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorOnlyBlockingPairPredicate : string.Empty) + dbClause + @"
 ORDER BY event_time DESC
 LIMIT $4";
             command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -1032,7 +1039,7 @@ SELECT
     {PerformanceMonitorLite.Analysis.BlockingPairRowQuery.IdentityColumns},
     contentious_object,
     {PerformanceMonitorLite.Analysis.BlockingPairRowQuery.TrailingIdentityColumns}
-FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 " + PerformanceMonitorLite.Analysis.BlockingPairRowQuery.SpidFilter)} AS ev
+FROM {StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3 " + PerformanceMonitorLite.Analysis.BlockingPairRowQuery.SpidFilter)} AS ev
 ORDER BY event_time DESC, collection_time DESC, blocked_report_id DESC
 LIMIT 5000";
 
@@ -1084,7 +1091,7 @@ WITH bpr AS (
         COUNT(DISTINCT blocking_spid) AS distinct_blockers,
         COUNT(DISTINCT blocked_spid) AS distinct_blocked,
         COUNT(DISTINCT database_name) AS distinct_databases
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + @" AS ev
     GROUP BY " + BucketOf("event_time") + @"
 ),
 dmv AS (
@@ -1096,7 +1103,7 @@ dmv AS (
         COUNT(DISTINCT blocked_spid) AS distinct_blocked,
         COUNT(DISTINCT database_name) AS distinct_databases
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause + @"
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause + @"
     GROUP BY " + BucketOf("collection_time") + @"
 )
 SELECT bucket, event_count, total_wait_sec, distinct_blockers, distinct_blocked, distinct_databases FROM bpr
@@ -1151,7 +1158,7 @@ SELECT
     " + bucket + @" AS bucket,
     " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
 FROM v_deadlocks AS dl
-WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+WHERE server_id = $1 AND deadlock_time > $2 AND deadlock_time <= $3
 GROUP BY " + bucket + @"
 ORDER BY bucket";
 
@@ -1188,7 +1195,7 @@ ORDER BY bucket";
         using var command = connection.CreateCommand();
 
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
-        command.CommandText = "SELECT 1 FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + " AS ev LIMIT 1";
+        command.CommandText = "SELECT 1 FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + " AS ev LIMIT 1";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
@@ -1210,7 +1217,7 @@ ORDER BY bucket";
         using var command = connection.CreateCommand();
 
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
-        command.CommandText = "SELECT MIN(ev.event_time) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3" + dbClause) + " AS ev";
+        command.CommandText = "SELECT MIN(ev.event_time) FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3" + dbClause) + " AS ev";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
@@ -1303,13 +1310,13 @@ SELECT
         command.CommandText = @"
 WITH bpr AS (
     SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'blocked-process-report' AS source
-    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + @" AS ev
+    FROM " + StoredEventCopies.BlockedProcessReports("server_id = $1 AND event_time > $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause) + @" AS ev
     GROUP BY DATE_TRUNC('minute', event_time)
 ),
 dmv AS (
     SELECT DATE_TRUNC('minute', event_time) AS bucket, COUNT(*) AS incident_count, 'DMV snapshot' AS source
     FROM v_dmv_blocking_snapshots
-    WHERE server_id = $1 AND event_time >= $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause + @"
+    WHERE server_id = $1 AND event_time > $2 AND event_time <= $3 AND " + BlockingWaits.NotSelfWaitSql + dbClause + @"
     GROUP BY DATE_TRUNC('minute', event_time)
 )
 SELECT bucket, incident_count, source FROM bpr
@@ -1356,7 +1363,7 @@ FROM (
         DATE_TRUNC('minute', deadlock_time) AS bucket,
         " + StoredEventCopies.DeadlockDistinctCount + @" AS deadlock_count
     FROM v_deadlocks AS dl
-    WHERE server_id = $1 AND deadlock_time >= $2 AND deadlock_time <= $3
+    WHERE server_id = $1 AND deadlock_time > $2 AND deadlock_time <= $3
     GROUP BY DATE_TRUNC('minute', deadlock_time)
 ) sub
 ORDER BY bucket";
@@ -1452,7 +1459,7 @@ SELECT
     MAX(collection_time)
 FROM v_collection_log
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   status = 'SUCCESS'
 AND   " + collectorPredicate + @"
@@ -1515,6 +1522,8 @@ WITH raw AS
     FROM v_wait_stats
     WHERE server_id = $1
     AND   wait_type LIKE 'LCK%'
+    /* A pre-v60 row takes its interval from the row before it, so the row stamped on $2 is read as that predecessor only:
+       the read below drops it, and every row it returns was collected in ($2, $3]. */
     AND   collection_time >= $2
     AND   collection_time <= $3
 ),
@@ -1526,6 +1535,7 @@ rated AS
         CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN delta_wait_time_ms END AS rated_wait_ms,
         CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN interval_seconds END AS rated_seconds
     FROM raw
+    WHERE collection_time > $2
 )
 SELECT
     wait_type,

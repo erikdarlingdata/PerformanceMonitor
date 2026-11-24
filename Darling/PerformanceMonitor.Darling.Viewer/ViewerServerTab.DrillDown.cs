@@ -257,15 +257,17 @@ public partial class ViewerServerTab
     /// </summary>
     private async void OnActiveQueriesDrillDown(DateTime centreUtc)
     {
+        var timer = new ViewerLoadTimer();
         try
         {
             var (fromUtc, toUtc) = DrillWindowUtc(centreUtc);
             var indicator = DrillDownIndicatorText(fromUtc, toUtc, ViewerTimeHelper.CurrentDisplayZone());
-            await NavigateToActiveQueriesForWindowAsync(fromUtc, toUtc, indicator);
+            await NavigateToActiveQueriesForWindowAsync(fromUtc, toUtc, indicator, timer);
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"active-queries drill-down failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Queries > Active Queries", timer, ex));
         }
     }
 
@@ -288,13 +290,15 @@ public partial class ViewerServerTab
             _suppressDrillDownAutoRefresh = false;
         }
 
+        var timer = new ViewerLoadTimer();
         try
         {
-            await LoadBlockedProcessReportsAsync(fromUtc, toUtc);
+            await LoadBlockedProcessReportsAsync(fromUtc, toUtc, timer);
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"blocking drill-down failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Blocking > Blocked Process Reports", timer, ex));
         }
     }
 
@@ -316,13 +320,15 @@ public partial class ViewerServerTab
             _suppressDrillDownAutoRefresh = false;
         }
 
+        var timer = new ViewerLoadTimer();
         try
         {
-            await LoadDeadlocksAsync(fromUtc, toUtc);
+            await LoadDeadlocksAsync(fromUtc, toUtc, timer);
         }
         catch (Exception ex)
         {
-            StatusChanged?.Invoke($"deadlock drill-down failed: {ex.Message}");
+            /* #9365: one warning line in the Viewer log naming the tab and the read, and plain words in the status bar, never the driver's text. */
+            StatusChanged?.Invoke(ViewerRefreshFailure.Report($"{_server.DisplayName}: Blocking > Deadlocks", timer, ex));
         }
     }
 

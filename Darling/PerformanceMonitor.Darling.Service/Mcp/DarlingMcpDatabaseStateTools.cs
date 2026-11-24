@@ -57,7 +57,7 @@ public sealed class DarlingMcpDatabaseStateTools
     public static async Task<string> GetDatabaseStateExpectations(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
-        [Description("Optional: only this database (exact name).")] string? database_name = null,
+        [Description("Optional: only this database.")] string? database_name = null,
         CancellationToken cancellationToken = default)
     {
         try
@@ -135,7 +135,7 @@ public sealed class DarlingMcpDatabaseStateTools
     public static async Task<string> SetDatabaseStateExpected(
         NpgsqlDataSource postgres,
         [Description("Server name (the name list_servers shows), or a unique part of it.")] string server_name,
-        [Description("The database's exact name, as get_database_state_expectations shows it.")] string database_name,
+        [Description("The database, as get_database_state_expectations shows it.")] string database_name,
         [Description("ONLINE, OFFLINE, RESTORING, RECOVERING, RECOVERY_PENDING, SUSPECT, EMERGENCY, STANDBY, IGNORE, or CLEAR.")] string expected_state,
         ILogger? logger = null,
         CancellationToken cancellationToken = default)
@@ -152,7 +152,8 @@ public sealed class DarlingMcpDatabaseStateTools
                 return DarlingMcpAlertTools.Outcome("invalid", "expected_state is required: one of " + string.Join(", ", AllowedStates()) + ". Nothing was changed.");
             }
 
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
+            /* A write never guesses between two servers: a name that is one server's stored name and another's display name is refused. */
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken, NameClash.Refuse);
             if (error is not null)
             {
                 return error;

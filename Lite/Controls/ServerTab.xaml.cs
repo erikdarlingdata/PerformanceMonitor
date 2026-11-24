@@ -215,7 +215,7 @@ public partial class ServerTab : UserControl
     public event Func<Task>? ManualRefreshRequested;
     public event Action<ServerConnection>? PersistServerRequested; /* #1319: persist ViewFilterDatabases via ServerManager */
 
-    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None, Func<CollectorSchedule?>? queryStoreHealthSchedule = null)
+    public ServerTab(ServerConnection server, DuckDbInitializer duckDb, CredentialResolver credentialResolver, int utcOffsetMinutes = 0, bool hasMsdbAccess = true, int sqlEngineEdition = 0, Func<bool>? isLongQueryTraceEnabled = null, AwsRdsKind awsRdsKind = AwsRdsKind.None, Func<CollectorSchedule?>? queryStoreHealthSchedule = null, int sqlMajorVersion = 0)
     {
         InitializeComponent();
         PerformanceMonitor.Ui.ChartPairLayout.Attach(CurrentWaitsScroll, CurrentWaitsGrid, CurrentWaitsFirstCard, CurrentWaitsSecondCard, CurrentWaitsGrid.RowDefinitions[2]); // #8219: side by side when the tab is too short for both stacked
@@ -253,6 +253,9 @@ public partial class ServerTab : UserControl
         _hasMsdbAccess = hasMsdbAccess;
         _awsRdsKind = awsRdsKind;
         _engineEdition = sqlEngineEdition;
+        /* #9099: the major the connection check read. The stored server_properties row cannot be the only source: on a server below SQL Server 2016 that
+           collector never runs, so the stored version would stay unknown (assumed newest) for good. */
+        _sqlMajorVersion = sqlMajorVersion;
         ServerTimeHelper.ActiveServerClock = _serverClock;
 
         ShowServerName(server);
@@ -305,6 +308,8 @@ public partial class ServerTab : UserControl
             if (IsVisible && _refreshPendingWhileHidden)
             {
                 _refreshPendingWhileHidden = false;
+                /* #9366: coming back to this server tab is the pick its pending read answers. */
+                StampFirstLoadPick();
                 _ = RefreshAllDataAsync();
             }
         };
@@ -593,6 +598,10 @@ public partial class ServerTab : UserControl
         if (e.Source != MainTabControl && e.Source != QueriesSubTabControl
             && e.Source != CpuSubTabControl && e.Source != MemorySubTabControl && e.Source != BlockingSubTabControl
             && e.Source != SystemEventsSubTabControl && e.Source != ConfigChangesSubTabControl) return;
+
+        /* #9366: the selection just changed, so this is the pick the first-load line times from. Before the drill-down return
+           below, whose own load goes through the same first-load line. */
+        StampFirstLoadPick();
 
         UpdateCompareDropdownState();
 

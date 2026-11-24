@@ -1872,6 +1872,12 @@
                                         <ScottPlot:WpfPlot x:Name="FileIoWriteChart"/>
                                     </ui:ChartPanel>
                                 </Border>
+                                <!-- #9099: shown over the charts when the file_io_stats collector does not collect for this server (a SQL Server older than the supported floor). -->
+                                <Border Grid.Row="0" Grid.RowSpan="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
+                                        Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="16,12"
+                                        Visibility="{Binding Visibility, ElementName=FileIoNoDataMessage}">
+                                    <TextBlock Style="{DynamicResource EmptyHint}" x:Name="FileIoNoDataMessage" Visibility="Collapsed"/>
+                                </Border>
                             </Grid></ScrollViewer>
                         </TabItem>
 
@@ -1892,6 +1898,12 @@
                                     <ui:ChartPanel Title="Write Throughput">
                                         <ScottPlot:WpfPlot x:Name="FileIoWriteThroughputChart"/>
                                     </ui:ChartPanel>
+                                </Border>
+                                <!-- #9099: shown over the charts when the file_io_stats collector does not collect for this server (a SQL Server older than the supported floor). -->
+                                <Border Grid.Row="0" Grid.RowSpan="2" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
+                                        Background="{DynamicResource BackgroundDarkBrush}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="16,12"
+                                        Visibility="{Binding Visibility, ElementName=FileIoThroughputNoDataMessage}">
+                                    <TextBlock Style="{DynamicResource EmptyHint}" x:Name="FileIoThroughputNoDataMessage" Visibility="Collapsed"/>
                                 </Border>
                             </Grid></ScrollViewer>
                         </TabItem>
@@ -2276,7 +2288,7 @@
                              severity is parsed from deadlock_graph_xml over the SAME deadlock window as the
                              deadlock count (so those reconcile too), via Lite's own DeadlockProcessDetail parse.
                              Appended as the LAST Blocking sub-tab (sub-index 4, after Deadlocks) — nothing else
-                             reindexed; RefreshBlockingAsync's subTabOnly switch gains case 4. -->
+                             reindexed; the sub-tab switch of RefreshBlockingAsync gains case 4. -->
                         <TabItem Header="Blocking Stats">
                             <!-- 2x2 grid (matching the Performance Trends layout): row 0 = blocking Max/Avg |
                                  blocking Total, row 1 = deadlock Max/Avg | deadlock Total, so each plot area

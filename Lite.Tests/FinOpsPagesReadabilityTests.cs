@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -34,7 +35,8 @@ namespace PerformanceMonitorLite.Tests;
 /// sentence, not two; and the 7-Day Provisioning Trend shows the stolen memory that decides a low-CPU day, gives the day's reason on
 /// its Status, and says which window the badge covers. The Darling Viewer's twin is ViewerFinOpsPagesReadabilityTests in Darling.Tests.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class FinOpsPagesReadabilityTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -142,36 +144,6 @@ public sealed class FinOpsPagesReadabilityTests
         Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
     }
 
-    [Theory]
-    [InlineData("Dark")]
-    [InlineData("Light")]
-    [InlineData("CoolBreeze")]
-    public void TheIndexAnalysisDatabaseBox_IsAPickerWithAnArrow(string theme)
-    {
-        var problems = StaTestThread.Run(() => WithTheme(theme, () => WithTab(MaximizedTabWidth, 925, (tab, window) =>
-        {
-            var box = (FrameworkElement)tab.FindName("IndexAnalysisDatabaseInput");
-            Reveal(box);
-            Settle(window);
-
-            var found = new List<string>();
-            if (box is not ComboBox)
-            {
-                found.Add($"{theme}: the Database box is a {box.GetType().Name}, not a picker");
-                return found;
-            }
-
-            var arrow = Descendants(box).OfType<ToggleButton>().SelectMany(Descendants).OfType<System.Windows.Shapes.Path>().FirstOrDefault(p => p.ActualWidth > 0 && p.ActualHeight > 0 && p.IsVisible);
-            if (arrow is null)
-            {
-                found.Add($"{theme}: the Database picker shows no drop-down arrow");
-            }
-            return found;
-        })));
-
-        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
-    }
-
     /// <summary>
     /// Before a run the Index Analysis screen shows one message over both grids, not a message under a bare summary grid (#8621).
     /// A run that returns rows swaps the message for the grids, and an empty one swaps them back.
@@ -250,7 +222,7 @@ public sealed class FinOpsPagesReadabilityTests
                     var grid = (DataGrid)tab.FindName("HighImpactDataGrid");
                     Reveal(grid);
                     Settle(window);
-                    await (Task)typeof(FinOpsTab).GetMethod("LoadHighImpactQueriesAsync", Instance)!.Invoke(tab, [12345])!;
+                    await (Task)typeof(FinOpsTab).GetMethod("LoadHighImpactQueriesAsync", Instance)!.Invoke(tab, [12345, CancellationToken.None])!;
                     Settle(window);
                     problems.AddRange(EmptySentences(grid, "High Impact"));
                 }

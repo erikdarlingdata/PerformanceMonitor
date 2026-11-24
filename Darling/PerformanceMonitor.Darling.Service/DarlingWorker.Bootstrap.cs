@@ -48,6 +48,7 @@ public sealed partial class DarlingWorker
         /* A file: secret whose target ordinary users can read is reported through the service log; the resolver
            itself has no logger. Set before the first config read, which is the first resolve. */
         DarlingSecretSource.ReportFileAccessTo(message => _logger.LogWarning("{Warning}", message));
+        _stoppingToken = stoppingToken;
 
         _executeStartedUtc = DateTime.UtcNow;
         /* #7681: the statements the service sends to a PostgreSQL target, known before any collector has run, so the first
@@ -110,8 +111,12 @@ public sealed partial class DarlingWorker
                 _analyzerConfig = config.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
                 /* #7674: the trigram index option is read by get_store_metrics and by the all-servers find_queries_by_text refusal from process
                    start, long before the migrations finish (and for good when they fail). Set it the moment the file loads, not when the
-                   background pass starts, or a valid index reads as "option off, being dropped" while the option is on. */
-                QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled);
+                   background pass starts, or a valid index reads as "option off, being dropped" while the option is on. #8978: the file value
+                   until the store is read; the store's value, when its column holds one, replaces it after the first config load. */
+                QueryTextTrigramIndexTracker.Shared.Configure(config.QueryTextTrigramIndexEnabled, QueryTextTrigramIndexTracker.SourceFile);
+                /* #8570: the Query Store text index's option, for the same reason: get_store_metrics and find_queries_by_text read it from
+                   process start. */
+                QueryStoreTextTrigramIndex.SharedTracker.Configure(config.QueryStoreTextTrigramIndexEnabled, QueryTextTrigramIndexTracker.SourceFile);
                 _logger.LogInformation("Loaded configuration from {Path}: {ServerCount} server(s)", configPath, config.Servers.Count);
                 break;
             }
@@ -274,6 +279,10 @@ public sealed partial class DarlingWorker
             _logger.LogWarning("{Warning}", warning);
         }
 
+        /* #8737: mcp.personalTokens off, or the one warning for each reason it cannot be served as written. The result is read where the token
+           routes are built; here the start only names the reasons. */
+        DarlingPersonalTokenSettings.Resolve(config, _logger);
+
         /* #4220: web.publicBaseUrl shaped like it carries a credential (a query string, fragment, or
            userinfo — e.g. the dashboard's own sign-in link pasted in by mistake). Ruled: sending the link is
            the operator's call, not refused here; one warning at startup is the whole mitigation. */
@@ -371,6 +380,7 @@ public sealed partial class DarlingWorker
                         if (OperatingSystem.IsWindows())
                         {
                             storeConnectionString = await managedPostgres.EnsureRunningAsync(stoppingToken);
+                            Mcp.StoreProcessOwnership.Shared.Publish(managedPostgres.StartedByThisProcess);
                             storeUpgradeReport = BuildStoreUpgradeReport(managedPostgres.LastUpgradeOutcome);
                             storeTimescaleReport = BuildStoreTimescaleReport(managedPostgres.LastTimescaleOutcome);
                         }
@@ -835,7 +845,7 @@ public sealed partial class DarlingWorker
 
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(budget.Token);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, budget.Token);
             var profile = await DarlingStoreHostProfile.GatherStartupProfileAsync(config.Postgres, connection, budget.Token);
 
             _logger.LogInformation("Store host profile:\n{Profile}", DarlingStoreHostProfile.FormatStartupProfileText(profile));

@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -57,14 +58,15 @@ WITH windowed AS
         c.offset_reset    AS offset_reset,
         c.groups_dropped  AS groups_dropped
     FROM collect.store_log_captures AS c
-    WHERE c.capture_time >= $1
+    WHERE c.capture_time > $1
     AND   c.capture_time <= $2
 ),
 newest AS
 (
     /* Pending bytes are a LEVEL, not a total: summing them over the window would add the same backlog once
        per capture. Only the newest capture's figure means anything, so only it is read. */
-    SELECT coalesce(sum(n.bytes_pending), 0)::bigint AS bytes_pending
+    SELECT coalesce(sum(n.bytes_pending), 0)::bigint AS bytes_pending,
+           coalesce(sum(n.bytes_read), 0)::bigint    AS bytes_read
     FROM windowed AS n
     WHERE n.capture_time = (SELECT max(m.capture_time) FROM windowed AS m)
 )
@@ -84,7 +86,16 @@ SELECT
     min(w.capture_time)                                             AS first_capture_at,
     max(w.capture_time)                                             AS last_capture_at,
     (SELECT p.bytes_pending FROM newest AS p)                       AS bytes_pending,
-    coalesce(array_agg(DISTINCT w.log_file ORDER BY w.log_file), '{}'::text[]) AS log_files
+    coalesce(array_agg(DISTINCT w.log_file ORDER BY w.log_file), '{}'::text[]) AS log_files,
+    /* #9314: the newest capture's own bytes read, and when the marker last moved. Two captures in a row that read 0
+       bytes with bytes pending are a marker that is not moving: one is a heartbeat over a short line still being
+       written. The time is the newest capture that read bytes at or before the window's end, so a window that ends
+       before a later reading capture does not report that later time. */
+    (SELECT p.bytes_read FROM newest AS p)                          AS newest_bytes_read,
+    (SELECT max(c.capture_time) FROM collect.store_log_captures AS c WHERE c.bytes_read > 0 AND c.capture_time <= $2) AS marker_last_moved_at,
+    (SELECT sum(t.bytes_read)::bigint FROM
+        (SELECT x.capture_time, sum(x.bytes_read) AS bytes_read FROM windowed AS x GROUP BY x.capture_time ORDER BY x.capture_time DESC LIMIT 1 OFFSET 1) AS t
+    ) AS previous_bytes_read
 FROM windowed AS w";
 
     /// <summary>
@@ -105,7 +116,7 @@ WITH buckets AS
 (
     SELECT DISTINCT date_trunc('hour', c.capture_time) AS bucket
     FROM collect.store_log_captures AS c
-    WHERE c.capture_time >= $1
+    WHERE c.capture_time > $1
     AND   c.capture_time <= $2
 ),
 hourly AS
@@ -115,7 +126,7 @@ hourly AS
         date_trunc('hour', e.capture_time)        AS bucket,
         sum(e.occurrences)::bigint                AS occurrences
     FROM collect.store_log_events AS e
-    WHERE e.capture_time >= $1
+    WHERE e.capture_time > $1
     AND   e.capture_time <= $2
     GROUP BY e.event_class, date_trunc('hour', e.capture_time)
 ),
@@ -125,7 +136,7 @@ severities AS
         e.event_class                                         AS event_class,
         array_agg(DISTINCT e.severity ORDER BY e.severity)    AS severities
     FROM collect.store_log_events AS e
-    WHERE e.capture_time >= $1
+    WHERE e.capture_time > $1
     AND   e.capture_time <= $2
     GROUP BY e.event_class
 ),
@@ -167,6 +178,17 @@ ORDER BY sum(g.occurrences) DESC, g.event_class";
     /// <para>The order ends on the grouping key, so it is total: rows that tie on capture and count keep one order
     /// on every read, which is what lets an offset page through them (#8568).</para>
     ///
+    /// <para>Inside one capture a WARNING or worse comes ahead of a LOG row, so a short page carries the errors and
+    /// not only the most repeated slow plans (#8813).</para>
+    ///
+    /// <para><c>total_groups</c> is every row the window holds, counted over the grouped set before the LIMIT cuts it,
+    /// so the page can say how much of the set it is (#8813).</para>
+    ///
+    /// <para>$4 is the <c>query_id</c> filter (#9435), or NULL for none. A slow plan's message ends in
+    /// <c>queryid=&lt;id&gt;</c> and that text is the only place the id is kept (the row has no column for it), so the
+    /// filter is one exact test of the message's tail on the plan class ($5, passed so this text names no class), in the WHERE ahead of the LIMIT: an id that
+    /// is a prefix or suffix of another statement's does not match it.</para>
+    ///
     /// <para><c>message_text IS NOT NULL</c> is the whole predicate, and it is a structural test rather than
     /// a class list: the sweep writes text only for the classes the classifier retains, so asking for rows
     /// that HAVE text asks exactly the right population and cannot drift from the classifier's own decision
@@ -180,13 +202,18 @@ SELECT
     sum(e.occurrences)::bigint               AS occurrences,
     min(e.capture_time)                      AS first_capture_at,
     max(e.capture_time)                      AS last_capture_at,
-    (array_agg(e.sample_line ORDER BY e.capture_time DESC))[1] AS sample_line
+    (array_agg(e.sample_line ORDER BY e.capture_time DESC))[1] AS sample_line,
+    count(*) OVER ()::bigint                 AS total_groups
 FROM collect.store_log_events AS e
-WHERE e.capture_time >= $1
+WHERE e.capture_time > $1
 AND   e.capture_time <= $2
 AND   e.message_text IS NOT NULL
+AND   ($4::text IS NULL
+       OR (e.event_class = $5 AND right(e.message_text, length($4::text)) = $4::text))
 GROUP BY e.event_class, e.severity, e.message_text
-ORDER BY max(e.capture_time) DESC, sum(e.occurrences) DESC, e.event_class, e.severity, e.message_text
+ORDER BY max(e.capture_time) DESC,
+         CASE WHEN e.severity IN ('WARNING', 'ERROR', 'FATAL', 'PANIC') THEN 0 ELSE 1 END,
+         sum(e.occurrences) DESC, e.event_class, e.severity, e.message_text
 LIMIT $3";
 
     /// <summary>The capture denominator for the window.</summary>
@@ -216,6 +243,22 @@ LIMIT $3";
         /// <summary>Bytes still unread when the newest capture finished — non-zero means the per-capture
         /// read cap bit and the next capture picks it up, not that anything was lost.</summary>
         [JsonPropertyName("bytes_pending")] public long BytesPending { get; init; }
+
+        /// <summary>Bytes the newest capture in the window read (#9314). Null when not known.</summary>
+        [JsonPropertyName("newest_capture_bytes_read"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public long? NewestCaptureBytesRead { get; init; }
+
+        /// <summary>When a read marker last moved, as UTC ISO text (#9314). Null when no marker is stored.</summary>
+        [JsonPropertyName("marker_last_moved_at"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? MarkerLastMovedAt { get; init; }
+
+        /// <summary>Bytes the capture before the newest in the window read (#9314). Null when the window holds one capture.</summary>
+        [JsonIgnore] public long? PreviousCaptureBytesRead { get; init; }
+
+        /// <summary>True when the newest two captures both read 0 bytes while bytes are pending (#9314): the marker has not moved, so
+        /// the log is not being read past it. One such capture is not enough, since a heartbeat over a short line at the end of the file reads nothing too. That is not the backlog <see cref="BytesPending"/> alone describes, which later
+        /// captures read down.</summary>
+        [JsonIgnore] public bool MarkerStalled => BytesPending > 0 && NewestCaptureBytesRead == 0 && PreviousCaptureBytesRead == 0;
 
         /// <summary>Captures that discarded a resume marker because the weekday ring truncated the file
         /// underneath it.</summary>
@@ -291,6 +334,16 @@ LIMIT $3";
 
         /// <summary>The stored entry's whole length in characters, beside the preview.</summary>
         [JsonPropertyName("sample_line_length")] public int? SampleLineLength { get; init; }
+
+        /// <summary>The TOAST relation an autovacuum cancel's CONTEXT names, as the log writes it with its
+        /// database (<c>darling.pg_toast.pg_toast_17428</c>), when it names one (#8814). Null for every other row.</summary>
+        [JsonPropertyName("toast_relation"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ToastRelation { get; init; }
+
+        /// <summary>The table that owns <see cref="ToastRelation"/> (<c>schema.table</c>), read from the store's catalog
+        /// when the answer is built (#8814), so the reader can act on the cancel without a catalog query. Null when
+        /// the row names no TOAST relation, the relation no longer exists, or the log names it under another
+        /// database than this store's (#8822).</summary>
+        [JsonPropertyName("toast_owner"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ToastOwner { get; set; }
     }
 
     /// <summary>A class this build classifies into that had no rows in the window.</summary>
@@ -337,6 +390,35 @@ LIMIT $3";
         return absent;
     }
 
+    /// <summary>The unread-log fields of one answer (#8904).</summary>
+    public sealed class LogBacklogInfo
+    {
+        /// <summary>Bytes of log still unread when the newest capture finished.</summary>
+        [JsonPropertyName("bytes_pending")] public long BytesPending { get; init; }
+
+        /// <summary>The most log one capture reads.</summary>
+        [JsonPropertyName("per_capture_bound_bytes")] public long PerCaptureBoundBytes { get; init; }
+
+        /// <summary>The least captures the backlog needs if nothing more is written.</summary>
+        [JsonPropertyName("captures_needed")] public long CapturesNeeded { get; init; }
+
+        /// <summary>The log's own time stamp on the newest kept sample line, as written, in the store's log time zone.
+        /// It is a floor, not a ceiling: the read reached at least this time, and how far past it is not known, because only
+        /// a retained class keeps a sample line. Null when no kept sample line carries one.</summary>
+        [JsonPropertyName("newest_sample_log_stamp")] public string? NewestSampleLogStamp { get; init; }
+
+        /// <summary>True when the newest capture read nothing while bytes are pending (#9314).</summary>
+        [JsonPropertyName("marker_stalled")] public bool MarkerStalled { get; init; }
+
+        /// <summary>When a read marker last moved, as UTC ISO text, while <see cref="MarkerStalled"/>. Null when unknown.</summary>
+        [JsonPropertyName("marker_last_moved_at"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? MarkerLastMovedAt { get; init; }
+
+        [JsonPropertyName("note")] public string Note => MarkerStalled
+            ? "The read marker is not moving: the newest capture read 0 bytes while the log has more past the marker, so the newest hours of the log are not read, and 0 in occurrences_last_hour is not a quiet hour."
+            : "The newest hours of the log are not read yet: occurrences_last_hour counts only what was read, so 0 there is not a quiet hour.";
+    }
+
     /// <summary>What one <c>get_store_log</c> answer is.</summary>
     public sealed class StoreLogReport
     {
@@ -345,6 +427,26 @@ LIMIT $3";
         [JsonPropertyName("as_of")] public string AsOf { get; init; } = string.Empty;
 
         [JsonPropertyName("capture_summary")] public CaptureSummary Captures { get; init; } = new();
+
+        /// <summary>The log's own stamp (as written, in the store's log time zone) on the newest kept sample line, set
+        /// by the caller only while bytes are pending (#8904). Null when none was found.</summary>
+        [JsonIgnore] public string? NewestSampleLogStamp { get; init; }
+
+        /// <summary>Present only while bytes are pending (#8904): the newest hours of the log are not read yet, how much
+        /// one capture reads, and the log time the read reached at least, so an <c>occurrences_last_hour</c> of 0 is not taken
+        /// for a quiet hour. Absent when the reader is level.</summary>
+        [JsonPropertyName("log_backlog"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public LogBacklogInfo? LogBacklog => Captures.BytesPending > 0
+            ? new LogBacklogInfo
+            {
+                BytesPending = Captures.BytesPending,
+                PerCaptureBoundBytes = StoreLogSweep.MaxBytesPerCapture,
+                CapturesNeeded = StoreLogSweep.CapturesNeeded(Captures.BytesPending),
+                MarkerStalled = Captures.MarkerStalled,
+                MarkerLastMovedAt = Captures.MarkerStalled ? Captures.MarkerLastMovedAt : null,
+                NewestSampleLogStamp = NewestSampleLogStamp,
+            }
+            : null;
 
         [JsonPropertyName("classes")] public IReadOnlyList<ClassCensus> Classes { get; init; } = [];
 
@@ -368,6 +470,22 @@ LIMIT $3";
 
         /// <summary>How many rows <see cref="RetainedEvents"/> holds.</summary>
         [JsonPropertyName("retained_events_returned")] public int RetainedEventsReturned => RetainedEvents.Count;
+
+        private int _retainedEventsTotal;
+
+        /// <summary>How many distinct retained messages the window holds, whatever the page: the rows this answer
+        /// holds are <see cref="RetainedEventsReturned"/> of them, after the first <c>offset</c> (#8813). Never less
+        /// than the rows the page already reaches.</summary>
+        [JsonPropertyName("retained_events_total")]
+        public int RetainedEventsTotal
+        {
+            get => Math.Max(_retainedEventsTotal, RetainedEventsSkipped + RetainedEvents.Count);
+            init => _retainedEventsTotal = value;
+        }
+
+        /// <summary>True when retained messages follow the last row this answer holds, whether <c>limit</c> or the
+        /// response budget left them off (#8813). The way on is <c>offset</c> at <c>skipped + returned</c>.</summary>
+        [JsonPropertyName("truncated")] public bool Truncated => RetainedEventsSkipped + RetainedEvents.Count < RetainedEventsTotal;
 
         /// <summary>The oldest <c>last_capture_at</c> among <see cref="RetainedEvents"/>, which are newest capture
         /// first: where this answer's rows stop, and the time <c>as_of</c> reads on from (#8568). Null when the answer
@@ -444,11 +562,19 @@ LIMIT $3";
             note.Append(". ");
         }
 
-        if (report.BudgetTruncated || report.RetainedEventsSkipped > 0)
+        if (report.BudgetTruncated || report.Truncated || report.RetainedEventsSkipped > 0)
         {
-            /* A page of the retained messages: the count is this answer's, not the window's. */
+            /* A page of the retained messages, whatever cut it (a limit, the budget, or an offset): the window's
+               total beside the page's own count, and where the rest starts (#8813). */
             note.Append(CultureInfo.InvariantCulture,
-                $"{report.RetainedEvents.Count:N0} of the distinct messages retained with their text {(report.RetainedEvents.Count == 1 ? "is" : "are")} listed here. ");
+                $"{report.RetainedEvents.Count:N0} of {report.RetainedEventsTotal:N0} distinct messages retained with their text {(report.RetainedEvents.Count == 1 ? "is" : "are")} listed here");
+            if (report.Truncated)
+            {
+                note.Append(CultureInfo.InvariantCulture,
+                    $"; offset {report.RetainedEventsSkipped + report.RetainedEvents.Count:N0} reads on, with as_of at this answer's as_of so the rows do not shift");
+            }
+
+            note.Append(". ");
         }
         else
         {
@@ -478,11 +604,50 @@ LIMIT $3";
 
         if (summary.BytesPending > 0)
         {
-            note.Append(string.Format(
-                CultureInfo.InvariantCulture,
-                "{0} {1} still unread when the newest capture finished; the next capture reads them. ",
-                CountText.Plural(summary.BytesPending, "byte"),
-                summary.BytesPending == 1 ? "was" : "were"));
+            if (summary.MarkerStalled)
+            {
+                /* #9314: a capture that read nothing while bytes are pending is not a backlog the next capture reads down. */
+                note.Append(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} {1} past the read marker, and the newest capture read none of them: the marker has {2}. "
+                    + "The log is not being read past it, so what was written after that point is missing from every count here. ",
+                    CountText.Plural(summary.BytesPending, "byte"),
+                    summary.BytesPending == 1 ? "is" : "are",
+                    summary.MarkerLastMovedAt is { } movedAt
+                        ? $"not moved since {movedAt} UTC"
+                        : "not moved in the latest capture"));
+            }
+            else if (summary.BytesPending > StoreLogSweep.MaxBytesPerCapture)
+            {
+                /* #8904: more than one capture can read, so "the next capture reads them" would be untrue. */
+                var needed = StoreLogSweep.CapturesNeeded(summary.BytesPending);
+                note.Append(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} {1} still unread when the newest capture finished. One capture reads at most {2} ({3} slabs of {4}), "
+                    + "so this backlog needs at least {5} to read, at one capture an hour, and more if the log keeps growing. ",
+                    CountText.Plural(summary.BytesPending, "byte"),
+                    summary.BytesPending == 1 ? "was" : "were",
+                    CountText.Plural(StoreLogSweep.MaxBytesPerCapture, "byte"),
+                    StoreLogSweep.MaxSlabsPerCapture,
+                    CountText.Plural(StoreLogSlab.MaxBytesPerRead, "byte"),
+                    CountText.Plural(needed, "capture")));
+            }
+            else
+            {
+                note.Append(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} {1} still unread when the newest capture finished; the next capture reads them. ",
+                    CountText.Plural(summary.BytesPending, "byte"),
+                    summary.BytesPending == 1 ? "was" : "were"));
+            }
+
+            /* #8904: the newest hours are the unread ones, so a 0 in occurrences_last_hour is not a quiet hour. */
+            if (!summary.MarkerStalled)
+            {
+                note.Append(report.NewestSampleLogStamp is { } stamp
+                ? $"The read reached at least the log's own time {stamp} (the newest stamp on a kept sample line) and how far past it is not known, so occurrences_last_hour and the newest hours of every class count only what was read and can read low. "
+                : "The newest hours of the log are not read yet (no kept sample line carries a log time to name), so occurrences_last_hour and the newest hours of every class count only what was read and can read low. ");
+            }
         }
 
         note.Append("No band is applied. Whether a class moved is its count read against the per-hour median "
@@ -490,6 +655,68 @@ LIMIT $3";
             + "is healthy and has to keep reading that way.");
 
         return note.ToString();
+    }
+
+    /// <summary>
+    /// The first characters of every kept sample line in the newest capture that kept any (#8904). The sweep parses no
+    /// timestamp, so the only log time the store holds is the one a kept entry carries at the front of its own line.
+    /// $1/$2 window (naive UTC).
+    /// </summary>
+    public const string NewestSampleHeadsSql = @"
+WITH newest AS
+(
+    SELECT max(m.capture_time) AS capture_time
+    FROM collect.store_log_events AS m
+    WHERE m.sample_line IS NOT NULL
+    AND   m.capture_time > $1
+    AND   m.capture_time <= $2
+)
+SELECT left(e.sample_line, 64)
+FROM collect.store_log_events AS e
+JOIN newest AS n
+  ON n.capture_time = e.capture_time
+WHERE e.sample_line IS NOT NULL";
+
+    private static readonly System.Text.RegularExpressions.Regex s_logStamp = new(
+        @"^\s*\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?(?: [A-Za-z+\-][A-Za-z0-9+:\-]*)?(?=\s|\[|$)",
+        System.Text.RegularExpressions.RegexOptions.CultureInvariant | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>The log stamp at the front of a sample line as the log wrote it, or null when it has none.</summary>
+    public static string? LogStampOf(string? sampleHead)
+    {
+        if (string.IsNullOrEmpty(sampleHead))
+        {
+            return null;
+        }
+
+        var match = s_logStamp.Match(sampleHead);
+        return match.Success ? match.Value.Trim() : null;
+    }
+
+    /// <summary>The newest log stamp among the kept samples (#8904), or null when none carries one.</summary>
+    public static async Task<string?> GetNewestSampleLogStampAsync(
+        NpgsqlDataSource postgres,
+        DateTime windowStartUtc,
+        DateTime windowEndUtc,
+        CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(NewestSampleHeadsSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(windowEndUtc, DateTimeKind.Unspecified));
+
+        string? newest = null;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var stamp = LogStampOf(reader.IsDBNull(0) ? null : reader.GetString(0));
+            if (stamp is not null && (newest is null || string.CompareOrdinal(stamp, newest) > 0))
+            {
+                newest = stamp;
+            }
+        }
+
+        return newest;
     }
 
     /// <summary>Reads the denominator for the window.</summary>
@@ -526,6 +753,9 @@ LIMIT $3";
             LastCaptureAt = reader.IsDBNull(9) ? null : Iso(reader.GetDateTime(9)),
             BytesPending = reader.GetInt64(10),
             LogFiles = reader.IsDBNull(11) ? [] : reader.GetFieldValue<string[]>(11),
+            NewestCaptureBytesRead = reader.IsDBNull(12) ? null : reader.GetInt64(12),
+            MarkerLastMovedAt = reader.IsDBNull(13) ? null : Iso(reader.GetDateTime(13)),
+            PreviousCaptureBytesRead = reader.IsDBNull(14) ? null : reader.GetInt64(14),
         };
     }
 
@@ -567,28 +797,42 @@ LIMIT $3";
 
     /// <summary>Reads the retained messages for the window: up to <paramref name="limit"/> rows after the first
     /// <paramref name="offset"/> of the read's order. <c>Skipped</c> is how many rows the offset passed over, which is
-    /// less than the offset when the window holds fewer.</summary>
-    public static async Task<(List<RetainedEvent> Rows, int Skipped)> GetRetainedEventsAsync(
+    /// less than the offset when the window holds fewer. <c>Total</c> is how many rows the window holds, so a page can say
+    /// it is a page (#8813); a row the read passes that has no text to show is left out of it, so it is exact whenever
+    /// the page reaches the end.</summary>
+    public static async Task<(List<RetainedEvent> Rows, int Skipped, int Total)> GetRetainedEventsAsync(
         NpgsqlDataSource postgres,
         DateTime windowStartUtc,
         DateTime windowEndUtc,
         int limit,
         int offset,
         int? sampleLinePreviewLength,
+        long? queryId = null,
         CancellationToken cancellationToken = default)
     {
         var rows = new List<RetainedEvent>();
         var skipped = 0;
+        long total = 0;
+        var emptied = 0;
+        var toastRefs = new HashSet<StoreLogClassifier.ToastRelationRef>();
 
         await using var command = postgres.CreateCommand(RetainedEventsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         command.Parameters.AddWithValue(DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(windowEndUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(offset + limit);
+        command.Parameters.Add(new NpgsqlParameter
+        {
+            Value = queryId is long id ? " queryid=" + id.ToString(CultureInfo.InvariantCulture) : DBNull.Value,
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text,
+        });
+        command.Parameters.AddWithValue(StoreLogClassifier.SlowPlanClass);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
         while (await reader.ReadAsync(cancellationToken))
         {
+            total = reader.GetInt64(7);
+
             /* #3915, #3944: brought to this build's rules again on the way out, with the classifier's own
                function. Rows a newer capture wrote come back unchanged (it is idempotent), and rows an earlier
                build stored with a statement's literals are normalized in storage by the sweep's own pass, a
@@ -601,6 +845,7 @@ LIMIT $3";
             {
                 /* A row the pass will empty (a fragment an older build filed as an entry): its occurrences are in
                    the class census, and it has no text to show. */
+                emptied++;
                 continue;
             }
 
@@ -614,8 +859,15 @@ LIMIT $3";
             /* #8568: the evidence line is a preview when the caller gave a length; the message stays whole, because it is
                what tells one row from another. */
             var line = McpResponseBudget.Preview(sample, sampleLinePreviewLength ?? 0, whole: sampleLinePreviewLength is null);
+            var toastRef = eventClass == StoreLogClassifier.AutovacuumCancelClass ? StoreLogClassifier.ToastRelationOf(sample) : null;
+            if (toastRef is { Database: not null } named)
+            {
+                toastRefs.Add(named);
+            }
+
             rows.Add(new RetainedEvent
             {
+                ToastRelation = toastRef?.Qualified,
                 EventClass = eventClass,
                 Severity = reader.GetString(1),
                 MessageText = StoreLogClassifier.DisplayMessageOf(eventClass, key, sample),
@@ -628,7 +880,54 @@ LIMIT $3";
             });
         }
 
-        return (rows, skipped);
+        if (toastRefs.Count > 0)
+        {
+            var owners = await GetToastOwnersAsync(postgres, toastRefs, cancellationToken);
+            foreach (var row in rows)
+            {
+                if (row.ToastRelation is { } name && owners.TryGetValue(name, out var owner))
+                {
+                    row.ToastOwner = owner;
+                }
+            }
+        }
+
+        return (rows, skipped, (int)Math.Max(0, Math.Min(int.MaxValue, total - emptied)));
+    }
+
+    /// <summary>The tables that own TOAST relations, as <c>schema.table</c> (#8814). An autovacuum cancel's CONTEXT
+    /// names a TOAST relation by number only, with the database it lives in. This is the catalog read that tells a
+    /// reader which table it belongs to, and it answers only for the database the answer is read from: a relation the
+    /// log names under another database has no entry here, because this catalog cannot say what it is (#8822). A relation
+    /// dropped since is not in the map either. Columns: the relation as the log writes it, then its owner.</summary>
+    public const string ToastOwnerSql = @"
+SELECT w.db || '.pg_toast.' || t.relname,
+       format('%I.%I', n.nspname, o.relname)
+FROM unnest($1::text[], $2::text[]) AS w(db, relname)
+JOIN pg_catalog.pg_class AS t ON t.relname = w.relname
+JOIN pg_catalog.pg_namespace AS tn ON tn.oid = t.relnamespace AND tn.nspname = 'pg_toast'
+JOIN pg_catalog.pg_class AS o ON o.reltoastrelid = t.oid
+JOIN pg_catalog.pg_namespace AS n ON n.oid = o.relnamespace
+WHERE w.db = current_database()";
+
+    private static async Task<Dictionary<string, string>> GetToastOwnersAsync(
+        NpgsqlDataSource postgres,
+        IReadOnlyCollection<StoreLogClassifier.ToastRelationRef> toastRelations,
+        CancellationToken cancellationToken)
+    {
+        var owners = new Dictionary<string, string>(StringComparer.Ordinal);
+        await using var command = postgres.CreateCommand(ToastOwnerSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.AddWithValue(toastRelations.Select(r => r.Database!).ToArray());
+        command.Parameters.AddWithValue(toastRelations.Select(r => r.Name).ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            owners[reader.GetString(0)] = reader.GetString(1);
+        }
+
+        return owners;
     }
 
     /// <summary>

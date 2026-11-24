@@ -71,14 +71,20 @@ public partial class ViewerServerTab
     /// toolbar's settable window (the reads are already bounded on both ends, so no client-side end-trim
     /// is needed unlike the start-only CPU/tempdb reads). Mirrors the Dashboard's one-refresh-feeds-both.
     /// </summary>
-    private async Task LoadSystemHealthChartsAsync()
+    private async Task LoadSystemHealthChartsAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var data = await _dataService.GetSystemHealthAsync(_server.ServerId, startUtc, endUtc);
+        /* #9112: the read is named on the load's clock, and the eight chart draws are one named client step. */
+        var data = await Timed(timer, "System Health read", _dataService.GetSystemHealthAsync(_server.ServerId, startUtc, endUtc));
 
         double xMin = ChartXStart(startUtc, endUtc);
         double xMax = endUtc.ToOADate();
 
+        ClientStep(timer, "System Health chart draw", () => DrawSystemHealthCharts(data, startUtc, endUtc, xMin, xMax));
+    }
+
+    private void DrawSystemHealthCharts(List<SystemHealthRecord> data, DateTime startUtc, DateTime endUtc, double xMin, double xMax)
+    {
         // Corruption Events (2x2).
         SysHealthRenderer.RenderCounterChart(BadPagesChart, _badPagesHover, data, d => d.BadPagesDetected, "Bad Pages",
             ChartPalette.CyclingColor(3), xMin, xMax);

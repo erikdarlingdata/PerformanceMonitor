@@ -43,8 +43,9 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
 
     private sealed record Store(ScratchPostgres Scratch, NpgsqlConnection Connection);
 
-    /// <summary>The window ends eight days back, so every whole day in it is older than the daily policy's four-day re-read span and the mid route
-    /// may read it from the daily. <c>End</c> and the start are both off midnight, so both edge days hold hours.</summary>
+    /// <summary>The window ends at noon eight days back, so every whole day in it is older than the daily policy's four-day re-read span and the mid
+    /// route may read it from the daily. <c>End</c> (12:00) and the start (13:00 seven days earlier) are both off midnight, so both edge days hold
+    /// hours, and the days fall the same way at every hour the test runs: six whole days from <c>DStart</c> to <c>DEnd</c>.</summary>
     private sealed record Timeline(DateTime End, int HoursBack)
     {
         public DateTime Start => End.AddHours(-HoursBack);
@@ -54,20 +55,8 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
 
     private static Timeline NewTimeline()
     {
-        var back = LiveClock.Now().AddDays(-8);
-        var end = new DateTime(back.Year, back.Month, back.Day, back.Hour, 0, 0, DateTimeKind.Unspecified);
-        if (end.Hour == 0)
-        {
-            end = end.AddHours(-1);
-        }
-
-        var hoursBack = 167;
-        while (end.AddHours(-hoursBack).Hour == 0)
-        {
-            hoursBack--;
-        }
-
-        return new Timeline(end, hoursBack);
+        var end = DateTime.SpecifyKind(LiveClock.Now().Date.AddDays(-8).AddHours(12), DateTimeKind.Unspecified);
+        return new Timeline(end, 167);
     }
 
     private static async Task<Store> CreateStoreAsync(CancellationToken ct)
@@ -193,7 +182,8 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
         }
     }
 
-    /// <summary>A raw snapshot at the rollup's boundary, from a pair the rollup never held: the tail both statements read the same way.</summary>
+    /// <summary>A raw snapshot of an interval that starts at the rollup's boundary and at the window's end, from a pair the rollup never held: a window
+    /// ends before it, so neither statement counts it (#9100).</summary>
     private static Task InsertTailAsync(NpgsqlConnection c, CancellationToken ct, Timeline t)
         => Snapshot(c, ct, 0, "Eps", NextInterval(), t.End, t.End.AddMinutes(5), 1, 100, 200);
 
@@ -285,7 +275,9 @@ public sealed class QueryFleetSummaryQueryStoreDailyMidLiveTests
 
             var all = await RunAsync(pg, DarlingMcpQueryFleetSummaryTools.BuildQueryStoreSql(true), t, rawFrom, 200, null, ct);
             Assert.Contains(all, r => r.Database is null);
-            Assert.Contains(all, r => r.Database == "Eps");
+            Assert.DoesNotContain(all, r => r.Database == "Eps");   /* #9100: an interval that starts at the window end belongs to the next window */
+            var midRows = await RunAsync(pg, DarlingMcpQueryFleetSummaryTools.BuildQueryStoreMidSql(), t, rawFrom, 200, plan, ct);
+            Assert.DoesNotContain(midRows, r => r.Database == "Eps");
             var ties = all.Where(r => r.Database is "TieA" or "TieB").ToArray();
             Assert.Equal(2, ties.Length);
             Assert.Equal(ties[0].CpuUs, ties[1].CpuUs);

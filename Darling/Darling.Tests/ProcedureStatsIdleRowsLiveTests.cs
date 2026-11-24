@@ -96,8 +96,9 @@ public sealed class ProcedureStatsIdleRowsLiveTests
     {
         await using var command = store.DataSource.CreateCommand(DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: false));
         command.Parameters.AddWithValue(serverId);
-        /* From the first run to the run at minute 25 (its log row lands three seconds after its start, so the window ends a moment later). */
-        command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart, DateTimeKind.Unspecified));
+        /* From just before the first run (the read answers (start, end], and that run is a point at its start) to the run at minute 25
+           (its log row lands three seconds after its start, so the window ends a moment later). */
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddSeconds(-30), DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(DateTime.SpecifyKind(store.WorkStart.AddMinutes(25).AddSeconds(30), DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(bucketMinutes);
         var rows = new List<(DateTime, double, double)>();

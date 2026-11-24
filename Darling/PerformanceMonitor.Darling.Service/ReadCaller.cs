@@ -70,9 +70,72 @@ internal static class ReadCaller
             : "token " + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(bearerToken)))[..8].ToLowerInvariant();
 
     /// <summary>The server-side identity of a call (#6542): <c>named token NAME</c> when a named token was presented, else the fingerprint
-    /// of the legacy token (<see cref="OfMcpToken"/>). A name is a label the operator chose, never a secret.</summary>
+    /// of the legacy token (<see cref="OfMcpToken"/>). A name is a label the operator chose, never a secret. A personal token's caller name
+    /// (#8737) is the person and the token (<see cref="OfTokenName"/>).</summary>
     internal static string OfMcpIdentity(string? namedTokenName, string? bearerToken) =>
-        string.IsNullOrEmpty(namedTokenName) ? OfMcpToken(bearerToken) : "named token " + namedTokenName;
+        string.IsNullOrEmpty(namedTokenName) ? OfMcpToken(bearerToken)
+        : TryRenderPersonal(namedTokenName, out var personal) ? personal
+        : "named token " + namedTokenName;
+
+    /// <summary>A caller name as journal rows and actors carry it (#8737): a personal token's <c>personal:&lt;subject&gt;/&lt;token_name&gt;</c>
+    /// as <c>personal token &lt;token_name&gt; of &lt;subject&gt;</c>, any other name as it is.</summary>
+    internal static string OfTokenName(string name) => TryRenderPersonal(name, out var personal) ? personal : name;
+
+    private const string PersonalNamePrefix = Mcp.DarlingMcpTokenSet.PersonalNamePrefix;
+    private const string PersonalIdentityPrefix = "personal token ";
+
+    /* The identity columns a write stamps (ck_known_patterns_created_by and its siblings) hold 256 characters. The longest form a personal identity
+       takes there is "mcp:" + the rendered identity + ", client says: " + a client name of up to MaxLength, so the subject is cut to fit that. */
+    private const int IdentityColumnLength = 256;
+    private const int IdentityFrameLength = 4 + 15 + 4 + 15 + MaxLength;
+    private const string CutMarker = "...";
+
+    /* Split at the LAST '/': a subject may hold one, a token name may not. A file token's name cannot hold a '/', so a name with no '/'
+       after the prefix is a named token's own name and is left alone. */
+    private static bool TryRenderPersonal(string name, out string rendered)
+    {
+        rendered = name;
+        if (!name.StartsWith(PersonalNamePrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var slash = name.LastIndexOf('/');
+        if (slash <= PersonalNamePrefix.Length || slash == name.Length - 1)
+        {
+            return false;
+        }
+
+        var tokenName = name[(slash + 1)..];
+        var subject = CutToTextElements(name[PersonalNamePrefix.Length..slash], IdentityColumnLength - IdentityFrameLength - tokenName.Length);
+        rendered = PersonalIdentityPrefix + tokenName + " of " + subject;
+        return true;
+    }
+
+    /* M4 (#3625): a subject longer than the room left is cut on whole text elements and marked with an ASCII "...", so the full identity fits its
+       column and no joined emoji or surrogate pair is split. The marker is ASCII because the person-scoped journal actor
+       (person:mcp personal token NAME of SUBJECT) must still pass the login rule, which refuses U+2026. */
+    private static string CutToTextElements(string value, int room)
+    {
+        if (value.Length <= room)
+        {
+            return value;
+        }
+
+        var end = 0;
+        while (end < value.Length)
+        {
+            var next = StringInfo.GetNextTextElementLength(value, end);
+            if (end + next > room - CutMarker.Length)
+            {
+                break;
+            }
+
+            end += next;
+        }
+
+        return value[..end] + CutMarker;
+    }
 
     /// <summary>
     /// The text a write log line carries for who made the call: the token identity the service worked out, then the name the client
@@ -82,14 +145,14 @@ internal static class ReadCaller
         (AmbientMcpToken ?? "token unknown") + ", client says: " + (AmbientMcpCaller ?? Unknown);
 
     /// <summary>The token part of the identity a store row records for an MCP write: <c>named token NAME</c> when a named token was
-    /// used, <c>legacy token</c> for the endpoint's one legacy token (the fingerprint <see cref="WriteIdentity"/> logs is left out of
+    /// used, <c>personal token NAME of SUBJECT</c> for a personal token (#8737), <c>legacy token</c> for the endpoint's one legacy token (the fingerprint <see cref="WriteIdentity"/> logs is left out of
     /// store rows, which read-only logins and agent briefs can read), <c>no token</c> when the request carried none.</summary>
     internal static string StoreTokenIdentity()
     {
         var token = AmbientMcpToken;
         if (string.IsNullOrEmpty(token))
             return "token unknown";
-        if (token.StartsWith("named token ", StringComparison.Ordinal) || token == "no token")
+        if (token.StartsWith("named token ", StringComparison.Ordinal) || token.StartsWith(PersonalIdentityPrefix, StringComparison.Ordinal) || token == "no token")
             return token;
         return "legacy token";
     }

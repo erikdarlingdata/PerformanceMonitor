@@ -55,7 +55,7 @@ WHERE id = 1";
     {
         await using var command = _dataSource.CreateCommand(ServiceConfigSelectSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return null;

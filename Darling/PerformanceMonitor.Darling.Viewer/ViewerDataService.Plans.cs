@@ -170,7 +170,7 @@ public sealed partial class ViewerDataService
             viaMap.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
             viaMap.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
             viaMap.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId });
-            await using var reader = await viaMap.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await viaMap.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             if (await reader.ReadAsync(cancellationToken))
             {
                 /* The map knows this plan_id: whatever it holds is the answer, including nothing. */
@@ -186,7 +186,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
         command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId });
-        var result = await command.ExecuteScalarAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         return result is string s ? s : null;
     }
 
@@ -283,7 +283,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     private static async Task<string?> ReadBacklogPlanXmlAsync(NpgsqlCommand command, CancellationToken cancellationToken)
     {
-        var result = await command.ExecuteScalarAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         return result is string plan ? plan : null;
     }
 
@@ -295,7 +295,7 @@ public sealed partial class ViewerDataService
     private static async Task<(string Text, string? PlanId, DateTime? CollectionTime)?> ReadPlanTextOrGzipAsync(
         NpgsqlCommand command, CancellationToken cancellationToken)
     {
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return null;

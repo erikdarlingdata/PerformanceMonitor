@@ -84,7 +84,7 @@ public sealed partial class ViewerDataService
             COUNT(*) AS collection_count
         FROM v_memory_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         GROUP BY 1
         ORDER BY 1
@@ -122,7 +122,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Rate)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. The HAVING
@@ -182,7 +182,7 @@ public sealed partial class ViewerDataService
         var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double Total, double Target, double BufferPool, double PlanCache)>();
         var everyBucketSingleton = true;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             if (reader.GetInt64(6) != 1)

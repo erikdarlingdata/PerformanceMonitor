@@ -1353,9 +1353,12 @@ internal sealed class DarlingSelfAlertEvaluator
         Func<int>? identityCapacityWarningPercent = null,
         Func<int>? identityCapacityCriticalPercent = null,
         Func<string, string, string?, int, int>? resolveThreshold = null,
-        Func<AlertMuteContext, string?>? digestWindowReason = null)
+        Func<AlertMuteContext, string?>? digestWindowReason = null,
+        Func<StoreGrowthSettings>? storeGrowthSettings = null)
     {
         _digestWindowReason = digestWindowReason;
+        /* #9000: unsupplied falls back to the V276 column defaults (on, 5 GB for the store, 2 GB for one object). */
+        _storeGrowthSettings = storeGrowthSettings ?? (() => new StoreGrowthSettings(true, 5, 2));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
         _historyStore = historyStore ?? throw new ArgumentNullException(nameof(historyStore));
@@ -2420,7 +2423,18 @@ internal sealed class DarlingSelfAlertEvaluator
     private Task<(int EngineEdition, string? EngineKind, AwsRdsKind AwsRdsKind)> ReadCaptureDownEngineFactsAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
         => ReadWithOneRetryAsync(
-            token => (CaptureDownEngineReadOverride ?? Mcp.DarlingEngineCapability.ReadServerEngineAsync)(postgres, serverId, token),
+            async token =>
+            {
+                if (CaptureDownEngineReadOverride is { } overridden)
+                {
+                    return await overridden(postgres, serverId, token);
+                }
+
+                /* The three captures (blocking, deadlock, client timeouts) are not version-floored collectors (#9099), so the probed major the
+                   read also returns is not needed here. */
+                var (edition, kind, awsRdsKind, _) = await Mcp.DarlingEngineCapability.ReadServerEngineAsync(postgres, serverId, token);
+                return (edition, kind, awsRdsKind);
+            },
             serverId, CaptureDownEngineReadName, cancellationToken);
 
     /// <summary>
@@ -5415,9 +5429,13 @@ internal sealed class DarlingSelfAlertEvaluator
                     (items.Count > OverdueDetailDatabases
                         ? string.Create(CultureInfo.InvariantCulture, $", and {items.Count - OverdueDetailDatabases} more")
                         : string.Empty);
+                /* #8865: a CHECKDB that found errors is overdue whatever its age, so "older than" alone would misread it. */
+                var lateness = items.Any(i => i.State == DatabaseProtectionBands.ErrorsFound)
+                    ? $"The {factName} is older than {threshold}, or CHECKDB found errors,"
+                    : $"The {factName} is older than {threshold}";
                 var delivery = await FireAsync(
                     key, serverName, metric, string.Create(CultureInfo.InvariantCulture, $"{items.Count} overdue"), $"older than {threshold}",
-                    detail: StateRepeatNote(decision, refire) + $"The {factName} is older than {threshold} on {CountText.Plural(items.Count, "database")}: {names}." + consequence,
+                    detail: StateRepeatNote(decision, refire) + $"{lateness} on {CountText.Plural(items.Count, "database")}: {names}." + consequence,
                     severity: AlertSeverityLevel.Warning,
                     shortMessage: string.Create(CultureInfo.InvariantCulture, $"{metric}: {CountText.Plural(items.Count, "database")}") + " - " + string.Join(", ", items.Take(5).Select(i => i.Database)) +
                         (items.Count > 5 ? ", ..." : string.Empty),
@@ -5438,6 +5456,32 @@ internal sealed class DarlingSelfAlertEvaluator
                 key, serverName, metric,
                 metric + " Cleared", $"{serverName}: no database has an overdue {factName}"), cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// The 100 percent bar is the mute: a user sets a database's (or server's) warning bar to 100 to quiet it, and sets the critical bar to 100 to quiet
+    /// only the critical page. The days-left grade (#8818) honors it the same way, so a muted bar is never raised by days. A days grade that would
+    /// land on a muted bar drops to the next bar that is not muted. The tool and the cards keep the true band: only the alert is quieted.
+    /// </summary>
+    internal static IdentityBand MutedGrade(IdentityBand graded, double percent, int warning, int critical)
+    {
+        if (graded.Reason != IdentityCapacityMath.ReasonDays)
+        {
+            return graded;
+        }
+
+        if (warning >= 100)
+        {
+            return IdentityCapacityMath.Grade(percent, null, warning, critical);
+        }
+
+        if (graded.Band == IdentityCapacityMath.BandCritical && critical >= 100)
+        {
+            var byPercent = IdentityCapacityMath.Grade(percent, null, warning, critical);
+            return byPercent.Band == IdentityCapacityMath.BandWarning ? byPercent : new IdentityBand(IdentityCapacityMath.BandWarning, IdentityCapacityMath.ReasonDays);
+        }
+
+        return graded;
     }
 
     /// <summary>The scans the Identity Capacity alert judges: seven days, the window <c>get_identity_capacity</c> reads by default, so a database
@@ -5465,8 +5509,9 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>
     /// Edge-applies "Identity Capacity" (#6875) from <see cref="ReadIdentityCapacityAsync"/>. A column is judged by the same percent and the same
-    /// <see cref="IdentityCapacityMath.Band(double, double, double)"/> the tool and the Viewer use, against the bars that apply to its server and
-    /// database (a threshold override replaces the global bar for that scope, the critical bar never below the warning bar). Fires once when a column
+    /// <see cref="IdentityCapacityMath.Grade"/> the tool and the Viewer use, against the percent bars that apply to its server and
+    /// database (a threshold override replaces the global bar for that scope, the critical bar never below the warning bar) and the fixed days-left bars
+    /// (#8818: under 30 days is warning, under 7 critical, the worse grade wins, and no days grade without a rate). Fires once when a column
     /// reaches a bar, again when the worst band rises from warning to critical, re-fires after the cooldown while one stands, and writes one
     /// "Identity Capacity Cleared" history row when no column is at a bar any more. A null <paramref name="read"/> judges nothing. Off unless the
     /// <c>identity_capacity_enabled</c> setting is on, and gated on the master alerts switch.
@@ -5483,7 +5528,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var now = _utcNow();
         var globalWarning = Math.Clamp(_identityCapacityWarningPercent(), 1, 100);
         var globalCritical = Math.Clamp(_identityCapacityCriticalPercent(), globalWarning, 100);
-        var hits = new List<(IdentityColumnFact Column, double Percent, string Band, int Warning, int Critical)>();
+        var hits = new List<(IdentityColumnFact Column, double Percent, string Band, string? Reason, int Warning, int Critical)>();
         foreach (var column in read.Columns)
         {
             if (column.PercentUsed is not double percent)
@@ -5493,16 +5538,18 @@ internal sealed class DarlingSelfAlertEvaluator
 
             var warning = Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityWarning, key, column.DatabaseName, globalWarning), 1, 100);
             var critical = Math.Max(warning, Math.Clamp(_resolveThreshold(DarlingThresholdKeys.IdentityCapacityCritical, key, column.DatabaseName, globalCritical), 1, 100));
-            var band = IdentityCapacityMath.Band(percent, warning, critical);
-            if (band != IdentityCapacityMath.BandOk)
+            /* #8818: the percent grade against this scope's bars and the days-left grade against the fixed days bars, the worse winning. */
+            var graded = MutedGrade(IdentityCapacityMath.Grade(percent, column.Exhaustion?.DaysLeft, warning, critical), percent, warning, critical);
+            if (graded.Band != IdentityCapacityMath.BandOk)
             {
-                hits.Add((column, percent, band, warning, critical));
+                hits.Add((column, percent, graded.Band, graded.Reason, warning, critical));
             }
         }
 
         if (hits.Count > 0)
         {
-            hits.Sort((a, b) => b.Percent.CompareTo(a.Percent));
+            /* The worst first: critical before warning, then the fullest. A column banded on days can be less full than one banded on percent. */
+            hits.Sort((a, b) => IdentityCapacityMath.Rank(b.Band).CompareTo(IdentityCapacityMath.Rank(a.Band)) is var byBand and not 0 ? byBand : b.Percent.CompareTo(a.Percent));
             var isCritical = hits.Any(h => h.Band == IdentityCapacityMath.BandCritical);
             _activeIdentityCapacity[key] = true;
             await SeedStandingStateAsync(_lastIdentityCapacityAlert, key, key, key, IdentityCapacityMetric, cancellationToken, ranked: true);
@@ -5512,23 +5559,26 @@ internal sealed class DarlingSelfAlertEvaluator
                 _lastIdentityCapacityAlert[key] = now;
                 var worst = hits[0];
                 var worstBar = worst.Band == IdentityCapacityMath.BandCritical ? worst.Critical : worst.Warning;
+                var worstOnDays = worst.Reason == IdentityCapacityMath.ReasonDays && worst.Column.Exhaustion is not null;
+                var worstDays = worstOnDays ? worst.Column.Exhaustion!.Value.DaysLeft : 0;
+                var worstDaysBar = worst.Band == IdentityCapacityMath.BandCritical ? IdentityCapacityMath.CriticalDays : IdentityCapacityMath.WarningDays;
                 var lines = hits.Take(IdentityCapacityDetailColumns).Select(h =>
-                    $"{h.Column.DatabaseName}.{h.Column.SchemaName}.{h.Column.TableName}.{h.Column.ColumnName}: {h.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used ({h.Band}), " +
+                    $"{h.Column.DatabaseName}.{h.Column.SchemaName}.{h.Column.TableName}.{h.Column.ColumnName}: {h.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used ({h.Band}{(h.Reason == IdentityCapacityMath.ReasonDays ? " on days left" : "")}), " +
                     (h.Column.Exhaustion is { } e
                         ? $"about {e.DaysLeft.ToString("F0", CultureInfo.InvariantCulture)} days to exhaustion."
                         : "days to exhaustion unknown."));
                 var more = hits.Count > IdentityCapacityDetailColumns ? $" And {hits.Count - IdentityCapacityDetailColumns} more." : "";
                 var delivery = await FireAsync(
                     key, serverName, IdentityCapacityMetric,
-                    $"{worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}%",
-                    $"{worstBar.ToString(CultureInfo.InvariantCulture)}%",
+                    worstOnDays ? $"{worstDays.ToString("F1", CultureInfo.InvariantCulture)} days" : $"{worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}%",
+                    worstOnDays ? $"{worstDaysBar.ToString("F0", CultureInfo.InvariantCulture)} days" : $"{worstBar.ToString(CultureInfo.InvariantCulture)}%",
                     detail: StateRepeatNote(decision, refire) +
                         $"{CountText.Plural(hits.Count, "identity column")} on this server {(hits.Count == 1 ? "is" : "are")} near the end of {(hits.Count == 1 ? "its" : "their")} type. An identity column that runs out stops every insert into its table. " +
                         string.Join(" ", lines) + more,
                     severity: isCritical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
                     shortMessage: $"{CountText.Plural(hits.Count, "identity column")} near the end of {(hits.Count == 1 ? "its" : "their")} type, fullest {worst.Column.DatabaseName}.{worst.Column.TableName}.{worst.Column.ColumnName} at {worst.Percent.ToString("F1", CultureInfo.InvariantCulture)}% used",
-                    numericCurrentValue: worst.Percent,
-                    numericThresholdValue: worstBar,
+                    numericCurrentValue: worstOnDays ? worstDays : worst.Percent,
+                    numericThresholdValue: worstOnDays ? worstDaysBar : worstBar,
                     cancellationToken);
                 if (IsStaleSweep(serverId, sweepGeneration))
                 {
@@ -6352,6 +6402,190 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
+    /* ---------------- store growth (fleet-level, polled hourly, #9000) ---------------- */
+
+    /// <summary>The fixed key for the fleet-level Store Growth edge (not a real server); non-numeric so the deliverer's #1236 int.TryParse
+    /// override no-ops on it, like <see cref="DiskKey"/>.</summary>
+    private const string GrowthKey = "store-growth";
+
+    /// <summary>The alert metric name the Store Growth edge fires under (#9000). A WEBHOOK AUTOMATION KEY like its siblings and keyed on by the
+    /// triage map, so it is a const and must stay stable across releases. Its value is the last 24 hours of growth in GB.</summary>
+    internal const string StoreGrowthMetric = "Store Growth";
+
+    /// <summary>The resolution title the recovery edge records into <c>config_alert_log.metric_name</c>; the triage map aliases it back to
+    /// <see cref="StoreGrowthMetric"/>.</summary>
+    internal const string StoreGrowthResolvedMetric = "Store Growth Resolved";
+
+    /// <summary>A standing breach alerts again only when its growth reaches this multiple of the growth the last alert reported (and the shared
+    /// cooldown has run out). The condition reads a 24 hour window, so one spike stays true for a day.</summary>
+    internal const double StoreGrowthWorseningFactor = 1.25;
+
+    private readonly Func<StoreGrowthSettings> _storeGrowthSettings;
+    private readonly ConcurrentDictionary<string, bool> _activeStoreGrowth = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastStoreGrowthAlert = new();
+    private readonly ConcurrentDictionary<string, double> _lastAlertedStoreGrowth = new();
+
+    /// <summary>
+    /// The entry point the worker's hourly check calls. Skips the read when the master alerts switch or the Store Growth switch is off, reads
+    /// the store once (<see cref="StoreGrowthReader"/>), and hands the reading to <see cref="ApplyStoreGrowthAsync"/> in the same failure
+    /// isolation the disk-pressure sweep has. A FAILED read changes no state. <paramref name="freeBytes"/> is the store volume's free space
+    /// when the service can see it (null for a remote store), and only adds the days until the volume is full to the text.
+    /// </summary>
+    public async Task EvaluateStoreGrowthAsync(NpgsqlDataSource postgres, long? freeBytes, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || !_storeGrowthSettings().Enabled)
+        {
+            return;
+        }
+
+        StoreGrowthReading reading;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            reading = await StoreGrowthReader.ReadAsync(postgres, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "store growth self-alert read failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "store growth self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        try
+        {
+            await ApplyStoreGrowthAsync(reading, freeBytes, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* Not counted as a swallowed read: the read above succeeded, this catch covers the apply/deliver half. */
+            _logger?.LogError(ex, "Store growth self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the fleet-level Store Growth condition (#9000) from one reading. Fires on entry and re-fires while it stands only when the
+    /// growth is <see cref="StoreGrowthWorseningFactor"/> times what the last alert reported and the shared cooldown has run out. The first
+    /// reading with the store line judged and no line crossed clears the state and, when the alert had fired, writes ONE "Store Growth Resolved" row.
+    /// A null reading is a read that failed, and a reading whose store line cannot be judged (no sample near 24 hours back) is a missing sample: nothing changes. Internal so it pins directly with a recording deliverer and a controllable clock.
+    /// </summary>
+    internal async Task ApplyStoreGrowthAsync(StoreGrowthReading? reading, long? freeBytes, CancellationToken cancellationToken)
+    {
+        var growthSettings = _storeGrowthSettings();
+        if (!_settings.AlertsEnabled || !growthSettings.Enabled || reading is null)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var verdict = StoreGrowthJudge.Judge(reading, growthSettings);
+        if (verdict.Store is null)
+        {
+            /* The store line has no growth value for the last day: no sample sits near 24 hours back (a restart, a skipped sweep).
+               That is a missing reading, not a recovery. No resolution, no alert, and the worsening marker stays. */
+            return;
+        }
+
+        if (!verdict.Crossed)
+        {
+            _lastAlertedStoreGrowth.TryRemove(GrowthKey, out _);
+            if (_activeStoreGrowth.TryRemove(GrowthKey, out var was) && was)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(GrowthKey), _storeLabel, StoreGrowthMetric,
+                    StoreGrowthResolvedMetric, "The store and its objects are growing at their usual rate again"), cancellationToken);
+            }
+
+            return;
+        }
+
+        _activeStoreGrowth[GrowthKey] = true;
+        var headline = verdict.Store is { Crossed: true } storeLine ? storeLine : verdict.Objects[0];
+        double? lastReported = _lastAlertedStoreGrowth.TryGetValue(GrowthKey, out var last) ? last : null;
+        if (lastReported is double prior && headline.GrowthBytes < prior * StoreGrowthWorseningFactor)
+        {
+            return;
+        }
+
+        if (!CooldownElapsed(_lastStoreGrowthAlert, GrowthKey, now))
+        {
+            return;
+        }
+
+        _lastStoreGrowthAlert[GrowthKey] = now;
+        _lastAlertedStoreGrowth[GrowthKey] = headline.GrowthBytes;
+        var floorGb = headline.IsStore ? growthSettings.StoreFloorGb : growthSettings.ObjectFloorGb;
+        var shortMessage = BuildStoreGrowthShortMessage(verdict);
+        var multiple = StoreGrowthJudge.BaselineMultiple.ToString("0.#", CultureInfo.InvariantCulture);
+        var delivery = await FireAsync(
+            StoreKey(GrowthKey), _storeLabel, StoreGrowthMetric,
+            currentValue: StoreGrowthReader.FormatGb(headline.GrowthBytes),
+            thresholdValue: floorGb > 0
+                ? $"{multiple} times its own baseline and at least {floorGb.ToString(CultureInfo.InvariantCulture)} GB a day"
+                : $"{multiple} times its own baseline",
+            detail: BuildStoreGrowthDetail(verdict, freeBytes),
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            numericCurrentValue: headline.GrowthBytes / (1024.0 * 1024.0 * 1024.0),
+            numericThresholdValue: floorGb,
+            cancellationToken);
+        if (AfterSelfFire(StoreGrowthMetric, _lastStoreGrowthAlert, GrowthKey, now, SharedCooldown, delivery))
+        {
+            /* #4795, as on disk pressure: the marker moved before the send. Put it back so the retry still counts as worse. */
+            RestoreMarker(_lastAlertedStoreGrowth, GrowthKey, lastReported);
+        }
+    }
+
+    private static string DescribeStoreGrowthLine(StoreGrowthLine line) =>
+        $"{line.Name} grew {StoreGrowthReader.FormatGb(line.GrowthBytes)} against a typical {StoreGrowthReader.FormatGb(line.BaselineBytes ?? 0)}";
+
+    /// <summary>The headline of the alert: the store's growth when it crossed, then the largest object. No em dashes and no semicolons.</summary>
+    internal static string BuildStoreGrowthShortMessage(StoreGrowthVerdict verdict)
+    {
+        var parts = new List<string>();
+        if (verdict.Store is { Crossed: true } store)
+        {
+            parts.Add($"The store grew {StoreGrowthReader.FormatGb(store.GrowthBytes)} in the last 24 hours against a typical {StoreGrowthReader.FormatGb(store.BaselineBytes ?? 0)}");
+        }
+
+        if (verdict.Objects.Count > 0)
+        {
+            parts.Add(DescribeStoreGrowthLine(verdict.Objects[0]));
+        }
+
+        return string.Join(". Largest object: ", parts) + ".";
+    }
+
+    /// <summary>The alert text. No em dashes and no semicolons: it is public text.</summary>
+    internal static string BuildStoreGrowthDetail(StoreGrowthVerdict verdict, long? freeBytes)
+    {
+        var text = new StringBuilder();
+        if (verdict.Store is { } store)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $"The store grew {StoreGrowthReader.FormatGb(store.GrowthBytes)} in the last 24 hours. Its typical day over the 14 days before is {StoreGrowthReader.FormatGb(store.BaselineBytes ?? 0)}. ");
+            if (freeBytes is long free && store.GrowthBytes > 0)
+            {
+                var days = free / (double)store.GrowthBytes;
+                text.Append(CultureInfo.InvariantCulture,
+                    $"The store volume has {StoreGrowthReader.FormatGb(free)} free. At that rate it is full in about {days.ToString("0.#", CultureInfo.InvariantCulture)} days. ");
+            }
+        }
+
+        if (verdict.Objects.Count > 0)
+        {
+            text.Append("Objects growing at least 3 times faster than their own typical day: ");
+            text.Append(string.Join(", ", verdict.Objects.Take(5).Select(DescribeStoreGrowthLine)));
+            text.Append(". ");
+        }
+
+        text.Append("Find what is writing more than before. Shorten retention (config_collector_schedules), enable TimescaleDB compression, or move the store to a larger disk.");
+        return text.ToString();
+    }
+
     /* ---------------- store autovacuum behind (fleet-level, polled hourly — #7368) ---------------- */
 
     /// <summary>The fixed key for the fleet-level Store Autovacuum Behind edge (not a real server); non-numeric so the
@@ -6575,6 +6809,233 @@ internal sealed class DarlingSelfAlertEvaluator
             ? "On the managed store, set them with ALTER SYSTEM or add lines below the include line in postgresql.conf. The service does not manage these settings, so there is nothing for them in darling.json, and darling-managed.conf is rewritten on every start."
             : "Change them on the store's PostgreSQL.");
         return text.ToString();
+    }
+
+    /* ---------------- store vacuum stalled (fleet-level, polled hourly, #8950) ---------------- */
+
+    /// <summary>The fixed key for the fleet-level Store Vacuum Stalled edge (not a real server); non-numeric so the deliverer's
+    /// #1236 int.TryParse override no-ops on it, like <see cref="AutovacuumKey"/>.</summary>
+    private const string VacuumStalledKey = "vacuum-stalled";
+
+    /// <summary>The alert metric name the Store Vacuum Stalled edge fires under (#8950). A WEBHOOK AUTOMATION KEY like its siblings
+    /// and keyed on by the triage map, so it is a const and must stay stable across releases. Its value is the count of store
+    /// tables behind on autovacuum or repeatedly cancelled (a count metric to <c>AlertMetricClassifier</c>).</summary>
+    internal const string VacuumStalledMetric = "Store Vacuum Stalled";
+
+    /// <summary>The resolution title the recovery edge records into <c>config_alert_log.metric_name</c>; the triage map aliases it back
+    /// to <see cref="VacuumStalledMetric"/>.</summary>
+    internal const string VacuumStalledResolvedMetric = "Store Vacuum Stalled Resolved";
+
+    /// <summary>How many hourly reads in a row must find a stalled table before the alert fires. A table that crossed its start point
+    /// minutes before a read counts as behind when its last vacuum is over a day old, and autovacuum usually reaches it well inside
+    /// the hour, so one read is not enough.</summary>
+    internal const int VacuumStalledReadsToFire = 2;
+
+    /// <summary>The Store Vacuum Stalled edge, in memory only like <see cref="_autovacuumBehindReads"/> and its siblings: a service
+    /// restart forgets them, so the first read after a restart counts as the first of two, and a standing alert that clears across a
+    /// restart records no resolution row.</summary>
+    private readonly ConcurrentDictionary<string, int> _vacuumStalledReads = new();
+    private readonly ConcurrentDictionary<string, bool> _activeVacuumStalled = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastVacuumStalledAlert = new();
+
+    /// <summary>What the last Store Vacuum Stalled alert reported: the tables behind and the tables repeatedly cancelled. The
+    /// worsening gate compares the next reading with it.</summary>
+    internal readonly record struct VacuumStalledMarker(int Behind, int Cancelled);
+
+    private readonly ConcurrentDictionary<string, VacuumStalledMarker> _lastAlertedVacuumStalled = new();
+
+    /// <summary>True when <paramref name="reading"/> is worse than what the last alert reported: more tables behind or more tables
+    /// repeatedly cancelled. True when nothing has been reported yet. The hours behind and the cancel counts grow on their own while
+    /// the condition stands, so they never count as worse.</summary>
+    internal static bool VacuumStalledWorsened(StoreVacuumStalledReading reading, VacuumStalledMarker? last) =>
+        last is not { } prior
+        || reading.TablesBehind > prior.Behind
+        || reading.TablesRepeatedlyCancelled > prior.Cancelled;
+
+    /// <summary>
+    /// The entry point the worker's hourly autovacuum check calls. Skips the read when the master alerts switch is off, reads the
+    /// store's autovacuum progress once (<see cref="DarlingStoreTableHealthReader.GetVacuumAsync"/>, bounded by the MCP read
+    /// deadline), and hands the reading to <see cref="ApplyVacuumStalledAsync"/>. A FAILED read changes no state: it neither counts
+    /// toward the two reads nor resolves a standing alert. Cancellation propagates.
+    /// </summary>
+    public async Task EvaluateVacuumStalledAsync(
+        NpgsqlDataSource postgres, bool managedStore, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        StoreVacuumStalledReading reading;
+        var readClock = Stopwatch.StartNew();
+        try
+        {
+            var asOf = _utcNow();
+            reading = StoreVacuumStalledReading.From(
+                await DarlingStoreTableHealthReader.GetVacuumAsync(postgres, asOf, cancellationToken), asOf);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
+        {
+            _logger?.LogDebug(ex, "store vacuum stalled self-alert read failed after {ElapsedMs} ms", readClock.ElapsedMilliseconds);
+            _readFailures?.RecordReadFailure(null, "store vacuum stalled self-alert", readClock.ElapsedMilliseconds);
+            return;
+        }
+
+        try
+        {
+            await ApplyVacuumStalledAsync(reading, managedStore, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* Not counted as a swallowed read: the read above succeeded, this catch covers the apply/deliver half. */
+            _logger?.LogError(ex, "Store vacuum stalled self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the fleet-level Store Vacuum Stalled condition (#8950) from one hourly reading. A reading with a stalled table
+    /// counts as one read toward <see cref="VacuumStalledReadsToFire"/>. The alert fires on the second such read in a row and re-fires
+    /// while the condition stands only when it is worse than what the last alert reported (<see cref="VacuumStalledWorsened"/>) and
+    /// the shared cooldown has run out. The first read that finds no stalled table clears the count and, when the alert had fired,
+    /// writes ONE "Store Vacuum Stalled Resolved" row. A null reading is a read that failed: nothing changes. Gated on the master
+    /// alerts switch. Internal so it pins directly with a recording deliverer and a controllable clock.
+    /// </summary>
+    internal async Task ApplyVacuumStalledAsync(
+        StoreVacuumStalledReading? reading, bool managedStore, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled || reading is null)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        if (!reading.IsStalled)
+        {
+            _vacuumStalledReads.TryRemove(VacuumStalledKey, out _);
+            _lastAlertedVacuumStalled.TryRemove(VacuumStalledKey, out _);
+            if (_activeVacuumStalled.TryRemove(VacuumStalledKey, out var was) && was)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(VacuumStalledKey), _storeLabel, VacuumStalledMetric,
+                    VacuumStalledResolvedMetric,
+                    string.Create(CultureInfo.InvariantCulture,
+                        $"No store table is behind on autovacuum or has had it cancelled {DarlingStoreTableHealthReader.RepeatedCancelMinimum} or more times in 24 hours any more")),
+                    cancellationToken);
+            }
+
+            return;
+        }
+
+        var reads = _vacuumStalledReads.AddOrUpdate(VacuumStalledKey, 1, static (_, n) => n < int.MaxValue ? n + 1 : n);
+        if (reads < VacuumStalledReadsToFire)
+        {
+            return;
+        }
+
+        _activeVacuumStalled[VacuumStalledKey] = true;
+        VacuumStalledMarker? lastReported =
+            _lastAlertedVacuumStalled.TryGetValue(VacuumStalledKey, out var marker) ? marker : null;
+        if (!VacuumStalledWorsened(reading, lastReported)
+            || !CooldownElapsed(_lastVacuumStalledAlert, VacuumStalledKey, now))
+        {
+            return;
+        }
+
+        _lastVacuumStalledAlert[VacuumStalledKey] = now;
+        _lastAlertedVacuumStalled[VacuumStalledKey] = new VacuumStalledMarker(reading.TablesBehind, reading.TablesRepeatedlyCancelled);
+        var delivery = await FireAsync(
+            StoreKey(VacuumStalledKey), _storeLabel, VacuumStalledMetric,
+            currentValue: reading.TablesStalled.ToString(CultureInfo.InvariantCulture),
+            thresholdValue: "0",
+            detail: BuildVacuumStalledDetail(reading, managedStore),
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: BuildVacuumStalledShortMessage(reading),
+            numericCurrentValue: reading.TablesStalled,
+            numericThresholdValue: 0,
+            cancellationToken);
+        if (AfterSelfFire(VacuumStalledMetric, _lastVacuumStalledAlert, VacuumStalledKey, now, SharedCooldown, delivery))
+        {
+            /* #4795, as on the autovacuum-behind edge: the marker moved before the send. Put it back so the retry still counts as worse. */
+            RestoreMarker(_lastAlertedVacuumStalled, VacuumStalledKey, lastReported);
+        }
+    }
+
+    private static string StalledTables(int count) =>
+        string.Create(CultureInfo.InvariantCulture, $"{count} {(count == 1 ? "table" : "tables")}");
+
+    private static string StalledTimes(long count) =>
+        string.Create(CultureInfo.InvariantCulture, $"{count} {(count == 1 ? "time" : "times")}");
+
+    /// <summary>"last vacuumed 31 h ago", or "with no vacuum on record" for a table with a part never vacuumed since the statistics began.
+    /// No hours for that one: the statistics can be older than the time they give (they survive a clean restart) and a part can be newer
+    /// (a chunk made since), so no figure is true of both.</summary>
+    private static string DescribeVacuumBehind(StoreVacuumStalledReading reading) =>
+        reading.WorstBehindNeverVacuumed
+            ? "with no vacuum on record"
+            : $"last vacuumed {StoreVacuumStalledReading.FormatHours(reading.WorstBehindHours ?? 0)} ago";
+
+    internal static string BuildVacuumStalledShortMessage(StoreVacuumStalledReading reading)
+    {
+        var text = new StringBuilder($"autovacuum is stalled on {StalledTables(reading.TablesStalled)}");
+        if (reading.TablesBehind > 0 && reading.WorstBehindTable is { } behind)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $", {reading.TablesBehind} behind (worst {behind}, {DescribeVacuumBehind(reading)})");
+        }
+
+        if (reading.TablesRepeatedlyCancelled > 0 && reading.WorstCancelledTable is { } cancelled)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $", {reading.TablesRepeatedlyCancelled} cancelled repeatedly (worst {cancelled}, {StalledTimes(reading.WorstCancels)} in 24 hours)");
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>The alert text. No em dashes and no semicolons: it is public text.</summary>
+    internal static string BuildVacuumStalledDetail(StoreVacuumStalledReading reading, bool managedStore)
+    {
+        var text = new StringBuilder();
+        text.Append(CultureInfo.InvariantCulture,
+            $"Autovacuum is stalled on {StalledTables(reading.TablesStalled)} in the store on two hourly reads in a row. ");
+        if (reading.TablesBehind > 0 && reading.WorstBehindTable is { } behind)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $"{StalledTables(reading.TablesBehind)} {(reading.TablesBehind == 1 ? "has" : "have")} dead or inserted rows past the point where autovacuum starts and no vacuum in 24 hours. ");
+            text.Append(CultureInfo.InvariantCulture, $"The worst is {behind}, {DescribeVacuumBehind(reading)}. ");
+        }
+
+        if (reading.TablesRepeatedlyCancelled > 0 && reading.WorstCancelledTable is { } cancelled)
+        {
+            text.Append(CultureInfo.InvariantCulture,
+                $"{StalledTables(reading.TablesRepeatedlyCancelled)} had autovacuum cancelled {DarlingStoreTableHealthReader.RepeatedCancelMinimum} or more times in 24 hours. ");
+            text.Append(CultureInfo.InvariantCulture, $"The worst is {cancelled}, cancelled {StalledTimes(reading.WorstCancels)}");
+            text.Append(reading.WorstLastCancel is DateTime last
+                ? string.Create(CultureInfo.InvariantCulture, $", last at {last:yyyy-MM-dd HH:mm} UTC. ")
+                : ". ");
+            text.Append("A cancelled autovacuum stops before it finishes the table, and the next one starts the table again. PostgreSQL cancels one when another session waits on a lock that conflicts with it, such as ALTER TABLE, TRUNCATE, DROP, LOCK TABLE or a TimescaleDB job that compresses or drops chunks. The store log has the lines around each cancel. ");
+        }
+
+        text.Append("Store Health in the Viewer and on the web page, and the get_store_table_health tool, list these tables first, with the store's autovacuum settings and write budget. ");
+        if (reading.TablesRepeatedlyCancelled > 0)
+        {
+            text.Append("Move the job that takes the lock away from the times autovacuum works on the table, or run VACUUM on the table after the job. ");
+        }
+
+        if (reading.TablesBehind > 0)
+        {
+            text.Append("When every autovacuum worker is busy, raise autovacuum_vacuum_cost_limit and autovacuum_max_workers, or run VACUUM on the table at a quiet hour. ");
+            text.Append("autovacuum_vacuum_cost_limit takes a reload, and autovacuum_max_workers takes a restart before PostgreSQL 18. ");
+            text.Append(managedStore
+                ? "On the managed store, set them with ALTER SYSTEM or add lines below the include line in postgresql.conf. The service does not manage these settings, so there is nothing for them in darling.json, and darling-managed.conf is rewritten on every start."
+                : "Change them on the store's PostgreSQL.");
+        }
+
+        return text.ToString().TrimEnd();
     }
 
     /* ---------------- custom-alert-rule health (fleet-level, polled — #3304) ---------------- */
@@ -10153,7 +10614,7 @@ WHERE c.is_enabled";
     private static async Task<(DateTime? LastSuccessUtc, int RecentRunCount, int RecentSuccessCount)> ReadCollectionSignalsCoreAsync(
         NpgsqlDataSource postgres, int serverId, int recentWindow, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         using var command = new NpgsqlCommand($@"
 SELECT
     (SELECT MAX(collection_time)
@@ -10264,7 +10725,7 @@ ORDER BY x.collector_name";
     {
         var missing = new List<string>();
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         using var command = new NpgsqlCommand(MissingCaptureSessionsSql, connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
 
@@ -10306,7 +10767,7 @@ ORDER BY x.collector_name";
     private static async Task<bool> HasAgentEverBeenSeenRunningCoreAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         using var command = new NpgsqlCommand(@"
 SELECT EXISTS
 (
@@ -10336,7 +10797,7 @@ SELECT EXISTS
     private static async Task<(DateTime? CollectionTimeUtc, bool? AgentRunning)> ReadLatestAgentStatusCoreAsync(
         NpgsqlDataSource postgres, int serverId, NewestRowFloor floor, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         (DateTime? CollectionTimeUtc, bool? AgentRunning) result = (null, null);
         /* #7017: the shared newest-row floor loop (#6968). collection_time is NOT NULL, so a found row has one. */
         await floor.ReadAsync(serverId, async since =>
@@ -10434,7 +10895,7 @@ LIMIT 1";
         var replicas = new List<AgReplicaReading>();
         DateTime? newest = null;
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         /* #7017: the shared newest-row floor loop (#6968). The floor is the snapshot's time, so a bounded read that finds no row
            means the snapshot is gone and the loop reads again without a bound. A server with no Availability Group has no rows
            either way and gets the loop's empty-read floor. */
@@ -10511,7 +10972,7 @@ ORDER BY ag_name, replica_server_name";
         var databases = new List<AgDatabaseReading>();
         DateTime? newest = null;
 
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.SelfAlert, cancellationToken);
         /* #7017: the shared newest-row floor loop (#6968), as in the replica read above. */
         await floor.ReadAsync(serverId, async since =>
         {

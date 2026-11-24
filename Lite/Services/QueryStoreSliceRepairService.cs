@@ -72,6 +72,7 @@ public sealed partial class QueryStoreSliceRepairService
     private readonly DuckDbInitializer _duckDb;
     private readonly string _archivePath;
     private readonly ILogger<QueryStoreSliceRepairService>? _logger;
+    private readonly QueryStoreSliceRepairState _state;
     private int _surveysRun;
 
     /// <summary>
@@ -86,6 +87,9 @@ public sealed partial class QueryStoreSliceRepairService
         _duckDb = duckDb ?? throw new ArgumentNullException(nameof(duckDb));
         _archivePath = archivePath ?? throw new ArgumentNullException(nameof(archivePath));
         _logger = logger;
+
+        /* #9352: the completion marker and the attempt history are a file beside the store, because a size reset replaces the store. */
+        _state = new QueryStoreSliceRepairState(QueryStoreSliceRepairState.PathFor(duckDb.DatabasePath));
     }
 
     /// <summary>
@@ -110,8 +114,9 @@ public sealed partial class QueryStoreSliceRepairService
 
     /// <summary>
     /// One archive file's share of the work. <paramref name="Executions"/> is the file's total
-    /// <c>SUM(execution_count)</c> BEFORE the rewrite — the conservation baseline, since the collapse sums the
-    /// counter within a group and therefore cannot change the file's total.
+    /// <c>SUM(execution_count)</c> over its DISTINCT slices, which is what the rewrite keeps: the collapse sums the
+    /// counter across the slices of a group and drops exact copies (#9352), so the total changes by exactly the copies'
+    /// counts. It is the conservation baseline.
     /// </summary>
     public sealed record ArchiveFileSurvey(string Path, long Rows, long Groups, long SplitRows, long Executions, bool HasIntervalId)
     {
@@ -144,6 +149,12 @@ public sealed partial class QueryStoreSliceRepairService
     /// </summary>
     public async Task<bool> AlreadyRepairedAsync(CancellationToken cancellationToken = default)
     {
+        /* #9352: the file beside the store answers first. It is the one record the size reset does not take away. */
+        if (_state.Read().CompletedAtUtc is not null)
+        {
+            return true;
+        }
+
         using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(cancellationToken);
@@ -158,8 +169,17 @@ public sealed partial class QueryStoreSliceRepairService
         }
 
         using var rows = connection.CreateCommand();
-        rows.CommandText = $"SELECT COUNT(*) FROM {MarkerTable}";
-        return Convert.ToInt64(await rows.ExecuteScalarAsync(cancellationToken) ?? 0L, CultureInfo.InvariantCulture) > 0;
+        rows.CommandText = $"SELECT COUNT(*), CAST(COALESCE(MAX(rows_removed), 0) AS BIGINT) FROM {MarkerTable}";
+        using var reader = await rows.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture) == 0)
+        {
+            return false;
+        }
+
+        /* #9352: a store that already carries the in-store marker (written by a build before this file existed) counts as
+           repaired, and the file is written from it now so the next size reset cannot take the answer away. */
+        _state.MarkCompleted(Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
+        return true;
     }
 
     private async Task MarkRepairedAsync(DuckDBConnection connection, long rowsRemoved, CancellationToken cancellationToken)
@@ -173,6 +193,9 @@ public sealed partial class QueryStoreSliceRepairService
         insert.CommandText = $"INSERT INTO {MarkerTable} (completed_at, rows_removed) VALUES ($1, {rowsRemoved})";
         insert.Parameters.Add(new DuckDBParameter { Value = DateTime.UtcNow });
         await insert.ExecuteNonQueryAsync(cancellationToken);
+
+        /* #9352: and the file beside the store, which the size reset leaves alone. */
+        _state.MarkCompleted(rowsRemoved);
     }
 
     /// <summary>
@@ -218,6 +241,29 @@ public sealed partial class QueryStoreSliceRepairService
     /// for #2761 to weigh, for two numbers that are written together and read together.</para>
     /// </summary>
     internal async Task<AttemptState> ReadAttemptsAsync(CancellationToken cancellationToken = default)
+    {
+        var inStore = await ReadStoreAttemptsAsync(cancellationToken);
+        var recorded = _state.Read().Attempts;
+
+        /* #9352: the file beside the store is the record a size reset cannot take away, so it wins whenever it holds at least as
+           many attempts as the store. A store that holds more (attempts written by a build before the file existed) seeds the
+           file, so the count carries on from there and the cap keeps its meaning. */
+        if (recorded.Count >= inStore.Count)
+        {
+            if (recorded.Count == 0)
+            {
+                return inStore;
+            }
+
+            var last = recorded[^1];
+            return new AttemptState(recorded.Count, last.HotGroups, last.ArchiveFiles, last.UnreadableFiles);
+        }
+
+        _state.SeedAttempts(inStore.Count, inStore.HotGroups, inStore.ArchiveFiles, inStore.UnreadableFiles);
+        return inStore;
+    }
+
+    private async Task<AttemptState> ReadStoreAttemptsAsync(CancellationToken cancellationToken)
     {
         using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
@@ -319,6 +365,9 @@ SELECT
         insert.CommandText =
             $"INSERT INTO {AttemptTable} (attempted_at, hot_groups, archive_files, unreadable_files) VALUES (CURRENT_TIMESTAMP, {hotGroups}, {archiveFiles}, {unreadableFiles})";
         await insert.ExecuteNonQueryAsync(CancellationToken.None);
+
+        /* #9352: and the file beside the store, so a size reset between two starts does not give the repair its attempts back. */
+        _state.AddAttempt(hotGroups, archiveFiles, unreadableFiles);
     }
 
     /// <summary>
@@ -373,11 +422,12 @@ SELECT
                     "normally; what is left undone is the one-time collapse of {HotGroups} pre-#1907 split interval(s) " +
                     "in the hot store, {ArchiveFiles} archive file(s), and {UnreadableFiles} unreadable archive file(s) " +
                     "as of the last attempt, and #1907's read-side tie-break still resolves those rows " +
-                    "deterministically. To retry after upgrading, drop the '{Table}' table from the store.",
+                    "deterministically. To retry after upgrading, delete '{File}' from the data folder and drop the '{Table}' table from the store.",
                     attempts.Count,
                     attempts.HotGroups,
                     attempts.ArchiveFiles,
                     attempts.UnreadableFiles,
+                    QueryStoreSliceRepairState.FileName,
                     AttemptTable);
                 return;
             }
@@ -488,7 +538,7 @@ SELECT
         attemptNumber >= MaxStartupAttempts
             ? $"This was attempt {attemptNumber} of {MaxStartupAttempts}, the last one: the repair will NOT run again on the next start. " +
               "The app collects normally, and reads still resolve the duplicate rows deterministically. To try again, free up disk space " +
-              $"if the failures above mention it, then drop the '{AttemptTable}' table from the store."
+              $"if the failures above mention it, then delete '{QueryStoreSliceRepairState.FileName}' from the data folder and drop the '{AttemptTable}' table from the store."
             : $"This was attempt {attemptNumber} of {MaxStartupAttempts}; the unrepaired files will be retried on the next start.";
 
     /// <summary>
@@ -605,6 +655,8 @@ FROM (SELECT COUNT(*) AS c FROM {Table} GROUP BY {string.Join(", ", hotKey)} HAV
     {
         var columns = await ColumnsOfParquetAsync(connection, file, cancellationToken);
         var key = KeyColumnsFor(columns);
+        /* #9352: the file's total AFTER its exact copies are dropped, because that is what the rewrite keeps: it sums only distinct slices. */
+        var distinctColumns = string.Join(", ", DistinctSliceColumns(columns, key));
 
         using var command = connection.CreateCommand();
         command.CommandText = $@"
@@ -612,7 +664,7 @@ SELECT
     (SELECT COUNT(*) FROM read_parquet('{EscapePath(file)}')) AS total_rows,
     COUNT(*) AS groups,
     CAST(COALESCE(SUM(c), 0) AS BIGINT) AS rows_in_groups,
-    (SELECT CAST(COALESCE(SUM(execution_count), 0) AS BIGINT) FROM read_parquet('{EscapePath(file)}')) AS executions
+    (SELECT CAST(COALESCE(SUM(execution_count), 0) AS BIGINT) FROM (SELECT {distinctColumns} FROM read_parquet('{EscapePath(file)}') GROUP BY {distinctColumns})) AS executions
 FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {string.Join(", ", key)} HAVING COUNT(*) > 1)";
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -681,8 +733,9 @@ FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {str
                repair still completes at 100,000 groups / ~12.8 GB of plan text — 3.2x the reporting store —
                inside the same 1 GB budget. Verified byte-identical to the original at a size where BOTH
                strategies complete: same final row count, same SUM(execution_count), same full-row hash. */
-            var measurements = BuildMeasurementProjection(hotColumns, key, "MIN(rowid)", KeepRowIdColumn);
+            var measurements = BuildMeasurementProjection(hotColumns, key, "MIN(pm_row)", KeepRowIdColumn);
             var assignments = BuildMeasurementAssignments(hotColumns, key, "r");
+            var slices = BuildDistinctSliceSource(hotColumns, key, "rowid", Table);
 
             using var transaction = connection.BeginTransaction();
 
@@ -691,10 +744,10 @@ FROM (SELECT COUNT(*) AS c FROM read_parquet('{EscapePath(file)}') GROUP BY {str
                 command.Transaction = transaction;
                 command.CommandText = $@"
 CREATE OR REPLACE TEMP TABLE qs_slice_repair AS
-SELECT {measurements}
-FROM {Table}
+SELECT {measurements}, COUNT(*) AS pm_slices
+FROM {slices}
 GROUP BY {string.Join(", ", key)}
-HAVING COUNT(*) > 1";
+HAVING SUM(pm_copies) > 1";
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -722,11 +775,16 @@ HAVING COUNT(*) > 1";
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
-                command.CommandText = $"UPDATE {Table} AS t SET {assignments} FROM qs_slice_repair AS r WHERE {match}";
+                /* #9352: a group of pure copies has one distinct slice, so its survivor is already the row and nothing is rewritten. */
+                command.CommandText = $"UPDATE {Table} AS t SET {assignments} FROM qs_slice_repair AS r WHERE {match} AND r.pm_slices > 1";
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
 
             transaction.Commit();
+
+            /* #9241: the collapse removed hot rows, so a query text no hot row references any more can leave the dimension. Under
+               the write lock this block holds, and a failure never fails the repair. */
+            TextDimensionWriter.TryRemoveUnreferenced(connection, _logger, "the Query Store slice repair");
             progress?.Report($"Hot store: {CountText.Plural(survey.HotRowsRemoved, "row")} removed from {CountText.Plural(survey.HotGroups, "split interval")}.");
         }
 
@@ -830,11 +888,7 @@ HAVING COUNT(*) > 1";
     /// </summary>
     internal static bool IsOutOfTempSpace(Exception ex)
     {
-        var text = ex.ToString();
-        return text.Contains("max_temp_directory_size", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("Out of Disk Space", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("not enough space", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("offload data block", StringComparison.OrdinalIgnoreCase);
+        return ParquetCompaction.IsOutOfTempSpace(ex);
     }
 
     /// <summary>Test seam only, null in production: runs first in <see cref="SurveyAsync"/>, so a test can make the survey throw.</summary>
@@ -1022,8 +1076,9 @@ COPY (
              - Row count must land on exactly (rows - rowsRemoved): every split group becomes one row and
                nothing else moves, so any other number means the GROUP BY grouped something it should not have
                — which is precisely the damage an era-wrong key would do.
-             - SUM(execution_count) must be UNCHANGED. The collapse sums the counter within a group, so the
-               file's total is invariant across the rewrite. This is the check that would catch a mis-typed
+             - SUM(execution_count) must equal the survey's figure, the total over the file's DISTINCT slices. The
+               collapse sums the counter across the slices of a group and drops exact copies (#9352), so nothing but
+               a copy's count leaves the total. This is the check that would catch a mis-typed
                aggregate that still produced the right row count, and it is the number the whole defect is
                about.
 
@@ -1186,7 +1241,8 @@ COPY (
     {
         var names = columns.Select(c => c.Name).ToList();
         var keySet = new HashSet<string>(key, StringComparer.OrdinalIgnoreCase);
-        var narrow = BuildMeasurementProjection(names, key, "MIN(file_row_number)", "__survivor");
+        var narrow = BuildMeasurementProjection(names, key, "MIN(pm_row)", "__survivor");
+        var slices = BuildDistinctSliceSource(names, key, "file_row_number", $"read_parquet('{escapedPath}', file_row_number = true)");
         var select = string.Join(
             ", ",
             columns.Select(c => keySet.Contains(c.Name) || !IsMeasurement(c.Name)
@@ -1197,7 +1253,7 @@ COPY (
     FROM read_parquet('{escapedPath}', file_row_number = true) AS t
     JOIN (
         SELECT {narrow}, COUNT(*) AS __slices
-        FROM read_parquet('{escapedPath}', file_row_number = true)
+        FROM {slices}
         GROUP BY {string.Join(", ", key)}
     ) AS s ON t.file_row_number = s.__survivor";
     }

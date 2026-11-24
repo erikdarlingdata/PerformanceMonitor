@@ -83,7 +83,10 @@ public class ArchivableTableBareReadSweepTests
         /* Collector path. The backfill's candidate databases share one rule with Darling's; its orphan prune
            compares against MAX(collection_time), which is NULL on an empty table, so it deletes nothing then.
            HasPriorCollectorSuccessAsync counts the live log first and v_collection_log when that is 0. */
-        [("RemoteCollectorService.QueryStoreBackfill.cs", "query_store_stats")] = 1,
+        /* #9352: the other two are the copy guard that runs right after a backfill slice writes. It deletes from the hot table the slice
+           just wrote to and compares each row with an earlier hot row of the same key and measurements. Rows already archived are not
+           compared: the guard only cleans what the slice just wrote, and the read-side dedup covers an archived twin. */
+        [("RemoteCollectorService.QueryStoreBackfill.cs", "query_store_stats")] = 3,
         [("RemoteCollectorService.QueryStoreBackfill.cs", "database_states")] = 3,
         [("RemoteCollectorService.cs", "collection_log")] = 1,
 
@@ -91,6 +94,11 @@ public class ArchivableTableBareReadSweepTests
            reads the live log within the longest daily interval plus a day: a collector whose last run is older than
            that is due anyway, and the run it makes is then a live row. */
         [("RemoteCollectorService.RunTime.cs", "collection_log")] = 1,
+
+        /* #9425: the build history's last sighting of the previous run, read once at start. The newest collection row is in the live
+           log unless Lite was off longer than the archive age, and then the previous run's last housekeeping entry stands in. Reading
+           the parquet archive for one maximum would cost every start. */
+        [("BuildHistory.cs", "collection_log")] = 1,
     };
 
     private static readonly List<string> Tables = ArchiveService.ArchivableTables.Select(t => t.Table)

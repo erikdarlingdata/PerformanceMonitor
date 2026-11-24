@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <OutputType>Exe</OutputType>
-    <!-- xUnit1051: per-call-site CancellationToken style nag, suppressed as in the PerformanceMonitor test projects. -->
+    <!-- xUnit1051: per-call-site CancellationToken style nag, suppressed as in the PerformanceMonitor test projects (still fires in about 70 places). -->
     <NoWarn>$(NoWarn);xUnit1051</NoWarn>
     <RootNamespace>PerformanceMonitor.Exporter.Tests</RootNamespace>
   </PropertyGroup>
@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PerformanceMonitor.Exporter\PerformanceMonitor.Exporter.csproj" />
+    <!-- StoreColumnCoverageTests builds a real store schema from the migrations (PgMigrations.MigrateAsync). -->
+    <ProjectReference Include="..\..\Darling\PerformanceMonitor.Darling.Storage\PerformanceMonitor.Darling.Storage.csproj" />
   </ItemGroup>
 
   <ItemGroup>

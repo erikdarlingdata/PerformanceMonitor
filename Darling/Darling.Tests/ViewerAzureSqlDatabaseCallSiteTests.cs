@@ -57,7 +57,7 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
     [Fact]
     public void BothChartSubTabs_ShowTheGapNote()
     {
-        Assert.Contains("ShowSystemHealthChartsNote();", MethodBody(SystemHealthChartsFile, "Task LoadSystemHealthChartsAsync("), StringComparison.Ordinal);
+        Assert.Contains("ShowSystemHealthChartsNote();", MethodBody(SystemHealthChartsFile, "void DrawSystemHealthCharts("), StringComparison.Ordinal);
 
         var body = MethodBody(SystemHealthChartsFile, "void ShowSystemHealthChartsNote(");
         Assert.Contains($"SystemHealthGapNote{GapNoteArguments}", body, StringComparison.Ordinal);
@@ -142,7 +142,6 @@ public sealed class ViewerAzureSqlDatabaseCallSiteTests
 
         /* The registry reader answers both the success path and the not_collected gate, from the same read of the servers row. */
         Assert.Contains("(await ReadServerEngineAsync(postgres, serverId, cancellationToken)).EngineEdition", MethodBody(EngineCapabilityFile, "Task<int> EngineEditionAsync("), StringComparison.Ordinal);
-        Assert.Contains("(engineEdition, engineKind, awsRdsKind) = await ReadServerEngineAsync(postgres, serverId, cancellationToken);", MethodBody(EngineCapabilityFile, "Task<string?> NotCollectedStatusAsync("), StringComparison.Ordinal);
         Assert.Contains("sql_engine_edition", DarlingEngineCapability.ServerEngineSql, StringComparison.Ordinal);
         Assert.Contains("FROM servers", DarlingEngineCapability.ServerEngineSql, StringComparison.Ordinal);
     }

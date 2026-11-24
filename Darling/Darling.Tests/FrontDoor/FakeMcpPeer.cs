@@ -18,6 +18,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using PerformanceMonitor.Common;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.Logging;
@@ -43,6 +44,7 @@ internal sealed class FakeMcpPeer : IAsyncDisposable
     private readonly ConcurrentDictionary<string, int> _toolCalls = new();
     private readonly object _serversGate = new();
     private readonly List<string> _servers;
+    private readonly HashSet<string> _disabled = new(StringComparer.Ordinal);
     private int _httpRequests;
     private int _refuseStatus;
     private int _retryAfterSeconds;
@@ -91,6 +93,16 @@ internal sealed class FakeMcpPeer : IAsyncDisposable
         }
     }
 
+    /// <summary>Adds a server whose collection is off: <c>list_servers</c> answers its row with the Disabled status word (#9087).</summary>
+    public void AddDisabledServer(string name)
+    {
+        lock (_serversGate)
+        {
+            _servers.Add(name);
+            _disabled.Add(name);
+        }
+    }
+
     /// <param name="servers">The <c>server_name</c> values <c>list_servers</c> answers.</param>
     /// <param name="operatorToken">The operator-role token, or null for a store that has none.</param>
     /// <param name="agentToken">The agent-role token, or null for a store that has none.</param>
@@ -117,9 +129,11 @@ internal sealed class FakeMcpPeer : IAsyncDisposable
                 {
                     Count("list_servers");
                     string[] snapshot;
+                    HashSet<string> disabled;
                     lock (self!._serversGate)
                     {
                         snapshot = self._servers.ToArray();
+                        disabled = new HashSet<string>(self._disabled, StringComparer.Ordinal);
                     }
 
                     /* A store with nothing registered answers the `empty` status envelope, as DarlingMcpDataTools.ListServers does (#6277). */
@@ -136,6 +150,7 @@ internal sealed class FakeMcpPeer : IAsyncDisposable
                             server_name = n,
                             display_name = n,
                             engine_kind = "sqlserver",
+                            status = disabled.Contains(n) ? ServerHealthClassifier.DisabledServerStatus : "Online",
                             read_only = n.EndsWith(":RO", StringComparison.Ordinal),
                         }),
                     });

@@ -247,7 +247,7 @@ SELECT
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             var checkpointBuffers = await ReadCheckpointPressureAsync(context, facts, connection, isAurora, major);
             await ReadWalVolumeAsync(context, facts, connection, isAurora, major, checkpointBuffers);

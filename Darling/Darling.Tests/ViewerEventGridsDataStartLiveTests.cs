@@ -105,7 +105,8 @@ public sealed class ViewerSystemEventsDataStartLiveTests
     }
 
     /* History that reaches the range start: the same recent server, its first collection stored events from 9 days ago,
-       so the grid's first row is the range's own start. No notice, though the coverage starts 5 days later. */
+       so the grid's first row is an hour into the range, inside the notice's slack. No notice, though the coverage starts
+       5 days later. */
     [Theory]
     [InlineData(Grid.SystemEvents)]
     [InlineData(Grid.DefaultTrace)]
@@ -220,9 +221,11 @@ public sealed class ViewerSystemEventsDataStartLiveTests
                     await InsertEventsAsync(connection, grid, HistoryServerId, end.AddDays(-5), end.AddDays(-2), collectedFirst: end.AddDays(-2), ct);
                     await InsertEventsAsync(connection, grid, HistoryServerId, end.AddDays(-2).AddHours(6), end, collectedFirst: null, ct);
 
-                    /* The same, with 7 days of history before it, so the first collection stored the range's own start. */
+                    /* The same, with 7 days of history before it, so the first collection stored events from before the range's
+                       start. Its events fall an hour off the 6-hour marks the range starts on: the range is (start, end], an
+                       event stamped on the start is outside it, and the first one the grid shows is an hour in. */
                     await EventGridSeed.AddServerAsync(connection, DeepHistoryServerId, "event-grids-deep-history", end.AddDays(-2), collector, end, ClockOffsetMinutes, ct);
-                    await InsertEventsAsync(connection, grid, DeepHistoryServerId, end.AddDays(-9), end.AddDays(-2), collectedFirst: end.AddDays(-2), ct);
+                    await InsertEventsAsync(connection, grid, DeepHistoryServerId, end.AddDays(-9).AddHours(1), end.AddDays(-2), collectedFirst: end.AddDays(-2), ct);
                     await InsertEventsAsync(connection, grid, DeepHistoryServerId, end.AddDays(-2).AddHours(6), end, collectedFirst: null, ct);
                 }
 

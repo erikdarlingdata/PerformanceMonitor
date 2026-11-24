@@ -125,7 +125,8 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', 'Db', '{hash}', '{h
         Break(archiveFile);
 
         var inside = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", Whole(NowUtc.AddHours(-6)), Ct);
-        Assert.Equal("SELECT 1 FROM query_stats", inside.Apply("SELECT 1 FROM v_query_stats"));
+        /* query_stats keeps its text in a dimension (#9241), so its hot read goes through the vh_ view that resolves it. */
+        Assert.Equal("SELECT 1 FROM vh_query_stats", inside.Apply("SELECT 1 FROM v_query_stats"));
 
         var reaching = await _duckDb.PlanArchiveReadAsync("query_stats", "collection_time", Whole(NowUtc.AddDays(-12)), Ct);
         Assert.Equal("SELECT 1 FROM v_query_stats", reaching.Apply("SELECT 1 FROM v_query_stats"));

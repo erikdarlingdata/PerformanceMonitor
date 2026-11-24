@@ -26,7 +26,7 @@ namespace PerformanceMonitorLite.Tests;
 /// (host swapped, read-only intent, everything else kept), it saves and loads with the server list, and
 /// <c>collection_log.read_source</c> reaches an existing store and its archive. The runner that opens the replica is a later part.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
 public sealed class QueryStoreReplicaConnectionStringTests
 {
     private static ServerConnection SqlAuthServer(string? replica) => new()

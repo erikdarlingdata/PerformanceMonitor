@@ -352,7 +352,7 @@ public sealed class StoreMetricsSummaryFirstTests
     public void TheWebCatalog_AdvertisesTheNewParameters()
     {
         var descriptor = DarlingWebEndpoints.CatalogDescriptors["get_store_metrics"];
-        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit" }, descriptor.Params.Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "days_back", "object_kind", "object_name", "limit", "wal_hours_back", "table_activity", "hours", "rank_by", "as_of" }, descriptor.Params.Select(p => p.Name).ToArray());
         Assert.All(descriptor.Params, p => Assert.False(p.Required));
         Assert.Equal(DarlingMcpStoreMetricsTools.DefaultLimit, descriptor.Params.Single(p => p.Name == "limit").Default);
     }
@@ -631,6 +631,44 @@ public sealed class StoreMetricsSummaryFirstLivePostgresTests
             Assert.Equal(StoreSelfMetrics.BackgroundJobObjectKind, root.GetProperty("object_kind").GetString());
             Assert.Equal(25, root.GetProperty("objects_returned").GetInt32());
             Assert.Equal("policy_retention big_grower [3000]", root.GetProperty("objects")[0].GetProperty("object_name").GetString());
+        }
+    }
+
+    /// <summary>
+    /// #9446 made the MCP read refuse as_of without table_activity, and the triage page adds as_of to every section
+    /// of a store alert opened more than a minute after the firing. Both store sections (size and jobs) are
+    /// not table_activity, so both answered invalid. The web read now forwards as_of only with table_activity:
+    /// the page's own query for each section, anchored at a past time, answers with data.
+    /// </summary>
+    [Fact]
+    public async Task TheStoreTriageSections_OpenedLater_AnswerWithData_NotInvalid_AgainstDevPostgres()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live get_store_metrics triage as_of test (it mints its own scratch database).");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await SeedAsync(scratch.ConnectionString, ct);
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var dispatch = DarlingWebEndpoints.BuildReadDispatch();
+        var pastFiring = DateTime.UtcNow.AddHours(-3).ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
+        var sections = DarlingTriageEndpoint.SectionsFor(DarlingSelfAlertEvaluator.JobCadenceMetric)
+            .Where(s => s.Read == "get_store_metrics")
+            .ToList();
+        Assert.Equal(2, sections.Count);
+
+        foreach (var section in sections)
+        {
+            var query = DarlingTriageEndpoint.BuildSectionQuery(section, DarlingSelfAlertEvaluator.StoreServerLabel, pastFiring);
+            Assert.Contains("as_of=", query, StringComparison.Ordinal);
+
+            using var answer = JsonDocument.Parse(await RunReadAsync(dispatch, query, dataSource));
+            var root = answer.RootElement;
+            Assert.False(McpHelpers.IsRefusalEnvelope(root.GetRawText()), $"section '{section.Title}' answered a refusal: {root.GetRawText()}");
+            Assert.Equal(
+                section.Params.ContainsKey("object_kind") ? "list" : "summary",
+                root.GetProperty("view").GetString());
         }
     }
 

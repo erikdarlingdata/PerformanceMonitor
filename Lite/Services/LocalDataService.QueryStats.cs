@@ -72,7 +72,7 @@ SELECT
     COALESCE(SUM(delta_physical_reads), 0) AS total_physical_reads
 FROM v_query_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3" + dbClause + @"
 GROUP BY " + bucket + @"
 ORDER BY bucket";
@@ -124,7 +124,7 @@ WITH winners AS (
         host_object_name AS win_host_object_name
     FROM v_query_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + @"
     GROUP BY database_name, query_hash, host_object_name
@@ -199,7 +199,7 @@ ranked AS (
       AND q.query_hash IS NOT DISTINCT FROM w.win_query_hash
       AND q.host_object_name IS NOT DISTINCT FROM w.win_host_object_name
     WHERE q.server_id = $1
-    AND   q.collection_time >= $2
+    AND   q.collection_time > $2
     AND   q.collection_time <= $3
     AND   q.last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE
     GROUP BY database_name, query_hash, host_object_name
@@ -233,8 +233,10 @@ module AS (
            the archive holds for the server (432,000 rows from one day of a 344-database server, 3.2 s of the read; it grows
            with the archive, not the window, so a month of history made this read take minutes). The page joins on
            sql_handle alone, so a handle outside the ranked groups was never used, and a handle inside them keeps the
-           same newest row. */
-        AND   sql_handle IN (SELECT sql_handle FROM ranked)
+           same newest row.
+           #8549: and only the groups with no host_object_name. QueryStatsRow.ModuleName shows the host when the group has one, so
+           nothing reads the stitch's answer for it. */
+        AND   sql_handle IN (SELECT sql_handle FROM ranked WHERE host_object_name IS NULL)
         GROUP BY sql_handle
     ) AS ranked_modules
 ),
@@ -273,7 +275,7 @@ texts AS (
           AND r.database_name = q.database_name
           AND r.host_object_name IS NOT DISTINCT FROM q.host_object_name
         WHERE q.server_id = $1
-        AND   q.collection_time >= $2
+        AND   q.collection_time > $2
         AND   q.collection_time <= $3
         GROUP BY q.database_name, q.query_hash, q.host_object_name
     ) w_pick
@@ -323,7 +325,7 @@ ORDER BY p.page_ord";
         command.CommandText = @"
 SELECT
     (SELECT COUNT(*) FROM v_query_stats
-     WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3" + dbClause + @"),
+     WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3" + dbClause + @"),
     (SELECT MAX(collection_time) FROM v_query_stats
      WHERE server_id = $1 AND collection_time <= $3" + dbClause + @"
      AND   (delta_execution_count > 0 OR delta_elapsed_time > 0))";
@@ -488,7 +490,7 @@ WITH top_current AS (
     SELECT query_hash, database_name
     FROM v_query_stats
     WHERE server_id = $1
-    AND   collection_time >= $2 AND collection_time <= $3" + dbClause + @"
+    AND   collection_time > $2 AND collection_time <= $3" + dbClause + @"
     AND   delta_execution_count > 0
     GROUP BY query_hash, database_name
     ORDER BY SUM(delta_execution_count) DESC
@@ -498,7 +500,7 @@ top_baseline AS (
     SELECT query_hash, database_name
     FROM v_query_stats
     WHERE server_id = $1
-    AND   collection_time >= $4 AND collection_time <= $5" + dbClause + @"
+    AND   collection_time > $4 AND collection_time <= $5" + dbClause + @"
     AND   delta_execution_count > 0
     GROUP BY query_hash, database_name
     ORDER BY SUM(delta_execution_count) DESC
@@ -524,7 +526,7 @@ current_period AS (
       ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
       AND qs.database_name IS NOT DISTINCT FROM th.database_name
     WHERE qs.server_id = $1
-    AND   qs.collection_time >= $2 AND qs.collection_time <= $3
+    AND   qs.collection_time > $2 AND qs.collection_time <= $3
     AND   qs.delta_execution_count > 0
     GROUP BY th.database_name, th.query_hash
 ),
@@ -540,7 +542,7 @@ baseline_period AS (
       ON  qs.query_hash IS NOT DISTINCT FROM th.query_hash
       AND qs.database_name IS NOT DISTINCT FROM th.database_name
     WHERE qs.server_id = $1
-    AND   qs.collection_time >= $4 AND qs.collection_time <= $5
+    AND   qs.collection_time > $4 AND qs.collection_time <= $5
     AND   qs.delta_execution_count > 0
     GROUP BY th.database_name, th.query_hash
 )
@@ -657,7 +659,7 @@ FROM v_query_stats
 WHERE server_id = $1
 AND   database_name = $2
 AND   query_hash = $3
-AND   collection_time >= $4
+AND   collection_time > $4
 AND   collection_time <= $5
 ORDER BY collection_time";
 
@@ -785,8 +787,11 @@ WHERE server_id = $1
 AND   database_name = $2
 AND   schema_name = $3
 AND   object_name = $4
+/* A pre-v61 row takes its interval from the row before it, so the row stamped on $5 is read as that predecessor only:
+   QUALIFY drops it after the LAG, and every row returned was collected in ($5, $6]. */
 AND   collection_time >= $5
 AND   collection_time <= $6
+QUALIFY collection_time > $5
 ORDER BY collection_time";
 
         command.CommandText = SwapArchiveView(command.CommandText, "procedure_stats", relation);
@@ -866,7 +871,7 @@ FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = 'procedure_stats'
 AND   status = 'SUCCESS'
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 ORDER BY collection_time";
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
@@ -1102,7 +1107,7 @@ SELECT
     COALESCE(SUM(delta_physical_reads), 0) AS total_physical_reads
 FROM v_procedure_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3" + dbClause + @"
 GROUP BY " + bucket + @"
 ORDER BY bucket";
@@ -1189,7 +1194,7 @@ SELECT
     CAST(SUM(delta_spills) AS DOUBLE PRECISION) / NULLIF(SUM(delta_execution_count), 0) AS avg_spills
 FROM v_procedure_stats
 WHERE server_id = $1
-AND   collection_time >= $2
+AND   collection_time > $2
 AND   collection_time <= $3
 AND   last_execution_time >= $2 + $5 * INTERVAL '1' MINUTE" + dbClause + excludeClause + (tags is null ? "" : QueryTagReadScope.ObjectToken("database_name", "schema_name", "object_name")) + @"
 GROUP BY database_name, schema_name, object_name, object_type
@@ -1268,7 +1273,7 @@ WITH top_current AS (
     SELECT database_name, schema_name, object_name
     FROM v_procedure_stats
     WHERE server_id = $1
-    AND   collection_time >= $2 AND collection_time <= $3" + dbClause + @"
+    AND   collection_time > $2 AND collection_time <= $3" + dbClause + @"
     AND   delta_execution_count > 0
     GROUP BY database_name, schema_name, object_name
     ORDER BY SUM(delta_execution_count) DESC
@@ -1278,7 +1283,7 @@ top_baseline AS (
     SELECT database_name, schema_name, object_name
     FROM v_procedure_stats
     WHERE server_id = $1
-    AND   collection_time >= $4 AND collection_time <= $5" + dbClause + @"
+    AND   collection_time > $4 AND collection_time <= $5" + dbClause + @"
     AND   delta_execution_count > 0
     GROUP BY database_name, schema_name, object_name
     ORDER BY SUM(delta_execution_count) DESC
@@ -1305,7 +1310,7 @@ current_period AS (
       AND ps.schema_name IS NOT DISTINCT FROM tp.schema_name
       AND ps.object_name IS NOT DISTINCT FROM tp.object_name
     WHERE ps.server_id = $1
-    AND   ps.collection_time >= $2 AND ps.collection_time <= $3
+    AND   ps.collection_time > $2 AND ps.collection_time <= $3
     AND   ps.delta_execution_count > 0
     GROUP BY tp.database_name, tp.schema_name, tp.object_name
 ),
@@ -1322,7 +1327,7 @@ baseline_period AS (
       AND ps.schema_name IS NOT DISTINCT FROM tp.schema_name
       AND ps.object_name IS NOT DISTINCT FROM tp.object_name
     WHERE ps.server_id = $1
-    AND   ps.collection_time >= $4 AND ps.collection_time <= $5
+    AND   ps.collection_time > $4 AND ps.collection_time <= $5
     AND   ps.delta_execution_count > 0
     GROUP BY tp.database_name, tp.schema_name, tp.object_name
 ),
@@ -1364,8 +1369,8 @@ texts AS (
       ON h.text_handle = qs.sql_handle
     WHERE qs.server_id = $1
     AND   qs.query_text IS NOT NULL
-    AND   ((qs.collection_time >= $2 AND qs.collection_time <= $3)
-        OR (qs.collection_time >= $4 AND qs.collection_time <= $5))
+    AND   ((qs.collection_time > $2 AND qs.collection_time <= $3)
+        OR (qs.collection_time > $4 AND qs.collection_time <= $5))
     GROUP BY qs.sql_handle
 )
 SELECT j.database_name, j.schema_name, j.object_name,
@@ -1640,7 +1645,7 @@ ORDER BY 1";
         AND   collection_time <= $3
         GROUP BY collection_time
     ) AS g
-    WHERE collection_time >= $2
+    WHERE collection_time > $2
 ),";
     }
 
@@ -1747,7 +1752,7 @@ raw AS
             LAG(collection_time) OVER (ORDER BY collection_time) AS prev_t
         FROM axis
     ) AS a
-    WHERE collection_time >= $2
+    WHERE collection_time > $2
     AND   collection_time <= $3
 ),";
     }
@@ -2057,7 +2062,7 @@ WITH per_query AS (
         delta_execution_count
     FROM v_query_stats
     WHERE server_id = $1
-    AND   collection_time >= $2
+    AND   collection_time > $2
     AND   collection_time <= $3
     AND   delta_execution_count > 0
     AND   {metricExpr} IS NOT NULL{dbClause}

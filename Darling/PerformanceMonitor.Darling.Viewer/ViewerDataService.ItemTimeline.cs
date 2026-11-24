@@ -46,7 +46,7 @@ public sealed partial class ViewerDataService
         WHERE server_id = $1
         AND   database_name = $2
         AND   query_hash = $3
-        AND   collection_time >= $4
+        AND   collection_time > $4
         AND   collection_time <= $5
         ORDER BY collection_time
         """;
@@ -75,7 +75,7 @@ public sealed partial class ViewerDataService
         AND   database_name = $2
         AND   schema_name = $3
         AND   object_name = $4
-        AND   collection_time >= $5
+        AND   collection_time > $5
         AND   collection_time <= $6
         ORDER BY collection_time
         """;
@@ -151,7 +151,7 @@ public sealed partial class ViewerDataService
                lands after the range ends, would vanish. It also has to match the BARS' window, or the two
                surfaces on one chart disagree about whether an interval is in the window at all. */
             AND   COALESCE(interval_start_time_utc, collection_time) >= $5
-            AND   COALESCE(interval_start_time_utc, collection_time) <= $6
+            AND   COALESCE(interval_start_time_utc, collection_time) < $6
             /* Chunk-exclusion bounds, NOT filters: neither can exclude a row the predicate above keeps in any
                realistic store. query_store_stats is a hypertable partitioned on collection_time, so without
                bounds on that column TimescaleDB opens every chunk from the window through the present.
@@ -213,7 +213,7 @@ public sealed partial class ViewerDataService
         NpgsqlCommand command, CancellationToken cancellationToken)
     {
         var points = new List<ItemTimelinePoint>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             points.Add(new ItemTimelinePoint(

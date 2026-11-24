@@ -11,7 +11,9 @@
          graph, so the RID-less locked-mode restore and the RID publish agree on one lock file.
          RuntimeIdentifiers (plural) only widens what restore resolves; it sets no RID on the
          build, so a plain dotnet build stays RID-agnostic and Lite.Tests is untouched. -->
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <!-- #9256: win-arm64 is a second published RID, so its restore graph is in the lock file too. Both RIDs
+         stay here together: dropping one leaves the other's publish out of step with the lock file. -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
     <StartupObject>PerformanceMonitorLite.Program</StartupObject>

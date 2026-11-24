@@ -8,6 +8,8 @@
 
 using System;
 using System.IO;
+using System.Linq;
+using System.Threading;
 using System.Text.Json;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -239,6 +241,196 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
         Assert.True(service.LastWindowCoverage!.IsObserved);
     }
 
+    /// <summary>
+    /// #8910: a window older than the history Lite keeps (the archive's three months) is answered as removed by retention, not
+    /// as a collector that "may have stopped or broken". The store has the shape a real archive purge leaves: the month files
+    /// before the cutoff are gone, so the oldest row is in the archive, in the first month the purge kept
+    /// (<see cref="RetentionService.OldestRetainedInstant"/>), up to a month AFTER the raw cutoff. A recent hot row keeps the
+    /// span far over the history gate; <c>as_of</c> puts the window ten days before the oldest row. Both tools say so, and
+    /// neither points at collection health. A window INSIDE the span with no rows, and with over a day of history before its
+    /// end, keeps the collection wording: collection may well have missed it.
+    /// </summary>
+    [Fact]
+    public async Task AWindowOlderThanRetention_SaysRetentionRemovedIt_AndOtherEmptyWindowsKeepTheCollectionText()
+    {
+        var now = DateTime.UtcNow;
+        string AsOf(double daysAgo) => now.AddDays(-daysAgo).ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        var oldestKept = DateTime.SpecifyKind(RetentionService.OldestRetainedInstant(now), DateTimeKind.Utc).AddHours(3);
+        var oldestDaysAgo = (now - oldestKept).TotalDays;
+
+        /* Two archived rows two days apart: the history gate measures to a window's end, so the inside window below has a
+           day of history before it. */
+        await PlantWaitAsync(oldestKept.AddDays(2), StaleWait, 60_000L);
+        await ArchiveWaitAsync(oldestKept);
+        try
+        {
+            await PlantWaitAsync(now.AddHours(-5), StaleWait, 60_000L);
+
+            var service = new AnalysisService(_duckDb);
+            var removed = await McpAnalysisTools.AnalyzeServer(service, _serverManager, hours_back: 48, as_of: AsOf(oldestDaysAgo + 10));
+            using (var doc = JsonDocument.Parse(removed))
+            {
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                var message = doc.RootElement.GetProperty("message").GetString()!;
+                Assert.Contains("This window ends before the oldest row this store keeps (", message, StringComparison.Ordinal);
+                Assert.Contains("3 months of retention for wait_stats", message, StringComparison.Ordinal);
+                Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+                Assert.Contains("NOT an all-clear", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("stopped or broken", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("total collected history", message, StringComparison.Ordinal);
+            }
+            Assert.True(service.WindowEmptyRemovedByRetention);
+
+            var removedFacts = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, hours_back: 48, as_of: AsOf(oldestDaysAgo + 10));
+            using (var doc = JsonDocument.Parse(removedFacts))
+            {
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                var message = doc.RootElement.GetProperty("message").GetString()!;
+                Assert.Contains("This window ends before the oldest row this store keeps (", message, StringComparison.Ordinal);
+                Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("may not have run yet", message, StringComparison.Ordinal);
+            }
+
+            /* A window INSIDE the retained span that holds no rows: today's text, today's pointer. */
+            var inside = await McpAnalysisTools.AnalyzeServer(service, _serverManager, hours_back: 4, as_of: AsOf(oldestDaysAgo / 2.0));
+            using (var doc = JsonDocument.Parse(inside))
+            {
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                var message = doc.RootElement.GetProperty("message").GetString()!;
+                Assert.Contains("Collection may have stopped or broken", message, StringComparison.Ordinal);
+                Assert.Contains("get_collection_health", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("Retention removed it", message, StringComparison.Ordinal);
+            }
+            Assert.False(service.WindowEmptyRemovedByRetention);
+
+            var insideFacts = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, hours_back: 4, as_of: AsOf(oldestDaysAgo / 2.0));
+            Assert.DoesNotContain("Retention removed it", insideFacts, StringComparison.Ordinal);
+        }
+        finally
+        {
+            await RemoveArchiveAsync();
+        }
+    }
+
+    /// <summary>
+    /// #9218: a replay whose whole window ends before the oldest row the store keeps is answered from one lookup of that row, and
+    /// the fact collector never runs (no family is read, no coverage is measured), in <c>analyze_server</c> and in
+    /// <c>get_analysis_facts</c>. A window that reaches the oldest row, and one inside retention, still run it, and the facts the
+    /// tool returns are the ones the service scores, in severity order.
+    /// </summary>
+    [Fact]
+    public async Task AWindowWhollyBeforeRetention_ReadsNoFacts_AndAWindowThatReachesTheFloorOrSitsInsideStillDoes()
+    {
+        var now = DateTime.UtcNow;
+        string Iso(DateTime at) => at.ToString("o", System.Globalization.CultureInfo.InvariantCulture);
+        var oldestKept = DateTime.SpecifyKind(RetentionService.OldestRetainedInstant(now), DateTimeKind.Utc).AddHours(3);
+
+        await ArchiveWaitAsync(oldestKept);
+        try
+        {
+            for (var hours = 1; hours <= 30; hours++)
+                await PlantWaitAsync(oldestKept.AddHours(hours), BenignWait, 100L);
+            for (var minutesAgo = 600; minutesAgo >= 0; minutesAgo -= 15)
+                await PlantWaitAsync(now.AddMinutes(-minutesAgo), BenignWait, 100L);
+
+            var service = new AnalysisService(_duckDb);
+
+            var farBefore = Iso(oldestKept.AddDays(-10));
+            var removed = await McpAnalysisTools.AnalyzeServer(service, _serverManager, hours_back: 4, as_of: farBefore);
+            Assert.Equal(0, service.LastCollectionFamilyCount);
+            Assert.Null(service.LastWindowCoverage);
+            Assert.True(service.WindowEmptyRemovedByRetention);
+            var removedFacts = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, hours_back: 4, as_of: farBefore);
+            foreach (var answer in new[] { removed, removedFacts })
+            {
+                using var doc = JsonDocument.Parse(answer);
+                Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+                var message = doc.RootElement.GetProperty("message").GetString()!;
+                Assert.Contains("This window ends before the oldest row this store keeps (", message, StringComparison.Ordinal);
+                Assert.Contains("3 months of retention for wait_stats", message, StringComparison.Ordinal);
+                Assert.Contains("Retention removed it, and collection did not break.", message, StringComparison.Ordinal);
+                Assert.DoesNotContain("get_collection_health", message, StringComparison.Ordinal);
+            }
+
+            /* get_analysis_facts answers from its own early return, which says no fact was read; the fall-through arms count facts instead. */
+            using (var factsDoc = JsonDocument.Parse(removedFacts))
+                Assert.Contains("no fact was read for it", factsDoc.RootElement.GetProperty("message").GetString()!, StringComparison.Ordinal);
+
+            /* A window that starts before the oldest row and ends a day after it keeps its path: the collector runs. */
+            var straddleEnd = Iso(oldestKept.AddHours(28));
+            var straddle = await McpAnalysisTools.AnalyzeServer(service, _serverManager, hours_back: 48, as_of: straddleEnd);
+            Assert.True(service.LastCollectionFamilyCount > 0);
+            Assert.NotNull(service.LastWindowCoverage);
+            Assert.False(service.WindowEmptyRemovedByRetention);
+            using (var doc = JsonDocument.Parse(straddle))
+                Assert.NotEqual("unavailable", doc.RootElement.GetProperty("status").GetString());
+
+            /* A window inside retention returns the facts the service scores, in severity order. */
+            var insideEnd = now.AddMinutes(-30);
+            var insideJson = await McpAnalysisTools.GetAnalysisFacts(service, _serverManager, hours_back: 4, as_of: Iso(insideEnd));
+            var (scored, _, _) = await service.CollectAndScoreFactsAsync(
+                _serverId, "TestServer", 4, DateTime.SpecifyKind(insideEnd, DateTimeKind.Utc), CancellationToken.None);
+            Assert.NotEmpty(scored);
+            using (var doc = JsonDocument.Parse(insideJson))
+            {
+                Assert.True(doc.RootElement.TryGetProperty("facts", out _));
+                var returned = doc.RootElement.GetProperty("facts").EnumerateArray()
+                    .Select(f => f.GetProperty("key").GetString()!).ToList();
+                Assert.Equal(scored.OrderByDescending(f => f.Severity).Select(f => f.Key).ToList(), returned);
+            }
+        }
+        finally
+        {
+            await RemoveArchiveAsync();
+        }
+    }
+
+    /// <summary>
+    /// #8910: a store whose purge has stalled keeps rows far older than the horizon, so a window before the server was first
+    /// monitored ends before the oldest row too. The store never held that window, and the answer must not say retention
+    /// removed it.
+    /// </summary>
+    [Fact]
+    public async Task AWindowBeforeAStalledPurgeStoresFirstRow_KeepsTheCollectionText_NotARetentionClaim()
+    {
+        var now = DateTime.UtcNow;
+        var horizon = now.AddMonths(-RetentionService.ArchiveRetentionMonths);
+        await PlantWaitAsync(horizon.AddDays(-10), StaleWait, 60_000L);
+        await PlantWaitAsync(now.AddHours(-5), StaleWait, 60_000L);
+
+        var service = new AnalysisService(_duckDb);
+        var result = await McpAnalysisTools.AnalyzeServer(
+            service, _serverManager, hours_back: 48,
+            as_of: horizon.AddDays(-20).ToString("o", System.Globalization.CultureInfo.InvariantCulture));
+
+        Assert.DoesNotContain("Retention removed it", result, StringComparison.Ordinal);
+        Assert.Contains("Collection may have stopped or broken", result, StringComparison.Ordinal);
+        Assert.False(service.WindowEmptyRemovedByRetention);
+    }
+
+    /// <summary>
+    /// #8910: a young store's first row is five days old, far past the retention horizon, so a window ten days back was never
+    /// held. Retention did not remove it, and the message must not say it did.
+    /// </summary>
+    [Fact]
+    public async Task AWindowBeforeAYoungStoresFirstRow_KeepsTheCollectionText_NotARetentionClaim()
+    {
+        var now = DateTime.UtcNow;
+        await PlantWaitAsync(now.AddDays(-5), StaleWait, 60_000L);
+        await PlantWaitAsync(now.AddHours(-5), StaleWait, 60_000L);
+
+        var service = new AnalysisService(_duckDb);
+        var result = await McpAnalysisTools.AnalyzeServer(
+            service, _serverManager, hours_back: 48,
+            as_of: now.AddDays(-10).ToString("o", System.Globalization.CultureInfo.InvariantCulture));
+
+        Assert.DoesNotContain("Retention removed it", result, StringComparison.Ordinal);
+        Assert.Contains("Collection may have stopped or broken", result, StringComparison.Ordinal);
+        Assert.False(service.WindowEmptyRemovedByRetention);
+    }
+
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
         if (_seedConn is null)
@@ -247,6 +439,44 @@ public sealed class AnalysisWindowEmptyTests : IClassFixture<SharedDuckDbFixture
             await _seedConn.OpenAsync();
         }
         return _seedConn;
+    }
+
+    private DateTime? _archivedMonth;
+
+    private string ArchiveFile(DateTime month) =>
+        Path.Combine(_duckDb.ArchivePath, month.ToString("yyyyMM", System.Globalization.CultureInfo.InvariantCulture) + "_wait_stats.parquet").Replace("\\", "/");
+
+    /// <summary>
+    /// Leaves the one wait_stats row at <paramref name="at"/> in the archive only, as a monthly archive file named for its month,
+    /// and none in the hot table: the shape the archive purge leaves behind when it deletes the older months.
+    /// </summary>
+    private async Task ArchiveWaitAsync(DateTime at)
+    {
+        await PlantWaitAsync(at, StaleWait, 60_000L);
+        Directory.CreateDirectory(_duckDb.ArchivePath);
+        _archivedMonth = at;
+        using (var readLock = _duckDb.AcquireReadLock())
+        {
+            var conn = await SeedConnectionAsync();
+            using var copy = conn.CreateCommand();
+            copy.CommandText = $"COPY (SELECT * FROM wait_stats) TO '{ArchiveFile(at)}' (FORMAT PARQUET)";
+            await copy.ExecuteNonQueryAsync();
+            using var delete = conn.CreateCommand();
+            delete.CommandText = "DELETE FROM wait_stats";
+            await delete.ExecuteNonQueryAsync();
+        }
+        await _duckDb.CreateArchiveViewsAsync();
+    }
+
+    private async Task RemoveArchiveAsync()
+    {
+        if (_archivedMonth is { } month)
+        {
+            try { File.Delete(ArchiveFile(month)); }
+            catch { /* best-effort cleanup */ }
+            await _duckDb.CreateArchiveViewsAsync();
+            _archivedMonth = null;
+        }
     }
 
     private async Task PlantWaitAsync(DateTime at, string waitType, long deltaWaitMs)

@@ -45,8 +45,9 @@ public sealed class ClientTimeoutsToolLiveTests
     private const int LeakId = -5640108;
     private const int TieId = -5640109;
     private const int MissingSessionId = -5640110;
+    private const int DurationFloorId = -5640111;
 
-    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId };
+    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId };
 
     private static string Name(int id) => "ct-live" + (-id).ToString(CultureInfo.InvariantCulture);
 
@@ -130,6 +131,46 @@ public sealed class ClientTimeoutsToolLiveTests
                 Assert.Equal(limitValue, pageBody.GetProperty("sampled_events_returned").GetInt32());
                 Assert.Equal(55, pageBody.GetProperty("count").GetInt64());
             }
+        });
+    }
+
+    [Fact]
+    public async Task TheOneSecondFloor_LeavesFourMillisecondEventsOut_ButEveryEventStaysListed_AndTheJudgedCountDropsThem()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var now = Now();
+            await RegisterAsync(connection, DurationFloorId, "sqlserver", ct);
+            var runs = await SeedRunsAsync(connection, DurationFloorId, now.AddSeconds(-30), 12, TimeSpan.FromMinutes(1), ct);
+            foreach (var run in runs)
+            {
+                await RowAsync(connection, DurationFloorId, run.AddSeconds(2), "count", 5, null, null, null, null, ct);
+            }
+
+            /* #9030: two 4 ms events are under the 1 s floor. A 30 s event, one at exactly 1 s and one with no recorded duration are not. */
+            var at = runs[1].AddSeconds(2);
+            await RowAsync(connection, DurationFloorId, at, "sample", 0, "db1", "etl", "fp-ms", "SELECT 1", ct, durationUs: 4_000);
+            await RowAsync(connection, DurationFloorId, at, "sample", 0, "db1", "web", "fp-ms", "SELECT 1", ct, durationUs: 4_000);
+            await RowAsync(connection, DurationFloorId, at, "sample", 0, "db1", "etl", "fp-30s", "SELECT 2", ct, durationUs: 30_000_000);
+            await RowAsync(connection, DurationFloorId, at, "sample", 0, "db1", "etl", "fp-1s", "SELECT 3", ct, durationUs: 1_000_000);
+            await RowAsync(connection, DurationFloorId, at, "sample", 0, "db1", "etl", "fp-null", "SELECT 4", ct, durationUs: null);
+
+            using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(DurationFloorId), 1, cancellationToken: ct));
+            var body = doc.RootElement.GetProperty("client_timeouts");
+
+            /* Every event is still counted and listed. The exact count is the collector's, the floor only reshapes what the alert judges. */
+            Assert.Equal(55, body.GetProperty("count").GetInt64());
+            Assert.Equal(5, body.GetProperty("sampled_events_in_range").GetInt64());
+            var excluded = body.GetProperty("excluded_from_alert");
+            Assert.Equal(2, excluded.GetProperty("below_duration_floor_events").GetInt64());
+            Assert.Equal(55 * 3 / 5.0, excluded.GetProperty("count_judged").GetDouble());
+
+            var listed = body.GetProperty("sampled_events").EnumerateArray().ToList();
+            Assert.Equal(5, listed.Count);
+            Assert.Equal(new[] { "fp-ms", "fp-ms" }, listed.Where(e => e.GetProperty("below_duration_floor").GetBoolean())
+                .Select(e => e.GetProperty("statement_fingerprint").GetString()!).ToArray());
+            Assert.Equal(new[] { "fp-1s", "fp-30s", "fp-null" }, listed.Where(e => !e.GetProperty("below_duration_floor").GetBoolean())
+                .Select(e => e.GetProperty("statement_fingerprint").GetString()!).OrderBy(f => f, StringComparer.Ordinal).ToArray());
         });
     }
 
@@ -476,12 +517,12 @@ public sealed class ClientTimeoutsToolLiveTests
 
     private static async Task RowAsync(
         NpgsqlConnection connection, int serverId, DateTime time, string kind, long count,
-        string? db, string? app, string? fingerprint, string? text, CancellationToken ct)
+        string? db, string? app, string? fingerprint, string? text, CancellationToken ct, long? durationUs = null)
     {
         using var command = new NpgsqlCommand(
             @"INSERT INTO attention_events
-                  (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
+                  (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, interrupt_duration_us)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", connection);
         command.Parameters.AddWithValue(NpgsqlDbType.Bigint, Interlocked.Increment(ref _nextEventId));
         command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(time, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(NpgsqlDbType.Integer, serverId);
@@ -492,6 +533,7 @@ public sealed class ClientTimeoutsToolLiveTests
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)app ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)fingerprint ?? DBNull.Value });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = (object?)text ?? DBNull.Value });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = (object?)durationUs ?? DBNull.Value });
         await command.ExecuteNonQueryAsync(ct);
     }
 }

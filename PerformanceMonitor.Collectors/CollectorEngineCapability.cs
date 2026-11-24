@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -566,6 +567,74 @@ public static class CollectorEngineCapability
         return false;
     }
 
+    /// <summary>The SQL Server versions this product supports, in the words every surface uses (README: SQL Server 2016 SP2 to 2025).</summary>
+    public const string SupportedVersionsDescription = "SQL Server 2016 SP2 to 2025";
+
+    /// <summary>
+    /// True when a SQL Server of this probed major is older than the supported floor (#9099): a known major below
+    /// <see cref="CollectorTargetInfo.SupportedFloorMajorVersion"/> on a box that is neither Azure SQL Database nor Managed Instance
+    /// (an Azure SQL Database reports major 12, which is not a product year there). Zero is unknown and is never below.
+    /// </summary>
+    public static bool IsBelowSupportedVersion(int sqlMajorVersion, int engineEdition) =>
+        sqlMajorVersion is > 0 and < CollectorTargetInfo.SupportedFloorMajorVersion
+        && engineEdition != AzureSqlDatabaseEngineEdition
+        && engineEdition != AzureManagedInstanceEngineEdition;
+
+    /// <summary>
+    /// The not-collected sentence for a collector whose SQL needs a newer engine than this SQL Server has (#9099), or <c>null</c> when it
+    /// makes no claim: the server is not SQL Server, its version is unknown (0) or Azure, the collector runs on it, or the collector's
+    /// gate is closed on every supported version too (an engine or RDS gap, which a later axis words). It asks the collector's own gate
+    /// at the real major and at each supported one, so the answer follows the gate and no list of collectors is kept here.
+    /// A server below <see cref="CollectorTargetInfo.SupportedFloorMajorVersion"/> also says which versions are supported. The
+    /// sentence does not say "never": a server upgrade is what starts the collector.
+    /// </summary>
+    public static string? VersionGapMessage(
+        string serverName, int engineEdition, string? engineKind, ICollectorSchemaInfo definition, AwsRdsKind awsRdsKind, int sqlMajorVersion)
+    {
+        if (sqlMajorVersion <= 0 || MonitoredEngineKind.IsPostgres(engineKind)
+            || engineEdition == AzureSqlDatabaseEngineEdition || engineEdition == AzureManagedInstanceEngineEdition)
+        {
+            return null;
+        }
+
+        CollectorTargetInfo TargetAt(int major) => new()
+        {
+            IsAwsRds = awsRdsKind != AwsRdsKind.None,
+            IsAwsRdsWebOrExpress = awsRdsKind == AwsRdsKind.RdsWebOrExpress,
+            SqlMajorVersion = major,
+        };
+
+        if (CollectorCatalog.AppliesTo(definition, TargetAt(sqlMajorVersion)))
+        {
+            return null;
+        }
+
+        var needed = 0;
+        for (var major = Math.Max(sqlMajorVersion + 1, CollectorTargetInfo.SupportedFloorMajorVersion); major <= NewestSupportedMajorVersion; major++)
+        {
+            if (CollectorCatalog.AppliesTo(definition, TargetAt(major)))
+            {
+                needed = major;
+                break;
+            }
+        }
+
+        if (needed == 0)
+        {
+            return null;
+        }
+
+        var running = MonitoredEngineVersion.DescribeEngineVersion(null, sqlMajorVersion, null, engineEdition);
+        return IsBelowSupportedVersion(sqlMajorVersion, engineEdition)
+            ? $"{serverName} runs {running}, which is older than the versions Performance Monitor supports ({SupportedVersionsDescription}), " +
+              $"so the {definition.Name} collector does not run on it and this server has no rows from it. Moving the server to a supported version starts it."
+            : $"{serverName} runs {running}. The {definition.Name} collector needs {MonitoredEngineVersion.DescribeEngineVersion(null, needed, null, engineEdition)} or later, " +
+              "so it does not run on this server and this server has no rows from it. Moving the server to that version starts it.";
+    }
+
+    /// <summary>The newest SQL Server major this product supports (17 = SQL Server 2025), the top of the range <see cref="VersionGapMessage"/> looks through.</summary>
+    private const int NewestSupportedMajorVersion = 17;
+
     /// <summary>How an Amazon RDS for SQL Server target is named in a not-collected message (#6894).</summary>
     public const string AwsRdsDescription = "Amazon RDS for SQL Server (an AWS RDS instance)";
 
@@ -707,7 +776,7 @@ public static class CollectorEngineCapability
     /// pass the surface's real Amazon RDS fact, or an explicit <see cref="AwsRdsKind.None"/> where it has none or cannot apply (a PostgreSQL
     /// panel, a collector with no RDS gate). <see cref="AwsRdsKind.None"/> makes no RDS claim.</para>
     /// </summary>
-    public static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind)
+    public static string? NotCollectedMessage(string serverName, int engineEdition, string? engineKind, string collectorName, AwsRdsKind awsRdsKind, IReadOnlyCollection<string>? extensionsNotOffered = null, int sqlMajorVersion = 0)
     {
         var definition = CollectorCatalog.Find(collectorName);
 
@@ -750,6 +819,14 @@ public static class CollectorEngineCapability
                    $"collect {CapturePathOf(collectorName)}, and never will. {PermanentGapEpilogue}" + CoveredInsteadSuffix(collectorName);
         }
 
+        /* #9099: the version axis. A SQL Server too old for a collector's SQL does not run it, and says so in words that name the server's version,
+           instead of reading as a failing collector. Zero (not probed) and every
+           Azure edition make no claim, as the collectors' own gates do. */
+        if (VersionGapMessage(serverName, engineEdition, engineKind, definition, awsRdsKind, sqlMajorVersion) is { } versionGap)
+        {
+            return versionGap;
+        }
+
         if (IsCollectedOnEngineEdition(definition, engineEdition))
         {
             /* #6894: the third axis, and the last. Amazon RDS reports an ordinary edition, so the edition axis cannot see it and a
@@ -760,7 +837,8 @@ public static class CollectorEngineCapability
                SERVERPROPERTY('EngineEdition') is 2 for both Web and Standard, so the registry's edition cannot say it and the stored fact does. */
             if (awsRdsKind == AwsRdsKind.None || IsCollectedOnAwsRds(definition, engineKind, awsRdsKind))
             {
-                return null;
+                /* #8913: the last axis, and the only one that needs a stored fact rather than the engine facts alone. */
+                return AuroraExtensionNotOfferedMessage(serverName, engineKind, definition, extensionsNotOffered);
             }
 
             if (awsRdsKind == AwsRdsKind.RdsWebOrExpress && IsCollectedOnAwsRds(definition, engineKind, AwsRdsKind.Rds))
@@ -793,6 +871,60 @@ public static class CollectorEngineCapability
         return $"{serverName} runs on {DescribeEngineEdition(engineEdition)} (EngineEdition {engineEdition}), " +
                $"which does not have {CapturePathOf(collectorName)} that this server can read, so this server does not collect {CapturePathOf(collectorName)}, and never will. " +
                PermanentGapEpilogue + $" (The collector for it is {collectorName}.)" + CoveredInsteadSuffix(collectorName);
+    }
+
+    /// <summary>
+    /// #8913: the collectors whose whole job is one optional extension that Amazon Aurora PostgreSQL does not offer. The extension is
+    /// absent from <c>pg_available_extensions</c> there, so no setup step exists, and a precondition that sends the operator to a
+    /// parameter-group change and a reboot cannot work. The gate is on the server's stored extension census, not on the engine kind
+    /// alone, so an Aurora server that does offer the extension (available but not created) keeps the precondition wording.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AuroraOptionalExtensionCollectors = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "pg_kernel_stats",
+        "pg_predicate_stats",
+    };
+
+    /// <summary>
+    /// The extensions a server's newest census shows as absent, narrowed to the ones <paramref name="collectorName"/> cannot run without,
+    /// or <c>null</c> when <paramref name="engineKind"/> is not Aurora, the collector is not one of
+    /// <see cref="AuroraOptionalExtensionCollectors"/>, or the census does not say the extension is absent. Unknown is not absent: a
+    /// census that has not run, or a server that offers the extension, makes no claim.
+    /// </summary>
+    public static string? AuroraAbsentExtensionOf(string? engineKind, string collectorName, IReadOnlyCollection<string>? extensionsNotOffered)
+    {
+        if (extensionsNotOffered is null
+            || extensionsNotOffered.Count == 0
+            || !MonitoredEngineKind.IsAurora(engineKind)
+            || !AuroraOptionalExtensionCollectors.Contains(collectorName)
+            || CollectorCatalog.Find(collectorName) is not { } definition
+            || definition.RequiredPgExtensions.Count == 0)
+        {
+            return null;
+        }
+
+        foreach (var required in definition.RequiredPgExtensions)
+        {
+            if (!extensionsNotOffered.Contains(required.ExtensionName, StringComparer.Ordinal))
+            {
+                return null;
+            }
+        }
+
+        return definition.RequiredPgExtensions[0].ExtensionName;
+    }
+
+    private static string? AuroraExtensionNotOfferedMessage(
+        string serverName, string? engineKind, ICollectorSchemaInfo definition, IReadOnlyCollection<string>? extensionsNotOffered)
+    {
+        if (AuroraAbsentExtensionOf(engineKind, definition.Name, extensionsNotOffered) is not { } extension)
+        {
+            return null;
+        }
+
+        return $"{serverName} runs {MonitoredEngineKind.DescribeEngineKind(engineKind)}. It does not offer the {extension} extension " +
+               $"(the extension is not in pg_available_extensions), so this server does not collect {CapturePathOf(definition.Name)}, and never will. " +
+               $"There is no setup step that adds it. {PermanentGapEpilogue}" + CoveredInsteadSuffix(definition.Name);
     }
 
     /// <summary>

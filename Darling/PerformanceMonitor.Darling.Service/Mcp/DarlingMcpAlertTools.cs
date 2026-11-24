@@ -625,6 +625,9 @@ public sealed partial class DarlingMcpAlertTools
             excluded_logins = s.LongRunningQueryExcludedLogins
         },
         tempdb_space = new { enabled = s.TempDbSpaceEnabled, threshold_percent = s.TempDbSpaceThresholdPercent },
+        /* #8881 (V269): the TempDB Log Space alert's switch and bar. */
+        tempdb_log_space = new { enabled = s.TempDbLogSpaceEnabled, threshold_percent = s.TempDbLogSpaceThresholdPercent },
+        tempdb_growth_fit = new { enabled = s.TempDbGrowthFitEnabled },
         low_disk = new
         {
             enabled = s.LowDiskEnabled,
@@ -643,6 +646,11 @@ public sealed partial class DarlingMcpAlertTools
                AND free space below this many GB (0 removes the floor), so a large store volume at a low
                percent stops paging CRITICAL. The pvs.floor_gb composition, not low_disk's OR pair. */
             disk_free_warn_gb = s.SelfDiskFreeWarnGb,
+            /* #9000 (V276): the Store Growth alert. It fires when the store or one object grew at least this many GB in the last 24 hours AND at
+               least 3 times its own typical day. A floor of 0 removes that floor. */
+            store_growth_enabled = s.SelfStoreGrowthEnabled,
+            store_growth_floor_gb = s.SelfStoreGrowthFloorGb,
+            store_growth_object_floor_gb = s.SelfStoreGrowthObjectFloorGb,
             collection_stale_minutes = s.CollectionStaleMinutes,
             collection_failure_threshold = s.CollectionFailureThreshold,
             /* #2136: the Store Job Over Cadence warning percent (Critical is fixed at 100). */
@@ -687,6 +695,9 @@ public sealed partial class DarlingMcpAlertTools
         backup_overdue = new { enabled = s.BackupOverdueEnabled, threshold_hours = s.BackupOverdueThresholdHours },
         log_backup_overdue = new { enabled = s.LogBackupOverdueEnabled, threshold_minutes = s.LogBackupOverdueThresholdMinutes },
         checkdb_overdue = new { enabled = s.CheckDbOverdueEnabled, threshold_hours = s.CheckDbOverdueThresholdHours },
+        /* #8884: the Instance Restarted and Memory Dumps alerts. On by default. */
+        instance_restarted = new { enabled = s.InstanceRestartedEnabled },
+        memory_dumps = new { enabled = s.MemoryDumpsEnabled },
         /* #2417: the AG family, read out of the store since V35/V37 and emitted to nobody until now -- so
            an agent asked why nothing alerted when a replica fell behind could not see the lag threshold,
            could not see whether AG notification was on at all, and had no way to tell "configured not to
@@ -1492,6 +1503,7 @@ public sealed partial class DarlingMcpAlertTools
         "shipped values are DEFAULTS from a 7-day production read, the SQL Agent job-step prefix and the two NT AUTHORITY service " +
         "logins; the application's admin login is deliberately not one, because it also runs real ad-hoc long-runners). The fired " +
         "card's Excluded Count item, split by arm, shows the knob working. " +
+        "excluded_databases is the shared list of databases the alerts skip, a name or a pattern (* matches any run of characters, so archive_* skips every database whose name starts with archive_.) with no other wildcard. " +
         "excluded_volumes is the Volume Free Space alert's fleet-wide list of mount points to ignore (for example [\"S:\\\\\", \"/mnt/scratch\"]): " +
         "the whole mount point, any case, a trailing \\ or / on either side ignored, never a prefix match. Excluded volumes are dropped before " +
         "the breach test, so the worst volume, the severity and the card come from the volumes that remain, and a server whose only low volumes " +
@@ -1512,7 +1524,7 @@ public sealed partial class DarlingMcpAlertTools
             }
             catch (JsonException ex)
             {
-                return Outcome("invalid", $"settings_json is not valid JSON: {ex.Message}");
+                return Outcome("invalid", JsonParseError.Describe("settings_json", ex));
             }
 
             if (root is not JsonObject body)
@@ -2047,7 +2059,7 @@ public sealed partial class DarlingMcpAlertTools
             }
             catch (JsonException ex)
             {
-                return Outcome("invalid", $"the request body is not valid JSON: {ex.Message}");
+                return Outcome("invalid", JsonParseError.Describe("the request body", ex));
             }
 
             if (root is not JsonObject body)
@@ -2460,7 +2472,7 @@ public sealed partial class DarlingMcpAlertTools
             }
             catch (JsonException ex)
             {
-                return Outcome("invalid", $"changes_json is not valid JSON: {ex.Message}");
+                return Outcome("invalid", JsonParseError.Describe("changes_json", ex));
             }
 
             if (root is not JsonObject body)
@@ -3773,6 +3785,28 @@ public sealed partial class DarlingMcpAlertTools
                     });
                     break;
 
+                case "instance_restarted":
+                    Group(prop.Value, "instance_restarted", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("instance_restarted_enabled", n, "instance_restarted.enabled"); break;
+                            default: error = $"Unknown field 'instance_restarted.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "memory_dumps":
+                    Group(prop.Value, "memory_dumps", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("memory_dumps_enabled", n, "memory_dumps.enabled"); break;
+                            default: error = $"Unknown field 'memory_dumps.{k}'."; break;
+                        }
+                    });
+                    break;
+
                 case "tempdb_space":
                     Group(prop.Value, "tempdb_space", (k, n) =>
                     {
@@ -3781,6 +3815,29 @@ public sealed partial class DarlingMcpAlertTools
                             case "enabled": AddBool("tempdb_space_enabled", n, "tempdb_space.enabled"); break;
                             case "threshold_percent": AddInt("tempdb_space_threshold_percent", n, "tempdb_space.threshold_percent", 1, 100); break;
                             default: error = $"Unknown field 'tempdb_space.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "tempdb_log_space":
+                    Group(prop.Value, "tempdb_log_space", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("tempdb_log_space_enabled", n, "tempdb_log_space.enabled"); break;
+                            case "threshold_percent": AddInt("tempdb_log_space_threshold_percent", n, "tempdb_log_space.threshold_percent", 1, 100); break;
+                            default: error = $"Unknown field 'tempdb_log_space.{k}'."; break;
+                        }
+                    });
+                    break;
+
+                case "tempdb_growth_fit":
+                    Group(prop.Value, "tempdb_growth_fit", (k, n) =>
+                    {
+                        switch (k)
+                        {
+                            case "enabled": AddBool("tempdb_growth_fit_enabled", n, "tempdb_growth_fit.enabled"); break;
+                            default: error = $"Unknown field 'tempdb_growth_fit.{k}'."; break;
                         }
                     });
                     break;
@@ -3813,6 +3870,10 @@ public sealed partial class DarlingMcpAlertTools
                             /* #3528: bound mirrors DarlingAlertSettings' Math.Max(0, ...) — 0 is IN range
                                because it removes the floor (the pvs.floor_gb reading), not nonsense. */
                             case "disk_free_warn_gb": AddInt("self_disk_free_warn_gb", n, "self_alerts.disk_free_warn_gb", 0, int.MaxValue); break;
+                            /* #9000: bounds mirror DarlingAlertSettings' Math.Max(0, ...), and 0 removes a floor. */
+                            case "store_growth_enabled": AddBool("self_store_growth_enabled", n, "self_alerts.store_growth_enabled"); break;
+                            case "store_growth_floor_gb": AddInt("self_store_growth_floor_gb", n, "self_alerts.store_growth_floor_gb", 0, int.MaxValue); break;
+                            case "store_growth_object_floor_gb": AddInt("self_store_growth_object_floor_gb", n, "self_alerts.store_growth_object_floor_gb", 0, int.MaxValue); break;
                             case "collection_stale_minutes": AddInt("collection_stale_minutes", n, "self_alerts.collection_stale_minutes", 5, 1440); break;
                             case "collection_failure_threshold": AddInt("collection_failure_threshold", n, "self_alerts.collection_failure_threshold", 1, 1000); break;
                             case "store_job_cadence_warn_percent": AddInt("store_job_cadence_warn_percent", n, "self_alerts.store_job_cadence_warn_percent", 5, 100); break;

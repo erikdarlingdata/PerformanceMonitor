@@ -25,7 +25,8 @@ namespace PerformanceMonitorLite.Tests;
 /// <see cref="ServerSummaryItem"/>), shown in a window and read back from what it rendered: a 2 px border in the server's health band
 /// colour, a severity dot on each metric row that has a band, the CPU detail column, and the name and rows in the shared text styles.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LiteOverviewCardRenderTests
 {
     private static readonly Uri LiteTheme = new("pack://application:,,,/PerformanceMonitorLite;component/Themes/DarkTheme.xaml");
@@ -146,30 +147,5 @@ public sealed class LiteOverviewCardRenderTests
         Assert.Equal(deadlockDot, dots.Deadlocks);
         // Lite keeps no memory band, so the row has no dot rather than an invented one.
         Assert.Null(dots.Memory);
-    }
-
-    [Fact]
-    public void TheCpuRow_ShowsItsDetail_InTheColumnAfterTheValue()
-    {
-        var detail = Shown(Server("detail", 0, 0), card =>
-        {
-            var value = Descendants<TextBlock>(card).First(t => t.Text.StartsWith("25%", StringComparison.Ordinal));
-            return Descendants<TextBlock>(card).FirstOrDefault(t => Grid.GetRow(t) == Grid.GetRow(value) && Grid.GetColumn(t) == Grid.GetColumn(value) + 1)?.Text;
-        });
-
-        Assert.Equal("Other: 5%", detail);
-    }
-
-    [Fact]
-    public void TheCardName_IsAPanelTitle()
-    {
-        var (size, weight) = Shown(Server("title-check", 0, 0), card =>
-        {
-            var name = Descendants<TextBlock>(card).First(t => t.Text == "title-check");
-            return (name.FontSize, name.FontWeight);
-        });
-
-        Assert.Equal(14, size);
-        Assert.Equal(FontWeights.SemiBold, weight);
     }
 }

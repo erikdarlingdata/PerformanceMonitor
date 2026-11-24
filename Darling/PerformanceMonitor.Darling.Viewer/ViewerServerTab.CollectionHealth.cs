@@ -71,7 +71,7 @@ public partial class ViewerServerTab
            settable window EXACTLY — a preset or a custom From/To — via GetWindowUtc(), matching the Wait
            Stats / Blocking tabs (the old GetWindowHoursBack() rounded a custom range to a now-relative span). */
         var (startUtc, endUtc) = GetWindowUtc();
-        using var readFanOut = ViewerReadFanOut.Of(5);
+        using var readFanOut = ViewerReadFanOut.Of(6);
         var healthTask = _dataService.GetCollectionHealthAsync(_server.ServerId);
         var dataStartTask = _dataService.GetCollectionLogDataStartAsync(_server.ServerId, startUtc, endUtc);
         var logTask = _dataService.GetRecentCollectionLogAsync(_server.ServerId, startUtc, endUtc);
@@ -81,19 +81,25 @@ public partial class ViewerServerTab
            and leave both grids, the note and the caveats undrawn. */
         var durationTask = ReadOrEmptyAsync(() => _dataService.GetCollectorDurationTrendAsync(_server.ServerId, startUtc, endUtc), "Collection Health duration chart");
         var caveatsTask = _dataService.GetCollectionCaveatsAsync(_server.ServerId);
+        /* #8913: the extensions this Aurora engine does not offer ride the same width as the other reads, so the gate below never waits on a read of its own. Other engines have nothing to ask. */
+        var notOfferedTask = MonitoredEngineKind.IsAurora(_server.EngineKind)
+            ? _dataService.GetExtensionsNotOfferedAsync(_server.ServerId)
+            : Task.FromResult<System.Collections.Generic.IReadOnlyCollection<string>?>(_extensionsNotOffered);
         /* #8549: each read is booked by name (Track hands the task back unchanged), so a slow Collection Health says which read it was. */
         _ = timer?.Track("health summary read", healthTask);
         _ = timer?.Track("collection log data start read", dataStartTask);
         _ = timer?.Track("collection log read", logTask);
         _ = timer?.Track("duration trend read", durationTask);
         _ = timer?.Track("caveats read", caveatsTask);
-        await AwaitReadWatchingProbeAsync(Task.WhenAll(healthTask, logTask, durationTask, caveatsTask), dataStartTask, "Collection Log");
+        await AwaitReadWatchingProbeAsync(Task.WhenAll(healthTask, logTask, durationTask, caveatsTask, notOfferedTask), dataStartTask, "Collection Log");
 
-        /* The four reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
+        /* The reads are done: end the declared width here, before the data-start note below awaits its probe (#4966), so that
            await is not priced against contention that has already finished. */
         readFanOut.Release();
 
-        ApplyEngineGate(healthTask.Result, _server.DisplayName, _server.EngineEdition, _server.EngineKind, _server.AwsRdsKind);
+        _extensionsNotOffered = notOfferedTask.Result;
+
+        ApplyEngineGate(healthTask.Result, _server.DisplayName, _server.EngineEdition, _server.EngineKind, _server.AwsRdsKind, _extensionsNotOffered, _server.SqlMajorVersion ?? 0);
         await ShowCollectionHealthAsync(
             healthTask.Result, logTask.Result, durationTask.Result, caveatsTask.Result, dataStartTask, startUtc, CollectionLogTruncationBanner,
             _collectionHealthFilterMgr!.UpdateData, _collectionLogFilterMgr!.UpdateData, RenderCollectorDurationChart, ShowCollectionCaveats);
@@ -176,9 +182,11 @@ public partial class ViewerServerTab
     /// FAILING, and a collector that does not run can never replace it. The set is <see cref="FleetEngineGatedCollectors.For"/>, the gate
     /// the status bar, the Overview card and the fleet card count with. An engine not read yet makes no claim, so those rows stand.
     /// </summary>
-    internal static void ApplyEngineGate(List<CollectorHealthRow> health, string serverName, int engineEdition, string? engineKind, AwsRdsKind awsRdsKind)
+    internal static void ApplyEngineGate(
+        List<CollectorHealthRow> health, string serverName, int engineEdition, string? engineKind, AwsRdsKind awsRdsKind,
+        System.Collections.Generic.IReadOnlyCollection<string>? extensionsNotOffered = null, int sqlMajorVersion = 0)
     {
-        var gated = FleetEngineGatedCollectors.For(engineEdition, engineKind, awsRdsKind);
+        var gated = FleetEngineGatedCollectors.For(engineEdition, engineKind, awsRdsKind, extensionsNotOffered, sqlMajorVersion);
         if (gated.Count == 0)
         {
             return;
@@ -189,7 +197,7 @@ public partial class ViewerServerTab
             if (gated.Contains(row.CollectorName))
             {
                 row.EngineGated = true;
-                row.EngineNotCollectedMessage = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, row.CollectorName, awsRdsKind);
+                row.EngineNotCollectedMessage = CollectorEngineCapability.NotCollectedMessage(serverName, engineEdition, engineKind, row.CollectorName, awsRdsKind, extensionsNotOffered, sqlMajorVersion);
             }
         }
     }
@@ -204,7 +212,7 @@ public partial class ViewerServerTab
         try
         {
             /* #6912: the same gate get_collection_health leaves the gated collectors' runs out with, so the panel and the tool name the same peak collector. */
-            var engineGated = FleetEngineGatedCollectors.For(_server.EngineEdition, _server.EngineKind, _server.AwsRdsKind);
+            var engineGated = FleetEngineGatedCollectors.For(_server.EngineEdition, _server.EngineKind, _server.AwsRdsKind, _extensionsNotOffered, _server.SqlMajorVersion ?? 0);
             ShowSweepPressure(await _dataService.GetSweepPressureAsync(_server.ServerId, engineGated: engineGated));
         }
         catch (OperationCanceledException)

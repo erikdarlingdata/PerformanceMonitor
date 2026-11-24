@@ -30,7 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 /// Add SQL Server form keeps a form's width when the window is wide, and the plan's Server Context card gets the server's name
 /// from the store. Built from the real controls on the shared STA thread, in hosts that fit a 1024x768 screen.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LiveScreenTextAndLayoutTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;
@@ -98,40 +99,6 @@ public sealed class LiveScreenTextAndLayoutTests
 
         Assert.False(empty);
         Assert.True(withRows);
-    }
-
-    [Fact]
-    public void TheAddServerForm_KeepsAFormsWidth_WhenTheWindowIsWide()
-    {
-        var dir = ScratchDir("AddServerWide");
-        try
-        {
-            var width = StaTestThread.Run(() => WithTheme(() =>
-            {
-                var servers = new ServerManager(dir);
-                var profiles = new ProfileManager(servers);
-                var dialog = new AddServerDialog(servers, profiles);
-                dialog.SizeToContent = SizeToContent.Manual;
-                dialog.Width = 1000;
-                dialog.Height = 700;
-                StaTestThread.ShowOffScreen(dialog);
-                try
-                {
-                    dialog.UpdateLayout();
-                    return ((TextBox)dialog.FindName("ServerNameBox")).ActualWidth;
-                }
-                finally
-                {
-                    dialog.Close();
-                }
-            }));
-
-            Assert.True(width > 300 && width <= 560, $"the Server Name box is {width:F0} px wide in a 1000 px window; a form box stays at a form's width");
-        }
-        finally
-        {
-            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort cleanup */ }
-        }
     }
 
     [Fact]

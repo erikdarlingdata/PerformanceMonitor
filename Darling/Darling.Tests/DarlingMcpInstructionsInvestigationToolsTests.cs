@@ -21,7 +21,7 @@ public sealed class DarlingMcpInstructionsInvestigationToolsTests
     public void SettingsParagraph_NamesEveryInvestigationTool()
     {
         Assert.All(DarlingMcpWritePolicy.InvestigationTools,
-            name => Assert.Contains(name, DarlingMcpWritePolicy.InstructionsLine, StringComparison.Ordinal));
+            name => Assert.Contains(name, DarlingMcpWritePolicy.InstructionsLine(), StringComparison.Ordinal));
         Assert.All(DarlingMcpWritePolicy.InvestigationTools,
             name => Assert.Contains(name, DarlingMcpInstructions.Text, StringComparison.Ordinal));
     }

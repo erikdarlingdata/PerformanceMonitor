@@ -183,28 +183,27 @@ public sealed class ViewerCollectorDurationChartLiveTests : IClassFixture<Collec
         RequireStore();
         var start = End.AddHours(-24);
 
-        /* The store really outgrows the page: 2,162 runs in the range, the grid keeps the newest 500, and those end hours into the range. */
+        /* The store really outgrows the page: 2,160 runs in the range, the grid keeps the newest 500, and those end hours into the range. */
         var page = await _store.Viewer!.GetRecentCollectionLogAsync(
             CollectorDurationChartStore.DenseServerId, start, End, cancellationToken: TestContext.Current.CancellationToken);
         Assert.Equal(ViewerDataService.CollectionLogRowCap, page.Count);
         Assert.True(page.Min(r => r.CollectionTime) >= End.AddHours(-6), "the page the grid keeps ends hours into the 24 hours");
 
-        /* What the chart plots: each collector's line starts on the range's first instant and ends on its last, and holds a point
-           for every bucket (a minute wide for 24 hours), well over the page. */
+        /* What the chart plots: the range is (start, end], so the run stamped on its start is outside it. Each collector's line
+           starts on its first run after the start and ends on the range's last instant, and holds a point for every bucket (a
+           minute wide for 24 hours), well over the page. */
         var buckets = await ChartReadAsync(CollectorDurationChartStore.DenseServerId, start, End);
         var lines = CollectorDurationSeries.Build(buckets);
 
         Assert.Equal(new[] { CollectorDurationChartStore.CpuUtilization, CollectorDurationChartStore.WaitStats }, lines.Select(l => l.Collector).ToArray());
-        foreach (var line in lines)
-        {
-            Assert.Equal(start.ToOADate(), line.Times[0]);
-            Assert.Equal(End.ToOADate(), line.Times[^1]);
-        }
-
         var wait = lines.Single(l => l.Collector == CollectorDurationChartStore.WaitStats);
         var cpu = lines.Single(l => l.Collector == CollectorDurationChartStore.CpuUtilization);
-        Assert.Equal(1441, wait.Times.Length);
-        Assert.Equal(721, cpu.Times.Length);
+        Assert.Equal(start.AddMinutes(1).ToOADate(), wait.Times[0]);
+        Assert.Equal(start.AddMinutes(2).ToOADate(), cpu.Times[0]);
+        Assert.All(lines, line => Assert.Equal(End.ToOADate(), line.Times[^1]));
+
+        Assert.Equal(1440, wait.Times.Length);
+        Assert.Equal(720, cpu.Times.Length);
         Assert.True(wait.Times.Length > ViewerDataService.CollectionLogRowCap, "the read is not capped at the grid's page");
         Assert.All(wait.MaxMs, v => Assert.Equal(CollectorDurationChartStore.DenseDurationMs, v));
 
@@ -286,9 +285,9 @@ public sealed class ViewerCollectorDurationChartLiveTests : IClassFixture<Collec
     [Fact]
     public async Task TheFirstBucket_StartsAtTheRangesStart_WhenTheRangeStartsInsideABucket()
     {
-        /* A range that starts five minutes into a ten-minute bucket: the first bucket is clamped to the range's start, not the grid line
-           before it, and holds only the five runs from there. A range's end may lie past the data. */
-        var start = _store.T.AddMinutes(5);
+        /* A range that starts four and a half minutes into a ten-minute bucket: the first bucket is clamped to the range's start, not
+           the grid line before it, and holds only the five runs from there. A range's end may lie past the data. */
+        var start = _store.T.AddMinutes(4).AddSeconds(30);
         var end = start.AddDays(7);
         Assert.Equal(10, ViewerDataService.CollectorDurationBucketMinutes(start, end));
 
@@ -304,13 +303,14 @@ public sealed class ViewerCollectorDurationChartLiveTests : IClassFixture<Collec
     [Fact]
     public async Task TheRangesEnd_IsInclusive_AndNothingLaterIsRead()
     {
-        /* One hour from T to T plus 60 minutes reads a minute wide: the run on the end instant is in, the one a minute after is not. */
+        /* One hour from T to T plus 60 minutes reads a minute wide: the run on the end instant is in, the one a minute after is not.
+           The run on the start instant is outside the range (start, end], so the first bucket is the minute after it. */
         var t = _store.T;
         var buckets = await ChartReadAsync(CollectorDurationChartStore.ExactServerId, t, t.AddMinutes(60));
         var wait = buckets.Where(b => b.CollectorName == CollectorDurationChartStore.WaitStats).ToList();
 
-        Assert.Equal(61, wait.Count);
-        Assert.Equal(t, wait[0].BucketStart);
+        Assert.Equal(60, wait.Count);
+        Assert.Equal(t.AddMinutes(1), wait[0].BucketStart);
         Assert.Equal(t.AddMinutes(60), wait[^1].BucketStart);
     }
 

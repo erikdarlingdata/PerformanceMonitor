@@ -13,6 +13,7 @@ using Npgsql;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -43,7 +44,7 @@ LIMIT 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -105,7 +106,7 @@ FROM newest";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(RunnableTaskStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -161,7 +162,7 @@ AND   collection_time <= $3";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryGrantSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -230,7 +231,7 @@ LIMIT 10";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryClerkSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -294,7 +295,7 @@ AND   collection_time <= $3";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(CpuUtilizationSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -423,7 +424,7 @@ UNION ALL
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PerfmonSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -511,7 +512,7 @@ WHERE rnk = 1";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(PlanCacheStatsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
@@ -584,7 +585,7 @@ AND   collection_time <= $3";
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             using var cmd = new NpgsqlCommand(MemoryPressureEventsSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);

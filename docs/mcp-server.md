@@ -26,6 +26,8 @@ Lite and Darling set up MCP in different ways. Follow the part for your edition,
 claude mcp add --transport http --scope user sql-monitor http://localhost:5151/ --header "Authorization: Bearer <token>"
 ```
 
+   The command puts the token on the command line. It stays in your shell history, and it shows in the process list while the command runs. PowerShell keeps its history in a file, at the path `(Get-PSReadLineOption).HistorySavePath`, so delete the line there if you ran it. To keep the token off the command line, use a `.mcp.json` file. Claude Code's documentation says a `headers` value there can hold `${NAME}`, which it replaces with the environment variable `NAME`, for example `"Authorization": "Bearer ${SQL_MONITOR_TOKEN}"`. Set that variable in the Windows environment variable settings, not with a typed command.
+
    If you type the command yourself, replace `<token>` with the token. A request with no token, or a wrong one, is answered `401`.
 
    If MCP was already on when you updated, Lite makes the token at its first start and logs a line saying so. Copy the new config then, because the old registration has no token.
@@ -60,7 +62,7 @@ The MCP token gates the entire read surface. It also gates `analyze_server`, whi
 claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/ --header "Authorization: Bearer <token>"
 ```
 
-   Replace `<token>` with your token. A project's `.mcp.json` must read the token from an environment variable, because project files get committed. The [Darling MCP configuration page](darling/configuration-mcp.md#mcp) shows how.
+   Replace `<token>` with your token. A project's `.mcp.json` must read the token from an environment variable, because project files get committed. The [Darling MCP configuration page](darling/configuration-mcp.md#mcp) shows how. The command above puts the token on the command line in the same way, so the note under the Lite step applies to it too.
 
 **Proof**, in the service log:
 
@@ -124,6 +126,12 @@ The `http://localhost:5152/core` URL serves a subset of 75 tools. They are the d
 
 Tools from every other MCP server enabled in the same chat count toward the 128 as well. A chat that also uses other servers has less room. Turn tools off in the picker if you reach the cap.
 
+##### The /lean URL
+
+Many clients load every listed tool into the model's context before the first question. The `http://localhost:5152/lean` URL lists six tools: the four entry tools that `/core` starts from, `find_tools` and `call_tool`. Use `find_tools` to find the tool a question needs. Use `call_tool` with that tool's name and arguments to run it.
+
+`call_tool` runs read tools only. It runs the tool as a direct call would, with the same argument checks, output filters and timing records. A tool that writes is refused with a pointer to `/`. `/lean` serves the same tools as `/` for the same token, so a tool that `/lean` does not list can still be called by name. Only `call_tool` is new, and it is served on `/lean` alone.
+
 ##### A reader token for Copilot
 
 A named token with the `reader` role fits Copilot well. A `reader` token sees the reads and nothing else: no write tool, no server admin tool and no investigation tool.
@@ -134,7 +142,7 @@ Give each Copilot user an entry under `mcp.tokens` in `darling.json`, for exampl
 
 Lite listens on port `5151` and has no `/core` URL. Point Copilot at its only URL, `http://localhost:5151/`. Use the same entry with that URL and a `lite-token` input. Paste the token from Lite's Settings, Access, **Copy Token**.
 
-Lite does not need `/core`. Its code defines 113 tools in all. The default list leaves out the twelve write tools and the two tools that claim and report on investigation requests, so it is well under 128. Even all 113 are under the cap. The cap still counts every other MCP server in the same chat.
+Lite does not need `/core`. Its code defines 116 tools in all. The default list leaves out the twelve write tools and the two tools that claim and report on investigation requests. That leaves 102 by default, well under 128. Even all 116 are under the cap. The cap still counts every other MCP server in the same chat.
 
 These steps were checked with VS Code and Copilot Free against a Darling service, where the server loaded its 75 `/core` tools and answered `list_servers`. Lite was not checked in Copilot, and the Lite steps follow the same entry with Lite's URL.
 
@@ -175,6 +183,18 @@ The write tools and the investigation tools need the token, and every request mu
 
 With `mcp.tokens` set, each named token is served the tools of its role, and the switches above do not change that. A named `operator` token gets the write tools while `mcp.allowWrites` is `false`. It gets the four server administration tools only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. A named `agent` token gets the investigation tools and the agent action tools while `mcp.allowInvestigations` is `false`. A named `reader` token gets the read tools and nothing else. The token floor applies to each named token. See [Named tokens](darling-agent-dispatch.md#named-tokens-an-operator-agents-and-readers-on-one-service).
 
+#### Personal tokens
+
+With `mcp.personalTokens` on, a person signed in to the Darling web dashboard with OpenID Connect makes their own MCP token on the **My MCP tokens** page. It looks like `dpt1_` followed by a 16-hex id, an underscore and a 43-character secret. The page shows the value once, at creation, and never again.
+
+- A person with a read-only seat makes `reader` tokens. An admin seat makes tokens up to `mcp.personalTokens.adminRole` (`reader` by default; `operator` is opt-in and gets the write tools whatever `mcp.allowWrites` says). A personal token never has the `agent` role and never gets the investigation tools.
+- A token has a name of 1 to 64 of `A-Za-z0-9._:-`. The name cannot be `web`, `mcp`, `cli`, `viewer`, `invalid`, `unclaimed` or `legacy-token`, whatever its case. It is unique per person among their live tokens, and that check is case-sensitive.
+- A token lives at most `maxLifetimeDays` (30 by default) and a person holds at most `maxTokensPerPerson` (5 by default).
+- Write log lines, store rows and journal actors name the caller as `personal token <name> of <subject>`, for example `personal token ci of alice@example.com`. The slow-read and latency records carry only the MCP client's own name, not the token identity.
+- The token goes in the same `Authorization: Bearer` header as any other. A refused personal token gets the same 401 as a wrong token.
+
+The service still needs a file token (`mcp.network` or `mcp.tokens`) to start the MCP server, and that file token keeps working when the identity provider or the store is down. See [Personal tokens](darling/configuration-mcp.md#personal-tokens) for the settings and [Personal MCP tokens](darling/security.md#personal-mcp-tokens) for storage and revocation.
+
 #### Where Lite and Darling differ
 
 Four differences are intended. Do not assume the two products match on them.
@@ -200,9 +220,12 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Category | Tools |
 |---|---|
 | Discovery | `list_servers`, `find_database` |
-| Query text search (Darling) | `find_queries_by_text` (finds the statements whose text holds a piece of text, such as a table name. Name a server and it searches Query Store text and the plan-cache text of the raw tier. Each source has its own horizon and its own 4 second budget. Leave the server out to search the plan-cache text of every server, which is served only when the opt-in trigram index (`queryTextTrigramIndexEnabled`) is ready. The matching texts' digests are then bound to the sample read (`sample_read` is `probe`, `matched_texts` says how many), which the sample index the same option builds on `query_stats` serves on uncompressed chunks; a pattern more than 1,000 statements contain joins the whole raw window instead (`sample_read` is `join`) and can reach the 4 second budget and report `stopped`. Each source reports `ok`, `empty`, `stopped`, or `not_searched` (Query Store text, in the all-servers scope). A statement the sensitive-statement filter withholds is listed with the withheld marker in place of its text. It is refused when `mcp.dataDetail` hides statement text) |
+| Query text search (Darling) | `find_queries_by_text` (finds the statements whose text holds a piece of text, such as a table name. Name a server and it searches Query Store text and the plan-cache text of the raw tier. Each source has its own horizon and its own 4 second budget. The Query Store text is read through its opt-in trigram index (`queryStoreTextTrigramIndexEnabled`, or `update_service_flags` `query_store_text_trigram_index_enabled`, which wins and needs no restart) when that index is ready, which makes a rare pattern fast. The plan-cache text of that server is read through the plan-cache text index (`queryTextTrigramIndexEnabled`) when that index is ready: the matching texts are found first and the server's samples read by them (`sample_read` is `probe`), and a pattern more than 1,000 texts contain, or a text match that takes more than a second, tests each text instead (`sample_read` is `plain`). Leave the server out to search the plan-cache text of every server, which is served only when the opt-in trigram index (`queryTextTrigramIndexEnabled`, or `update_service_flags` `query_text_trigram_index_enabled`, which wins and needs no restart) is ready. The matching texts' digests are then bound to the sample read (`sample_read` is `probe`, `matched_texts` says how many), which the sample index the same option builds on `query_stats` serves on uncompressed chunks; a pattern more than 1,000 statements contain joins the whole raw window instead (`sample_read` is `join`) and can reach the 4 second budget and report `stopped`. Each source reports `ok`, `empty`, `stopped`, or `not_searched` (Query Store text, in the all-servers scope). A statement the sensitive-statement filter withholds is listed with the withheld marker in place of its text. It is refused when `mcp.dataDetail` hides statement text) |
 | Tool guides | `get_tool_guide` (the long-form reading guide of a tool whose description ends "Reading guide: get_tool_guide.", and cross-tool topics; both editions) |
+| Tool search | `find_tools` (searches the tools the connection can call; both editions) |
 | Health | `get_server_summary`, `get_collection_health`, `get_daily_summary` |
+| Store health (Lite) | `get_store_health` (Lite's own store, not a monitored server: data against the reset point (`hot_store_reset_mb`, 512 MB by default), file size against twice that, archive files, the history of archives, resets and cleanups, and rows per table) |
+| Slow calls | `get_slow_mcp_calls` (the monitor's own MCP calls that took 2 seconds or more, newest first, and per-tool figures since the service started: count, mean, max, p50, p95, p99, slow calls and errors. Each slow call carries its tool, outcome, total and lock-wait time, reply bytes, the window asked for and the process working-set peak while it ran. Only `get_query_store_top` also splits hot-store time from archive time; the split reads null elsewhere. Argument values are never stored. Rows are kept 7 days, at most 1000) |
 | Alerts | `get_alert_history`, `get_alert_settings`, `get_mute_rules`, and in Darling `get_known_patterns` (the entries you wrote about alerts that recur) and, with writes on, `create_known_pattern`, `update_known_pattern`, `delete_known_pattern` |
 | Daily Health Report (Darling) | `get_daily_health_report` (one day's report on every server: bands, alerts, failed Agent jobs, backup and CHECKDB gaps, low disk and collection problems, read from the store and sent nowhere) and, with writes on, `send_daily_health_report_now` (sends the report now through the alert routes) |
 | Waits | `get_wait_stats`, `get_wait_types`, `get_wait_trend`, `get_waiting_tasks` |
@@ -218,7 +241,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Jobs | `get_running_jobs` |
 | Configuration | `get_server_config`, `get_database_config`, `get_database_scoped_config`, `get_query_store_health`, `get_trace_flags` |
 | Server Info | `get_server_properties`, `get_database_sizes` |
-| Object/Index Stats | `get_table_index_sizes`, `get_index_usage`, `get_object_locking` |
+| Object/Index Stats | `get_table_index_sizes`, `get_index_usage`, `get_object_locking`, `get_object_usage` |
 | Sessions | `get_session_stats` |
 | System Events | `get_memory_pressure_events` |
 | Latches & Spinlocks | `get_latch_stats`, `get_spinlock_stats` |
@@ -234,7 +257,7 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Database protection (Darling) | `get_database_protection` (per database, the last good CHECKDB, the last full backup and the last log backup, each with its age and a state word, plus a summary of which databases are overdue on what. A full backup is overdue after 7 days, a log backup after 60 minutes and CHECKDB after 14 days. A SIMPLE database expects no log backup. A new database is not late yet. Offline, restoring and secondary databases are left out. Azure SQL Database and Managed Instance show the age and are never overdue, and Amazon RDS shows the backup ages and is never overdue on them, but its CHECKDB is judged) |
 | Jobs history (Darling) | `get_job_history` (retained SQL Agent job runs for a server or the fleet) |
 | Agent alerts (Darling) | `get_agent_alerts` (the SQL Server Agent alerts on an instance, with an `instance_status` that names what they lack: no alert for severities 19 to 25 or errors 823 to 825, an alert with no operator, a disabled alert, and an alert that fired in the window and told no operator) |
-| Trends and store history (Darling) | `get_server_trend` (one trend per `metric`, such as total waits, latch, spinlock, or tempdb size), `get_store_query_history` (the Darling store's own statements, hour by hour), `get_query_repro_script` |
+| Trends and store history (Darling) | `get_server_trend` (one trend per `metric`, such as total waits, latch, spinlock, or tempdb size), `get_store_query_history` (the Darling store's own statements, hour by hour), `get_service_starts` (each start of the service with its build, schema change, migration rungs and error counts), `get_query_repro_script` |
 | Server management (Darling) | `add_servers`, `edit_server`, `remove_server`, `set_server_action`, and the server tag tools such as `create_server_tag` and `assign_server_tag` (`update_server_tag` also reorders a tag among its siblings with `{"move":"up"}` or `{"move":"down"}`), and the query tag tools such as `create_query_tag` and `assign_query_tag`, with the reads `list_query_tags`, `list_query_tag_rules` and `test_query_tag_rule` |
 | Investigations (Darling) | The reads `wait_for_investigation_requests` (waits up to 25 seconds for a request), `get_investigation_evidence` (the evidence frozen at the open), `list_investigation_requests` and `get_investigation_reports` are served in every configuration. `claim_investigation_request`, `submit_investigation_report` and `post_investigation_message` are served with `mcp.allowInvestigations` and a token while `mcp.allowWrites` is off, or to a named `agent` token |
 | Agent actions (Darling) | `force_query_store_plan`, `unforce_query_store_plan`, `evict_cached_plan`, `recompile_module`, `create_plan_guide`, `drop_plan_guide`, `kill_session`, `merge_deadlock_signatures` (counts two deadlock signatures as one) and `undo_plan_change` (puts a plan forced or unforced by an agent back), and the reads `get_plan_force_precheck`, `get_compiles_after_evict`, `get_agent_changes` and `get_server_actions`. A person can undo a plan force, an unforce or a plan guide create (the undo drops the guide). An eviction or a session kill cannot be undone. `set_server_action` (with `mcp.allowServerAdmin`) turns a server's switch on or off. `set_agent_actions_enabled` turns the service-wide agent switch off only: `enabled: true` is refused, because an MCP client must not give agents back the actions a person took away, and a person turns it on in the Viewer (Agent changes) or the web dashboard. `undo_agent_change` undoes one agent change that is not a plan force or unforce (a mute rule, a custom alert rule, a threshold override or a deadlock signature merge) by its `called_id` from `get_agent_changes` |
@@ -247,6 +270,12 @@ The four investigation tools let your own agent pick up an alert, look into it w
 | Mute rule purge (Darling) | `purge_expired_mute_rules` deletes every expired mute rule (the Viewer's Purge Expired) and returns each rule it deleted |
 | Custom alert rules (Darling) | `create_custom_alert_rule` and `update_custom_alert_rule` take no server argument. A rule applies to every monitored server unless its definition carries a `scope`: `{"scope":{"mode":"servers","servers":["<server name>"]}}` limits it to the named servers, and `{"scope":{"mode":"tag","tagId":<fleet tag id>}}` to the servers assigned that fleet tag (#6455) |
 | Alert tuning (Darling) | `backtest_custom_alert_rule` (where a rule fired over stored history), `set_alert_threshold_override`, `dismiss_alert_history` and `restore_alert_history`, and route tools such as `create_notification_route`, `update_notification_route`, `set_notification_route_fallback`, `update_notification_channels` (the default SMTP, Teams, Slack, generic webhook and PagerDuty channels the Viewer sets in Settings > Notifications; secrets are sealed and never shown), and the webhook signing key tools `generate_webhook_signing_key` and `remove_webhook_signing_key` |
+
+#### Finding a tool with find_tools
+
+Many clients load every tool definition before the first question. `find_tools` lets the model ask for the few tools a question needs. Pass words in `query`. A tool matches when any word is in its name or its description, and a tool with more of the words in its name comes first. `detail` is `names`, `summaries` (the default) or `full`, which adds the input schema and hints. `limit` is at most 50 results, or 10 at `full`. A larger value, or one below 1, is refused.
+
+The search covers only tools that this connection can call. A tool that a token's settings, a write switch or the `/core` path leave out is never named. `find_tools` reads no collected data and no monitored server. Lite and Darling have the same tool.
 
 Most tools accept optional `server_name` and `hours_back` parameters. If only one server is configured, `server_name` is auto-resolved. Every tool that takes `hours_back` also takes an optional `as_of` — an ISO-8601 UTC instant that moves the END of the window off "now", so a past incident is one call (`as_of` its end, `hours_back` its length) rather than a very wide window filtered by hand. The MCP server binds to `localhost` only and does not accept remote connections. (Darling adds windowed-trend and fleet-overview tools plus agent-driven write tools — Custom Views authoring, alert-settings and mute-rule tuning, and bulk add/remove servers — and supports an opt-in LAN endpoint — see [Darling/README.md](../Darling/README.md).)
 
@@ -295,6 +324,8 @@ Then set up the client. Point it at the LAN IP of the box and never at `localhos
 claude mcp add --transport http --scope user sql-monitor-darling http://192.168.1.205:5152/ `
   --header "Authorization: Bearer <token>"
 ```
+
+The command above puts the token on the command line in the same way, so the note under the Lite step applies to it too.
 
 Two gates apply, in this order:
 

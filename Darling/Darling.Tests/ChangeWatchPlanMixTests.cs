@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -239,6 +241,47 @@ public sealed class ChangeWatchPlanMixTests
                 return Task.CompletedTask;
             });
         Assert.Equal("request_opened", result);
+    }
+
+    /* #8772: one query hash cached in two databases runs at a different speed in each. Each (database, hash) is its own measure with its own averages and its
+       own plan mix; before the fix the databases were summed into one average and the label named whichever database sorted last. Both databases use the
+       same plan hash on purpose: a plan read that ignored the database would merge them. */
+    [Fact]
+    public async Task APlanCacheQuery_InTwoDatabases_IsMeasuredPerDatabase_WithEachDatabasesOwnAverageAndPlanMix()
+    {
+        await RunWatchWithConfigChangeAsync(
+            async (c, change, ct) =>
+            {
+                for (var i = 0; i < 6; i++)
+                {
+                    var before = change.AddMinutes(-55 + (i * 8));
+                    var after = change.AddMinutes(5 + (i * 8));
+                    /* TenantA: one plan, 1 ms -> 3 ms. */
+                    await SeedStatsAsync(c, before, "0xP1", 20, 1_000, ct, "TenantA");
+                    await SeedStatsAsync(c, after, "0xP1", 20, 3_000, ct, "TenantA");
+                    /* TenantB: two plans, the fast one 1 ms -> 4 ms, the slow one steady at 10 ms; 1.9 ms -> 4.6 ms. */
+                    await SeedStatsAsync(c, before, "0xP1", 9, 1_000, ct, "TenantB");
+                    await SeedStatsAsync(c, before, "0xP2", 1, 10_000, ct, "TenantB");
+                    await SeedStatsAsync(c, after, "0xP1", 9, 4_000, ct, "TenantB");
+                    await SeedStatsAsync(c, after, "0xP2", 1, 10_000, ct, "TenantB");
+                }
+            },
+            (json) =>
+            {
+                var measures = JsonNode.Parse(json!)!["measures"]!.AsArray().Select(m => m!).Where(m => m["measure"]!.GetValue<string>().StartsWith("query_avg_duration_ms:", StringComparison.Ordinal)).ToList();
+                Assert.Equal(new[] { "query_avg_duration_ms:TenantA:0xABC", "query_avg_duration_ms:TenantB:0xABC" }, measures.Select(m => m["measure"]!.GetValue<string>()).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+                var a = measures.Single(m => m["measure"]!.GetValue<string>() == "query_avg_duration_ms:TenantA:0xABC");
+                var b = measures.Single(m => m["measure"]!.GetValue<string>() == "query_avg_duration_ms:TenantB:0xABC");
+                Assert.Equal(1.0, a["before"]!.GetValue<double>(), 3);
+                Assert.Equal(3.0, a["after"]!.GetValue<double>(), 3);
+                Assert.Equal(1.9, b["before"]!.GetValue<double>(), 3);
+                Assert.Equal(4.6, b["after"]!.GetValue<double>(), 3);
+                Assert.Contains("in database TenantA;", a["note"]!.GetValue<string>(), StringComparison.Ordinal);
+                Assert.Contains("in database TenantB;", b["note"]!.GetValue<string>(), StringComparison.Ordinal);
+                /* The plan mix is read per database: TenantA ran one plan, TenantB two. */
+                Assert.DoesNotContain("2 plans", a["note"]!.GetValue<string>(), StringComparison.Ordinal);
+                Assert.Contains("2 plans before, 2 after", b["note"]!.GetValue<string>(), StringComparison.Ordinal);
+            });
     }
 
     private static async Task<string?> RunWatchWithConfigChangeAsync(Func<NpgsqlConnection, DateTime, CancellationToken, Task> seed, Action<string?> check)

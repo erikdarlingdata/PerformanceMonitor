@@ -65,6 +65,16 @@ public sealed class ViewerCustomViewsTests
         Assert.Null(ViewerDataService.ValidateCustomViewDefinition(CustomViewsEditorModel.NewViewTemplate));
     }
 
+    /// <summary>#9477: a read a tool registers in its own files is known to the Viewer, which has no Service. This is the first call here
+    /// and touches nothing from the Service assembly before it, so Storage must find the registered read itself.</summary>
+    [Fact]
+    public void ARegisteredRead_IsAcceptedByTheViewer_WithoutTheServiceHavingRun()
+    {
+        const string registered = "{\"panels\":[{\"read\":\"get_store_maintenance_readiness\",\"viz\":\"table\"}]}";
+        Assert.Null(ViewerDataService.ValidateCustomViewDefinition(registered));
+        Assert.Contains("get_store_maintenance_readiness", CustomViewValidation.KnownReadNames);
+    }
+
     [Fact]
     public void ARoundTrip_ThroughExportAndImport_KeepsTheNameDescriptionAndDefinition()
     {
@@ -114,6 +124,34 @@ public sealed class ViewerCustomViewsTests
 
         Assert.Equal(new long[] { 4, 2, 3, 1, 5 }, rows.Select(r => r.Id).ToArray());
         Assert.Equal(CustomViewsEditorModel.TopLevelLabel, rows[0].FolderDisplay);
+    }
+
+    [Fact]
+    public void ABoundList_LoadsTheRowTheGridSelectsOnItsOwn_SoExportAndRunAreOnAtOnce()
+    {
+        CustomViewSummary S(long id, string name) =>
+            new(id, name, null, 1, DateTime.UtcNow, "erik", null, null, false, null, false);
+
+        // A collection view makes its first row current as soon as the grid binds it, and the grid shows that row selected.
+        var collection = new System.Windows.Data.ListCollectionView(CustomViewsEditorModel.Rows(new[] { S(1, "b"), S(2, "a") }).ToList());
+        var shownSelected = collection.CurrentItem;
+
+        var row = CustomViewsEditorModel.RowToLoad(shownSelected, editorHoldsAView: false);
+
+        Assert.NotNull(row);
+        Assert.Equal(2L, row!.Id);
+        Assert.Same(shownSelected, row);
+    }
+
+    [Fact]
+    public void AClickOnTheSelectedRow_LoadsItOnlyWhileTheEditorHoldsNothing()
+    {
+        var row = new CustomViewRow(new CustomViewSummary(7, "v", null, 1, DateTime.UtcNow, "erik", null, null, false, null, false));
+
+        Assert.Same(row, CustomViewsEditorModel.RowToLoad(row, editorHoldsAView: false));
+        Assert.Null(CustomViewsEditorModel.RowToLoad(row, editorHoldsAView: true));
+        Assert.Null(CustomViewsEditorModel.RowToLoad(null, editorHoldsAView: false));
+        Assert.Null(CustomViewsEditorModel.RowToLoad("a group header", editorHoldsAView: false));
     }
 
     [Fact]

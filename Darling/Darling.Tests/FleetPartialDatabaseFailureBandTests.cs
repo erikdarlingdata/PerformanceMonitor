@@ -66,34 +66,6 @@ public class FleetPartialDatabaseFailureBandTests
         Assert.DoesNotContain("array_agg", cagg, StringComparison.OrdinalIgnoreCase);
     }
 
-    [Theory]
-    [InlineData("DarlingFleetReader.FleetCollectionHealthSql")]
-    [InlineData("ViewerDataService.FleetCollectionHealthByServerSql")]
-    public void BothRawFleetReads_SelectTheNewestRunNote_WithPlainAggregatesOnly(string which)
-    {
-        var sql = which == "DarlingFleetReader.FleetCollectionHealthSql"
-            ? DarlingFleetReader.FleetCollectionHealthSql
-            : ViewerDataService.FleetCollectionHealthByServerSql;
-        var flat = Flat(sql);
-
-        Assert.Contains(Flat(CollectionHealthRollupSupport.LatestRunNoteRawSql), flat, StringComparison.Ordinal);
-        Assert.Contains("AS latest_run_note", flat, StringComparison.Ordinal);
-        /* An ordered aggregate cannot be hashed or run as a partial aggregate: it would put a serial sort of a
-           week of collection_log in front of the fleet GROUP BY (the cost FleetCollectionHealthSql's own comment
-           refuses), and the raw read is what answers while the rollup is being rebuilt. */
-        Assert.DoesNotContain("array_agg", flat, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("ROW_NUMBER", flat, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("ORDER BY collection_time", flat, StringComparison.Ordinal);
-
-        /* The note is the LAST column: the reader is positional and ordinal 13 is the fourteenth. */
-        Assert.True(flat.IndexOf("AS last_zero_row_streak_break_time", StringComparison.Ordinal)
-                    < flat.IndexOf("AS latest_run_note", StringComparison.Ordinal));
-        /* #5735: the raw read leaves the stepped-over-slots row (collector_name collection_cycle) out with one more plain predicate
-           ahead of the GROUP BY, so the row is never counted as a collector's run; the read stays a plain aggregate. */
-        Assert.EndsWith($" FROM v_collection_log WHERE collection_time >= $1 AND server_id <> 0 AND {CollectionCycleRow.NotCycleRowSql} GROUP BY server_id, collector_name",
-            flat.Replace("\"", string.Empty), StringComparison.Ordinal);
-    }
-
     [Fact]
     public void ComposeFleetSql_TakesTheNoteOfTheRowWithTheGreatestLastRunTime()
     {
@@ -164,7 +136,7 @@ public class FleetPartialDatabaseFailureBandTests
         /* The refresh itself is called from exactly one place: the background method on its own connection. */
         Assert.Single(Regex.Matches(worker, Regex.Escape("TimescaleSupport.WarmCollectionHealthHourlyAsync(connection")));
         var method = worker[worker.IndexOf("private async Task RunCollectionHealthRollupWarmAsync(", StringComparison.Ordinal)..];
-        Assert.Contains("await using var connection = await postgres.OpenConnectionAsync(stoppingToken);", method[..600], StringComparison.Ordinal);
+        Assert.Contains("await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RollupWarm, stoppingToken);", method[..600], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -845,7 +817,8 @@ FROM generate_series(0, 29) AS g", connection))
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runs = Enumerable.Range(0, 30).Select(g => dayStart.AddDays(-g).AddHours(14)).ToList();
         var coveredAfterFloor = runs.Count(t => t >= floor.Value && t < dayStart);
-        Assert.InRange(coveredAfterFloor, 8, 10);
+        /* The floor is the store's real clock but dayStart is the pinned clock (#8752), up to a day ahead, so allow one more run. */
+        Assert.InRange(coveredAfterFloor, 8, 10 + (dayStart - DateTime.UtcNow.Date).Days);
 
         var (covered, events) = await BlockingBaselineTotalsAsync(postgres, now, ct);
         Assert.Equal(coveredAfterFloor, covered);

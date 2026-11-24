@@ -100,7 +100,7 @@ public sealed partial class ViewerDataService
             object_name
         FROM long_query_completions
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         AND   ($5::boolean OR client_app_name IS NULL OR client_app_name NOT ILIKE '{{PerformanceMonitor.Common.MonitorApplicationNames.SqlProgramNameLikePattern}}')
@@ -136,7 +136,7 @@ public sealed partial class ViewerDataService
         AddWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Boolean, Value = includeMonitor });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerLongQueryRow

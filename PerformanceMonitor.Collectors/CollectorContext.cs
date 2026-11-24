@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Text;
 using PerformanceMonitor.Common;
 
@@ -870,6 +871,16 @@ public sealed class CollectorContext
     public List<ProcPlaceholderId> ProcPlaceholderIds { get; } = new();
 
     /// <summary>
+    /// #8865: the SQL Server error log read <c>database_protection</c> decided on, set by its <c>ReadAsync</c> and drained by its
+    /// <c>BuildSupplementalQuery</c>, so the supplemental reads exactly the logs the primary pass planned. Null when there is
+    /// nothing to read: a platform-managed target (Azure SQL Database, Managed Instance), or a pass that listed no databases.
+    ///
+    /// <para>Like <see cref="ProcPlaceholderIds"/> it lives on the single-connection path only: the Azure SQL DB per-database loops
+    /// never set it, so no supplemental runs there and the rows keep the state the read gave them.</para>
+    /// </summary>
+    public DatabaseProtectionErrorLogState.ErrorLogPlan? DatabaseProtectionErrorLogPlan { get; set; }
+
+    /// <summary>
     /// Milliseconds spent waiting for <c>ExecuteReaderAsync</c> to return for the item just read (#2164),
     /// set by the host around the open. Splits a batch's server time into the part the client cannot
     /// influence and the part it can:
@@ -1215,6 +1226,14 @@ public sealed class CollectorContext
     /// WARNING.
     /// </summary>
     public DateTime? PerItemShippedBoundary { get; set; }
+
+    /// <summary>
+    /// #9359: a write the Darling store runs on the batch's own connection and transaction, after the rows and every side write and
+    /// just before the commit. Set by the Query Store backfill so a slice's state commits with its rows; a fault in it rolls the rows
+    /// back. Null for every other caller, where it changes nothing. Typed on the provider-neutral base classes so this project does
+    /// not reference the store driver.
+    /// </summary>
+    public Func<DbConnection, DbTransaction, System.Threading.CancellationToken, System.Threading.Tasks.Task>? StoreTransactionWrite { get; set; }
 
     /// <summary>
     /// Catch-up signal (#1836): set by a definition whose cutoff computation floored a stale watermark

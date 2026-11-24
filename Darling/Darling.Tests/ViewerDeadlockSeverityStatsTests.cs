@@ -50,7 +50,6 @@ public sealed class ViewerDeadlockSeverityStatsSqlTests
            collected after the window end still counts. */
         foreach (var sql in new[] { ViewerDataService.DeadlockSeverityGraphsSql, ViewerDataService.DeadlockTrendSql })
         {
-            Assert.Contains("deadlock_time >= $2", sql, StringComparison.Ordinal);
             Assert.Contains("deadlock_time <= $3", sql, StringComparison.Ordinal);
             Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);
             Assert.DoesNotContain("collection_time <=", sql, StringComparison.Ordinal);

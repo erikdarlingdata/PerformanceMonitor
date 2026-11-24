@@ -130,6 +130,55 @@ public sealed class StaleSqlServerCpuOverviewTests : IClassFixture<SharedDuckDbF
     }
 
     [Fact]
+    public void ADisabledCollector_IsBoundedByTheFloorAlone_AnEnabledSlowOneByTwiceItsInterval()
+    {
+        /* #9139: a switched-off collector gets no newer reading, so its last one is not held for twice its last interval. */
+        var enabledSlow = new LocalDataService(_duckDb)
+        {
+            CollectorFrequencyMinutes = (_, _) => 30,
+            CollectorEnabled = (_, _) => true
+        };
+        Assert.Equal(TimeSpan.FromMinutes(60), enabledSlow.CpuFreshnessBound(_serverId));
+
+        var disabledSlow = new LocalDataService(_duckDb)
+        {
+            CollectorFrequencyMinutes = (_, _) => 30,
+            CollectorEnabled = (_, _) => false
+        };
+        Assert.Equal(LocalDataService.CpuFreshnessFloor, disabledSlow.CpuFreshnessBound(_serverId));
+
+        /* A schedule that cannot answer is read as enabled. */
+        var unknown = new LocalDataService(_duckDb)
+        {
+            CollectorFrequencyMinutes = (_, _) => 30,
+            CollectorEnabled = (_, _) => null
+        };
+        Assert.Equal(TimeSpan.FromMinutes(60), unknown.CpuFreshnessBound(_serverId));
+    }
+
+    [Fact]
+    public async Task ATwentyMinuteOldReading_IsStaleOnceTheSlowCollectorIsDisabled()
+    {
+        await SeedCpuAsync(Whole(DateTime.UtcNow.AddMinutes(-20)), sqlCpu: 61, otherCpu: 0);
+
+        var enabled = new LocalDataService(_duckDb)
+        {
+            CollectorFrequencyMinutes = (_, _) => 30,
+            CollectorEnabled = (_, _) => true
+        };
+        Assert.False((await enabled.GetServerSummaryAsync(_serverId, ServerName, registeredAtUtc: null))!.CpuIsStale);
+
+        var disabled = new LocalDataService(_duckDb)
+        {
+            CollectorFrequencyMinutes = (_, _) => 30,
+            CollectorEnabled = (_, collector) => collector == "cpu_utilization" ? false : null
+        };
+        var card = await disabled.GetServerSummaryAsync(_serverId, ServerName, registeredAtUtc: null);
+        Assert.True(card!.CpuIsStale);
+        Assert.Equal("--", card.CpuDisplay);
+    }
+
+    [Fact]
     public async Task AReadingPastTwiceTheScheduledInterval_IsStaleEvenOnASlowSchedule()
     {
         await SeedCpuAsync(Whole(DateTime.UtcNow.AddMinutes(-70)), sqlCpu: 61, otherCpu: 0);

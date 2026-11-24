@@ -50,7 +50,10 @@ public static class RawWindowFloor
     {
         QueryStats,
         ProcedureStats,
-        QueryStoreStats
+        QueryStoreStats,
+
+        /// <summary>#9382: <c>wait_stats</c>, the table <c>get_query_store_clutter</c>'s wait arm reads, so that arm has a floor of its own.</summary>
+        WaitStats
     }
 
     private static string TableName(Table table) => table switch
@@ -58,6 +61,7 @@ public static class RawWindowFloor
         Table.QueryStats => "query_stats",
         Table.ProcedureStats => "procedure_stats",
         Table.QueryStoreStats => "query_store_stats",
+        Table.WaitStats => "wait_stats",
         _ => throw new ArgumentOutOfRangeException(nameof(table), table, "unknown raw window floor table")
     };
 
@@ -82,7 +86,7 @@ public static class RawWindowFloor
             SELECT 1
             FROM {PgSchemaGenerator.CollectSchema}.{TableName(table)} AS w
             WHERE w.server_id = $1
-            AND   w.collection_time >= $2
+            AND   w.collection_time > $2
             AND   w.collection_time <= $3
         )
         """;
@@ -149,7 +153,7 @@ public static class RawWindowFloor
             SELECT 1
             FROM {PgSchemaGenerator.CollectSchema}.procedure_stats AS w
             WHERE w.server_id = $1
-            AND   w.collection_time >= $2
+            AND   w.collection_time > $2
             AND   w.collection_time <= $3
         )
         OR EXISTS
@@ -159,7 +163,7 @@ public static class RawWindowFloor
             WHERE c.server_id = $1
             AND   c.collector_name = 'procedure_stats'
             AND   c.status = 'SUCCESS'
-            AND   c.collection_time >= $2
+            AND   c.collection_time > $2
             AND   c.collection_time <= $3
         )
         """;

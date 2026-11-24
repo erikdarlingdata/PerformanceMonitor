@@ -82,7 +82,7 @@ internal static class DarlingMemoryGrantReader
             SELECT MAX(collection_time) AS mx
             FROM v_memory_grant_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         )
         SELECT
@@ -198,7 +198,7 @@ internal static class DarlingMemoryGrantReader
                 SUM(forced_grant_count_delta) AS forced_grant_count_delta
             FROM v_memory_grant_stats
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             GROUP BY collection_time, pool_id
         ),
@@ -299,7 +299,7 @@ internal static class DarlingMemoryGrantReader
             memory_node_id
         FROM v_memory_pressure_events
         WHERE server_id = $1
-        AND   sample_time >= $2
+        AND   sample_time > $2
         AND   sample_time <= $3
         ORDER BY sample_time DESC
         LIMIT $4
@@ -317,7 +317,7 @@ internal static class DarlingMemoryGrantReader
             COUNT(DISTINCT date_trunc('second', sample_time)) FILTER (WHERE memory_indicators_process >= 2 OR memory_indicators_system >= 2) AS medium_or_worse_events
         FROM v_memory_pressure_events
         WHERE server_id = $1
-        AND   sample_time >= $2
+        AND   sample_time > $2
         AND   sample_time <= $3
         GROUP BY memory_notification
         ORDER BY memory_notification
@@ -329,7 +329,21 @@ internal static class DarlingMemoryGrantReader
     /// <summary>The page (time order, oldest first), whether the window held more, and the whole window's counts.</summary>
     public sealed record MemoryPressureEventsPage(
         List<MemoryPressureEventRow> Rows, bool Truncated, long TotalEvents, long MediumOrWorseEvents,
-        IReadOnlyList<MemoryPressureNotificationCount> ByNotification);
+        IReadOnlyList<MemoryPressureNotificationCount> ByNotification, long ShownEvents = 0);
+
+    /// <summary>
+    /// #9337: how many events (one per notification and one-second bucket, the unit <see cref="MemoryPressureSummarySql"/> counts in)
+    /// the page's rows cover. A page holds raw rows, and several rows can share an event (one per memory node, or samples inside
+    /// one second), so the row count is not an event count: set against the window's event total it could exceed it and print a
+    /// negative "left out" figure. The page's rows are a subset of the window's, so this never exceeds the total.
+    /// </summary>
+    public static long CountEvents(IEnumerable<MemoryPressureEventRow> rows)
+    {
+        var seen = new HashSet<(string, long)>();
+        foreach (var r in rows)
+            seen.Add((r.MemoryNotification, r.SampleTime.Ticks / TimeSpan.TicksPerSecond));
+        return seen.Count;
+    }
 
     /// <param name="limit">The newest rows to return, or null for every row in the window (the web chart).</param>
     public static async Task<MemoryPressureEventsPage> GetMemoryPressureEventsAsync(
@@ -370,10 +384,15 @@ internal static class DarlingMemoryGrantReader
             }
         }
 
-        var truncated = limit is { } cap && fetched.Count > cap;
-        var page = truncated ? fetched.Take(limit!.Value).ToList() : fetched;
+        var rowsCut = limit is { } cap && fetched.Count > cap;
+        var page = rowsCut ? fetched.Take(limit!.Value).ToList() : fetched;
         page.Reverse();
+        var total = byNotification.Sum(n => n.Events);
+        var shown = CountEvents(page);
+        /* #9337: truncated only when an event was left out, in events, the unit the note and the total use. Rows cut that only repeat an
+           event already shown (another node's record of it) leave nothing out. */
+        var truncated = rowsCut && total > shown;
         return new MemoryPressureEventsPage(
-            page, truncated, byNotification.Sum(n => n.Events), byNotification.Sum(n => n.MediumOrWorseEvents), byNotification);
+            page, truncated, total, byNotification.Sum(n => n.MediumOrWorseEvents), byNotification, shown);
     }
 }

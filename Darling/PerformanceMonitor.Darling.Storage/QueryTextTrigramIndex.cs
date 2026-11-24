@@ -59,9 +59,13 @@ public enum TrigramIndexStatus
 /// <param name="SampleIndexValid">Null when the sample index on <c>collect.query_stats</c> does not exist, otherwise its <c>pg_index.indisvalid</c>.</param>
 /// <param name="SampleIndexSizeBytes">The sample index's size over the table and its chunks, null when it does not exist.</param>
 /// <param name="SampleBuildRunning">Whether a backend this login can see is building an index on <c>collect.query_stats</c> or one of its chunks.</param>
+/// <param name="KeyExtensionSchema">#8570, the Query Store text index only: the schema <c>btree_gin</c> is installed in (the operator class of its
+/// server key), null when it is not installed.</param>
+/// <param name="ReplacedIndexExists">#8570, the Query Store text index only: whether the index it replaces, on the text alone, still exists.</param>
 public sealed record TrigramCatalogState(
     bool TableExists, bool? IndexValid, long? IndexSizeBytes, string? ExtensionSchema, bool ExtensionAvailable, bool BuildRunning,
-    bool? SampleIndexValid = null, long? SampleIndexSizeBytes = null, bool SampleBuildRunning = false);
+    bool? SampleIndexValid = null, long? SampleIndexSizeBytes = null, bool SampleBuildRunning = false,
+    string? KeyExtensionSchema = null, bool ReplacedIndexExists = false);
 
 /// <summary>The store health read's answer for the trigram index.</summary>
 public sealed record TrigramIndexHealth(
@@ -82,13 +86,16 @@ public sealed record TrigramIndexHealth(
     string? OperatorStatement,
     bool SampleIndexExists = false,
     bool? SampleIndexValid = null,
-    long? SampleIndexSizeBytes = null);
+    long? SampleIndexSizeBytes = null,
+    string? OptionSource = null,
+    bool ReplacedIndexExists = false);
 
 /// <summary>
 /// What this process remembers about the trigram index between passes: whether the option is on, whether a build or a drop is
 /// running, the last failure and its backoff, and whether <c>pg_trgm</c> could not be created. The catalog says what exists;
 /// only this says why it does not. Thread-safe: the worker's background pass writes it and the MCP and web hosts, which run in
-/// the same process, read it. Tests make their own instance; production uses <see cref="Shared"/>.
+/// the same process, read it. Tests make their own instance; production uses <see cref="Shared"/> for the plan-cache index and
+/// <see cref="QueryStoreTextTrigramIndex.SharedTracker"/> for the Query Store text index.
 /// </summary>
 public sealed class QueryTextTrigramIndexTracker
 {
@@ -101,11 +108,19 @@ public sealed class QueryTextTrigramIndexTracker
     /// <summary>A consistent copy of the tracker's fields.</summary>
     public sealed record Snapshot(
         bool Configured, bool Enabled, PhaseKind Phase, DateTime? BuildStartedUtc, int Failures, string? LastError, string? LastSqlState,
-        DateTime? LastFailedUtc, DateTime? NextAttemptUtc, bool ExtensionBlocked, string? ExtensionError);
+        DateTime? LastFailedUtc, DateTime? NextAttemptUtc, bool ExtensionBlocked, string? ExtensionError, string? OptionSource = null);
+
+    /// <summary>#8978: the option's value came from <c>darling.json</c> (the store column is NULL, or the store is not read yet).</summary>
+    public const string SourceFile = "file";
+
+    /// <summary>#8978: the option's value came from the store's <c>config.config_service</c> column, which overrides the file.</summary>
+    public const string SourceStore = "store";
 
     private readonly object _gate = new();
     private bool _configured;
     private bool _enabled;
+    private bool _resolved;
+    private string? _optionSource;
     private PhaseKind _phase;
     private DateTime? _buildStartedUtc;
     private int _failures;
@@ -125,14 +140,43 @@ public sealed class QueryTextTrigramIndexTracker
     public int SampleBuildsStarted { get { lock (_gate) { return _sampleBuildsStarted; } } }
 
     /// <summary>
-    /// Sets whether the option is on. The worker calls it the moment <c>darling.json</c> loads, before it migrates the store, so the
-    /// MCP host (which answers from process start) reads the real option. Until it is called the tracker is unconfigured and
+    /// Sets whether the option is on, as resolved: the store's value when its column holds one, else <c>darling.json</c>'s (#8978). The
+    /// pass calls it at the start of every pass with the value it acts on, and the worker calls it with <paramref name="optionSource"/>
+    /// the moment it loads <c>darling.json</c> (before it migrates the store) and each time it applies the store's config, so the health
+    /// read carries the option from process start and follows a store write before the next pass. Once called, a later
+    /// <see cref="ConfigureFromFile"/> is ignored. Until either is called the tracker is unconfigured and
     /// <see cref="QueryTextTrigramIndex.Classify"/> reports <see cref="TrigramIndexStatus.Unconfigured"/>, never Off or DropPending.
-    /// The pass entry point calls it again with the same value.
     /// </summary>
-    public void Configure(bool enabled)
+    public void Configure(bool enabled, string? optionSource = null)
     {
-        lock (_gate) { _configured = true; _enabled = enabled; }
+        lock (_gate)
+        {
+            _configured = true;
+            _enabled = enabled;
+            _resolved = true;
+            _optionSource = optionSource ?? _optionSource;
+        }
+    }
+
+    /// <summary>
+    /// Sets the option from <c>darling.json</c> alone, for a host that loads the file on its own: the MCP and web hosts call it from
+    /// their own loads, so get_store_metrics reads the real option even when such a host loads before the worker does. Ignored once
+    /// <see cref="Configure"/> has set the value, so a host that loads the file later (the MCP host started by the store's mcp_enabled)
+    /// cannot put back a value the store has overridden.
+    /// </summary>
+    public void ConfigureFromFile(bool enabled)
+    {
+        lock (_gate)
+        {
+            if (_resolved)
+            {
+                return;
+            }
+
+            _configured = true;
+            _enabled = enabled;
+            _optionSource = SourceFile;
+        }
     }
 
     /// <summary>A copy of the fields.</summary>
@@ -141,7 +185,7 @@ public sealed class QueryTextTrigramIndexTracker
         lock (_gate)
         {
             return new Snapshot(_configured, _enabled, _phase, _buildStartedUtc, _failures, _lastError, _lastSqlState, _lastFailedUtc,
-                _nextAttemptUtc, _extensionBlocked, _extensionError);
+                _nextAttemptUtc, _extensionBlocked, _extensionError, _optionSource);
         }
     }
 
@@ -227,9 +271,8 @@ public sealed class QueryTextTrigramIndexTracker
 /// largest field store: 3.1 GB (52% of the table), a 16.6 minute build, about 0.5 ms added to each written row. So it is off by default,
 /// it is never built by a migration rung (an upgrade must not wait that long), and turning the option off drops it.
 ///
-/// <para><b>Why the Query Store text is not indexed.</b> Only the plan-cache text was measured. <c>collect.query_store_text</c> is read in
-/// primary-key order with a row cap for one server, which stops early on a common pattern, and nothing measured shows it needs the index
-/// for a whole-table search. Part B of #7674 decides that with a measurement, not a guess.</para>
+/// <para><b>The Query Store text has its own index and option.</b> <c>collect.query_store_text</c> is indexed by
+/// <see cref="QueryStoreTextTrigramIndex"/> under its own option, with its own tracker, so either index can be on without the other.</para>
 ///
 /// <para><b>One pass.</b> <see cref="RunPassAsync"/> reads the catalog and does the one thing the option calls for: option off and index
 /// present, drop it (<c>DROP INDEX CONCURRENTLY</c>); option on and index valid, nothing; option on and a build running in another
@@ -354,7 +397,49 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     internal static string CreateIndexSql(string extensionSchema) =>
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS " + IndexName[(IndexName.IndexOf('.', StringComparison.Ordinal) + 1)..]
         + " ON " + TableName + " USING gin (query_text "
-        + QuoteIdentifier(extensionSchema) + ".gin_trgm_ops)";
+        + QuoteIdentifier(extensionSchema) + ".gin_trgm_ops) WITH (gin_pending_list_limit = " + PendingListLimitKb + ")";
+
+    /// <summary>The index's <c>gin_pending_list_limit</c> in kB (64 MB, the option's own unit), against the server default of 4 MB.
+    /// Every row of a collector batch adds its text's trigrams to the index's pending list, and the insert that takes the list past
+    /// the limit flushes the whole list inside its own call. A 4 MB list is reached every few dozen calls and each flush reads
+    /// a share of the index; 64 MB makes the flush rare, and the <see cref="CleanInterval"/> clean empties the list long
+    /// before it can reach that size, so the insert rarely pays for one.</summary>
+    internal const int PendingListLimitKb = 65536;
+
+    /// <summary>The time between cleans of the pending list. The list grows with the collector's calls, and the clean must run often enough
+    /// that a store far busier than the largest field store still never fills it between cleans.
+    /// <para>#9460 measured a longer interval and found 2 minutes is the longest safe one. At 60,000 new distinct texts an hour into one table
+    /// (texts of about 1.4 KB with about 460 distinct trigrams, so about 2 pending pages a row) the list peaked at about 4,000 pages between
+    /// cleans every 2 minutes, just under half of the 8,192-page limit, and no insert merged it. Cleaning every 5 or 10 minutes let it reach the
+    /// limit: the inserts then merged it inline, the stall #9303 fixed. A longer interval
+    /// would save WAL only by moving the merge into the collection insert. <see cref="QueryStoreTextTrigramIndex.CleanInterval"/> stays the same.</para></summary>
+    public static readonly TimeSpan CleanInterval = TimeSpan.FromMinutes(2);
+
+    /// <summary>#9303: the wait before the first clean after a start. Zero: the clean does not wait for the build's <see cref="StartDelay"/>,
+    /// because it only works on an index that exists, and the first inserts after a restart are the ones most likely to take a cold pending
+    /// list past its limit and merge it inside their own statement.</summary>
+    internal static readonly TimeSpan CleanFirstDelay = TimeSpan.Zero;
+
+    /// <summary>#8570: a clean statement that takes this long or longer is logged at Information, so a slow clean shows in the service log by default.</summary>
+    internal static readonly TimeSpan SlowCleanLogThreshold = TimeSpan.FromSeconds(10);
+
+    /// <summary>How long the limit change waits for its lock. <c>ALTER INDEX ... SET (gin_pending_list_limit)</c> takes <c>ACCESS EXCLUSIVE</c> on the
+    /// index, so while a long search holds the index it queues, and every insert into the table queues behind it.</summary>
+    internal const string LockTimeout = "2s";
+
+    /// <summary>One row, when <paramref name="indexName"/> exists: whether it is valid, and whether it already carries
+    /// <see cref="PendingListLimitKb"/>. The name is one of this assembly's own index names (this index, and the two the Query Store text
+    /// index manages), never outside input.</summary>
+    internal static string PendingListStateSql(string indexName) =>
+        "SELECT i.indisvalid, coalesce('gin_pending_list_limit=" + PendingListLimitKb + "' = ANY (c.reloptions), false) "
+        + "FROM pg_index AS i JOIN pg_class AS c ON c.oid = i.indexrelid WHERE i.indexrelid = to_regclass('" + indexName + "')";
+
+    /// <summary>Sets the limit on an index that does not carry it. Run in its own transaction under <see cref="LockTimeout"/>.</summary>
+    internal static string SetPendingListLimitSql(string indexName) =>
+        "ALTER INDEX IF EXISTS " + indexName + " SET (gin_pending_list_limit = " + PendingListLimitKb + ")";
+
+    /// <summary>Empties the pending list, so no insert has to.</summary>
+    internal static string CleanPendingListSql(string indexName) => "SELECT gin_clean_pending_list(to_regclass('" + indexName + "'))";
 
     internal static string QuoteIdentifier(string name) => "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 
@@ -383,9 +468,9 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     }
 
     /// <summary>
-    /// One pass (see the class summary). Returns true when the pass is settled for good: the option is off and no index remains, so the
-    /// loop can end (the option is read at start). Throws only on cancellation or on a failure to read the catalog; a failed build, drop or
-    /// extension create is recorded in <paramref name="tracker"/> and logged.
+    /// One pass (see the class summary). Returns true when there is nothing to do: the option is off and no index remains. The loop goes on
+    /// regardless, because the option is read at every pass (#8978) and can be turned on later. Throws only on cancellation or on a failure
+    /// to read the catalog; a failed build, drop or extension create is recorded in <paramref name="tracker"/> and logged.
     /// </summary>
     public static Task<bool> RunPassAsync(
         NpgsqlDataSource postgres, bool enabled, QueryTextTrigramIndexTracker tracker, DateTime utcNow, ILogger logger,
@@ -397,7 +482,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
         NpgsqlDataSource postgres, bool enabled, QueryTextTrigramIndexTracker tracker, DateTime utcNow, ILogger logger,
         int buildTimeoutSeconds, CancellationToken cancellationToken)
     {
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
         var state = await ReadStateAsync(connection, cancellationToken).ConfigureAwait(false);
         if (!state.TableExists)
         {
@@ -612,7 +697,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
             await using var drop = new NpgsqlCommand(DropSampleIndexSql(hypertable), connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
             await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -644,7 +729,7 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     {
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
             await using var drop = new NpgsqlCommand(DropSql, connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
             await drop.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -655,42 +740,196 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
     }
 
     /// <summary>
-    /// The background entry point: records the option, waits <paramref name="firstDelay"/>, then makes a pass every
-    /// <paramref name="interval"/> until shutdown (or, with the option off, until no index remains). Never throws: a pass that fails is a
-    /// Warning and the next interval tries again.
+    /// The background entry point: makes a pass every <paramref name="interval"/> until shutdown, after <paramref name="firstDelay"/>.
+    /// <paramref name="enabled"/> is the option's live, resolved value (#8978: the store's <c>config.config_service</c> column when it holds
+    /// one, else <c>darling.json</c>), read at the start of every pass, so a store write takes effect at the next pass with no restart. With
+    /// the option off and no index the pass is one catalog read. Never throws: a pass that fails is a Warning and the next interval tries again.
     /// </summary>
-    public static async Task RunAsync(
-        NpgsqlDataSource postgres, bool enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
-        TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken)
+    public static Task RunAsync(
+        NpgsqlDataSource postgres, Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger,
+        TimeSpan firstDelay, TimeSpan interval, CancellationToken cancellationToken) =>
+        RunLoopsAsync(
+            enabled, tracker, logger, "Trigram index", firstDelay, interval, CleanInterval,
+            (on, ct) => RunPassAsync(postgres, on, tracker, DateTime.UtcNow, logger, ct),
+            ct => CleanPendingListAsync(postgres, enabled, logger, ct),
+            static (wait, ct) => Task.Delay(wait, ct),
+            cancellationToken);
+
+    /// <summary>
+    /// #9303: the two loops under both indexes' <c>RunAsync</c>, with the pass, the clean and the wait passed in so a test steps them without a
+    /// store or a clock. The build pass waits <paramref name="firstDelay"/>, which keeps a whole-table build off the post-restart IO burst. The
+    /// clean starts at once (<see cref="CleanFirstDelay"/>): it only touches an index that already exists, and it is what keeps a collection
+    /// insert from merging the pending list inside its own statement, which is most likely right after a restart while the list is cold.
+    /// </summary>
+    internal static Task RunLoopsAsync(
+        Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger, string indexLabel, TimeSpan firstDelay, TimeSpan interval,
+        TimeSpan cleanInterval, Func<bool, CancellationToken, Task<bool>> pass, Func<CancellationToken, Task> clean,
+        Func<TimeSpan, CancellationToken, Task> delay, CancellationToken cancellationToken) =>
+        Task.WhenAll(
+            RunLoopAsync(enabled, tracker, logger, indexLabel, firstDelay, interval, pass, delay, cancellationToken),
+            RunCleanLoopAsync(clean, logger, indexLabel, CleanFirstDelay, cleanInterval, delay, cancellationToken));
+
+    /// <summary>
+    /// #9044: the clean loop under both indexes' <c>RunAsync</c>. Runs <paramref name="clean"/> every <paramref name="interval"/> (each index's
+    /// own <c>CleanInterval</c>) until shutdown, after <paramref name="firstDelay"/>, apart from the build pass, whose retries and backoff stay
+    /// on <see cref="PassInterval"/>. Never throws: <paramref name="clean"/> throws only on cancellation.
+    /// </summary>
+    internal static async Task RunCleanLoopAsync(
+        Func<CancellationToken, Task> clean, ILogger logger, string indexLabel, TimeSpan firstDelay, TimeSpan interval,
+        Func<TimeSpan, CancellationToken, Task> delay, CancellationToken cancellationToken)
     {
-        tracker.Configure(enabled);
         try
         {
-            await Task.Delay(firstDelay, cancellationToken).ConfigureAwait(false);
+            await delay(firstDelay, cancellationToken).ConfigureAwait(false);
             while (true)
             {
-                try
-                {
-                    if (await RunPassAsync(postgres, enabled, tracker, DateTime.UtcNow, logger, cancellationToken).ConfigureAwait(false))
-                    {
-                        return;
-                    }
-                }
-                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-                {
-                    logger.LogWarning("Trigram index pass failed and is tried again in {Interval}: {ExceptionType}: {Message}", interval, ex.GetType().Name, ErrorText(ex));
-                }
-
-                await Task.Delay(interval, cancellationToken).ConfigureAwait(false);
+                await clean(cancellationToken).ConfigureAwait(false);
+                await delay(interval, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
-            logger.LogDebug("Trigram index pass was cancelled at shutdown.");
+            logger.LogDebug("{Index} clean loop was cancelled at shutdown.", indexLabel);
+        }
+    }
+
+    /// <summary>#9044: one clean of this index (see the overload that names the index).</summary>
+    internal static Task CleanPendingListAsync(NpgsqlDataSource postgres, Func<bool> enabled, ILogger logger, CancellationToken cancellationToken) =>
+        CleanPendingListAsync(postgres, enabled, IndexName, logger, cancellationToken);
+
+    /// <summary>
+    /// #9044: one clean of <paramref name="indexName"/>, when the option is on and the index exists and is valid. An index that does not carry
+    /// <see cref="PendingListLimitKb"/> first gets it, once, in its own transaction under <see cref="LockTimeout"/>: a lock that is not free in
+    /// time is a quiet skip that the next clean retries (the clean itself takes no lock an insert or a search waits on). Best effort: the index
+    /// works the same without either, so any other failure is a Warning and the next clean tries again. Throws only on cancellation.
+    /// </summary>
+    internal static async Task CleanPendingListAsync(
+        NpgsqlDataSource postgres, Func<bool> enabled, string indexName, ILogger logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!enabled())
+            {
+                return;
+            }
+
+            var total = System.Diagnostics.Stopwatch.StartNew();
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.TrigramIndex, cancellationToken).ConfigureAwait(false);
+            var openSeconds = total.Elapsed.TotalSeconds;
+            bool limitSet;
+            await using (var read = new NpgsqlCommand(PendingListStateSql(indexName), connection) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
+            await using (var reader = await read.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false) || !reader.GetBoolean(0))
+                {
+                    return;
+                }
+
+                limitSet = reader.GetBoolean(1);
+            }
+
+            if (!limitSet)
+            {
+                await SetPendingListLimitAsync(connection, indexName, logger, cancellationToken).ConfigureAwait(false);
+            }
+
+            await using var clean = new NpgsqlCommand(CleanPendingListSql(indexName), connection) { CommandTimeout = QueryStoreBackgroundIndexes.BuildTimeoutSeconds };
+            var cleanTimer = System.Diagnostics.Stopwatch.StartNew();
+            var result = await clean.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            cleanTimer.Stop();
+            var pages = result is null or DBNull ? 0L : Convert.ToInt64(result, System.Globalization.CultureInfo.InvariantCulture);
+
+            /* #8570: the clean's result and timing, so the log says which index a clean worked on and how long it took. */
+            if (cleanTimer.Elapsed >= SlowCleanLogThreshold)
+            {
+                logger.LogInformation(
+                    "Cleaned the pending list of trigram index {Index}: {Pages} pages in {CleanSeconds:F1}s ({TotalSeconds:F1}s from start, {OpenSeconds:F1}s waiting for a connection).",
+                    indexName, pages, cleanTimer.Elapsed.TotalSeconds, total.Elapsed.TotalSeconds, openSeconds);
+            }
+            else
+            {
+                logger.LogDebug(
+                    "Cleaned the pending list of trigram index {Index}: {Pages} pages in {CleanSeconds:F1}s ({TotalSeconds:F1}s from start, {OpenSeconds:F1}s waiting for a connection).",
+                    indexName, pages, cleanTimer.Elapsed.TotalSeconds, total.Elapsed.TotalSeconds, openSeconds);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            logger.LogInformation("Trigram index pass stopped at shutdown: {ExceptionType}: {Message}", ex.GetType().Name, ErrorText(ex));
+            logger.LogWarning("Could not clean the pending list of trigram index {Index}: {Message}", indexName, ErrorText(ex));
+        }
+    }
+
+    private static async Task SetPendingListLimitAsync(NpgsqlConnection connection, string indexName, ILogger logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            await using (var timeout = new NpgsqlCommand("SET LOCAL lock_timeout = '" + LockTimeout + "'", connection, transaction) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
+            {
+                await timeout.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await using (var set = new NpgsqlCommand(SetPendingListLimitSql(indexName), connection, transaction) { CommandTimeout = QueryStoreBackgroundIndexes.CatalogReadTimeoutSeconds })
+            {
+                await set.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.LockNotAvailable)
+        {
+            logger.LogDebug("Setting the pending list limit on trigram index {Index} waited {Timeout} for its lock and is skipped; the next clean tries again.", indexName, LockTimeout);
+        }
+    }
+
+    /// <summary>
+    /// #8978: the loop under both indexes' <c>RunAsync</c>, with the pass and the wait passed in so a test steps it without a store or a clock.
+    /// Reads <paramref name="enabled"/> once before the first wait and again at the start of every pass, sets <paramref name="tracker"/> to the
+    /// value each pass acts on, and runs until <paramref name="cancellationToken"/> is cancelled, whatever a pass returns.
+    /// </summary>
+    internal static async Task RunLoopAsync(
+        Func<bool> enabled, QueryTextTrigramIndexTracker tracker, ILogger logger, string indexLabel, TimeSpan firstDelay, TimeSpan interval,
+        Func<bool, CancellationToken, Task<bool>> pass, Func<TimeSpan, CancellationToken, Task> delay, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(enabled);
+        try
+        {
+            bool? last = null;
+            tracker.Configure(enabled());
+            await delay(firstDelay, cancellationToken).ConfigureAwait(false);
+            while (true)
+            {
+                try
+                {
+                    var on = enabled();
+                    tracker.Configure(on);
+                    if (last is { } previous && previous != on)
+                    {
+                        logger.LogInformation("{Index} option is now {State}; this pass acts on it.", indexLabel, on ? "on" : "off");
+                    }
+
+                    last = on;
+                    await pass(on, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    logger.LogWarning("{Index} pass failed and is tried again in {Interval}: {ExceptionType}: {Message}", indexLabel, interval, ex.GetType().Name, ErrorText(ex));
+                }
+
+                await delay(interval, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            logger.LogDebug("{Index} pass was cancelled at shutdown.", indexLabel);
+        }
+        catch (Exception ex)
+        {
+            logger.LogInformation("{Index} pass stopped at shutdown: {ExceptionType}: {Message}", indexLabel, ex.GetType().Name, ErrorText(ex));
         }
     }
 
@@ -702,8 +941,9 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             return TrigramIndexStatus.Unconfigured;
         }
 
-        /* #7849: the sample index is part of the same state. Either index present means there is something to drop. */
-        var exists = state.IndexValid is not null || state.SampleIndexValid is not null;
+        /* #7849: the sample index is part of the same state, and #8570 the index the Query Store text index replaces. Any of them present
+           means there is something to drop. */
+        var exists = state.IndexValid is not null || state.SampleIndexValid is not null || state.ReplacedIndexExists;
         if (!snapshot.Enabled)
         {
             if (!exists)
@@ -760,7 +1000,8 @@ LEFT JOIN (SELECT n.nspname FROM pg_extension AS e JOIN pg_namespace AS n ON n.o
             status == TrigramIndexStatus.WaitingOnExtension ? OperatorStatement : null,
             state.SampleIndexValid is not null,
             state.SampleIndexValid,
-            state.SampleIndexSizeBytes);
+            state.SampleIndexSizeBytes,
+            snapshot.OptionSource);
     }
 
     /// <summary>One sentence for the health block's note, per status.</summary>

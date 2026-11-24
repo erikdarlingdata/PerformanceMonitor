@@ -29,7 +29,8 @@ namespace PerformanceMonitorLite.Tests;
 /// bitmap it held: in the field each server tab opened and closed kept 500 to 700 MB. These tests show that a grid still waiting for
 /// its rows, and a server tab closed with such grids in it, are collectable once dropped.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabLoadingTextLifetimeTests
 {
     [Fact]

@@ -42,17 +42,39 @@ public static class AttentionWindowSql
     /// <summary>How many entries each top list holds.</summary>
     public const int TopCount = 5;
 
-    /// <summary>The duration floor (#7061), in microseconds: a sampled attention that lasted under 1 ms is left out of the judged rate and the
-    /// baseline. Such events have no statement text and last 20 to 40 microseconds: the SqlClient driver cancelling a command that has already
-    /// finished, which no user saw. A real client timeout lasts about as long as the command timeout, often 30 s. A sample with NO recorded
+    /// <summary>The duration floor (#7061, raised from 1 ms to 1 s in #9030), in microseconds: a sampled attention that lasted under 1 s is
+    /// left out of the judged rate and the baseline. The shortest are the SqlClient driver cancelling a command that has already finished, with
+    /// no statement text and 20 to 40 microseconds. Busy servers also show cancels of a few milliseconds that no command timeout can explain:
+    /// a client command timeout under 1 s is very rare, and a real one lasts about as long as the command timeout, often 30 s. Cancels of long
+    /// queries (minutes or hours) are few, still client aborts, and keep counting. An event of exactly 1 s counts. A sample with NO recorded
     /// duration (NULL) is not under the floor and still counts, the way every sample did before the floor.</summary>
-    public const long MinInterruptDurationUs = 1000;
+    public const long MinInterruptDurationUs = 1_000_000;
+
+    /// <summary>The floor as it reads in a message: "1 s" for a whole number of seconds, "N ms" for a whole number of milliseconds, else
+    /// microseconds. Follows <see cref="MinInterruptDurationUs"/>, so no message carries its own copy of the value (#9030).</summary>
+    public static string MinInterruptDurationText => DurationText(MinInterruptDurationUs);
+
+    /// <summary>A microsecond count as "N s" (whole seconds), "N ms" (whole milliseconds) or "N µs".</summary>
+    public static string DurationText(long microseconds) => microseconds switch
+    {
+        > 0 when microseconds % 1_000_000 == 0 => $"{microseconds / 1_000_000} s",
+        > 0 when microseconds % 1000 == 0 => $"{microseconds / 1000} ms",
+        _ => $"{microseconds} µs",
+    };
 
     /// <summary>The client application Azure Data Studio connects under. Its SQL Tools Service names every connection <c>azdata</c>, the query
     /// editor's too (connection pooling is on by default, and with it the service adds no purpose suffix to the name), so the name alone cannot
     /// be left out without hiding a real timeout from the query editor (#7061). The metadata statements are told apart by shape, see
     /// <see cref="AzdataMetadataPredicate"/>.</summary>
     public const string AzdataClientApp = "azdata";
+
+    /// <summary>The client application the dbatools PowerShell module connects under (#8877). The same name runs people's own scripts and
+    /// queries (<c>Invoke-DbaQuery</c>), so the name alone cannot be left out without hiding a real timeout. The SMO catalog reads are told apart by
+    /// the parameter marker, see <see cref="DbatoolsSmoMetadataPredicate"/>.</summary>
+    public const string DbatoolsClientApp = "dbatools PowerShell module - dbatools.io";
+
+    /// <summary>The parameter marker SMO puts in the statements it generates (<c>@_msparam_0</c>, <c>@_msparam_1</c>, ...) (#8877).</summary>
+    public const string SmoParameterMarker = "@_msparam_";
 
     /// <summary>What an SSMS IntelliSense client application name starts with (#6552, #7061). The C# rule
     /// (<c>AttentionEvaluator.IsSsmsIntelliSense</c>) and the SQL rule (<see cref="ExcludedAppPredicate"/>) both read this, so they cannot drift.</summary>
@@ -99,6 +121,16 @@ public static class AttentionWindowSql
     /// </summary>
     public static readonly string AzdataMetadataPredicate =
         $"(lower(trim(client_app_name)) = '{AzdataClientApp}' AND (ltrim(statement_text) ILIKE 'create table #sver%' OR statement_text ILIKE '% as clmns%'))";
+
+    /// <summary>
+    /// True for a sample of dbatools' SMO catalog reads (#8877): the client application is <c>dbatools PowerShell module - dbatools.io</c> AND the
+    /// statement text holds SMO's parameter marker (<c>@_msparam_</c>, underscores escaped so they match literally). The same application name runs
+    /// people's own queries, so a statement without the marker still counts. A sample with no statement text (the statement filter withheld it) is
+    /// never matched. NULL when the application or the text is NULL. The application cannot be <c>azdata</c> too, so this and
+    /// <see cref="AzdataMetadataPredicate"/> never overlap.
+    /// </summary>
+    public static readonly string DbatoolsSmoMetadataPredicate =
+        $"(lower(trim(client_app_name)) = '{SqlQuote(DbatoolsClientApp.ToLowerInvariant())}' AND statement_text ILIKE '%{LikeEscape(SmoParameterMarker)}%' ESCAPE '\\')";
 
     /// <summary>
     /// True for a sample whose client application is SSMS IntelliSense or one of the VS Code mssql metadata connections (#6552, #6856), the
@@ -181,7 +213,7 @@ samples AS (
     SELECT
         date_trunc('minute', collection_time) AS minute,
         CAST(COUNT(*) AS BIGINT) AS kept,
-        CAST(COUNT(*) FILTER (WHERE COALESCE({ShortDurationPredicate}, FALSE) OR COALESCE({AzdataMetadataPredicate}, FALSE) OR COALESCE({ExcludedAppPredicate}, FALSE)) AS BIGINT) AS left_out
+        CAST(COUNT(*) FILTER (WHERE COALESCE({ShortDurationPredicate}, FALSE) OR COALESCE({AzdataMetadataPredicate}, FALSE) OR COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) OR COALESCE({ExcludedAppPredicate}, FALSE)) AS BIGINT) AS left_out
     FROM {eventsRelation}
     WHERE server_id = $1
     AND   collection_time >= $2
@@ -219,7 +251,8 @@ ORDER BY collection_time DESC
 
     /// <summary>The sample rows counted per (run, database, application). Columns: collection_time, database_name, client_app_name, samples (bigint),
     /// short_samples (bigint: the part under the duration floor, <see cref="ShortDurationPredicate"/>), azdata_metadata_samples (bigint: the part
-    /// that is Azure Data Studio metadata work and NOT already short, <see cref="AzdataMetadataPredicate"/>; the two parts never overlap).</summary>
+    /// that is Azure Data Studio metadata work and NOT already short, <see cref="AzdataMetadataPredicate"/>), dbatools_metadata_samples (bigint: the part that is
+    /// dbatools SMO metadata work and NOT already short, <see cref="DbatoolsSmoMetadataPredicate"/>; the three parts never overlap).</summary>
     public static string SampleGroups(string eventsRelation, bool bounded = false) => $"""
 SELECT
     collection_time,
@@ -227,7 +260,8 @@ SELECT
     client_app_name,
     CAST(COUNT(*) AS BIGINT) AS samples,
     CAST(COUNT(*) FILTER (WHERE {ShortDurationPredicate}) AS BIGINT) AS short_samples,
-    CAST(COUNT(*) FILTER (WHERE NOT COALESCE({ShortDurationPredicate}, FALSE) AND COALESCE({AzdataMetadataPredicate}, FALSE)) AS BIGINT) AS azdata_metadata_samples
+    CAST(COUNT(*) FILTER (WHERE NOT COALESCE({ShortDurationPredicate}, FALSE) AND COALESCE({AzdataMetadataPredicate}, FALSE)) AS BIGINT) AS azdata_metadata_samples,
+    CAST(COUNT(*) FILTER (WHERE NOT COALESCE({ShortDurationPredicate}, FALSE) AND COALESCE({DbatoolsSmoMetadataPredicate}, FALSE)) AS BIGINT) AS dbatools_metadata_samples
 FROM {eventsRelation}
 WHERE server_id = $1
 AND   collection_time >= $2{Ceiling(bounded)}
@@ -238,21 +272,39 @@ ORDER BY collection_time DESC, database_name, client_app_name
 
     /// <summary>The top <see cref="TopCount"/> statement fingerprints by sampled events (count ties break by name in binary order,
     /// <c>COLLATE "C"</c>, which PostgreSQL honors and DuckDB's default already is, so both stores list the same fifth entry), each with the newest non-NULL sample
-    /// text (ties on collection_time and event_time break on the unique id, so the pick is stable). Columns: fingerprint, samples (bigint), sample_text. Rows without a fingerprint (the statement filter withheld the
+    /// text, read for the five winners only (#9148: the text is never read for the rows that lose; ties on collection_time and event_time break on the unique id, so the pick is stable). Columns: fingerprint, samples (bigint), sample_text. Rows without a fingerprint (the statement filter withheld the
     /// text) are not a statement.</summary>
     public static string TopStatements(string eventsRelation, bool bounded = false) => $"""
+WITH winners AS (
+    SELECT
+        statement_fingerprint AS fingerprint,
+        CAST(COUNT(*) AS BIGINT) AS samples
+    FROM {eventsRelation}
+    WHERE server_id = $1
+    AND   {SpanFloor(bounded)}{Ceiling(bounded)}
+    AND   event_kind = '{KindSample}'
+    AND   statement_fingerprint IS NOT NULL
+    GROUP BY statement_fingerprint
+    ORDER BY COUNT(*) DESC, statement_fingerprint COLLATE "C"
+    LIMIT {TopCount}
+)
 SELECT
-    statement_fingerprint,
-    CAST(COUNT(*) AS BIGINT) AS samples,
-    (array_agg(statement_text ORDER BY collection_time DESC, event_time DESC NULLS LAST, attention_event_id DESC) FILTER (WHERE statement_text IS NOT NULL))[1] AS sample_text
-FROM {eventsRelation}
-WHERE server_id = $1
-AND   {SpanFloor(bounded)}{Ceiling(bounded)}
-AND   event_kind = '{KindSample}'
-AND   statement_fingerprint IS NOT NULL
-GROUP BY statement_fingerprint
-ORDER BY COUNT(*) DESC, statement_fingerprint COLLATE "C"
-LIMIT {TopCount}
+    w.fingerprint AS statement_fingerprint,
+    w.samples,
+    x.statement_text AS sample_text
+FROM winners AS w
+LEFT JOIN LATERAL (
+    SELECT statement_text
+    FROM {eventsRelation}
+    WHERE server_id = $1
+    AND   {SpanFloor(bounded)}{Ceiling(bounded)}
+    AND   event_kind = '{KindSample}'
+    AND   statement_fingerprint = w.fingerprint
+    AND   statement_text IS NOT NULL
+    ORDER BY collection_time DESC, event_time DESC NULLS LAST, attention_event_id DESC
+    LIMIT 1
+) AS x ON TRUE
+ORDER BY w.samples DESC, w.fingerprint COLLATE "C"
 """;
 
     /// <summary>The top <see cref="TopCount"/> values of <paramref name="column"/> (database_name or client_app_name) by
@@ -274,7 +326,7 @@ LIMIT {TopCount}
     /// <summary>
     /// The newest kept ring-buffer events, for the read surface only (get_client_timeouts): one row per <c>sample</c>, newest first.
     /// Columns: event_time, collection_time, database_name, client_app_name, client_hostname, session_id, interrupt_duration_us,
-    /// statement_fingerprint, statement_text, below_duration_floor (boolean), azdata_metadata (boolean). Always bounded: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive row ceiling (see <see cref="SpanFloor"/>). Newest first, ties broken by the table's unique id so a page edge is stable. <paramref name="limit"/> is a validated integer, never caller text.
+    /// statement_fingerprint, statement_text, below_duration_floor (boolean), azdata_metadata (boolean), dbatools_metadata (boolean). Always bounded: <c>$2</c> is the EXCLUSIVE span boundary and <c>$3</c> the inclusive row ceiling (see <see cref="SpanFloor"/>). Newest first, ties broken by the table's unique id so a page edge is stable. <paramref name="limit"/> is a validated integer, never caller text.
     /// </summary>
     public static string Samples(string eventsRelation, int limit) => $"""
 SELECT
@@ -288,7 +340,8 @@ SELECT
     statement_fingerprint,
     statement_text,
     COALESCE({ShortDurationPredicate}, FALSE) AS below_duration_floor,
-    COALESCE({AzdataMetadataPredicate}, FALSE) AS azdata_metadata
+    COALESCE({AzdataMetadataPredicate}, FALSE) AS azdata_metadata,
+    COALESCE({DbatoolsSmoMetadataPredicate}, FALSE) AS dbatools_metadata
 FROM {eventsRelation}
 WHERE server_id = $1
 AND   collection_time > $2

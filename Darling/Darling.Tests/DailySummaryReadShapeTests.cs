@@ -75,7 +75,7 @@ public sealed class DailySummaryReadShapeSqlTests
     public void TheDailyReader_RoutesOnTheCachedGate_NotAPerCallProbe()
     {
         var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingHealthReader.cs");
-        Assert.Contains("await ComposeStoreAvailability.GetMeasuredRollupsAsync(postgres, cancellationToken);", reader, StringComparison.Ordinal);
+        Assert.Contains("await ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(DailySummaryRangeCache.StoreKeyFor(postgres), postgres, cancellationToken);", reader, StringComparison.Ordinal);
         Assert.DoesNotContain("ComposeStoreAvailability.GetRollupsAsync(", reader, StringComparison.Ordinal);
         Assert.DoesNotContain("TimescaleSupport.DetectRollupsAsync(", reader, StringComparison.Ordinal);
         Assert.DoesNotContain("TimescaleSupport.DetectRollupCoverageAsync(", reader, StringComparison.Ordinal);

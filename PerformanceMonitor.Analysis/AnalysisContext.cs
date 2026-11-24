@@ -35,6 +35,23 @@ public class AnalysisContext
     /// null or empty, so the filter fails open.
     /// </summary>
     public IReadOnlySet<string>? SecondaryReplicaDatabases { get; set; }
+
+    /// <summary>
+    /// True for an on-demand read a person or an agent is waiting on (Lite's <c>get_analysis_facts</c> and
+    /// <c>compare_analysis</c>, #9195). The plan regression inputs check then answers from the outcomes an earlier
+    /// background pass cached, and for a pair with no cached answer makes at most the live plan fetches
+    /// <see cref="InteractiveFetches"/> allows the whole call (3 fetches, 3 s). A candidate the allowance does not reach
+    /// stays in the fact and is counted unverified, as one the background pass's fetch budget never reached is. Fetched
+    /// answers are cached as the background pass's are. Default false, the background pass, which has its own budget.
+    /// Darling does not read it.
+    /// </summary>
+    public bool InteractiveRead { get; set; }
+
+    /// <summary>
+    /// The live plan fetches an interactive read may make, shared by every context of one call so that
+    /// <c>compare_analysis</c>'s two windows together stay inside one allowance (#9195). Created on first use when the caller set none.
+    /// </summary>
+    public InteractivePlanFetchAllowance? InteractiveFetches { get; set; }
     public string ServerName { get; set; } = string.Empty;
     public DateTime TimeRangeStart { get; set; }
     public DateTime TimeRangeEnd { get; set; }
@@ -317,7 +334,31 @@ public class AnalysisContext
     /// into a record this project serves to MCP clients. There is no string parameter left to do that with.</para>
     /// </summary>
     public void RecordCollectionFailure(string family, string read, CollectionFailureOutcome outcome, Exception exception) =>
-        CollectionFailures.Add(new CollectionFailure(family, read, outcome, CollectionFailure.Describe(exception, outcome)));
+        (_failureBuffer.Value ?? CollectionFailures).Add(new CollectionFailure(family, read, outcome, CollectionFailure.Describe(exception, outcome)));
+
+    /// <summary>
+    /// How many family reads a collector may run at the same time on this pass (#9149). 1, the default, is the serial
+    /// pass every caller had before: the scheduled worker keeps it, because its sweeps already share the store's
+    /// connection pool. An on-demand read (<c>analyze_server</c>, <c>get_analysis_facts</c>) sets it above 1 so a
+    /// store that is a network away answers in the longest chain of reads rather than the sum of them. A collector
+    /// clamps the figure to its own ceiling.
+    /// </summary>
+    public int FamilyParallelism { get; set; } = 1;
+
+    private readonly AsyncLocal<List<CollectionFailure>?> _failureBuffer = new();
+
+    /// <summary>
+    /// Starts collecting the failures that the current async flow records into its own list instead of
+    /// <see cref="CollectionFailures"/> (#9149). Families that run at the same time use it so the list reads in family
+    /// order, as the serial pass wrote it, and not in the order the failures happened to land. The caller appends the
+    /// returned list to <see cref="CollectionFailures"/> itself, in the order it wants.
+    /// </summary>
+    public List<CollectionFailure> BufferCollectionFailuresForThisFlow()
+    {
+        var buffer = new List<CollectionFailure>();
+        _failureBuffer.Value = buffer;
+        return buffer;
+    }
 }
 
 /// <summary>One query the PLAN_REGRESSION fact reported (#3902) — see <see cref="AnalysisContext.PlanRegressionOffenders"/>.</summary>

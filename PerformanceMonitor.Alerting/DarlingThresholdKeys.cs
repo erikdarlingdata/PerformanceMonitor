@@ -60,6 +60,7 @@ public static class DarlingThresholdKeys
         new("client_timeouts.critical_per_minute", AlertThresholdKey.ClientTimeoutsCriticalPerMinute, AlertThresholdScope.Server, 1, int.MaxValue, "client_timeouts_critical_per_minute", int.MaxValue),
         new("long_running_query.threshold_minutes", AlertThresholdKey.LongRunningQueryThresholdMinutes, AlertThresholdScope.Server, 1, int.MaxValue, "long_running_query_threshold_minutes", int.MaxValue),
         new("tempdb_space.threshold_percent", AlertThresholdKey.TempDbSpaceThresholdPercent, AlertThresholdScope.Server, 1, 100, "tempdb_space_threshold_percent", 100),
+        new("tempdb_log_space.threshold_percent", AlertThresholdKey.TempDbLogSpaceThresholdPercent, AlertThresholdScope.Server, 1, 100, "tempdb_log_space_threshold_percent", 100),
         new("low_disk.threshold_percent", AlertThresholdKey.LowDiskThresholdPercent, AlertThresholdScope.Server, 0, 100, "low_disk_threshold_percent", 0),
         new("low_disk.threshold_gb", AlertThresholdKey.LowDiskThresholdGb, AlertThresholdScope.Server, 0, int.MaxValue, "low_disk_threshold_gb", 0),
         new("low_disk.critical_free_percent", AlertThresholdKey.DiskCriticalFreePercent, AlertThresholdScope.Server, 0, 100, "disk_critical_free_percent", 0),

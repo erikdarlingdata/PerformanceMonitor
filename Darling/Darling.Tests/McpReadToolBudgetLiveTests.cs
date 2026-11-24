@@ -210,6 +210,9 @@ public sealed class McpReadToolBudgetLiveTests
         name.StartsWith("analyze_", StringComparison.Ordinal) ||
         name.StartsWith("compare_", StringComparison.Ordinal) ||
         name == "audit_config" ||
+        /* #9388: find_tools reads the request's own served tool list through its McpServer, which a reflective call cannot give it. Its worst
+           case, full at its cap over the real registered tools, is measured in the McpToolSearch tests instead. */
+        name == "find_tools" ||
         WriteToolRoster.Contains(name);
 
     internal static (string Name, MethodInfo Method)[] ReadToolMethods() =>

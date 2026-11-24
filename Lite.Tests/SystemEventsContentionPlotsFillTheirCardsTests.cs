@@ -32,7 +32,8 @@ namespace PerformanceMonitorLite.Tests;
 /// the group, so the two counter charts share a group with each other and not with the two legend charts. The Darling Viewer's
 /// twin is ViewerSystemEventsContentionPlotsFillTheirCardsTests in Darling.Tests.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class SystemEventsContentionPlotsFillTheirCardsTests
 {
     private const BindingFlags Instance = BindingFlags.Instance | BindingFlags.NonPublic;

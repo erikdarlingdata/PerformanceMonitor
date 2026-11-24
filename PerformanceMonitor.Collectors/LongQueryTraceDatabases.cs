@@ -341,7 +341,7 @@ public static class LongQueryTraceDatabases
 
         return CanHoldSession(database)
             && !separatelyMonitored.Contains(database)
-            && !owner.ExcludedDatabases.Any(excluded => string.Equals(excluded.Trim(), database, StringComparison.OrdinalIgnoreCase))
+            && !PerformanceMonitor.Common.DatabaseNamePattern.MatchesAnyTrimmed(owner.ExcludedDatabases, database)
             && (owner.DatabaseScope is null
                 || owner.DatabaseScope.Count == 0
                 || owner.DatabaseScope.Any(inScope => string.Equals(inScope.Trim(), database, StringComparison.OrdinalIgnoreCase)));

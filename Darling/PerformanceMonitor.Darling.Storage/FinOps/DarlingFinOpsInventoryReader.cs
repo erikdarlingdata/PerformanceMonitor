@@ -9,6 +9,7 @@
 using System;
 using System.Globalization;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -76,12 +77,19 @@ public static class DarlingFinOpsInventoryReader
     /// the whole window, and the check is exact rather than "whatever raw retention still holds" (#4227's other
     /// finding: a 4-day raw retention silently narrowed a 7-day claim).</para>
     /// </summary>
-    public const string ServerMetricsSql = @"
-/* #8570: the window's rows are read first, on their own, and aggregated after. Grouped straight off the table, the planner fed the ordered-set
+    public const string ServerMetricsSql = FleetHeader + "WITH " + CpuCtes + MemoryLatestCte + GrantsCte + SizeCtes + IdleActiveDbsRawCte + "\n"
+        + IdleCoverageComment + IdleCoverageRawCte + "\n" + IdleDbsCte + FleetSelect;
+
+    /* #9149: the same text as ServerMetricsSql, in the pieces the reader runs at the same time. */
+    /// <summary>The single statement's leading comment (#8570).</summary>
+    private const string FleetHeader = @"/* #8570: the window's rows are read first, on their own, and aggregated after. Grouped straight off the table, the planner fed the ordered-set
    PERCENTILE_CONT through the (server_id, collection_time) index to skip a sort, which walks the heap server by server: every server revisits the whole
    chunk's pages in a scattered order, and the index's own pages come with it (1,073 pages for 60,000 rows on a 42 server store, against 625 read in
    file order here). A cold first call pays a disk wait for each scattered page. The 60,000 rows sort in memory in a few milliseconds. */
-WITH cpu_rows AS MATERIALIZED (
+";
+
+    /// <summary>The 24 hour CPU window and its per-server figures.</summary>
+    private const string CpuCtes = @"cpu_rows AS MATERIALIZED (
     SELECT server_id, sqlserver_cpu_utilization
     FROM v_cpu_utilization_stats
     WHERE collection_time >= $1
@@ -96,7 +104,10 @@ cpu_24h AS (
     FROM cpu_rows
     GROUP BY server_id
 ),
-/* The worker counts feed the verdict (memory_ratio used to feed this read's own CASE, and that CASE was the #2246 bug), and the
+";
+
+    /// <summary>The newest memory row per server.</summary>
+    private const string MemoryLatestCte = @"/* The worker counts feed the verdict (memory_ratio used to feed this read's own CASE, and that CASE was the #2246 bug), and the
    physical memory and buffer pool of the same newest row feed the health score, exactly as the Utilization read takes them
    (DarlingFinOpsUtilizationReader). A server with no memory row has no row here (CROSS JOIN LATERAL), no Utilization card and no score. */
 mem_latest AS (
@@ -116,7 +127,10 @@ mem_latest AS (
         LIMIT 1
     ) AS latest
 ),
-/* Same workspace-memory pressure signals as the drill-down read, so the INVENTORY GRID cannot classify a
+";
+
+    /// <summary>The 24 hour memory grant pressure per server.</summary>
+    private const string GrantsCte = @"/* Same workspace-memory pressure signals as the drill-down read, so the INVENTORY GRID cannot classify a
    server by a rule the drill-down no longer uses (#2246 — this grid is the screen the field report was
    looking at). */
 grants AS (
@@ -131,7 +145,10 @@ grants AS (
     AND   COALESCE(resource_semaphore_id, 0) = 0 /* #7676: regular semaphore only, as before id 1 was collected */
     GROUP BY server_id
 ),
-/* #8570: the newest size snapshot of every server, read ONCE. Its rows are the totals (storage_totals) and the idle check's known-databases
+";
+
+    /// <summary>The newest size snapshot per server, its totals and its known databases.</summary>
+    private const string SizeCtes = @"/* #8570: the newest size snapshot of every server, read ONCE. Its rows are the totals (storage_totals) and the idle check's known-databases
    universe (latest_dbs). The snapshot's time is not known when the statement is planned (it comes from each server's own newest row), so
    no chunk can be dropped at plan time: every reference to the hypertable plans every chunk of the size history, and the ones above the
    newest snapshot are only skipped while it runs. This read used to name the table three times (the newest time, then the totals and the
@@ -171,30 +188,17 @@ latest_dbs AS (
     FROM latest_size ls
     WHERE ls.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
 ),
-active_dbs AS (
-    SELECT DISTINCT server_id, database_name
-    FROM v_query_stats
-    WHERE collection_time >= $2
-    AND   delta_execution_count > 0
-),
-/* The recommendation row's coverage rule (DarlingFinOpsOptimizationReader.HasIdleCoverageAsync): a database is called idle for 7
+";
+
+    /// <summary>The coverage rule comment above the idle coverage CTE in the single statement.</summary>
+    private const string IdleCoverageComment = @"/* The recommendation row's coverage rule (DarlingFinOpsOptimizationReader.HasIdleCoverageAsync): a database is called idle for 7
    days only when the oldest query-stats sample is at or before $2 (now - 7 days) AND each complete UTC day in [$3, $5) -- D-7 through
    D-1, today excluded -- holds a sample ($4 is how many days). A server without that coverage gets NO idle_dbs row, so its
    count is NULL (a dash), never a count made from a window nothing watched. Covered servers count 0 when nothing is idle. */
-idle_coverage AS (
-    SELECT s.server_id
-    FROM servers s
-    WHERE (SELECT COUNT(*)
-           FROM (SELECT EXISTS (SELECT 1
-                                FROM v_query_stats q
-                                WHERE q.server_id = s.server_id
-                                AND   q.collection_time >= d.day_start
-                                AND   q.collection_time <  d.day_start + INTERVAL '1 day') AS has_sample
-                 FROM generate_series(CAST($3 AS timestamp), CAST($5 AS timestamp) - INTERVAL '1 day', INTERVAL '1 day') AS d(day_start)) AS probes
-           WHERE has_sample) >= $4
-    AND   EXISTS (SELECT 1 FROM v_query_stats o WHERE o.server_id = s.server_id AND o.collection_time <= $2)
-),
-/* LEFT JOIN from servers, not an EXCEPT grouped by server_id: a server whose every known database is
+";
+
+    /// <summary>The per-server idle database count behind the coverage join, as the single statement has it.</summary>
+    private const string IdleDbsCte = @"/* LEFT JOIN from servers, not an EXCEPT grouped by server_id: a server whose every known database is
    active has ZERO rows surviving an EXCEPT, and GROUP BY over zero rows contributes NO ROW for that
    server at all -- the outer LEFT JOIN then reads idle_db_count as NULL, not 0, and the loader's overlay-
    only-what-arrived rule (FinOpsTab.Loaders.cs) leaves the grid showing whatever idle count it last had
@@ -214,7 +218,10 @@ idle_dbs AS (
      AND ad.database_name = ld.database_name
     GROUP BY s.server_id
 )
-SELECT
+";
+
+    /// <summary>The single statement's final SELECT.</summary>
+    private const string FleetSelect = @"SELECT
     s.server_id,
     c.avg_cpu_pct,
     st.total_storage_gb,
@@ -251,6 +258,84 @@ LEFT JOIN storage_totals st ON st.server_id = s.server_id
 LEFT JOIN idle_dbs id ON id.server_id = s.server_id
 LEFT JOIN grants g ON g.server_id = s.server_id
 WHERE s.server_id <> 0";
+
+    /// <summary>The per-server memory, grant and property columns the fleet read selects, in <see cref="FleetQueries.Base"/>'s order: server id, max workers,
+    /// current workers, grant waiters, grant timeouts, forced grants, grant utilization, engine edition, edition, physical memory, buffer pool, the
+    /// memory row's server id, total server memory, AG replica role. It roots the answer at <c>servers</c>, so every registered server has a row.</summary>
+    private const string BaseSelect = @"
+SELECT
+    s.server_id,
+    COALESCE(m.max_workers_count, 0),
+    m.current_workers_count,
+    g.max_grant_waiters,
+    g.grant_timeouts,
+    g.forced_grants,
+    g.grant_utilization_pct,
+    props.engine_edition,
+    props.edition,
+    m.total_physical_memory_mb,
+    m.buffer_pool_mb,
+    m.server_id AS mem_server_id,
+    m.total_server_memory_mb,
+    props.ag_replica_role
+FROM servers s
+LEFT JOIN LATERAL (
+    SELECT engine_edition, edition, ag_replica_role
+    FROM server_properties
+    WHERE server_id = s.server_id
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS props ON true
+LEFT JOIN mem_latest m ON m.server_id = s.server_id
+LEFT JOIN grants g ON g.server_id = s.server_id
+WHERE s.server_id <> 0";
+
+    /// <summary><see cref="IdleDbsCte"/> without its coverage join: the count for every server, which the caller keeps only for the servers the
+    /// coverage read returns (a server without coverage has no idle count, the same NULL the single statement gives it).</summary>
+    private const string IdleDbsAllCte = @"/* Same one-row-per-server rule as the single statement's idle_dbs (#4227), rooted at servers. The coverage join is applied by the caller. */
+idle_dbs AS (
+    SELECT
+        s.server_id,
+        COUNT(ld.database_name) FILTER (WHERE ad.database_name IS NULL) AS idle_db_count
+    FROM servers s
+    LEFT JOIN latest_dbs ld ON ld.server_id = s.server_id
+    LEFT JOIN active_dbs ad
+      ON ad.server_id = ld.server_id
+     AND ad.database_name = ld.database_name
+    GROUP BY s.server_id
+)";
+
+    /// <summary>The storage totals and the uncovered idle counts, per server (columns: server id, total storage GB, allocated MB, free MB, idle count).</summary>
+    private const string SizeIdleSelect = @"
+SELECT
+    s.server_id,
+    st.total_storage_gb,
+    st.alloc_mb,
+    st.free_mb,
+    id.idle_db_count
+FROM servers s
+LEFT JOIN storage_totals st ON st.server_id = s.server_id
+LEFT JOIN idle_dbs id ON id.server_id = s.server_id
+WHERE s.server_id <> 0";
+
+    /// <summary>A CTE list without its trailing comma, so a SELECT can follow it.</summary>
+    private static string EndCtes(string cteText) => cteText.TrimEnd().TrimEnd(',');
+
+    /// <summary>
+    /// #9149: the four independent reads <see cref="ServerMetricsSql"/> is made of. Every one takes the same five parameters (<c>$1</c> the CPU
+    /// cutoff, <c>$2</c> the idle cutoff, <c>$3</c> the coverage start, <c>$4</c> the days to cover, <c>$5</c> the coverage end) and returns rows keyed by
+    /// server id in column 0. <see cref="Cpu"/> is the 24 hour CPU figures, <see cref="Base"/> the server list with its memory, grant and property
+    /// columns, <see cref="SizeIdle"/> the storage totals and the idle count of every server, and <see cref="IdleCoverage"/> the servers whose idle count counts.
+    /// </summary>
+    internal sealed record FleetQueries(string Cpu, string Base, string SizeIdle, string IdleCoverage)
+    {
+        /// <summary>The queries with the idle check reading the raw query stats table, the always correct form (<see cref="ServerMetricsSql"/>'s raw shape).</summary>
+        internal static readonly FleetQueries Raw = new(
+            Cpu: FleetHeader + "WITH " + EndCtes(CpuCtes) + "\nSELECT server_id, avg_cpu_pct, max_cpu_pct, p95_cpu_pct, cpu_samples FROM cpu_24h",
+            Base: "WITH " + EndCtes(MemoryLatestCte + GrantsCte) + BaseSelect,
+            SizeIdle: "WITH " + SizeCtes + IdleActiveDbsRawCte + "\n" + IdleDbsAllCte + SizeIdleSelect,
+            IdleCoverage: "WITH " + EndCtes(IdleCoverageRawCte) + "\nSELECT server_id FROM idle_coverage");
+    }
 
     /// <summary>The RAW <c>idle_coverage</c> CTE in <see cref="ServerMetricsSql"/>, verbatim — the second anchor <see cref="ServerMetricsSqlFor"/>
     /// replaces, so the coverage days come from the same hourly rollup as the activity check rather than a raw 7-day scan of every server. The raw days are one <c>EXISTS</c> probe per complete day and server (an index range seek
@@ -325,8 +410,12 @@ WHERE s.server_id <> 0";
     /// legacy/successor, already split at the successor's own floor) from <paramref name="ceilingHourUtc"/>,
     /// UNION the raw leading edge <c>[$2, ceilingHour)</c> the bucket grain can't slice, UNION the raw trailing
     /// edge <c>[watermark, now)</c> the aggregate has not materialized yet (<see cref="RollupMaterializationWatermark"/>).
-    /// Three <c>UNION</c>s rather than one combined predicate because each arm reads a different relation; a
-    /// database counts active if ANY of the three shows an execution (#4227's boolean rule).
+    /// A database counts active if ANY of the three shows an execution (#4227's boolean rule). The first two are
+    /// cheap and are read first (<c>window_active_dbs</c>). The trailing edge is the expensive one, up to the whole
+    /// current raw chunk, and it is read only for a server that still has a known database with no execution so far
+    /// (<c>edge_servers</c>), one server at a time through the <c>(server_id, collection_time)</c> index (#8570). A
+    /// server whose known databases are all active is not read, and a database the edge shows active but the window
+    /// already showed active adds nothing, so the pairs <c>idle_dbs</c> joins to are the same as before.
     /// </summary>
     private static string IdleActiveDbsForCagg(string relationSql, DateTime ceilingHourUtc, DateTime watermarkUtc)
     {
@@ -334,7 +423,12 @@ WHERE s.server_id <> 0";
         var ceiling = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{ceilingHourUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
         var watermark = string.Create(CultureInfo.InvariantCulture, $"TIMESTAMP '{watermarkUtc:yyyy-MM-dd HH:mm:ss.ffffff}'");
 
-        return $@"active_dbs AS (
+        return $@"/* #8570: the trailing raw edge is probed only for what the rest of the window has not already shown active. Read whole, it was the third arm of
+   a UNION over every raw row since the watermark: 1.7 million rows (the whole current chunk, 371,600 pages on a 42 server store) to find a few hundred
+   (server, database) pairs. The rollup and the leading edge answer first. The edge is then read, one server at a time through the
+   (server_id, collection_time) index, only for a server that still has a known database with no execution so far, and a server whose known
+   databases are all active is not read at all. The result is the same set of pairs for every known database, which is the only thing idle_dbs asks of it. */
+window_active_dbs AS (
     SELECT DISTINCT server_id, database_name
     FROM {relationSql}
     WHERE bucket >= {ceiling}
@@ -347,13 +441,30 @@ WHERE s.server_id <> 0";
     WHERE collection_time >= $2
     AND   collection_time < {ceiling}
     AND   delta_execution_count > 0
+),
+edge_servers AS (
+    SELECT DISTINCT ld.server_id
+    FROM latest_dbs ld
+    WHERE NOT EXISTS (SELECT 1
+                      FROM window_active_dbs wa
+                      WHERE wa.server_id = ld.server_id
+                      AND   wa.database_name = ld.database_name)
+),
+active_dbs AS (
+    SELECT server_id, database_name
+    FROM window_active_dbs
 
     UNION
 
-    SELECT DISTINCT server_id, database_name
-    FROM v_query_stats
-    WHERE collection_time >= {watermark}
-    AND   delta_execution_count > 0
+    SELECT es.server_id, edge.database_name
+    FROM edge_servers es
+    CROSS JOIN LATERAL (
+        SELECT DISTINCT q.database_name
+        FROM v_query_stats q
+        WHERE q.server_id = es.server_id
+        AND   q.collection_time >= {watermark}
+        AND   q.delta_execution_count > 0
+    ) AS edge
 ),";
     }
 
@@ -369,11 +480,7 @@ WHERE s.server_id <> 0";
     {
         ArgumentNullException.ThrowIfNull(coverage);
 
-        var floorHour = TimescaleSupport.AlignDown(idleCutoffUtc, TimescaleSupport.HourlyBucket);
-        var ceilingHour = floorHour == idleCutoffUtc ? floorHour : floorHour + TimescaleSupport.HourlyBucket;
-
-        var relationSql = coverage.StitchedRelationSql(
-            TimescaleSupport.QueryStatsDbHourlyView, "f", ceilingHour, RollupCoverage.StitchTier.Hourly);
+        var (ceilingHour, relationSql) = IdleRelation(coverage, idleCutoffUtc);
 
         var activeRouted = FinOpsRollupRouting.RouteOrThrow(
             ServerMetricsSql,
@@ -385,6 +492,110 @@ WHERE s.server_id <> 0";
             IdleCoverageRawCte,
             IdleCoverageForCagg(relationSql, watermarkUtc, idleCutoffUtc),
             "server inventory idle coverage");
+    }
+
+    /// <summary><see cref="FleetQueries"/> with the idle check routed through the hourly stitched rollup, by the same substitutions
+    /// <see cref="ServerMetricsSqlFor"/> makes in the single statement.</summary>
+    internal static FleetQueries FleetQueriesFor(RollupCoverage coverage, DateTime idleCutoffUtc, DateTime watermarkUtc)
+    {
+        ArgumentNullException.ThrowIfNull(coverage);
+
+        var (ceilingHour, relationSql) = IdleRelation(coverage, idleCutoffUtc);
+        var raw = FleetQueries.Raw;
+        return raw with
+        {
+            SizeIdle = FinOpsRollupRouting.RouteOrThrow(
+                raw.SizeIdle, IdleActiveDbsRawCte, IdleActiveDbsForCagg(relationSql, ceilingHour, watermarkUtc), "server inventory idle databases"),
+            IdleCoverage = "WITH " + EndCtes(IdleCoverageForCagg(relationSql, watermarkUtc, idleCutoffUtc)) + "\nSELECT server_id FROM idle_coverage"
+        };
+    }
+
+    /// <summary>The ceiling hour of the idle cutoff and the stitched hourly relation the routed idle reads share.</summary>
+    private static (DateTime CeilingHour, string RelationSql) IdleRelation(RollupCoverage coverage, DateTime idleCutoffUtc)
+    {
+        var floorHour = TimescaleSupport.AlignDown(idleCutoffUtc, TimescaleSupport.HourlyBucket);
+        var ceilingHour = floorHour == idleCutoffUtc ? floorHour : floorHour + TimescaleSupport.HourlyBucket;
+        return (ceilingHour, coverage.StitchedRelationSql(
+            TimescaleSupport.QueryStatsDbHourlyView, "f", ceilingHour, RollupCoverage.StitchTier.Hourly));
+    }
+
+    /// <summary>One read of <paramref name="sql"/> with the five fleet parameters, returning every row's values (DBNull kept).</summary>
+    private static async Task<List<object?[]>> ReadRowsAsync(
+        NpgsqlDataSource dataSource, string sql, DateTime now, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        await using var command = dataSource.CreateCommand(sql);
+        command.CommandTimeout = commandTimeoutSeconds;
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(now.AddHours(-24), DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now), DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DarlingFinOpsOptimizationReader.IdleCoverageDays });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now), DateTimeKind.Unspecified) });
+
+        var rows = new List<object?[]>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var values = new object[reader.FieldCount];
+            reader.GetValues(values);
+            rows.Add(values);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The fleet read's single-statement columns (the ordinals the <c>Fleet...For</c> readers use, 0 to 21), filled from the four reads. A column
+    /// whose read has no row for the server stays NULL, as the single statement's LEFT JOINs left it.
+    /// </summary>
+    private static System.Data.DataTable JoinFleetRows(
+        List<object?[]> cpuRows, List<object?[]> baseRows, List<object?[]> sizeIdleRows, List<object?[]> coverageRows)
+    {
+        var cpu = cpuRows.ToDictionary(r => (int)r[0]!);
+        var sizeIdle = sizeIdleRows.ToDictionary(r => (int)r[0]!);
+        var covered = new HashSet<int>(coverageRows.Select(r => (int)r[0]!));
+
+        var table = new System.Data.DataTable();
+        for (var i = 0; i < 22; i++) table.Columns.Add("c" + i, typeof(object));
+
+        foreach (var b in baseRows)
+        {
+            var id = (int)b[0]!;
+            var row = new object?[22];
+            Array.Fill(row, DBNull.Value);
+            row[0] = id;
+            if (cpu.TryGetValue(id, out var c))
+            {
+                row[1] = c[1];
+                row[4] = c[2];
+                row[5] = c[3];
+                row[19] = c[4];
+            }
+
+            if (sizeIdle.TryGetValue(id, out var z))
+            {
+                row[2] = z[1];
+                row[17] = z[2];
+                row[18] = z[3];
+                if (covered.Contains(id)) row[3] = z[4];
+            }
+
+            row[6] = b[1];
+            row[7] = b[2];
+            row[8] = b[3];
+            row[9] = b[4];
+            row[10] = b[5];
+            row[11] = b[6];
+            row[12] = b[7];
+            row[13] = b[8];
+            row[14] = b[9];
+            row[15] = b[10];
+            row[16] = b[11];
+            row[20] = b[12];
+            row[21] = b[13];
+            table.Rows.Add(row);
+        }
+
+        return table;
     }
 
     /// <summary>
@@ -400,8 +611,13 @@ WHERE s.server_id <> 0";
         DateTime? nowUtc = null, CancellationToken cancellationToken = default)
     {
         var now = nowUtc ?? DateTime.UtcNow;
-        var cpuCutoff = now.AddHours(-24);
         var idleCutoff = now.AddDays(-7);
+
+        /* #9149: the four independent inputs run at the same time, each on its own pooled connection (at most four open at once), so a cold first call
+           waits for the slowest one instead of the sum of all of them. The CPU and the server-list reads do not depend on the watermark, so they start
+           first and the watermark probe overlaps them. The rows are joined by server id below, into the single statement's columns. */
+        var cpuTask = ReadRowsAsync(dataSource, FleetQueries.Raw.Cpu, now, commandTimeoutSeconds, cancellationToken);
+        var baseTask = ReadRowsAsync(dataSource, FleetQueries.Raw.Base, now, commandTimeoutSeconds, cancellationToken);
 
         DateTime? watermark = null;
         if (rollups.DbGrainHourly)
@@ -414,21 +630,17 @@ WHERE s.server_id <> 0";
                 commandTimeoutSeconds, cancellationToken);
         }
 
-        var sql = watermark is DateTime mark
-            ? ServerMetricsSqlFor(coverage, idleCutoff, mark)
-            : ServerMetricsSql;
-
-        await using var command = dataSource.CreateCommand(sql);
-        command.CommandTimeout = commandTimeoutSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cpuCutoff, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(idleCutoff, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now), DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = DarlingFinOpsOptimizationReader.IdleCoverageDays });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now), DateTimeKind.Unspecified) });
+        var queries = watermark is DateTime mark
+            ? FleetQueriesFor(coverage, idleCutoff, mark)
+            : FleetQueries.Raw;
+        var sizeIdleTask = ReadRowsAsync(dataSource, queries.SizeIdle, now, commandTimeoutSeconds, cancellationToken);
+        var coverageTask = ReadRowsAsync(dataSource, queries.IdleCoverage, now, commandTimeoutSeconds, cancellationToken);
+        await Task.WhenAll(cpuTask, baseTask, sizeIdleTask, coverageTask);
 
         var results = new Dictionary<int, ServerMetricsDto>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        using var joined = JoinFleetRows(await cpuTask, await baseTask, await sizeIdleTask, await coverageTask);
+        using var reader = joined.CreateDataReader();
+        while (reader.Read())
         {
             /* The verdict is computed HERE rather than as a SQL CASE, so this grid and the drill-down
                cannot disagree — they now call the same predicate. The old inline CASE was copies 5 and 6

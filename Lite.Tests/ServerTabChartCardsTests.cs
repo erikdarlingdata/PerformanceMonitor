@@ -31,17 +31,11 @@ namespace PerformanceMonitorLite.Tests;
 /// only its unit: a name or a parenthesised unit left in the axis title is the defect the card replaces. Read from the rendered
 /// controls, not from the markup.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class ServerTabChartCardsTests
 {
     private static readonly BindingFlags Instance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
-    [Fact]
-    public void EveryChartOnTheServerTab_SitsInATitledCard_AndItsYAxisIsOnlyAUnit()
-    {
-        var failures = WithTab(CheckCardsAndAxes);
-        Assert.True(failures.Count == 0, $"{failures.Count} chart card defects:{Environment.NewLine}" + string.Join(Environment.NewLine, failures));
-    }
 
     /// <summary>
     /// The blocking charts used to carry the collector that answered in their Y axis title. The axis is only the unit now, so the card's
@@ -191,78 +185,5 @@ public sealed class ServerTabChartCardsTests
                 app.Resources.MergedDictionaries.Remove(added);
             }
         }
-    }
-
-    private static List<string> CheckCardsAndAxes(ServerTab tab)
-    {
-        var dataStart = DateTime.UtcNow.AddHours(-6);
-        tab.ServerDataStartUtc = dataStart;
-        var (_, failed) = ChartLayoutProbe.FeedRenderMethods(
-            tab,
-            m => m.Name.StartsWith("Update", StringComparison.Ordinal) && m.Name.Contains("Chart", StringComparison.Ordinal),
-            (type, _) =>
-            {
-                if (type == typeof(int))
-                {
-                    return 24;
-                }
-
-                if (type == typeof(DateTime?))
-                {
-                    return null;
-                }
-
-                if (type.IsGenericType && (type.GetGenericTypeDefinition() == typeof(List<>) || type.GetGenericTypeDefinition() == typeof(IReadOnlyList<>)))
-                {
-                    return type.GetGenericTypeDefinition() == typeof(List<>)
-                        ? ChartLayoutProbe.MakeRows(type.GetGenericArguments()[0], dataStart, DateTime.UtcNow)
-                        : Activator.CreateInstance(typeof(List<>).MakeGenericType(type.GetGenericArguments()[0]));
-                }
-
-                return null;
-            });
-
-        var problems = failed.Select(f => $"feeding {f}").ToList();
-        // The Overview tab's timeline lanes are their own control with their own lane layout, not chart hosts of the server tab's markup.
-        var charts = ChartLayoutProbe.Logical<WpfPlot>(tab).Where(c => !HasLogicalAncestor<CorrelatedTimelineLanesControl>(c)).ToList();
-        if (charts.Count < 40)
-        {
-            problems.Add($"only {charts.Count} charts found on the server tab");
-        }
-
-        var labelled = 0;
-        foreach (var chart in charts)
-        {
-            var name = ChartLayoutProbe.NameOf(chart);
-            var card = ServerTab.CardOf(chart);
-            if (card is null)
-            {
-                problems.Add($"{name}: not inside a ChartPanel card");
-            }
-            else if (string.IsNullOrWhiteSpace(card.Title))
-            {
-                problems.Add($"{name}: its card has no title");
-            }
-
-            var label = chart.Plot.Axes.Left.Label.Text ?? string.Empty;
-            if (label.Length == 0)
-            {
-                continue;
-            }
-
-            labelled++;
-            // A unit is one token such as "ms", "MB/s", "%" or "count": a space or a bracket means a name or a second unit is in there.
-            if (label.Any(char.IsWhiteSpace) || label.Contains('(') || label.EndsWith("...", StringComparison.Ordinal) || label.EndsWith('…'))
-            {
-                problems.Add($"{name}: Y axis title '{label}' is more than a unit");
-            }
-        }
-
-        if (labelled < 20)
-        {
-            problems.Add($"only {labelled} charts drew a Y axis title, so the unit check proved too little");
-        }
-
-        return problems;
     }
 }

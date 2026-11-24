@@ -88,7 +88,7 @@ public sealed class StoreConfigProvider
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
             using var command = new NpgsqlCommand("SELECT config_version FROM config_service WHERE id = 1", connection);
             command.CommandTimeout = ServiceCommandDeadlines.ConfigReloadBeaconSeconds;
             var result = await command.ExecuteScalarAsync(cancellationToken);
@@ -122,7 +122,7 @@ public sealed class StoreConfigProvider
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
             var now = Naive(DateTime.UtcNow);
 
             if (await CountAsync(connection, "config_alert_settings", cancellationToken) == 0)
@@ -1446,11 +1446,15 @@ INSERT INTO config_alert_settings (
     blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
     blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
     daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
-    backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours)
+    backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours,
+    tempdb_log_space_enabled, tempdb_log_space_threshold_percent,
+    tempdb_growth_fit_enabled,
+    instance_restarted_enabled, memory_dumps_enabled,
+    self_store_growth_enabled, self_store_growth_floor_gb, self_store_growth_object_floor_gb)
 VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
         $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42,
         $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63,
-        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99)
+        $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107)
 ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
         command.Parameters.AddWithValue(a.Enabled);
         command.Parameters.AddWithValue(a.CpuEnabled);
@@ -1596,6 +1600,17 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         command.Parameters.AddWithValue(a.BackupOverdueThresholdHours);
         command.Parameters.AddWithValue(a.LogBackupOverdueThresholdMinutes);
         command.Parameters.AddWithValue(a.CheckDbOverdueThresholdHours);
+        command.Parameters.AddWithValue(a.TempDbLogSpaceEnabled);
+        command.Parameters.AddWithValue(a.TempDbLogSpaceThresholdPercent);
+        /* #8882 (V270), bound last in the order the column was appended. The switch seeds TRUE (darling.json's default): the alert ships on. */
+        command.Parameters.AddWithValue(a.TempDbGrowthFitEnabled);
+        /* #8884, bound last in the order the V271 columns were appended. Both switches seed from darling.json, which defaults them on. */
+        command.Parameters.AddWithValue(a.InstanceRestartedEnabled);
+        command.Parameters.AddWithValue(a.MemoryDumpsEnabled);
+        /* #9000 (V276), bound last in the order the columns were appended. */
+        command.Parameters.AddWithValue(a.SelfStoreGrowthEnabled);
+        command.Parameters.AddWithValue(a.SelfStoreGrowthFloorGb);
+        command.Parameters.AddWithValue(a.SelfStoreGrowthObjectFloorGb);
         await command.ExecuteNonQueryAsync(ct);
     }
 
@@ -1673,7 +1688,7 @@ ON CONFLICT (id) DO NOTHING", connection) { CommandTimeout = ServiceCommandDeadl
         ArgumentNullException.ThrowIfNull(ring);
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
             var v = new string?[11];
             bool signingSaved;
             await using (var select = new NpgsqlCommand(
@@ -1998,9 +2013,9 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.StoreConfig, cancellationToken);
 
-            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, queryStoreFetchTopN, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
+            var (paused, capturePlans, backfillEnabled, textBudgetMb, maxSweeps, planXmlCompression, mcpEnabled, mcpPort, webEnabled, webPort, planContentRetentionDays, composeStatementTimeoutSeconds, queryStoreFetchTopN, queryTextTrigramIndexStoreValue, queryStoreTextTrigramIndexStoreValue, configVersion) = await ReadServiceRowAsync(connection, cancellationToken);
             var (alerts, analysis) = await ReadAlertSettingsAsync(connection, cancellationToken);
 
             /* #3712: analysis.uncorroboratedRoute is the FILE half of a two-source knob whose STORE half
@@ -2113,6 +2128,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                 PlanContentRetentionDays = planContentRetentionDays,
                 ComposeStatementTimeoutSeconds = composeStatementTimeoutSeconds,
                 QueryStoreFetchTopN = queryStoreFetchTopN,
+                QueryTextTrigramIndexStoreValue = queryTextTrigramIndexStoreValue,
+                QueryStoreTextTrigramIndexStoreValue = queryStoreTextTrigramIndexStoreValue,
                 MaxConcurrentSweeps = maxSweeps,
                 PlanXmlCompression = planXmlCompression,
                 McpEnabled = mcpEnabled,
@@ -2221,18 +2238,18 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal static string NormalizePlanXmlCompression(string? value) =>
         string.Equals(value?.Trim(), "none", StringComparison.OrdinalIgnoreCase) ? "none" : "gzip";
 
-    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, int ComposeStatementTimeoutSeconds, int QueryStoreFetchTopN, long ConfigVersion)>
+    private static async Task<(bool Paused, bool CapturePlans, bool QueryStoreBackfillEnabled, int QueryStoreTextBudgetMb, int MaxConcurrentSweeps, string PlanXmlCompression, bool McpEnabled, int McpPort, bool WebEnabled, int WebPort, int PlanContentRetentionDays, int ComposeStatementTimeoutSeconds, int QueryStoreFetchTopN, bool? QueryTextTrigramIndexStoreValue, bool? QueryStoreTextTrigramIndexStoreValue, long ConfigVersion)>
         ReadServiceRowAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var command = new NpgsqlCommand(
-            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, query_store_fetch_top_n, config_version FROM config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+            "SELECT paused, capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, plan_xml_compression, mcp_enabled, mcp_port, web_enabled, web_port, plan_content_retention_days, compose_statement_timeout_seconds, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled, config_version FROM config_service WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
         {
             /* Row missing (unseeded) — treat as defaults; capture and backfill stay on, the memory
                knobs reproduce the pre-V59 compile-time constants (64 MB budget, 4-wide sweep), and
-               plan content keeps the V75 default 21-day horizon. */
-            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 15, QueryStoreFetchSelection.DefaultTopN, 0);
+               plan content keeps the V75 default 21-day horizon. The trigram index options (V274) read NULL: darling.json governs. */
+            return (false, true, true, 64, 4, "gzip", false, 5152, false, 5153, 21, 15, QueryStoreFetchSelection.DefaultTopN, null, null, 0);
         }
 
         return (reader.GetBoolean(0), reader.GetBoolean(1), reader.GetBoolean(2),
@@ -2241,7 +2258,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
             reader.GetBoolean(6), reader.GetInt32(7),
             reader.GetBoolean(8), reader.GetInt32(9),
             ClampPlanContentRetentionDays(reader.GetInt32(10)),
-            ClampComposeStatementTimeoutSeconds(reader.GetInt32(11)), ClampQueryStoreFetchTopN(reader.GetInt32(12)), reader.GetInt64(13));
+            ClampComposeStatementTimeoutSeconds(reader.GetInt32(11)), ClampQueryStoreFetchTopN(reader.GetInt32(12)),
+            reader.IsDBNull(13) ? null : reader.GetBoolean(13), reader.IsDBNull(14) ? null : reader.GetBoolean(14), reader.GetInt64(15));
     }
 
     private static async Task<(AlertsConfig Alerts, AnalysisConfig Analysis)> ReadAlertSettingsAsync(NpgsqlConnection connection, CancellationToken ct)
@@ -2281,7 +2299,11 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
        blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
        daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
-       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours
+       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours,
+       tempdb_log_space_enabled, tempdb_log_space_threshold_percent,
+       tempdb_growth_fit_enabled,
+       instance_restarted_enabled, memory_dumps_enabled,
+       self_store_growth_enabled, self_store_growth_floor_gb, self_store_growth_object_floor_gb
 FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
         using var reader = await command.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -2468,6 +2490,18 @@ FROM config_alert_settings WHERE id = 1", connection) { CommandTimeout = Service
             BackupOverdueThresholdHours = reader.GetInt32(96),
             LogBackupOverdueThresholdMinutes = reader.GetInt32(97),
             CheckDbOverdueThresholdHours = reader.GetInt32(98),
+            /* #8881 (V269): the TempDB Log Space switch and bar at 99-100. */
+            TempDbLogSpaceEnabled = reader.GetBoolean(99),
+            TempDbLogSpaceThresholdPercent = reader.GetInt32(100),
+            /* #8882 (V270): the TempDB Growth Fit switch at 101 (same reachability rule as every appended knob: ApplyToConfig replaces config.Alerts wholesale, so a column selected but not read here would reset the switch to on at every worker start). */
+            TempDbGrowthFitEnabled = reader.GetBoolean(101),
+            /* #8884 (V271): the Instance Restarted and Memory Dumps switches at 102-103. */
+            InstanceRestartedEnabled = reader.GetBoolean(102),
+            MemoryDumpsEnabled = reader.GetBoolean(103),
+            /* #9000 (V276): the Store Growth switch and its two floors at 104-106. */
+            SelfStoreGrowthEnabled = reader.GetBoolean(104),
+            SelfStoreGrowthFloorGb = reader.GetInt32(105),
+            SelfStoreGrowthObjectFloorGb = reader.GetInt32(106),
         };
         var analysis = new AnalysisConfig
         {
@@ -3169,6 +3203,10 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         config.PlanContentRetentionDays = view.PlanContentRetentionDays;
         /* #6211: provider-read each cycle by the runner, so a store change reaches the next run without a restart. */
         config.QueryStoreFetchTopN = view.QueryStoreFetchTopN;
+        /* #8978: the store halves of the trigram index options, NULL when darling.json governs. The file values stay as loaded, so a column
+           set back to NULL resolves to the file again; the passes read the resolved values at their next pass. */
+        config.QueryTextTrigramIndexStoreValue = view.QueryTextTrigramIndexStoreValue;
+        config.QueryStoreTextTrigramIndexStoreValue = view.QueryStoreTextTrigramIndexStoreValue;
         /* #2357's effective timeout is NOT taken from here: startup role provisioning reads
            config_service.compose_statement_timeout_seconds straight out of the store and bakes it into
            ALTER ROLE viewer/mcp SET statement_timeout, so a change reaches the live roles on the next
@@ -3381,6 +3419,10 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
     /// </summary>
     public static IReadOnlyList<string> ResolveDatabaseScope(string collectorName, int serverId, IReadOnlyList<ScheduleOverride>? overrides)
     {
+        /* #8784: object_inventory and object_dependencies run under index_object_stats's scope, so the object list, the dependency list and the
+           usage counters cover the same databases. */
+        collectorName = PerformanceMonitor.Collectors.DatabaseScopeFilter.ScopeOwner(collectorName);
+
         ScheduleOverride? perServer = null;
         ScheduleOverride? fleet = null;
         if (overrides is not null)
@@ -3515,6 +3557,12 @@ public sealed class StoreConfigView
     /// 0 = every new plan, the behaviour before the setting.
     /// </summary>
     public int QueryStoreFetchTopN { get; init; } = QueryStoreFetchSelection.DefaultTopN;
+
+    /// <summary>#8978: <c>config_service.query_text_trigram_index_enabled</c> (V274). NULL means darling.json's <c>queryTextTrigramIndexEnabled</c> governs.</summary>
+    public bool? QueryTextTrigramIndexStoreValue { get; init; }
+
+    /// <summary>#8978: <c>config_service.query_store_text_trigram_index_enabled</c> (V274). NULL means darling.json's <c>queryStoreTextTrigramIndexEnabled</c> governs.</summary>
+    public bool? QueryStoreTextTrigramIndexStoreValue { get; init; }
 
     /// <summary>
     /// The per-session <c>statement_timeout</c> for the viewer and mcp roles, in seconds (#2357). Read

@@ -175,7 +175,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
             var rows = await CollectAsync(database, ct);
-            var baseTime = LiveClock.AnchoredEnd().AddHours(-2);
+            var baseTime = LiveClock.AnchoredEndNotAfterNow().AddHours(-2);
             await WriteCaptureAsync(connection, rows, baseTime, ct);
 
             /* Every plan of the query that ran after the force was first seen (base + 30 minutes), with the engine's own counts. */
@@ -216,7 +216,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,'Regular',$8,$9,$9,$10,$11,5000,7000,1,FALSE,0)",
 
     private static async Task<JsonElement> ForceAsync(Rig rig, CancellationToken ct)
     {
-        var asOf = LiveClock.AnchoredEnd().ToString("o", CultureInfo.InvariantCulture);
+        var asOf = LiveClock.AnchoredEndNotAfterNow().ToString("o", CultureInfo.InvariantCulture);
         var json = await DarlingMcpForcedPlanTools.GetForcedPlans(rig.Postgres, ServerName, 4, asOf, DatabaseFilter.One(rig.Setup.Database), ct);
         using var doc = JsonDocument.Parse(json);
         return doc.RootElement.GetProperty("forced_plans").EnumerateArray()

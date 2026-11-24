@@ -728,6 +728,848 @@ public sealed class ViewerSchemaVersionGateTests
         var allTrue = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
         Assert.Equal(ViewerDataService.RequiredStoreSchemaVersion, (int)map.Invoke(null, allTrue)!);
 
+        /* #9043: the V281 sentinel (the Query Store text liveness table) is the one before the last, so a store that has every sentinel but
+           that one and V282's is a V280 store and maps to 280, not 281. #8570: the V280 sentinel (the plan_correction recommendation index) is the one
+           before it, so a store without it (and without V281's) is a V279 store. The V279 sentinel (the aggregate compression order history) is the one before it,
+           so a store without it (and without V280's) is a V278 store. #8865: the V278 sentinel (the error-log facts on the database protection rows) is
+           the one before it, so a store without it (and without V279's) is a V277 store. #8967: the V277 sentinel (the progress table of the attention_events
+           copy) is the one before that, so a store without it (and without the two above) is a V276 store. #9000: the V276 sentinel (the Store Growth
+           settings on the alert settings) is the one before that, #8737: the V275 sentinel (the personal token table) the one before that,
+           and #8978: the V274 sentinel the one before that. */
+        /* #9110: the V282 sentinel (the job outcome daily rollup's tables) is the one before V283's, so a store that has every sentinel but
+           that one and the five above it is a V281 store and maps to 281, not 282. */
+        /* #9164: the V287 sentinel (the hourly host rollup's tables) is the one before the last, so a store that has every sentinel but that one and V288's is a
+           V286 store and maps to 286, not 287. #9147: the V286 sentinel (the query_stats per-collection summary table) is the one before it, so a
+           store without it (and without V287's) is a V285 store. #9148: the V285 sentinel (the Query Store clutter rollups' tables) is the one before it,
+           so a store without it (and without V286's) is a V284 store. #9149: the V284 sentinel (the covering hash index on the interval hourly plan
+           cache rollup) is the one before that, so a store without it (and without the two above) is a V283 store. #9111: the V283 sentinel (the Query
+           Store closed-day rollups' tables) is the one before that. Each sentinel below shifts one place from the end. */
+        /* #9151: the V288 sentinel (the covering index on the collector log's watermark index) is the one before the last, so a store that has every sentinel but
+           that one and V289's is a V287 store and maps to 287, not 288. Each sentinel below shifts one place from the end. */
+        /* #9173: the V289 sentinel (the hourly Query Store clutter rollups' tables) is the one before the last, so a store that has every sentinel but
+           that one and V290's is a V288 store and maps to 288, not 289. Each sentinel below shifts one place from the end. */
+        /* #9223: the V292 sentinel (the covering hash index on the corrected daily Query Store rollup) is the one before the last, so a store that has every
+           sentinel but that one and V293's, V294's and V295's is a V291 store and maps to 291, not 292. Each sentinel below shifts one place from the end. */
+        /* #9414: the V309 sentinel (the store checkpoint rows' table) is the last parameter, so a store that has every sentinel but that one is a V308 store
+           and maps to 308, not 309. Each sentinel below shifts one place from the end. */
+        var allButV309 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV309[^1] = false;
+        Assert.Equal("hasStoreCheckpoints", map.GetParameters()[^1].Name);
+        Assert.Equal(308, (int)map.Invoke(null, allButV309)!);
+
+        /* #9413: the V308 sentinel (the per-table activity tables) is the last parameter, so a store that has every sentinel but that one is a V307 store
+           and maps to 307, not 308. Each sentinel below shifts one place from the end. */
+        var allButV308 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV308[^1] = false;
+        allButV308[^2] = false;
+        Assert.Equal("hasStoreTableActivity", map.GetParameters()[^2].Name);
+        Assert.Equal(307, (int)map.Invoke(null, allButV308)!);
+
+        /* #9415: the V307 sentinel (the service start history's tables) is the last parameter, so a store that has every sentinel but that one is a V306 store
+           and maps to 306, not 307. Each sentinel below shifts one place from the end. */
+        var allButV307 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV307[^1] = false;
+        allButV307[^2] = false;
+        allButV307[^3] = false;
+        Assert.Equal("hasServiceStartHistory", map.GetParameters()[^3].Name);
+        Assert.Equal(306, (int)map.Invoke(null, allButV307)!);
+
+        /* #9411: the V306 sentinel (the background pass step history table) is the last parameter, so a store that has every sentinel but that one is a V305 store
+           and maps to 305, not 306. Each sentinel below shifts one place from the end. */
+        var allButV306 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV306[^1] = false;
+        allButV306[^2] = false;
+        allButV306[^3] = false;
+        allButV306[^4] = false;
+        Assert.Equal("hasStorePassSteps", map.GetParameters()[^4].Name);
+        Assert.Equal(305, (int)map.Invoke(null, allButV306)!);
+
+        /* #9419: the V305 sentinel (the WAL columns on the store metrics table) is the last parameter, so a store that has every sentinel but that one is a V304
+           store and maps to 304, not 305. Each sentinel below shifts one place from the end. */
+        var allButV305 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV305[^1] = false;
+        allButV305[^2] = false;
+        allButV305[^3] = false;
+        allButV305[^4] = false;
+        allButV305[^5] = false;
+        Assert.Equal("hasStoreWalFigures", map.GetParameters()[^5].Name);
+        Assert.Equal(304, (int)map.Invoke(null, allButV305)!);
+
+        /* #9410: the V304 sentinel (the statement history's write counters) is the last parameter, so a store that has every sentinel but that one is a V303 store
+           and maps to 303, not 304. Each sentinel below shifts one place from the end. */
+        var allButV304 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV304[^1] = false;
+        allButV304[^2] = false;
+        allButV304[^3] = false;
+        allButV304[^4] = false;
+        allButV304[^5] = false;
+        allButV304[^6] = false;
+        Assert.Equal("hasStatementHistoryWriteCounters", map.GetParameters()[^6].Name);
+        Assert.Equal(303, (int)map.Invoke(null, allButV304)!);
+
+        /* #9384: the V303 sentinel (the clutter-day stamp table) is the last parameter, so a store that has every sentinel but that one is a V302 store
+           and maps to 302, not 303. Each sentinel below shifts one place from the end. */
+        var allButV303 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV303[^1] = false;
+        allButV303[^2] = false;
+        allButV303[^3] = false;
+        allButV303[^4] = false;
+        allButV303[^5] = false;
+        allButV303[^6] = false;
+        allButV303[^7] = false;
+        Assert.Equal("hasClutterDayBuilt", map.GetParameters()[^7].Name);
+        Assert.Equal(302, (int)map.Invoke(null, allButV303)!);
+
+        /* #8570: the V302 sentinel (the partial index of failed Agent job outcomes on job_history) is the last parameter, so a store that has every sentinel
+           but that one is a V301 store and maps to 301, not 302. Each sentinel below shifts one place from the end. */
+        var allButV302 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV302[^1] = false;
+        allButV302[^2] = false;
+        allButV302[^3] = false;
+        allButV302[^4] = false;
+        allButV302[^5] = false;
+        allButV302[^6] = false;
+        allButV302[^7] = false;
+        allButV302[^8] = false;
+        Assert.Equal("hasJobHistoryFailedIndex", map.GetParameters()[^8].Name);
+        Assert.Equal(301, (int)map.Invoke(null, allButV302)!);
+
+        /* #9374: the V301 sentinel (the last measured relation sizes and their measured time) is the last parameter, so a store that has every sentinel but
+           that one is a V300 store and maps to 300, not 301. Each sentinel below shifts one place from the end. */
+        var allButV301 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV301[^1] = false;
+        allButV301[^2] = false;
+        allButV301[^3] = false;
+        allButV301[^4] = false;
+        allButV301[^5] = false;
+        allButV301[^6] = false;
+        allButV301[^7] = false;
+        allButV301[^8] = false;
+        allButV301[^9] = false;
+        Assert.Equal(300, (int)map.Invoke(null, allButV301)!);
+
+        /* #9357: the V300 sentinel (the procedure_stats hour ledger's tables) is the one before the last, so a store that has every sentinel but that one
+           and V301's is a V299 store and maps to 299, not 300. Each sentinel below shifts one place from the end. */
+        var allButV300 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV300[^1] = false;
+        allButV300[^2] = false;
+        allButV300[^3] = false;
+        allButV300[^4] = false;
+        allButV300[^5] = false;
+        allButV300[^6] = false;
+        allButV300[^7] = false;
+        allButV300[^8] = false;
+        allButV300[^9] = false;
+        allButV300[^10] = false;
+        Assert.Equal(299, (int)map.Invoke(null, allButV300)!);
+
+        /* #9349: the V299 sentinel (the object usage chain's tables) is the last parameter, so a store that has every sentinel but that one
+           is a V298 store and maps to 298, not 299. Each sentinel below shifts one place from the end. */
+        var allButV299 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV299[^1] = false;
+        allButV299[^2] = false;
+        allButV299[^3] = false;
+        allButV299[^4] = false;
+        allButV299[^5] = false;
+        allButV299[^6] = false;
+        allButV299[^7] = false;
+        allButV299[^8] = false;
+        allButV299[^9] = false;
+        allButV299[^10] = false;
+        allButV299[^11] = false;
+        Assert.Equal(298, (int)map.Invoke(null, allButV299)!);
+
+        /* #9304: the V298 sentinel (the payload dimension tables' stamp tables) is the last parameter, so a store that has every sentinel but that one
+           is a V297 store and maps to 297, not 298. Each sentinel below shifts one place from the end. */
+        var allButV298 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV298[^1] = false;
+        allButV298[^2] = false;
+        allButV298[^3] = false;
+        allButV298[^4] = false;
+        allButV298[^5] = false;
+        allButV298[^6] = false;
+        allButV298[^7] = false;
+        allButV298[^8] = false;
+        allButV298[^9] = false;
+        allButV298[^10] = false;
+        allButV298[^11] = false;
+        allButV298[^12] = false;
+        Assert.Equal(297, (int)map.Invoke(null, allButV298)!);
+
+        /* #8784 part 2: the V297 sentinel (the dependency list and the per-day referenced-names summary) is the last parameter, so a store that has
+           every sentinel but that one is a V296 store and maps to 296, not 297. Each sentinel below shifts one place from the end. */
+        var allButV297 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV297[^1] = false;
+        allButV297[^2] = false;
+        allButV297[^3] = false;
+        allButV297[^4] = false;
+        allButV297[^5] = false;
+        allButV297[^6] = false;
+        allButV297[^7] = false;
+        allButV297[^8] = false;
+        allButV297[^9] = false;
+        allButV297[^10] = false;
+        allButV297[^11] = false;
+        allButV297[^12] = false;
+        allButV297[^13] = false;
+        Assert.Equal(296, (int)map.Invoke(null, allButV297)!);
+
+        /* #9280: the V296 sentinel (the hourly Query Store summary's index) is the one before the last, so a store that has every sentinel but that
+           one and V297's is a V295 store and maps to 295, not 296. Each sentinel below shifts one place from the end. */
+        var allButV296 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV296[^1] = false;
+        allButV296[^2] = false;
+        allButV296[^3] = false;
+        allButV296[^4] = false;
+        allButV296[^5] = false;
+        allButV296[^6] = false;
+        allButV296[^7] = false;
+        allButV296[^8] = false;
+        allButV296[^9] = false;
+        allButV296[^10] = false;
+        allButV296[^11] = false;
+        allButV296[^12] = false;
+        allButV296[^13] = false;
+        allButV296[^14] = false;
+        Assert.Equal(295, (int)map.Invoke(null, allButV296)!);
+
+        /* #9225: the V295 sentinel (the plan regression block tables) is the one before the last, so a store that has every sentinel but that one and V296's
+           is a V294 store and maps to 294, not 295. Each sentinel below shifts one place from the end. */
+        var allButV295 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV295[^1] = false;
+        allButV295[^2] = false;
+        allButV295[^3] = false;
+        allButV295[^4] = false;
+        allButV295[^5] = false;
+        allButV295[^6] = false;
+        allButV295[^7] = false;
+        allButV295[^8] = false;
+        allButV295[^9] = false;
+        allButV295[^10] = false;
+        allButV295[^11] = false;
+        allButV295[^12] = false;
+        allButV295[^13] = false;
+        allButV295[^14] = false;
+        allButV295[^15] = false;
+        Assert.Equal(294, (int)map.Invoke(null, allButV295)!);
+
+        /* #9284: the V294 sentinel (the view-and-time index on the aggregate compression order history) is the one before V295's, so a store that has every
+           sentinel but that one and V295's and V296's is a V293 store and maps to 293, not 294. Each sentinel below shifts one place from the end. */
+        var allButV294 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV294[^1] = false;
+        allButV294[^2] = false;
+        allButV294[^3] = false;
+        allButV294[^4] = false;
+        allButV294[^5] = false;
+        allButV294[^6] = false;
+        allButV294[^7] = false;
+        allButV294[^8] = false;
+        allButV294[^9] = false;
+        allButV294[^10] = false;
+        allButV294[^11] = false;
+        allButV294[^12] = false;
+        allButV294[^13] = false;
+        allButV294[^14] = false;
+        allButV294[^15] = false;
+        allButV294[^16] = false;
+        Assert.Equal(293, (int)map.Invoke(null, allButV294)!);
+
+        /* #9277: the V293 sentinel (the partial counter-row index on attention_events) is the one before the last, so a store that has every
+           sentinel but that one is a V292 store and maps to 292, not 293. Each sentinel below shifts one place from the end. */
+        var allButV293 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV293[^1] = false;
+        allButV293[^2] = false;
+        allButV293[^3] = false;
+        allButV293[^4] = false;
+        allButV293[^5] = false;
+        allButV293[^6] = false;
+        allButV293[^7] = false;
+        allButV293[^8] = false;
+        allButV293[^9] = false;
+        allButV293[^10] = false;
+        allButV293[^11] = false;
+        allButV293[^12] = false;
+        allButV293[^13] = false;
+        allButV293[^14] = false;
+        allButV293[^15] = false;
+        allButV293[^16] = false;
+        allButV293[^17] = false;
+        Assert.Equal(292, (int)map.Invoke(null, allButV293)!);
+
+        var allButV292 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV292[^1] = false;
+        allButV292[^2] = false;
+        allButV292[^3] = false;
+        allButV292[^4] = false;
+        allButV292[^5] = false;
+        allButV292[^6] = false;
+        allButV292[^7] = false;
+        allButV292[^8] = false;
+        allButV292[^9] = false;
+        allButV292[^10] = false;
+        allButV292[^11] = false;
+        allButV292[^12] = false;
+        allButV292[^13] = false;
+        allButV292[^14] = false;
+        allButV292[^15] = false;
+        allButV292[^16] = false;
+        allButV292[^17] = false;
+        allButV292[^18] = false;
+        Assert.Equal(291, (int)map.Invoke(null, allButV292)!);
+
+        /* #9215: the V291 sentinel (the covering server index on the corrected hourly Query Store rollup) is the one before the last, so a store that has every
+           sentinel but that one is a V290 store and maps to 290, not 291. Each sentinel below shifts one place from the end. */
+        var allButV291 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV291[^1] = false;
+        allButV291[^2] = false;
+        allButV291[^3] = false;
+        allButV291[^4] = false;
+        allButV291[^5] = false;
+        allButV291[^6] = false;
+        allButV291[^7] = false;
+        allButV291[^8] = false;
+        allButV291[^9] = false;
+        allButV291[^10] = false;
+        allButV291[^11] = false;
+        allButV291[^12] = false;
+        allButV291[^13] = false;
+        allButV291[^14] = false;
+        allButV291[^15] = false;
+        allButV291[^16] = false;
+        allButV291[^17] = false;
+        allButV291[^18] = false;
+        allButV291[^19] = false;
+        Assert.Equal(290, (int)map.Invoke(null, allButV291)!);
+
+        /* #9193: the V290 sentinel (the query_stats summary floor table) is the third from the end, so a store that has every sentinel but that one
+           and V291's and V292's is a V289 store and maps to 289, not 290. Each sentinel below shifts one place from the end. */
+        var allButV290 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV290[^1] = false;
+        allButV290[^2] = false;
+        allButV290[^3] = false;
+        allButV290[^4] = false;
+        allButV290[^5] = false;
+        allButV290[^6] = false;
+        allButV290[^7] = false;
+        allButV290[^8] = false;
+        allButV290[^9] = false;
+        allButV290[^10] = false;
+        allButV290[^11] = false;
+        allButV290[^12] = false;
+        allButV290[^13] = false;
+        allButV290[^14] = false;
+        allButV290[^15] = false;
+        allButV290[^16] = false;
+        allButV290[^17] = false;
+        allButV290[^18] = false;
+        allButV290[^19] = false;
+        allButV290[^20] = false;
+        Assert.Equal(289, (int)map.Invoke(null, allButV290)!);
+
+        var allButV289 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV289[^1] = false;
+        allButV289[^2] = false;
+        allButV289[^3] = false;
+        allButV289[^4] = false;
+        allButV289[^5] = false;
+        allButV289[^6] = false;
+        allButV289[^7] = false;
+        allButV289[^8] = false;
+        allButV289[^9] = false;
+        allButV289[^10] = false;
+        allButV289[^11] = false;
+        allButV289[^12] = false;
+        allButV289[^13] = false;
+        allButV289[^14] = false;
+        allButV289[^15] = false;
+        allButV289[^16] = false;
+        allButV289[^17] = false;
+        allButV289[^18] = false;
+        allButV289[^19] = false;
+        allButV289[^20] = false;
+        allButV289[^21] = false;
+        Assert.Equal(288, (int)map.Invoke(null, allButV289)!);
+
+        var allButV288 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV288[^1] = false;
+        allButV288[^2] = false;
+        allButV288[^3] = false;
+        allButV288[^4] = false;
+        allButV288[^5] = false;
+        allButV288[^6] = false;
+        allButV288[^7] = false;
+        allButV288[^8] = false;
+        allButV288[^9] = false;
+        allButV288[^10] = false;
+        allButV288[^11] = false;
+        allButV288[^12] = false;
+        allButV288[^13] = false;
+        allButV288[^14] = false;
+        allButV288[^15] = false;
+        allButV288[^16] = false;
+        allButV288[^17] = false;
+        allButV288[^18] = false;
+        allButV288[^19] = false;
+        allButV288[^20] = false;
+        allButV288[^21] = false;
+        allButV288[^22] = false;
+        Assert.Equal(287, (int)map.Invoke(null, allButV288)!);
+
+        var allButV287 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV287[^1] = false;
+        allButV287[^2] = false;
+        allButV287[^3] = false;
+        allButV287[^4] = false;
+        allButV287[^5] = false;
+        allButV287[^6] = false;
+        allButV287[^7] = false;
+        allButV287[^8] = false;
+        allButV287[^9] = false;
+        allButV287[^10] = false;
+        allButV287[^11] = false;
+        allButV287[^12] = false;
+        allButV287[^13] = false;
+        allButV287[^14] = false;
+        allButV287[^15] = false;
+        allButV287[^16] = false;
+        allButV287[^17] = false;
+        allButV287[^18] = false;
+        allButV287[^19] = false;
+        allButV287[^20] = false;
+        allButV287[^21] = false;
+        allButV287[^22] = false;
+        allButV287[^23] = false;
+        Assert.Equal(286, (int)map.Invoke(null, allButV287)!);
+
+        var allButV286 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV286[^1] = false;
+        allButV286[^2] = false;
+        allButV286[^3] = false;
+        allButV286[^4] = false;
+        allButV286[^5] = false;
+        allButV286[^6] = false;
+        allButV286[^7] = false;
+        allButV286[^8] = false;
+        allButV286[^9] = false;
+        allButV286[^10] = false;
+        allButV286[^11] = false;
+        allButV286[^12] = false;
+        allButV286[^13] = false;
+        allButV286[^14] = false;
+        allButV286[^15] = false;
+        allButV286[^16] = false;
+        allButV286[^17] = false;
+        allButV286[^18] = false;
+        allButV286[^19] = false;
+        allButV286[^20] = false;
+        allButV286[^21] = false;
+        allButV286[^22] = false;
+        allButV286[^23] = false;
+        allButV286[^24] = false;
+        Assert.Equal(285, (int)map.Invoke(null, allButV286)!);
+
+        var allButV285 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV285[^1] = false;
+        allButV285[^2] = false;
+        allButV285[^3] = false;
+        allButV285[^4] = false;
+        allButV285[^5] = false;
+        allButV285[^6] = false;
+        allButV285[^7] = false;
+        allButV285[^8] = false;
+        allButV285[^9] = false;
+        allButV285[^10] = false;
+        allButV285[^11] = false;
+        allButV285[^12] = false;
+        allButV285[^13] = false;
+        allButV285[^14] = false;
+        allButV285[^15] = false;
+        allButV285[^16] = false;
+        allButV285[^17] = false;
+        allButV285[^18] = false;
+        allButV285[^19] = false;
+        allButV285[^20] = false;
+        allButV285[^21] = false;
+        allButV285[^22] = false;
+        allButV285[^23] = false;
+        allButV285[^24] = false;
+        allButV285[^25] = false;
+        Assert.Equal(284, (int)map.Invoke(null, allButV285)!);
+
+        var allButV284 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV284[^1] = false;
+        allButV284[^2] = false;
+        allButV284[^3] = false;
+        allButV284[^4] = false;
+        allButV284[^5] = false;
+        allButV284[^6] = false;
+        allButV284[^7] = false;
+        allButV284[^8] = false;
+        allButV284[^9] = false;
+        allButV284[^10] = false;
+        allButV284[^11] = false;
+        allButV284[^12] = false;
+        allButV284[^13] = false;
+        allButV284[^14] = false;
+        allButV284[^15] = false;
+        allButV284[^16] = false;
+        allButV284[^17] = false;
+        allButV284[^18] = false;
+        allButV284[^19] = false;
+        allButV284[^20] = false;
+        allButV284[^21] = false;
+        allButV284[^22] = false;
+        allButV284[^23] = false;
+        allButV284[^24] = false;
+        allButV284[^25] = false;
+        allButV284[^26] = false;
+        Assert.Equal(283, (int)map.Invoke(null, allButV284)!);
+
+        var allButV283 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV283[^1] = false;
+        allButV283[^2] = false;
+        allButV283[^3] = false;
+        allButV283[^4] = false;
+        allButV283[^5] = false;
+        allButV283[^6] = false;
+        allButV283[^7] = false;
+        allButV283[^8] = false;
+        allButV283[^9] = false;
+        allButV283[^10] = false;
+        allButV283[^11] = false;
+        allButV283[^12] = false;
+        allButV283[^13] = false;
+        allButV283[^14] = false;
+        allButV283[^15] = false;
+        allButV283[^16] = false;
+        allButV283[^17] = false;
+        allButV283[^18] = false;
+        allButV283[^19] = false;
+        allButV283[^20] = false;
+        allButV283[^21] = false;
+        allButV283[^22] = false;
+        allButV283[^23] = false;
+        allButV283[^24] = false;
+        allButV283[^25] = false;
+        allButV283[^26] = false;
+        allButV283[^27] = false;
+        Assert.Equal(282, (int)map.Invoke(null, allButV283)!);
+
+        var allButV282 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV282[^1] = false;
+        allButV282[^2] = false;
+        allButV282[^3] = false;
+        allButV282[^4] = false;
+        allButV282[^5] = false;
+        allButV282[^6] = false;
+        allButV282[^7] = false;
+        allButV282[^8] = false;
+        allButV282[^9] = false;
+        allButV282[^10] = false;
+        allButV282[^11] = false;
+        allButV282[^12] = false;
+        allButV282[^13] = false;
+        allButV282[^14] = false;
+        allButV282[^15] = false;
+        allButV282[^16] = false;
+        allButV282[^17] = false;
+        allButV282[^18] = false;
+        allButV282[^19] = false;
+        allButV282[^20] = false;
+        allButV282[^21] = false;
+        allButV282[^22] = false;
+        allButV282[^23] = false;
+        allButV282[^24] = false;
+        allButV282[^25] = false;
+        allButV282[^26] = false;
+        allButV282[^27] = false;
+        allButV282[^28] = false;
+        Assert.Equal(281, (int)map.Invoke(null, allButV282)!);
+
+        var allButV281 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV281[^1] = false;
+        allButV281[^2] = false;
+        allButV281[^3] = false;
+        allButV281[^4] = false;
+        allButV281[^5] = false;
+        allButV281[^6] = false;
+        allButV281[^7] = false;
+        allButV281[^8] = false;
+        allButV281[^9] = false;
+        allButV281[^10] = false;
+        allButV281[^11] = false;
+        allButV281[^12] = false;
+        allButV281[^13] = false;
+        allButV281[^14] = false;
+        allButV281[^15] = false;
+        allButV281[^16] = false;
+        allButV281[^17] = false;
+        allButV281[^18] = false;
+        allButV281[^19] = false;
+        allButV281[^20] = false;
+        allButV281[^21] = false;
+        allButV281[^22] = false;
+        allButV281[^23] = false;
+        allButV281[^24] = false;
+        allButV281[^25] = false;
+        allButV281[^26] = false;
+        allButV281[^27] = false;
+        allButV281[^28] = false;
+        allButV281[^29] = false;
+        Assert.Equal(280, (int)map.Invoke(null, allButV281)!);
+
+        var allButV280 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV280[^1] = false;
+        allButV280[^2] = false;
+        allButV280[^3] = false;
+        allButV280[^4] = false;
+        allButV280[^5] = false;
+        allButV280[^6] = false;
+        allButV280[^7] = false;
+        allButV280[^8] = false;
+        allButV280[^9] = false;
+        allButV280[^10] = false;
+        allButV280[^11] = false;
+        allButV280[^12] = false;
+        allButV280[^13] = false;
+        allButV280[^14] = false;
+        allButV280[^15] = false;
+        allButV280[^16] = false;
+        allButV280[^17] = false;
+        allButV280[^18] = false;
+        allButV280[^19] = false;
+        allButV280[^20] = false;
+        allButV280[^21] = false;
+        allButV280[^22] = false;
+        allButV280[^23] = false;
+        allButV280[^24] = false;
+        allButV280[^25] = false;
+        allButV280[^26] = false;
+        allButV280[^27] = false;
+        allButV280[^28] = false;
+        allButV280[^29] = false;
+        allButV280[^30] = false;
+        Assert.Equal(279, (int)map.Invoke(null, allButV280)!);
+
+        var allButV279 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV279[^1] = false;
+        allButV279[^2] = false;
+        allButV279[^3] = false;
+        allButV279[^4] = false;
+        allButV279[^5] = false;
+        allButV279[^6] = false;
+        allButV279[^7] = false;
+        allButV279[^8] = false;
+        allButV279[^9] = false;
+        allButV279[^10] = false;
+        allButV279[^11] = false;
+        allButV279[^12] = false;
+        allButV279[^13] = false;
+        allButV279[^14] = false;
+        allButV279[^15] = false;
+        allButV279[^16] = false;
+        allButV279[^17] = false;
+        allButV279[^18] = false;
+        allButV279[^19] = false;
+        allButV279[^20] = false;
+        allButV279[^21] = false;
+        allButV279[^22] = false;
+        allButV279[^23] = false;
+        allButV279[^24] = false;
+        allButV279[^25] = false;
+        allButV279[^26] = false;
+        allButV279[^27] = false;
+        allButV279[^28] = false;
+        allButV279[^29] = false;
+        allButV279[^30] = false;
+        allButV279[^31] = false;
+        Assert.Equal(278, (int)map.Invoke(null, allButV279)!);
+
+        var allButV278 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV278[^1] = false;
+        allButV278[^2] = false;
+        allButV278[^3] = false;
+        allButV278[^4] = false;
+        allButV278[^5] = false;
+        allButV278[^6] = false;
+        allButV278[^7] = false;
+        allButV278[^8] = false;
+        allButV278[^9] = false;
+        allButV278[^10] = false;
+        allButV278[^11] = false;
+        allButV278[^12] = false;
+        allButV278[^13] = false;
+        allButV278[^14] = false;
+        allButV278[^15] = false;
+        allButV278[^16] = false;
+        allButV278[^17] = false;
+        allButV278[^18] = false;
+        allButV278[^19] = false;
+        allButV278[^20] = false;
+        allButV278[^21] = false;
+        allButV278[^22] = false;
+        allButV278[^23] = false;
+        allButV278[^24] = false;
+        allButV278[^25] = false;
+        allButV278[^26] = false;
+        allButV278[^27] = false;
+        allButV278[^28] = false;
+        allButV278[^29] = false;
+        allButV278[^30] = false;
+        allButV278[^31] = false;
+        allButV278[^32] = false;
+        Assert.Equal(277, (int)map.Invoke(null, allButV278)!);
+
+        var allButV277 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV277[^1] = false;
+        allButV277[^2] = false;
+        allButV277[^3] = false;
+        allButV277[^4] = false;
+        allButV277[^5] = false;
+        allButV277[^6] = false;
+        allButV277[^7] = false;
+        allButV277[^8] = false;
+        allButV277[^9] = false;
+        allButV277[^10] = false;
+        allButV277[^11] = false;
+        allButV277[^12] = false;
+        allButV277[^13] = false;
+        allButV277[^14] = false;
+        allButV277[^15] = false;
+        allButV277[^16] = false;
+        allButV277[^17] = false;
+        allButV277[^18] = false;
+        allButV277[^19] = false;
+        allButV277[^20] = false;
+        allButV277[^21] = false;
+        allButV277[^22] = false;
+        allButV277[^23] = false;
+        allButV277[^24] = false;
+        allButV277[^25] = false;
+        allButV277[^26] = false;
+        allButV277[^27] = false;
+        allButV277[^28] = false;
+        allButV277[^29] = false;
+        allButV277[^30] = false;
+        allButV277[^31] = false;
+        allButV277[^32] = false;
+        allButV277[^33] = false;
+        Assert.Equal(276, (int)map.Invoke(null, allButV277)!);
+
+        var allButV276 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV276[^1] = false;
+        allButV276[^2] = false;
+        allButV276[^3] = false;
+        allButV276[^4] = false;
+        allButV276[^5] = false;
+        allButV276[^6] = false;
+        allButV276[^7] = false;
+        allButV276[^8] = false;
+        allButV276[^9] = false;
+        allButV276[^10] = false;
+        allButV276[^11] = false;
+        allButV276[^12] = false;
+        allButV276[^13] = false;
+        allButV276[^14] = false;
+        allButV276[^15] = false;
+        allButV276[^16] = false;
+        allButV276[^17] = false;
+        allButV276[^18] = false;
+        allButV276[^19] = false;
+        allButV276[^20] = false;
+        allButV276[^21] = false;
+        allButV276[^22] = false;
+        allButV276[^23] = false;
+        allButV276[^24] = false;
+        allButV276[^25] = false;
+        allButV276[^26] = false;
+        allButV276[^27] = false;
+        allButV276[^28] = false;
+        allButV276[^29] = false;
+        allButV276[^30] = false;
+        allButV276[^31] = false;
+        allButV276[^32] = false;
+        allButV276[^33] = false;
+        allButV276[^34] = false;
+        Assert.Equal(275, (int)map.Invoke(null, allButV276)!);
+
+        var allButV275 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV275[^1] = false;
+        allButV275[^2] = false;
+        allButV275[^3] = false;
+        allButV275[^4] = false;
+        allButV275[^5] = false;
+        allButV275[^6] = false;
+        allButV275[^7] = false;
+        allButV275[^8] = false;
+        allButV275[^9] = false;
+        allButV275[^10] = false;
+        allButV275[^11] = false;
+        allButV275[^12] = false;
+        allButV275[^13] = false;
+        allButV275[^14] = false;
+        allButV275[^15] = false;
+        allButV275[^16] = false;
+        allButV275[^17] = false;
+        allButV275[^18] = false;
+        allButV275[^19] = false;
+        allButV275[^20] = false;
+        allButV275[^21] = false;
+        allButV275[^22] = false;
+        allButV275[^23] = false;
+        allButV275[^24] = false;
+        allButV275[^25] = false;
+        allButV275[^26] = false;
+        allButV275[^27] = false;
+        allButV275[^28] = false;
+        allButV275[^29] = false;
+        allButV275[^30] = false;
+        allButV275[^31] = false;
+        allButV275[^32] = false;
+        allButV275[^33] = false;
+        allButV275[^34] = false;
+        allButV275[^35] = false;
+        Assert.Equal(274, (int)map.Invoke(null, allButV275)!);
+
+        var allButV274 = Enumerable.Repeat((object)true, map.GetParameters().Length).ToArray();
+        allButV274[^1] = false;
+        allButV274[^2] = false;
+        allButV274[^3] = false;
+        allButV274[^4] = false;
+        allButV274[^5] = false;
+        allButV274[^6] = false;
+        allButV274[^7] = false;
+        allButV274[^8] = false;
+        allButV274[^9] = false;
+        allButV274[^10] = false;
+        allButV274[^11] = false;
+        allButV274[^12] = false;
+        allButV274[^13] = false;
+        allButV274[^14] = false;
+        allButV274[^15] = false;
+        allButV274[^16] = false;
+        allButV274[^17] = false;
+        allButV274[^18] = false;
+        allButV274[^19] = false;
+        allButV274[^20] = false;
+        allButV274[^21] = false;
+        allButV274[^22] = false;
+        allButV274[^23] = false;
+        allButV274[^24] = false;
+        allButV274[^25] = false;
+        allButV274[^26] = false;
+        allButV274[^27] = false;
+        allButV274[^28] = false;
+        allButV274[^29] = false;
+        allButV274[^30] = false;
+        allButV274[^31] = false;
+        allButV274[^32] = false;
+        allButV274[^33] = false;
+        allButV274[^34] = false;
+        allButV274[^35] = false;
+        allButV274[^36] = false;
+        Assert.Equal(273, (int)map.Invoke(null, allButV274)!);
+
         /* Probe row width vs mapper arity is not checked HERE, and the reason it was left to the live probes
            was that one ordinal is legitimately a compound (two EXISTS OR-ed), so counting the token EXISTS
            lies — it reads one high. That is true of token counting and not of the seam: counting top-level

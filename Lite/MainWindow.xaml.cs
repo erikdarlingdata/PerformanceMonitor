@@ -311,6 +311,9 @@ public partial class MainWindow : Window
            instance. Wired once here, beside the managers it answers from, and read by each instance where it is used. */
         LocalDataService.DefaultCollectorFrequencyMinutes = (serverId, collector) =>
             _scheduleManager.GetFrequencyForStorageServer(_serverManager, serverId, collector);
+        /* #9139: a collector that is switched off gets no newer reading, so the Overview CPU bound reads it. */
+        LocalDataService.DefaultCollectorEnabled = (serverId, collector) =>
+            _scheduleManager.IsCollectorEnabledForStorageServer(_serverManager, serverId, collector);
 
         // Status bar update timer
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
@@ -400,10 +403,49 @@ public partial class MainWindow : Window
         if (_hostRecordProblemShown)
             return;
         _hostRecordProblemShown = true;
+        if (HeadlessUi.Skips("the server-settings-not-saved dialog"))
+        {
+            AppLogger.Warn("MainWindow", message);
+            return;
+        }
+
         MessageBox.Show(this, message, "Server settings not saved", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
-    private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    private async void MainWindow_Loaded(object sender, RoutedEventArgs e) => await InitializeServicesAsync();
+
+    /// <summary>
+    /// #9142: starts the store, collection, alert engine and MCP server of a headless instance. A window that is never shown
+    /// never raises Loaded, so <see cref="App"/> calls this in its place. It is the same method Loaded runs.
+    /// </summary>
+    internal Task StartHeadlessAsync() => InitializeServicesAsync();
+
+    /// <summary>
+    /// Opens the store. A start with a window tries once and shows the error. A headless start has no one to read it and Task
+    /// Scheduler does not restart a task that exits with code 3, so it retries for 30 minutes first (#9184). Only this step is
+    /// retried: <see cref="DuckDbInitializer.InitializeAsync"/> is written to run again on the same instance, while the steps
+    /// after it start collectors and subscribe handlers that a second pass would start twice. The exit channel is open only while the
+    /// start waits, so <c>--stop</c> ends the retry. It is closed again before each attempt, because an attempt opens the store
+    /// and can migrate or rebuild it, and a newer build that finds the channel open kills this one after 20 seconds. So a
+    /// <c>--stop</c> sent during an attempt finds nobody listening and exits 1, as it does during any start's first attempt.
+    /// A start that is only waiting holds the single-instance lock, so a second copy is refused as it is during any other start.
+    /// </summary>
+    private Task InitializeStoreAsync()
+    {
+        if (!App.IsHeadless)
+            return _databaseInitializer.InitializeAsync();
+
+        var app = (App)Application.Current;
+        return HeadlessStartRetry.RunAsync(
+            () => _databaseInitializer.InitializeAsync(),
+            HeadlessStartRetry.Timing.ForProduction(),
+            message => AppLogger.Warn("Headless", message),
+            app.EnableUpgradeHandoff,
+            app.DisableUpgradeHandoff,
+            app.StopRequested);
+    }
+
+    private async Task InitializeServicesAsync()
     {
         var rebuildNoticeQueued = false;
         try
@@ -411,16 +453,30 @@ public partial class MainWindow : Window
             StatusText.Text = "Initializing database...";
 
             // Initialize the DuckDB database
-            await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => _databaseInitializer.InitializeAsync(), _routeLoader);
+            await NotificationRouteCache.InitializeStoreThenConfigureAsync(() => InitializeStoreAsync(), _routeLoader);
 
             /* #7812: a rebuild that left the new database without the old data says where the old file went. */
             if (_databaseInitializer.RebuildOutcome is { } rebuild)
             {
                 rebuildNoticeQueued = true;
                 var notice = rebuild.Describe();
-                _ = Dispatcher.BeginInvoke(() =>
-                    MessageBox.Show(this, notice, DatabaseRebuildOutcome.NoticeTitle, MessageBoxButton.OK, MessageBoxImage.Warning));
+                if (HeadlessUi.Skips("the notice that the store was rebuilt"))
+                {
+                    AppLogger.Warn("MainWindow", notice);
+                }
+                else
+                {
+                    _ = Dispatcher.BeginInvoke(() =>
+                        MessageBox.Show(this, notice, DatabaseRebuildOutcome.NoticeTitle, MessageBoxButton.OK, MessageBoxImage.Warning));
+                }
             }
+
+            /* #9425: one build history row for this start, now that the store is open and before collection starts. It never throws,
+               and a write that fails only logs at Debug. */
+            var (build, fullVersion) = BuildHistory.CurrentBuild();
+            await BuildHistory.RecordStartAsync(
+                _databaseInitializer, new BuildHistory(BuildHistory.PathFor(App.DatabasePath)),
+                new StoreHousekeepingHistory(StoreHousekeepingHistory.PathFor(App.DatabasePath)), build, fullVersion, DateTime.UtcNow);
 
             /* The first run of the per-user record of confirmed server settings, before anything below connects: a user who
                used an earlier Lite gets bound the servers whose current host has rows in this store; a new user, and a
@@ -454,8 +510,16 @@ public partial class MainWindow : Window
                    first ask, so parallel first sweeps share one resolve. */
                 InstallIdStore.ForCurrentUser(App.DataDirectory));
 
-            var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>());
-            var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>());
+            /* #8788: the housekeeping history is a file beside the store, so the size reset that replaces the store leaves it alone. */
+            var housekeepingHistory = new StoreHousekeepingHistory(StoreHousekeepingHistory.PathFor(App.DatabasePath));
+            var archiveService = new ArchiveService(_databaseInitializer, App.ArchiveDirectory, new AppLoggerAdapter<ArchiveService>())
+            {
+                History = housekeepingHistory
+            };
+            var retentionService = new RetentionService(App.ArchiveDirectory, new AppLoggerAdapter<RetentionService>())
+            {
+                History = housekeepingHistory
+            };
 
             /* #1912 one-time Query Store repair: collapse the split slices stored by pre-#1907 builds, in the
                hot table and in the parquet archive. Runs ONCE per store, records a marker, and never throws —
@@ -532,12 +596,25 @@ public partial class MainWindow : Window
             _investigationSweepLoop = Task.Run(() => investigationSweep.RunAsync(_backgroundCts.Token));
 
             // Initialize system tray
-            _trayService = new SystemTrayService(this, RestoreFromTray, _backgroundService);
-            _trayService.Initialize();
+            /* #9142: no tray icon for a headless start, and none when the icon cannot be created (no taskbar). Either way the
+               rest of this start goes on: collection, the alert engine and every non-tray channel do not need it. */
+            _trayService = TrayIconStarter.TryStart(
+                App.StartupPlan,
+                () =>
+                {
+                    var tray = new SystemTrayService(this, RestoreFromTray, _backgroundService);
+                    tray.Initialize();
+                    return tray;
+                },
+                message => AppLogger.Info("Tray", message),
+                message => AppLogger.Warn("Tray", message));
 
             /* #1050: restore the window from the tray on resume/unlock if a sleep- or lock-driven
                minimize hid it. ??= so a repeated Loaded can't double-subscribe (static SystemEvents). */
-            _resumeGuard ??= new WindowResumeGuard(this, RestoreFromTray);
+            if (!App.IsHeadless)
+            {
+                _resumeGuard ??= new WindowResumeGuard(this, RestoreFromTray);
+            }
 
             // Initialize data service for overview
             _dataService = new LocalDataService(_databaseInitializer);
@@ -667,11 +744,23 @@ public partial class MainWindow : Window
 
             _ = CheckForUpdatesOnStartupAsync();
         }
+        catch (OperationCanceledException) when (App.IsHeadless && (Application.Current as App)?.StopRequested.IsCancellationRequested == true)
+        {
+            /* #9184: --stop ended a wait to retry the store open. The shutdown it asked for is already under way. */
+            AppLogger.Info("MainWindow", "The headless start was stopped while it waited to retry.");
+        }
         catch (Exception ex)
         {
             AppLogger.Error("MainWindow", "Failed to initialize the application", ex);
             AppLogger.Flush();
             StatusText.Text = $"Error: {ex.Message}";
+            /* #9142: a headless start has no one to read the dialog and no listener, so it ends with a nonzero exit code (see
+               LiteStartupPlan.EndsStartAfterInitFailure). A start with a window falls through to the dialog. */
+            if ((Application.Current as App)?.EndStartAfterInitFailure() == true)
+            {
+                return;
+            }
+
             /* #7812: a rebuild that moved the old file aside before the start failed says where it went, in this one message
                (unless the notice for it is already on its way). */
             MessageBox.Show(
@@ -763,6 +852,13 @@ public partial class MainWindow : Window
     /// </summary>
     private void AnnounceUpdate(string? version)
     {
+        /* #9142: a headless instance cannot show the balloon, and nobody could click About. The log carries the news. */
+        if (HeadlessUi.Skips("the update balloon"))
+        {
+            AppLogger.Info("Update", $"Performance Monitor Lite {version} is available. This instance runs headless: stop it with --stop, update, and start it again.");
+            return;
+        }
+
         _trayService?.ShowNotification(
             "Update Available",
             $"Performance Monitor Lite {version} is available. Click About in the left sidebar to install it. "
@@ -782,6 +878,26 @@ public partial class MainWindow : Window
            completion, then Close() again; the second pass returns early and closes for real. */
         if (_closingCleanupDone) return;
         e.Cancel = true;
+        if (_closingCleanupStarted) return;
+
+        await RunShutdownCleanupAsync();
+
+        /* Re-close on the next dispatcher cycle, not synchronously here. If the awaits above all
+           completed without ever suspending (MCP off, collector already idle), we're still inside
+           WPF's Closing event with Window._isClosing == true, and a synchronous Close() re-enters
+           InternalClose → VerifyNotClosing() throws "Cannot ... call Close ... while a Window is
+           closing" (#1050 follow-up). BeginInvoke lets this Closing event fully unwind — clearing
+           _isClosing — before the real close runs; the second pass returns early on
+           _closingCleanupDone and the window closes for real. */
+        _ = Dispatcher.BeginInvoke(new Action(Close));
+    }
+
+    /// <summary>
+    /// The shutdown work: stop the tray, collection, MCP and timers, then close the store. Runs once. The window's Closing
+    /// handler runs it, and a headless instance (no window to close) runs it directly when it is asked to stop (#9142).
+    /// </summary>
+    internal async Task RunShutdownCleanupAsync()
+    {
         if (_closingCleanupStarted) return;
         _closingCleanupStarted = true;
 
@@ -842,15 +958,6 @@ public partial class MainWindow : Window
         _databaseInitializer.Dispose();
 
         _closingCleanupDone = true;
-
-        /* Re-close on the next dispatcher cycle, not synchronously here. If the awaits above all
-           completed without ever suspending (MCP off, collector already idle), we're still inside
-           WPF's Closing event with Window._isClosing == true, and a synchronous Close() re-enters
-           InternalClose → VerifyNotClosing() throws "Cannot ... call Close ... while a Window is
-           closing" (#1050 follow-up). BeginInvoke lets this Closing event fully unwind — clearing
-           _isClosing — before the real close runs; the second pass returns early on
-           _closingCleanupDone and the window closes for real. */
-        _ = Dispatcher.BeginInvoke(new Action(Close));
     }
 
     private void ServerTabControl_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -975,8 +1082,9 @@ public partial class MainWindow : Window
         var servers = _serverManager.GetAllServers();
         foreach (var server in servers)
         {
+            /* #9084: a server whose collection is off has no live status here: the sidebar row says Disabled. */
             var connectionStatus = _serverManager.GetConnectionStatus(server.Id);
-            server.IsOnline = connectionStatus.IsOnline;
+            server.IsOnline = server.IsEnabled ? connectionStatus.IsOnline : null;
             server.UnreachableReason = connectionStatus.UnreachableReason;
             server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
             server.HasCollectorErrors = _collectorService != null
@@ -1210,6 +1318,7 @@ public partial class MainWindow : Window
                         summary.ServerName = server.ServerName;
                         summary.Clock = await ReadOverviewClockAsync(serverId, refreshClocks);
                         summary.IsSilenced = _alertStateService.IsServerSilenced(server.Id);
+                        summary.IsEnabled = server.IsEnabled;
                         var connStatus = _serverManager.GetConnectionStatus(server.Id);
                         summary.IsOnline = connStatus.IsOnline;
                         summary.UnreachableReason = connStatus.UnreachableReason;
@@ -1236,7 +1345,8 @@ public partial class MainWindow : Window
 
             /* Alerts run over the WHOLE fleet, never the filtered view — a search box narrowing what's on
                screen must not silence alerts for the servers it hides. */
-            foreach (var summary in summaries)
+            /* #9084: a server whose collection is off is not swept: no alert is raised for it and no live msdb read goes to it. */
+            foreach (var summary in DisabledServerGate.SummariesToSweep(summaries, servers))
             {
                 CheckPerformanceAlerts(summary);
             }
@@ -1568,7 +1678,8 @@ public partial class MainWindow : Window
         var utcOffset = status.UtcOffsetMinutes ?? 0;
         var serverTab = new ServerTab(server, _databaseInitializer, _serverManager.CredentialResolver, utcOffset, status.HasMsdbAccess, status.SqlEngineEdition, awsRdsKind: CollectorEngineCapability.AwsRdsKindOf(status.IsAwsRds, status.IsAwsRdsWebOrExpress),
             isLongQueryTraceEnabled: () => _scheduleManager.GetScheduleForServer(server.Id, "long_query_completions")?.Enabled ?? false,
-            queryStoreHealthSchedule: () => _scheduleManager.GetScheduleForServer(server.Id, "query_store_health"));
+            queryStoreHealthSchedule: () => _scheduleManager.GetScheduleForServer(server.Id, "query_store_health"),
+            sqlMajorVersion: status.SqlMajorVersion);
         var tabHeader = CreateTabHeader(server);
         var tabItem = new TabItem
         {
@@ -2183,6 +2294,12 @@ public partial class MainWindow : Window
         window.ShowDialog();
     }
 
+    private void StoreHealthButton_Click(object sender, RoutedEventArgs e)
+    {
+        var reader = new StoreHealthReader(_databaseInitializer, new StoreHousekeepingHistory(StoreHousekeepingHistory.PathFor(App.DatabasePath)));
+        new Windows.StoreHealthWindow(reader) { Owner = this }.Show();
+    }
+
     private void ViewLogButton_Click(object sender, RoutedEventArgs e)
     {
         var logFile = AppLogger.GetCurrentLogFile();
@@ -2733,10 +2850,11 @@ public partial class MainWindow : Window
             foreach (var server in servers)
             {
                 var status = _serverManager.GetConnectionStatus(server.Id);
-                server.IsOnline = status?.IsOnline;
+                /* #9084: no live status for a server whose collection is off, so no edge from it: no unreachable or restored notice. */
+                server.IsOnline = server.IsEnabled ? status?.IsOnline : null;
                 server.UnreachableReason = status?.UnreachableReason;
                 server.HostChangeNotice = _serverManager.HostChange(server)?.Describe(server);
-                if (status?.IsOnline == null) continue;
+                if (!server.IsEnabled || status?.IsOnline == null) continue;
 
                 bool isOnline = status.IsOnline == true;
                 /* #5642: an offline reading ends the connection, so the next online one is a new "watching since". */

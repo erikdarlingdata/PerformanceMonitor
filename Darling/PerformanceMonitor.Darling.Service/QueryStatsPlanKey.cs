@@ -99,3 +99,54 @@ internal readonly record struct QueryStatsPlanKey(
         + StartOffset.ToString(CultureInfo.InvariantCulture) + ","
         + EndOffset.ToString(CultureInfo.InvariantCulture) + "]";
 }
+
+/// <summary>
+/// #8994: a statement plan's shape, the key the deferred fetch stores one plan per. Ad hoc statements that differ only in
+/// their literals each compile their own <c>plan_handle</c>, so each is a new <see cref="QueryStatsPlanKey"/>, and each
+/// plan's XML carries its own literals (<c>StatementText</c>, the compiled values), so each would store a new digest. They
+/// share <c>query_hash</c> and <c>query_plan_hash</c>: the same statement with the same plan operators. A row whose shape
+/// the host already committed links to that stored plan instead of rendering and storing another copy. The database is in
+/// the key because one statement run in two databases can share both hashes while its plan names the other database's
+/// objects.
+/// </summary>
+internal readonly record struct QueryStatsPlanShapeKey(
+    int ServerId,
+    string? DatabaseName,
+    string QueryHash,
+    string QueryPlanHash)
+{
+    /// <summary>
+    /// Null when the row has no usable shape: a hash that is missing, or all zeros (the engine reports a zero
+    /// <c>query_plan_hash</c> for statements it gives no plan fingerprint), which would put unrelated plans under one key.
+    /// </summary>
+    public static QueryStatsPlanShapeKey? TryCreate(int serverId, QueryStatsCollector.Row row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+
+        if (!IsUsableHash(row.QueryHash) || !IsUsableHash(row.QueryPlanHash))
+        {
+            return null;
+        }
+
+        return new QueryStatsPlanShapeKey(
+            serverId, row.DatabaseName, row.QueryHash!.ToUpperInvariant(), row.QueryPlanHash!.ToUpperInvariant());
+    }
+
+    private static bool IsUsableHash(string? hash)
+    {
+        if (string.IsNullOrEmpty(hash) || hash.Length < 3 || !hash.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        for (var i = 2; i < hash.Length; i++)
+        {
+            if (hash[i] != '0')
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}

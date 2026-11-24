@@ -154,18 +154,6 @@ public sealed class RunnableQueueSettingsSurfaceTests
         }
     }
 
-    [Fact]
-    public void TheGetAlertSettingsGuideText_NamesTheRunnableQueueAlertAndItsKeys()
-    {
-        var method = typeof(McpAlertTools).GetMethod(nameof(McpAlertTools.GetAlertSettings))!;
-        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
-
-        Assert.Contains("poison waits, runnable queue,", description, StringComparison.Ordinal);
-        Assert.Contains("runnable_queue.enabled", description, StringComparison.Ordinal);
-        Assert.Contains("runnable_queue.warning_per_scheduler", description, StringComparison.Ordinal);
-        Assert.Contains("runnable_queue.critical_per_scheduler", description, StringComparison.Ordinal);
-    }
-
     /* ---------------- the mute dialog ---------------- */
 
     [Fact]

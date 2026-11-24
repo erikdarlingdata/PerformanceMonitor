@@ -21,6 +21,7 @@ using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.FrontDoor;
@@ -76,6 +77,9 @@ public sealed class DarlingFrontDoorToolTests
         var served = provider.GetRequiredService<IOptions<McpServerOptions>>().Value.ToolCollection!.ToList();
 
         var (registered, _, _) = McpToolsListBudgetTests.BuildServedTools();
+        /* The host stamps every registered tool with the write policy before the front door wraps it, and the stamp restates a
+           state-changing tool's database_name description (#9065). */
+        DarlingMcpWritePolicy.ApplyAnnotations(registered);
         var registeredCollection = new McpServerPrimitiveCollection<McpServerTool>();
         foreach (var registeredTool in registered)
         {
@@ -83,11 +87,13 @@ public sealed class DarlingFrontDoorToolTests
         }
         var offered = DarlingMcpWritePolicy.ToolNames(DarlingMcpWritePolicy.FilterToolCollection(registeredCollection, Operator));
         Assert.True(served.Count > 100);
-        Assert.Equal(offered.OrderBy(n => n, StringComparer.Ordinal), served.Select(t => t.ProtocolTool.Name).OrderBy(n => n, StringComparer.Ordinal));
-        Assert.All(served, tool => Assert.IsType<DarlingFrontDoorTool>(tool));
+        /* #9388: the census names what / serves, so it leaves out call_tool, which only /lean serves (the front door wraps it too). */
+        Assert.Equal(offered.OrderBy(n => n, StringComparer.Ordinal), served.Select(t => t.ProtocolTool.Name).Where(n => n != "call_tool").OrderBy(n => n, StringComparer.Ordinal));
+        /* #9388: the local tools stay the registered tools: find_tools answers from this request's served set, and call_tool takes store inside arguments. */
+        Assert.All(served, tool => Assert.Equal(!DarlingFrontDoorRouting.LocalTools.Contains(tool.ProtocolTool.Name), tool is DarlingFrontDoorTool));
 
         var byName = registered.ToDictionary(t => t.ProtocolTool.Name, StringComparer.Ordinal);
-        foreach (var tool in served)
+        foreach (var tool in served.Where(t => !DarlingFrontDoorRouting.LocalTools.Contains(t.ProtocolTool.Name)))
         {
             var inner = byName[tool.ProtocolTool.Name].ProtocolTool;
             var before = PropertiesOf(inner);
@@ -175,7 +181,7 @@ public sealed class DarlingFrontDoorToolTests
         await using var running = await StartAsync(directory, peers, Operator);
 
         var listed = await running.Client.ListToolsAsync();
-        Assert.All(listed, t => Assert.True(t.ProtocolTool.InputSchema.GetProperty("properties").TryGetProperty("store", out _), t.Name));
+        Assert.All(listed.Where(t => !DarlingFrontDoorRouting.LocalTools.Contains(t.Name)), t => Assert.True(t.ProtocolTool.InputSchema.GetProperty("properties").TryGetProperty("store", out _), t.Name));
 
         var result = await running.Client.CallToolAsync("get_wait_stats", new Dictionary<string, object?> { ["server_name"] = "sql-a", ["hours_back"] = 4 });
 
@@ -213,5 +219,68 @@ public sealed class DarlingFrontDoorToolTests
         await running.Client.CallToolAsync("get_wait_stats", new Dictionary<string, object?> { ["server_name"] = "sql-a" });
 
         Assert.Equal(agent, Assert.Single(peers.Calls).AgentRole);
+    }
+
+    /// <summary>The tools a store whose peer token has writes on serves, searched as that store's own find_tools would.</summary>
+    private static string StoreSideFindTools(FakePeerCall call)
+    {
+        var (registered, _, _) = McpToolsListBudgetTests.BuildServedTools();
+        DarlingMcpWritePolicy.ApplyAnnotations(registered);
+        var collection = new McpServerPrimitiveCollection<McpServerTool>();
+        foreach (var tool in registered)
+        {
+            collection.Add(tool);
+        }
+
+        var asked = call.Params.Arguments ?? new Dictionary<string, JsonElement>();
+        return McpToolSearch.Render(
+            DarlingMcpWritePolicy.FilterToolCollection(collection, Operator),
+            asked["query"].GetString(),
+            asked.TryGetValue("detail", out var detail) ? detail.GetString() : null,
+            null);
+    }
+
+    /// <summary>#9388: find_tools on a front door answers from the tools this caller is served on the front door. A store would search
+    /// its own set under the front door's peer token, which has writes on, so a reader token was shown write tools it cannot call,
+    /// and the schemas it was shown had no store argument.</summary>
+    [Fact]
+    public async Task FindTools_OnAFrontDoor_SearchesWhatTheCallerIsServedThere_AndNeverAsksAStore()
+    {
+        var directory = new FakeFrontDoorDirectory("use1", "use2");
+        var peers = new FakeFrontDoorPeers { Handler = call => Task.FromResult(Text(StoreSideFindTools(call))) };
+        var reader = new DarlingMcpWritePolicy.Effective(Writes: false, ServerAdmin: false);
+        await using var running = await StartAsync(directory, peers, reader);
+
+        var created = await running.Client.CallToolAsync("find_tools", new Dictionary<string, object?> { ["query"] = "create", ["detail"] = "names" });
+        var full = await running.Client.CallToolAsync("find_tools", new Dictionary<string, object?> { ["query"] = "wait", ["detail"] = "full", ["limit"] = 3 });
+
+        Assert.Empty(peers.Calls);
+        using var createdAnswer = JsonDocument.Parse(TextOf(created));
+        var names = createdAnswer.RootElement.TryGetProperty("tools", out var listed)
+            ? listed.EnumerateArray().Select(e => e.GetString()!).ToList()
+            : new List<string>();
+        Assert.DoesNotContain(names, n => DarlingMcpWritePolicy.IsWrite(n) || DarlingMcpWritePolicy.IsInvestigation(n) || DarlingMcpWritePolicy.IsServerAdmin(n));
+
+        using var fullAnswer = JsonDocument.Parse(TextOf(full));
+        var shown = fullAnswer.RootElement.GetProperty("tools").EnumerateArray().ToList();
+        Assert.NotEmpty(shown);
+        Assert.All(shown, entry =>
+        {
+            var properties = entry.GetProperty("input_schema").GetProperty("properties");
+            Assert.True(properties.TryGetProperty("store", out _), entry.GetProperty("name").GetString());
+        });
+    }
+
+    /// <summary>#9388: call_tool is served as the registered tool, with no outer store, because CallToolFilter discards one.</summary>
+    [Fact]
+    public async Task CallTool_OnAFrontDoor_HasNoOuterStore()
+    {
+        var directory = new FakeFrontDoorDirectory("use1", "use2");
+        await using var running = await StartAsync(directory, new FakeFrontDoorPeers(), Operator);
+
+        var listed = await running.Client.ListToolsAsync();
+
+        var callTool = Assert.Single(listed, t => t.Name == "call_tool").ProtocolTool;
+        Assert.False(PropertiesOf(callTool).ContainsKey("store"));
     }
 }

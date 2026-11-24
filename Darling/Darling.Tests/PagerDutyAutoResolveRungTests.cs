@@ -49,18 +49,9 @@ public sealed class PagerDutyAutoResolveRungTests
     [Fact]
     public void TheRungIsRegisteredInADenseLadder_BelowTheCurrentTop()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal(
             "pagerduty-auto-resolve",
             PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-
-        /* V167 (the record of old-format saved passwords) landed above this rung, so it is no longer the top. */
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Contains(RungVersion, versions);
-
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>

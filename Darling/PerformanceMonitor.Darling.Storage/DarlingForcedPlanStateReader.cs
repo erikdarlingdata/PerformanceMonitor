@@ -127,7 +127,7 @@ public sealed record ForcedPlanRead(
 /// <para><b>Access.</b> Both table reads are bounded by <c>server_id</c> and the window on <c>collection_time</c>
 /// (<c>idx_query_store_forced_plans_time</c>). The stats read starts from the forced plans' own queries (an inner join on
 /// database and query_id, so it takes <c>idx_query_store_stats_server_db_query_plan_time</c>) and is bounded below by the
-/// plan's own since time, never the whole table.</para>
+/// plan's own since time and by the earliest of them as one constant, so the plan leaves out the chunks before it; never the whole table.</para>
 ///
 /// <para><b>Variants and plan guides come from the stored plans (#6221).</b> The collector reads no plan XML on the monitored server. When a
 /// force's runs moved to a LATER plan id of the same query, this reads that plan's stored XML (the plan map, then <c>query_plan_dim</c>: two
@@ -180,40 +180,6 @@ LEFT JOIN query_plan_dim AS d
         return xml.Contains("UsePlan=\"1\"", StringComparison.Ordinal) ? (PlanKind.Variant, null) : (PlanKind.Plain, null);
     }
 
-    internal const string ForcesReadOnlySql = "SET TRANSACTION READ ONLY";
-
-    /// <summary>
-    /// #8570, the field cause: <c>collect.query_store_forced_plans</c> is a plain table whose statistics lag (autoanalyze about every two days on a busy
-    /// store). While the read's window lies past the end of the <c>collection_time</c> histogram, the planner estimates every window scan at one row
-    /// and builds nested loops: the absence step re-ran an index scan of the window 4,656 times and the first-seen step re-ran once per force, 33.5 s
-    /// for one read of 274 forces. The same statement with nested loops off took 45 ms, and a window inside the histogram took 44 ms. Neither index
-    /// leads with <c>collection_time</c>, so the planner cannot probe the real maximum past the histogram. This statement reads the window rows a few
-    /// times and joins them in memory, so a hash or merge join is right at every size, and the plan is made independent of the window estimate by
-    /// setting this with <c>SET LOCAL</c> in the transaction the statement runs in. It leaves no setting on the pooled connection.
-    /// </summary>
-    internal const string ForcesNoNestLoopSql = "SET LOCAL enable_nestloop = off";
-
-    /// <summary>The transaction <see cref="ForcesSql(DatabaseFilter, int)"/> runs in: read-only, with <see cref="ForcesNoNestLoopSql"/> set for its length.</summary>
-    internal static async Task<NpgsqlTransaction> BeginForcesTransactionAsync(NpgsqlConnection connection, int commandTimeoutSeconds, CancellationToken cancellationToken)
-    {
-        var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        try
-        {
-            foreach (var setting in new[] { ForcesReadOnlySql, ForcesNoNestLoopSql })
-            {
-                await using var set = new NpgsqlCommand(setting, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
-                await set.ExecuteNonQueryAsync(cancellationToken);
-            }
-
-            return transaction;
-        }
-        catch
-        {
-            await transaction.DisposeAsync();
-            throw;
-        }
-    }
-
     /// <summary>
     /// The newest collector capture of each force, read from the window, with the row cap given. $1 server, $2 start, $3 end, $4 database filter,
     /// $5 query_id or NULL, $6 plan_id or NULL (#6560: both narrow the read itself, before the cap, so a force past the cap is still found). The cap cuts the LAST rows of this order: a force that fails (a failure count or
@@ -240,14 +206,14 @@ WITH plans AS NOT MATERIALIZED (
     SELECT database_name, collection_time, plan_id, query_id, plan_forcing_type, force_failure_count, last_force_failure_reason,
            variant_plan_ids, plan_guide_name, plan_guide_enabled, plan_guide_scope
     FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)}
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3{databases.Clause("database_name", 4)}
     AND   plan_id IS NOT NULL AND ($5::bigint IS NULL OR query_id = $5) AND ($6::bigint IS NULL OR plan_id = $6)),
 markers AS (
     SELECT database_name, collection_time,
            RANK() OVER (PARTITION BY database_name ORDER BY collection_time) AS marker_rank,
            COUNT(*) OVER (PARTITION BY database_name) AS marker_total
     FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
     AND   database_name IN (SELECT database_name FROM plans)),
 newest AS (
     SELECT database_name, MAX(collection_time) AS newest_capture FROM markers GROUP BY database_name),
@@ -313,7 +279,7 @@ LIMIT {maxForces + 1}";
 WITH newest AS (
     SELECT database_name, MAX(collection_time) AS newest_capture
     FROM collect.query_store_forced_plans
-    WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
+    WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3{databases.Clause("database_name", 4)} AND plan_id IS NULL
     GROUP BY database_name)
 SELECT p.database_name, COUNT(DISTINCT p.plan_id)
 FROM collect.query_store_forced_plans AS p
@@ -326,15 +292,17 @@ GROUP BY p.database_name";
     public static string CapturesSql(DatabaseFilter databases) => $@"
 SELECT database_name, MAX(collection_time)
 FROM collect.query_store_forced_plans
-WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3 AND plan_id IS NULL{databases.Clause("database_name", 4)}
+WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 AND plan_id IS NULL{databases.Clause("database_name", 4)}
 GROUP BY database_name
 ORDER BY database_name";
 
     /// <summary>
     /// The executions of every plan of each forced plan's query after its since time. $1 server, $2 as_of, then five parallel arrays,
     /// one element per forced plan: database, query_id, forced plan_id, since (the instant a run counts as after the force) and
-    /// read_from (since clamped to the window, the lower bound of the read). The interval dedupe is the history tool's (#1841): the
-    /// collector stores an open interval again every cycle, so only its newest snapshot counts.
+    /// read_from (since clamped to the window, the lower bound of the read), then $8, the earliest read_from. Each target's rows are bounded
+    /// by its own read_from; $8 is the same bound as one constant, so the planner excludes the chunks before it (a join qual alone leaves
+    /// every chunk up to $2 in the scan, compressed ones included). The interval dedupe is the history tool's (#1841): the collector stores
+    /// an open interval again every cycle, so only its newest snapshot counts.
     /// </summary>
     public static readonly string StatsSql = @"
 WITH t AS (
@@ -348,7 +316,7 @@ d AS (
     FROM t
     JOIN query_store_stats AS s
         ON s.server_id = $1 AND s.database_name = t.database_name AND s.query_id = t.query_id
-        AND s.collection_time >= t.read_from AND s.collection_time <= $2)
+        AND s.collection_time >= t.read_from AND s.collection_time >= $8 AND s.collection_time <= $2)
 SELECT target_database, forced_plan_id, plan_id, SUM(execution_count), MAX(last_execution_time),
        " + WeightedAverage("avg_cpu_time_us") + @", " + WeightedAverage("avg_duration_us") + @", MAX(max_duration_us), MIN(first_execution_time)
 FROM d
@@ -376,7 +344,7 @@ WITH d AS (
            ROW_NUMBER() OVER (PARTITION BY s.plan_id, " + IntervalIdentity + @"
                               ORDER BY s.collection_time DESC, s.execution_count DESC) AS rn
     FROM query_store_stats AS s
-    WHERE s.server_id = $1 AND s.database_name = $2 AND s.query_id = $3 AND s.collection_time >= $4 AND s.collection_time <= $5)
+    WHERE s.server_id = $1 AND s.database_name = $2 AND s.query_id = $3 AND s.collection_time > $4 AND s.collection_time <= $5)
 SELECT plan_id, SUM(execution_count), MAX(last_execution_time),
        " + WeightedAverage("avg_cpu_time_us") + @", " + WeightedAverage("avg_duration_us") + @", MAX(max_duration_us), MIN(first_execution_time)
 FROM d
@@ -605,9 +573,9 @@ LIMIT 50";
             }
 
             /* #8570: the force list runs in a short read-only transaction with nested loops off. SET LOCAL ends with the transaction, which is
-               disposed with this block, so the pooled connection goes back to its own settings. See ForcesNoNestLoopSql. */
+               disposed with this block, so the pooled connection goes back to its own settings. See NoNestLoopRead. */
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            await using var transaction = await BeginForcesTransactionAsync(connection, commandTimeoutSeconds, cancellationToken);
+            await using var transaction = await NoNestLoopRead.BeginAsync(connection, commandTimeoutSeconds, cancellationToken);
             await using var command = new NpgsqlCommand(ForcesSql(databases, maxForces), connection, transaction);
             command.CommandTimeout = commandTimeoutSeconds;
             command.Parameters.AddWithValue(serverId);
@@ -651,6 +619,7 @@ LIMIT 50";
         {
             var since = live.Select(SinceOf).ToArray();
             var readFrom = since.Select(s => s < from ? from : s).ToArray();
+            var oldestRead = readFrom.Min();
             await using (var command = postgres.CreateCommand(StatsSql))
             {
                 command.CommandTimeout = commandTimeoutSeconds;
@@ -661,6 +630,7 @@ LIMIT 50";
                 command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Bigint, live.Select(f => f.PlanId).ToArray());
                 command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Timestamp, since.Select(s => DateTime.SpecifyKind(s, DateTimeKind.Unspecified)).ToArray());
                 command.Parameters.AddWithValue(NpgsqlDbType.Array | NpgsqlDbType.Timestamp, readFrom.Select(s => DateTime.SpecifyKind(s, DateTimeKind.Unspecified)).ToArray());
+                command.Parameters.AddWithValue(NpgsqlDbType.Timestamp, DateTime.SpecifyKind(oldestRead, DateTimeKind.Unspecified));
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
@@ -668,7 +638,6 @@ LIMIT 50";
                 }
             }
 
-            var oldestRead = readFrom.Min();
             floor = await RawWindowFloor.GetAsync(postgres, RawWindowFloor.Table.QueryStoreStats, serverId, oldestRead, to, commandTimeoutSeconds, cancellationToken);
             complete = floor is not null && !RawWindowFloor.IsTruncated(floor, oldestRead);
         }

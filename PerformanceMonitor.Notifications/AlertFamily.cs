@@ -104,6 +104,8 @@ public static class AlertFamily
         [ClientTimeoutsMetric] = Performance,
         ["Long-Running Query"] = Performance,
         ["tempdb Space"] = Performance,
+        ["tempdb Log Space"] = Performance,
+        ["tempdb Growth Fit"] = Performance,
         ["Volume Free Space"] = Performance,
         ["Version Store (PVS)"] = Performance,
         ["Database File Growth"] = Performance,
@@ -113,6 +115,9 @@ public static class AlertFamily
         ["CHECKDB Overdue"] = Performance,
         ["Identity Capacity"] = Performance,
         ["Forced Plan Failing"] = Performance,
+        /* #8884: both are events about the monitored instance itself, so the on-call hears them. */
+        ["Instance Restarted"] = Performance,
+        ["Memory Dumps"] = Performance,
 
         /* ---- performance: the PostgreSQL-only alerts ---- */
         ["PostgreSQL Wraparound Risk"] = Performance,
@@ -144,6 +149,11 @@ public static class AlertFamily
         ["Store Disk Pressure"] = SelfMonitor,
         /* #7368: big tables past 3 times their autoanalyze threshold on two hourly reads in a row. */
         ["Store Autovacuum Behind"] = SelfMonitor,
+        /* #8950: store tables past their autovacuum start point with no vacuum in 24 hours, or with autovacuum cancelled
+           repeatedly, on two hourly reads in a row. */
+        ["Store Vacuum Stalled"] = SelfMonitor,
+        /* #9000: the store or one object growing at least 3 times its own typical day, over a size floor. */
+        ["Store Growth"] = SelfMonitor,
         ["Store Runtime Upgrade"] = SelfMonitor,
         /* #5450: raised once per service start when the store shows the service was not collecting. */
         ["Collection Gap At Start"] = SelfMonitor,

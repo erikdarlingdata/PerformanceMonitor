@@ -44,7 +44,9 @@ namespace PerformanceMonitor.Collectors;
 /// <para><b>What the target has to have on for each family to carry anything.</b> <c>error</c> needs only
 /// <c>log_min_messages</c> at WARNING or lower (the default); <c>connection</c> needs
 /// <c>log_connections</c> / <c>log_disconnections</c>; <c>lock_wait</c> needs <c>log_lock_waits</c>;
-/// <c>temp_file</c> needs <c>log_temp_files</c>; <c>autovacuum</c> needs <c>log_autovacuum_min_duration</c>;
+/// <c>temp_file</c> needs <c>log_temp_files</c>; <c>autovacuum</c> needs <c>log_autovacuum_min_duration</c> (and, for its
+/// analyze runs on PostgreSQL 19 and later, <c>log_autoanalyze_min_duration</c>, since 19 logs vacuum and analyze
+/// runs under separate settings);
 /// <c>checkpoint</c> needs <c>log_checkpoints</c> (on by default since 15). This collector does NOT audit
 /// those settings — #3607 is that audit, running against <c>pg_server_config</c>'s snapshot — so an
 /// all-off target here reads as quiet, and the read's empty branch names the settings.</para>

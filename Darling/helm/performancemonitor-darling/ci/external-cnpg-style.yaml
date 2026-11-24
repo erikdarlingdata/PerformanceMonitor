@@ -17,6 +17,14 @@ store:
     caSecret:
       name: darling-store-ca
       key: ca.crt
+  # The store-roles hook Job, logging in as the owner with the service's own Secret and key.
+  provisionRoles:
+    enabled: true
+    login:
+      passwordSecret:
+        name: darling-secrets
+        key: sql-password
+    rolePasswordsSecret: darling-store-roles
 
 secrets:
   existingSecret: darling-secrets

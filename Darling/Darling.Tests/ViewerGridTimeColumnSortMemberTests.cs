@@ -123,6 +123,11 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "ViewerServerTab.xaml", "SchedulerIssuesGrid", "EventTimeLocal", Name(typeof(SchedulerIssueRow)), "EventTime" },
         { "ViewerServerTab.xaml", "SevereErrorsGrid", "EventTimeLocal", Name(typeof(SevereErrorRow)), "EventTime" },
         { "ViewerServerTab.xaml", "MemoryConditionsGrid", "EventTimeLocal", Name(typeof(MemoryConditionsRow)), "EventTime" },
+
+        /* #8919: these two columns are bound to the row's UTC DateTime itself and show it through a converter, so the member they
+           sort by is the one they are bound to (the check below accepts that for a converter column that is listed here). */
+        { "ViewerServerTab.xaml", "PgDeadlocksGrid", "OccurredAtUtc", Name(typeof(DarlingPgDeadlockReader.PgDeadlockRow)), "OccurredAtUtc" },
+        { "ViewerServerTab.xaml", "PgLogEventsGrid", "OccurredAtUtc", Name(typeof(DarlingPgLogEventReader.PgLogEventRow)), "OccurredAtUtc" },
         { "ViewerServerTab.xaml", "MemoryBrokerGrid", "EventTimeLocal", Name(typeof(MemoryBrokerRow)), "EventTime" },
         { "ViewerServerTab.xaml", "MemoryNodeOomGrid", "EventTimeLocal", Name(typeof(MemoryNodeOomRow)), "EventTime" },
         { "ViewerServerTab.xaml", "SignificantWaitsGrid", "EventTimeLocal", Name(typeof(SignificantWaitRow)), "EventTime" },
@@ -217,6 +222,11 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         { "InvestigationsWindow.xaml", "FeedbackGivenGrid", "WhenDisplay", Name(typeof(InvestigationsWindow.FeedbackGivenItem)), "CreatedAtUtc" },
         { "KnownPatternsWindow.xaml", "PatternsGrid", "TimeDisplay", Name(typeof(KnownPatternRow)), "TimeOfDaySortKey" },
         { "KnownPatternsWindow.xaml", "PatternsGrid", "ExpiresDisplay", Name(typeof(KnownPatternRow)), "ExpiresSortUtc" },
+
+        /* #8787: the Store Health tab's table grid. */
+        { "StoreHealthTab.xaml", "TablesDataGrid", "LastVacuum", Name(typeof(StoreTableRow)), "LastVacuumUtc" },
+        { "StoreHealthTab.xaml", "TablesDataGrid", "LastAnalyze", Name(typeof(StoreTableRow)), "LastAnalyzeUtc" },
+        { "StoreHealthTab.xaml", "TablesDataGrid", "CountedSince", Name(typeof(StoreTableRow)), "CountedSinceUtc" },
     };
 
     /// <summary>
@@ -247,6 +257,8 @@ public sealed class ViewerGridTimeColumnSortMemberTests
         [("ViewerServerTab.xaml", "PgIndexBloatGrid", "SkippedReason")] = "the reason a measurement was skipped, text",
         [("ViewerServerTab.xaml", "PgExtensionCensusGrid", "DatabasesCreated")] = "a count of databases the extension is created in",
         [("KnownPatternsWindow.xaml", "PatternsGrid", "CreatedBy")] = "the name of whoever created the entry, not when",
+        [("StoreHealthTab.xaml", "TablesDataGrid", "Turnover")] = "rows deleted per day over live rows, a rate sorted by its number (TurnoverSort)",
+        [("StoreHealthTab.xaml", "TablesDataGrid", "PastTrigger")] = "a count of table parts past their vacuum start point, sorted by its number (PastTriggerSort)",
     };
 
     /// <summary>
@@ -411,7 +423,8 @@ public sealed class ViewerGridTimeColumnSortMemberTests
                         + "Fix: set SortMemberPath to the row's UTC DateTime member (else the row's own DateTime for that value, "
                         + "else add a get-only DateTime property the text is formatted from) and add the column to Columns.");
                 }
-                else if (declared == column.BoundProperty || Regex.IsMatch(declared, "(?:Local|Display|Text|Formatted)$"))
+                else if ((declared == column.BoundProperty && !(column.BoundPropertyHasConverter && pinned.Contains(key)))
+                    || Regex.IsMatch(declared, "(?:Local|Display|Text|Formatted)$"))
                 {
                     failures.Add($"{label} sorts by {declared}, which is text. Fix: sort by the row's DateTime member instead.");
                 }
@@ -451,7 +464,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
     }
 
     /// <summary>One DataGrid column of the viewer's XAML, as the scan sees it.</summary>
-    private sealed record XamlColumn(string File, string Grid, string Header, string BoundProperty, bool BoundPropertyHasStringFormat, string SortMemberPath);
+    private sealed record XamlColumn(string File, string Grid, string Header, string BoundProperty, bool BoundPropertyHasStringFormat, bool BoundPropertyHasConverter, string SortMemberPath);
 
     private static readonly Regex GridStart = new(@"<DataGrid(?![\w.])(?:""[^""]*""|[^>""])*>", RegexOptions.CultureInvariant);
 
@@ -496,6 +509,7 @@ public sealed class ViewerGridTimeColumnSortMemberTests
                 WebUtility.HtmlDecode(header),
                 Regex.Match(binding, @"\{Binding\s+(?:Path=)?(?<p>[A-Za-z_][\w.]*)").Groups["p"].Value,
                 binding.Contains("StringFormat", StringComparison.Ordinal),
+                binding.Contains("Converter=", StringComparison.Ordinal),
                 Attribute(start.Value, "SortMemberPath")));
         }
 

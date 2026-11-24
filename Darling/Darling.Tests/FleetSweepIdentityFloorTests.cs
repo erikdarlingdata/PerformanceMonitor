@@ -34,8 +34,8 @@ public sealed class FleetSweepIdentityFloorTests
     private static readonly DateTime Now = new(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
     private static readonly TimeSpan Span = TimeSpan.FromHours(1);
 
-    private static FleetIdentityCapacity Crit => new(IdentityCapacityMath.BandCritical, 1, 1, "Sales", "dbo.Orders", "Id", 100.0, "0");
-    private static FleetIdentityCapacity Warn => new(IdentityCapacityMath.BandWarning, 2, 0);
+    private static FleetIdentityCapacity Crit => new(IdentityCapacityMath.BandCritical, 1, 1, 1, "Sales", "dbo.Orders", "Id", 100.0, "0");
+    private static FleetIdentityCapacity Warn => new(IdentityCapacityMath.BandWarning, 2, 0, 0);
 
     private static FleetSweepServerReading Reading(int id, string name, int memoryPressureEvents, FleetIdentityCapacity? identity) =>
         new(id, name,

@@ -25,11 +25,12 @@ namespace Darling.Tests;
    test's rows, so they are deliberately NOT [Collection("live-postgres")]. */
 
 /// <summary>
-/// The attention table is a PLAIN table on every store (#5640, seat ruling): the 73rd hypertable is a grid decision
-/// (#3035, #3044, #3107), and its rows are low volume. Pins the opt-out census (exactly this one table), what the
-/// opt-out leaves unchanged (<see cref="TimescaleSupport.HypertableCount"/> stays 72), the retention path that replaces
-/// the Timescale policy (the 30-day time-sliced DELETE), the V179 rung's shape on a live store, and the per-database
-/// session-name arm the Azure own-session fallback needs.
+/// The attention table is a hypertable outside the compression grid on a TimescaleDB store (#8967, its own compression policy since #9216) and a plain table on every
+/// other store (it was plain everywhere from #5640 on). It joins none of the compression grid (#3035, #3044, #3107), so the
+/// grid does not move (<see cref="TimescaleSupport.HypertableCount"/> stays 72). Pins the opt-out census (the plain tables, which
+/// no longer include this one), the deferral census (exactly this one table), the retention paths (drop_chunks on a hypertable,
+/// the 30-day time-sliced DELETE on a plain table), the V179 rung's shape on a live store, and the per-database session-name arm
+/// the Azure own-session fallback needs.
 /// </summary>
 public sealed class AttentionPlainTableTests
 {
@@ -45,12 +46,19 @@ public sealed class AttentionPlainTableTests
         /* Every opt-out is a table that is NOT in the hypertable grid. The list is exact, so the exception cannot spread
            silently: a second entry reddens here, and its author has to argue the grid decision again. */
         var optedOut = CollectorCatalog.All.Where(c => c.StaysPlainTable).Select(c => c.TargetTable).ToArray();
-        Assert.Equal(new[] { "attention_events", "query_store_forced_plans", "query_store_hints", "database_protection", "agent_alerts", "identity_capacity", "schema_capture_passes" }, optedOut);
+        Assert.Equal(new[] { "query_store_forced_plans", "query_store_hints", "database_protection", "agent_alerts", "identity_capacity", "object_inventory", "object_dependencies", "schema_capture_passes", "column_stats_runs" }, optedOut);
+
+        /* A hypertable that joins none of the compression grid is declared too, and the list is exact for the same reason. */
+        var deferred = CollectorCatalog.All.Where(c => c.CompressionOffGrid).Select(c => c.TargetTable).ToArray();
 
         Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.StaysPlainTable);
-        Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.TargetTable == "attention_events");
+        Assert.DoesNotContain(TimescaleSupport.HypertableTables, t => t.CompressionOffGrid);
         Assert.DoesNotContain("attention_events", TimescaleSupport.CompressionPhaseOrder);
-        Assert.Equal(CollectorCatalog.All.Count - optedOut.Length, TimescaleSupport.HypertableTables.Count);
+        Assert.Equal(CollectorCatalog.All.Count - optedOut.Length - deferred.Length, TimescaleSupport.HypertableTables.Count);
+
+        /* The conversion walk takes the deferred table too; the compression walk and the phase order do not. */
+        Assert.Contains(TimescaleSupport.ConvertedTables, t => t.TargetTable == "attention_events");
+        Assert.Equal(TimescaleSupport.HypertableTables.Count + deferred.Length, TimescaleSupport.ConvertedTables.Count);
 
         /* The grid did not move: 71 catalog hypertables plus collection_log. */
         Assert.Equal(71, TimescaleSupport.HypertableTables.Count);
@@ -58,33 +66,13 @@ public sealed class AttentionPlainTableTests
     }
 
     [Fact]
-    public void TheOptOut_IsDeclaredOnTheAttentionCollectorOnly_AndNamesTheGridDecision()
-    {
-        Assert.True(AttentionCollector.Instance.StaysPlainTable);
-        Assert.True(((ICollectorSchemaInfo)AttentionCollector.Instance).StaysPlainTable);
-
-        var source = RepoFile.ReadRepoFileLf("PerformanceMonitor.Collectors", "AttentionCollector.cs");
-        foreach (var phrase in new[] { "#3035", "#3044", "#3107", "1,000 events per read", "AttentionPlainTableTests" })
-        {
-            Assert.Contains(phrase, source, StringComparison.Ordinal);
-        }
-
-        var overrides = RepoFile.ReadRepoFileLf("PerformanceMonitor.Collectors", "CollectorDefinitionBase.cs");
-        Assert.Contains("public virtual bool StaysPlainTable => false;", overrides, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheRetention_IsThirtyDays_AndThePlainTableTakesTheTimeSlicedDelete()
+    public void TheRetention_IsThirtyDays_AndAPlainTableTakesTheTimeSlicedDelete()
     {
         Assert.Equal(30, CollectorScheduleDefaults.All["attention"].RetentionDays);
 
         var delete = DarlingRetention.DeleteSqlFor(AttentionCollector.Instance);
         Assert.Contains("attention_events", delete, StringComparison.Ordinal);
         Assert.Contains("collection_time", delete, StringComparison.Ordinal);
-
-        /* The sweep skips drop_chunks for a table that stays plain, so a TimescaleDB store neither calls it nor warns about it. */
-        var retention = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs");
-        Assert.Contains("if (timescaleAvailable && !definition.StaysPlainTable)", retention, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -176,9 +164,9 @@ public sealed class AttentionPlainTableTests
     }
 
     [Fact]
-    public async Task OnATimescaleStore_TheStartupWalkLeavesItPlain_AndTheSweepPurgesItAtThirtyDays()
+    public async Task OnATimescaleStore_TheStartupWalkMakesItAHypertableWithNoPolicy_AndTheSweepDropsChunksAndDeletesNoRows()
     {
-        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the attention plain-table live pin (it mints its own scratch database).");
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run the attention hypertable live pin (it mints its own scratch database).");
         var ct = TestContext.Current.CancellationToken;
 
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
@@ -198,20 +186,19 @@ public sealed class AttentionPlainTableTests
         {
             if (timescale)
             {
-                /* The start-up walk: conversion and compression over the grid. Both return the grid's count (71), not the catalog's (72). */
-                Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
+                /* The start-up walk: conversion over the grid and the deferred table (72), compression over the grid alone (71). */
+                Assert.Equal(TimescaleSupport.ConvertedTables.Count, await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct));
                 Assert.Equal(TimescaleSupport.HypertableTables.Count, await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct));
 
-                Assert.Equal(0L, await ScalarAsync(connection,
+                Assert.Equal(1L, await ScalarAsync(connection,
                     "SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = 'attention_events'", ct));
                 Assert.Equal(0L, await ScalarAsync(connection,
                     "SELECT count(*) FROM timescaledb_information.jobs WHERE hypertable_schema = 'collect' AND hypertable_name = 'attention_events'", ct));
-                /* The index V179 made is still there (a hypertable conversion would have re-created it per chunk). */
                 Assert.Equal(1L, await ScalarAsync(connection,
                     "SELECT count(*) FROM pg_indexes WHERE schemaname = 'collect' AND tablename = 'attention_events' AND indexname = 'idx_attention_events_time'", ct));
             }
 
-            /* Rows: 45 and 31 days old (past the horizon), 29 days, 1 day and now (inside it). One clock, read once here,
+            /* Rows: 45 and 32 days old (past the horizon), 29 days, 1 day and now (inside it). One clock, read once here,
                both seeds the rows and measures their ages below: a run that crosses midnight UTC between the seed and the
                read would otherwise find every row a day older than it was seeded. The purge measures from its own clock a
                few seconds later, and every row sits a full day or more from its 30-day horizon. */
@@ -220,17 +207,28 @@ public sealed class AttentionPlainTableTests
             await ExecAsync(connection,
                 "INSERT INTO collect.attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count) "
                 + "SELECT 700000 + d, " + seedTime + " - make_interval(days => d), " + TestServerId + ", 'plain-table-test', 'count', 1 "
-                + "FROM unnest(ARRAY[45, 31, 29, 1, 0]) AS d", ct);
+                + "FROM unnest(ARRAY[45, 32, 29, 1, 0]) AS d", ct);
 
             var log = new CapturingTestLogger();
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: timescale, log, ct);
+            var summary = await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: timescale, log, ct);
 
             Assert.Equal("0,1,29", await ScalarAsync(connection,
                 "SELECT string_agg(d::text, ',' ORDER BY d) FROM (SELECT ((" + seedTime + ")::date - collection_time::date) AS d "
                 + "FROM collect.attention_events WHERE server_id = " + TestServerId + ") AS x", ct));
 
-            /* No drop_chunks attempt on the plain table, so no "failed" warning for it. */
+            if (timescale)
+            {
+                /* Each expired day was its own chunk and went whole: two chunks dropped, no row deleted. */
+                Assert.Equal(2, summary.ChunksDropped);
+                Assert.Equal(0, summary.RowsDeleted);
+            }
+            else
+            {
+                Assert.Equal(2, summary.RowsDeleted);
+            }
+
+            /* No failed drop_chunks warning for the table. */
             Assert.DoesNotContain("attention_events", string.Join("\n", log.Joined.Split('\n').Where(l => l.Contains("Warning", StringComparison.Ordinal))), StringComparison.Ordinal);
 
             bodySucceeded = true;

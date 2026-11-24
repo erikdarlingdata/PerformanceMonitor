@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -222,6 +223,108 @@ LEFT JOIN grants g ON true";
         Assert.Equal(idleCount, idleCountViaFallback);
     }
 
+    /// <summary>
+    /// #8570: the trailing raw edge is probed per server and only for a server that still has a known database with no execution in
+    /// the rollup or the leading edge. This seeds six servers so a probe that answered a wrong server, ignored a zero-execution row or
+    /// skipped a server that needed it would change a count: an edge-only database is active, the same database name on another
+    /// server's edge does not make this server's idle, a zero-execution edge row is not an execution, a server with nothing left to
+    /// prove is not read, and a server without 7 days of coverage keeps its dash.
+    /// </summary>
+    [Fact]
+    public async Task ServerMetricsSqlFor_ProbesTheTrailingEdgePerServer_AndEachServersIdleCountStaysItsOwn()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #8570 edge-probe test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live #8570 edge-probe test needs TimescaleDB: the stitched-rollup arm only exists once a CAGG is materialized.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        const int Mixed = -940401;        // rollup-active, edge-only active and never executed: one idle
+        const int Shared = -940402;       // a known database that only ANOTHER server's edge shows active: idle
+        const int SharedActive = -940403; // the same database name, active on THIS server's edge: not idle
+        const int AllActive = -940404;    // nothing left to prove: not probed, not idle
+        const int ZeroRow = -940405;      // an edge row with no executions: still idle
+        const int NoCoverage = -940406;   // under 7 days of samples: no count at all
+
+        var anchorHour = new DateTime(2020, 6, 1, 8, 0, 0, DateTimeKind.Unspecified);
+        var idleCutoff = anchorHour.AddMinutes(-27);
+        var successorFloorTarget = anchorHour.AddHours(1);
+        var watermarkTarget = anchorHour.AddHours(3);
+        var edge = watermarkTarget.AddMinutes(10);
+
+        foreach (var id in new[] { Mixed, Shared, SharedActive, AllActive, ZeroRow, NoCoverage })
+        {
+            await ExecAsync(connection, "INSERT INTO servers (server_id, server_name) VALUES ($1, $2)", ct, id, "edge-probe" + id);
+        }
+
+        static string Name(int id) => "edge-probe" + id;
+
+        await InsertQueryStatsAsync(connection, Mixed, Name(Mixed), "RollupDb", anchorHour.AddMinutes(15), 4, ct);
+        await InsertQueryStatsAsync(connection, Mixed, Name(Mixed), "EdgeOnlyDb", edge, 2, ct);
+        /* This server's edge shows a database the Shared server lists as known: that must not make the Shared server's copy active. */
+        await InsertQueryStatsAsync(connection, Mixed, Name(Mixed), "SharedDb", edge, 7, ct);
+        await InsertQueryStatsAsync(connection, Shared, Name(Shared), "LeadingDb", idleCutoff.AddMinutes(5), 3, ct);
+        await InsertQueryStatsAsync(connection, Shared, Name(Shared), "SharedDb", edge, 0, ct);
+        await InsertQueryStatsAsync(connection, SharedActive, Name(SharedActive), "SharedDb", edge, 5, ct);
+        await InsertQueryStatsAsync(connection, AllActive, Name(AllActive), "RollupDb", anchorHour.AddMinutes(90), 6, ct);
+        /* The last successor bucket must hold a row for the engine to report the watermark there (see the first test). */
+        await InsertQueryStatsAsync(connection, AllActive, Name(AllActive), "RollupDb", anchorHour.AddMinutes(135), 1, ct);
+        await InsertQueryStatsAsync(connection, ZeroRow, Name(ZeroRow), "ZeroDb", edge, 0, ct);
+        await InsertQueryStatsAsync(connection, NoCoverage, Name(NoCoverage), "EdgeOnlyDb", edge, 2, ct);
+
+        foreach (var id in new[] { Mixed, Shared, SharedActive, AllActive, ZeroRow })
+        {
+            await FinOpsIdleCoverageSeed.InsertAsync(connection, ct, id, Name(id), idleCutoff.AddHours(-1), "oldest");
+            for (var day = 0; day < 7; day++)
+            {
+                await FinOpsIdleCoverageSeed.InsertAsync(connection, ct, id, Name(id), anchorHour.Date.AddDays(day).AddHours(12), "day" + day);
+            }
+        }
+
+        var snapshotTime = watermarkTarget.AddMinutes(20);
+        foreach (var db in new[] { "RollupDb", "EdgeOnlyDb", "NeverDb" })
+        {
+            await InsertDatabaseSizeAsync(connection, Mixed, Name(Mixed), db, snapshotTime, ct);
+        }
+
+        await InsertDatabaseSizeAsync(connection, Shared, Name(Shared), "LeadingDb", snapshotTime, ct);
+        await InsertDatabaseSizeAsync(connection, Shared, Name(Shared), "SharedDb", snapshotTime, ct);
+        await InsertDatabaseSizeAsync(connection, SharedActive, Name(SharedActive), "SharedDb", snapshotTime, ct);
+        await InsertDatabaseSizeAsync(connection, AllActive, Name(AllActive), "RollupDb", snapshotTime, ct);
+        await InsertDatabaseSizeAsync(connection, ZeroRow, Name(ZeroRow), "ZeroDb", snapshotTime, ct);
+        await InsertDatabaseSizeAsync(connection, NoCoverage, Name(NoCoverage), "EdgeOnlyDb", snapshotTime, ct);
+
+        Assert.True(await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct) > 0);
+        await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsDbHourlyView, anchorHour, successorFloorTarget, SilentDisclosure(), ct);
+        await RollupBackfill.RunSliceAsync(connection, TimescaleSupport.QueryStatsDbIntervalHourlyView, successorFloorTarget, watermarkTarget, SilentDisclosure(), ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var rollups = await TimescaleSupport.DetectRollupsAsync(dataSource, ct);
+        var coverage = await TimescaleSupport.DetectRollupCoverageAsync(dataSource, rollups, ct);
+        var watermark = await RollupMaterializationWatermark.GetAsync(
+            dataSource, TimescaleSupport.QueryStatsDbIntervalHourlyView, TimescaleSupport.HourlyBucket, 30, ct);
+        Assert.Equal(watermarkTarget, watermark);
+
+        var counts = await ReadIdleDbCountsAsync(dataSource, coverage, idleCutoff, watermark!.Value, ct);
+
+        Assert.Equal(1, counts[Mixed]);        // NeverDb only: RollupDb is in the rollup, EdgeOnlyDb on the edge
+        Assert.Equal(1, counts[Shared]);       // SharedDb: another server's edge activity for that name is not this server's
+        Assert.Equal(0, counts[SharedActive]); // SharedDb: its own edge shows it
+        Assert.Equal(0, counts[AllActive]);
+        Assert.Equal(1, counts[ZeroRow]);      // a zero-execution row is not an execution
+        Assert.Null(counts[NoCoverage]);       // under 7 days of samples: a dash, whatever the edge shows
+    }
+
     // ── the fleet statement vs. the old per-server loop, server by server ──
 
     [Fact]
@@ -407,6 +510,28 @@ LEFT JOIN grants g ON true";
         }
 
         throw new InvalidOperationException($"server {serverId} did not appear in the fleet result.");
+    }
+
+    /// <summary>Every server's idle count from the routed fleet statement; null where the statement answers NULL (no 7-day coverage).</summary>
+    private static async Task<Dictionary<int, int?>> ReadIdleDbCountsAsync(
+        NpgsqlDataSource dataSource, RollupCoverage coverage, DateTime idleCutoff, DateTime watermark, CancellationToken ct)
+    {
+        var sql = ViewerDataService.ServerMetricsSqlFor(coverage, idleCutoff, watermark);
+        await using var command = dataSource.CreateCommand(sql);
+        var now = idleCutoff.AddDays(7);
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = idleCutoff }); // $1 cpu cutoff, unused here
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = idleCutoff }); // $2 idle cutoff
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = PerformanceMonitor.Darling.Storage.FinOps.DarlingFinOpsOptimizationReader.IdleCoverageStartUtc(now) });
+        command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = PerformanceMonitor.Darling.Storage.FinOps.DarlingFinOpsOptimizationReader.IdleCoverageDays });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = PerformanceMonitor.Darling.Storage.FinOps.DarlingFinOpsOptimizationReader.IdleCoverageEndUtc(now) });
+        var counts = new Dictionary<int, int?>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            counts[reader.GetInt32(0)] = reader.IsDBNull(3) ? null : reader.GetInt32(3);
+        }
+
+        return counts;
     }
 
     private static async Task<DateTime> ReadFallbackMaxBucketAsync(NpgsqlConnection connection, string view, CancellationToken ct)

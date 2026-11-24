@@ -282,7 +282,7 @@ public class ServerConnection : INotifyPropertyChanged
     /// reporting failing collectors, and painting it amber would say it was.</para>
     /// </summary>
     [JsonIgnore]
-    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors == true);
+    public ServerCardStatus CardStatus => ServerCardStatusRules.Classify(IsOnline, HasCollectorErrors == true, IsEnabled);
 
     /// <summary>
     /// Computed dot status for the sidebar indicator. One of: "Connecting", "Online", "Warning", "Offline".
@@ -560,6 +560,18 @@ public class ServerConnection : INotifyPropertyChanged
     internal string BuildConnectionString(string? username, string? password)
         => BuildConnectionString(new ResolvedAuth(AuthenticationType, username, password, AzureClientId, ManagedIdentityClientId));
 
+    /// <summary>
+    /// The encryption option a stored mode builds. The one mapping, used here and by the Add Server window and <c>--add-server</c>
+    /// (through <c>ServerEntryRules</c>). Fail closed: an unknown or blank mode (legacy or hand-edited servers.json) must not
+    /// silently drop to an unencrypted, cert-unvalidated connection, so it is Mandatory, the same default the UI uses.
+    /// </summary>
+    internal static SqlConnectionEncryptOption EncryptOptionFor(string? encryptMode) => encryptMode switch
+    {
+        "Optional" => SqlConnectionEncryptOption.Optional,
+        "Strict" => SqlConnectionEncryptOption.Strict,
+        _ => SqlConnectionEncryptOption.Mandatory
+    };
+
     private string BuildConnectionString(ResolvedAuth auth)
     {
         var builder = new SqlConnectionStringBuilder
@@ -576,17 +588,7 @@ public class ServerConnection : INotifyPropertyChanged
             MultiSubnetFailover = MultiSubnetFailover
         };
 
-        // Set encryption mode
-        builder.Encrypt = EncryptMode switch
-        {
-            "Mandatory" => SqlConnectionEncryptOption.Mandatory,
-            "Strict" => SqlConnectionEncryptOption.Strict,
-            "Optional" => SqlConnectionEncryptOption.Optional,
-            // Fail closed: an unknown/blank EncryptMode (legacy or hand-edited servers.json) must
-            // not silently drop to an unencrypted, cert-unvalidated connection. The UI default is
-            // Mandatory and the Dashboard builders also default to Mandatory — match that.
-            _ => SqlConnectionEncryptOption.Mandatory
-        };
+        builder.Encrypt = EncryptOptionFor(EncryptMode);
 
         // The tuple is atomic: every auth field comes from the SAME source (profile or server).
         ApplyAuthentication(builder, auth.AuthType, auth.Username, auth.Password,

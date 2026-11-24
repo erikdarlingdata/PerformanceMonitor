@@ -65,7 +65,19 @@ public sealed class DarlingMcpStoreHostTools
         + "managed block set it but re-deriving from the CURRENT host gives a different number - a resize the "
         + "settings never caught up with), operator_override (postgresql.auto.conf, or a hand-edited line after "
         + "every managed block, is what is actually in force), or not_managed (a bring-your-own store; nothing "
-        + "here ever wrote a block to compare against, so pg_settings.source is reported as-is). "
+        + "here ever wrote a block to compare against, so pg_settings.source is reported as-is). Each settings row also "
+        + "carries provenance: value (the running value the way SHOW prints it, such as 2GB), file_value (the text the winning line carries, such as 77MB), source (pg_settings.source), source_file and source_line (null when the "
+        + "role cannot read them), pending_restart (a restart-only setting whose file line the server could not apply yet; false when the role cannot read pg_file_settings), not_applied (every pg_file_settings line for the setting that is not the value "
+        + "in force, with file, line and value, so a managed line hidden by ALTER SYSTEM shows) and summary, one sentence naming them. "
+        + "provenance_unreadable is one sentence with the grant that fixes it when the role cannot read the source columns or "
+        + "pg_file_settings, else null. "
+        + "planner_costs is one row per planner cost setting (random_page_cost, seq_page_cost, effective_io_concurrency): "
+        + "current, source (pg_settings.source), source_file (the conf file when the role can read pg_settings.sourcefile, "
+        + "else null: the source alone is reported), managed_value and matches_managed (the managed file writes only "
+        + "random_page_cost, 1.1; both are null for the other two and on a store that is not managed). "
+        + "planner_cost_warning is one sentence when random_page_cost is not the managed value, saying the planner may "
+        + "skip covering indexes and the shorter Query Store windows' plans on this store and where the value comes from; "
+        + "null otherwise. "
         + "any_stale is true when one or more settings verdict is stale_after_hardware_change, so a caller can "
         + "act on the summary without walking the whole table. gathered_at (UTC) is when this snapshot was "
         + "taken; the store/settings facts are cached for up to 5 minutes and shared across callers, so a burst "
@@ -79,10 +91,27 @@ public sealed class DarlingMcpStoreHostTools
         + "call; if that read times out or the role is refused it (any error but TimescaleDB being absent) they are "
         + "null, uncompressed_chunk_percent_of_ram is null with them, and uncompressed_unavailable_reason says why "
         + "(the SQLSTATE for a refusal); a store without TimescaleDB reports 0 chunks. The rest of the profile still "
-        + "returns (a slow fact fails alone). --check-settings reads the size live. This "
+        + "returns (a slow fact fails alone). --check-settings reads the size live. "
+        + "store_certificate is the server certificate the store presents to TLS clients: tls is on, off, "
+        + "socket or unavailable. On, source says where it was read: managed_file (the server.crt the service wrote for a "
+        + "managed store, beside the data directory) or tls_handshake (the certificate the store presents when this "
+        + "service connects, for a store it does not manage; over TCP the handshake ends before any user name or "
+        + "password is sent), and server carries subject, issuer, "
+        + "sha256 (64 upper-case hex characters, the fingerprint of the certificate's DER bytes), not_before and not_after "
+        + "(UTC) and days_to_expiry (whole days, negative once expired, as of this response). root is the issuing "
+        + "root's subject and sha256 when the chain carries one, else null. Off means the store's ssl setting is off and "
+        + "message says so. Socket means the store is reached over a Unix socket, which has no TLS handshake to read, so "
+        + "the service reads nothing and sends nothing. Unavailable means the setting or the certificate could not be read "
+        + "(the read has its own short time limit) and message says why; the rest of the profile still returns. A managed "
+        + "store's file is read on every call. A handshake result is kept for 10 minutes per store connection, so the "
+        + "store's log does not record a failed TLS handshake on every call, and a changed certificate shows within that time. "
+        + "postgres_owner says who owns the PostgreSQL "
+        + "process: owner is started_by_this_service (stopping the service stops PostgreSQL), adopted_running (it leaves PostgreSQL running), "
+        + "not_managed or not_yet_known (still starting), with the sentence in on_service_stop. This "
         + "tool never writes a setting or a conf file.")]
     public static async Task<string> GetStoreHost(
         NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache,
+        StoreProcessOwnership? ownership = null,
         CancellationToken cancellationToken = default)
     {
         if (postgresConfig is null)
@@ -123,6 +152,7 @@ public sealed class DarlingMcpStoreHostTools
                 },
                 cts.Token);
 
+            var owner = ownership?.Current ?? StoreProcessOwnership.Owner.Unknown;
             var anyStale = profile.Settings.Any(s => s.Verdict == HostSettingVerdict.StaleAfterHardwareChange);
             var ramPercent = profile.Memory.EffectiveBytes > 0 && profile.Store.UncompressedChunkBytes is { } uncompressedBytes
                 ? Math.Round(100.0 * uncompressedBytes / profile.Memory.EffectiveBytes, 1)
@@ -141,6 +171,17 @@ public sealed class DarlingMcpStoreHostTools
                raw ResolveDataDirectory) so a UNC-configured managed store agrees with
                GatherSettingProfilesAsync's own refusal (Low 4) instead of silently resolving a path
                GatherSettingProfilesAsync never used. */
+            /* #9430: the certificate is read on every call, outside the profile cache, so days_to_expiry is as of this response and a
+               rotated certificate shows at once. A failure or its own short deadline here answers unavailable and never fails the profile; only the caller cancelling does. */
+            var certificate = await StoreServerCertificate.ReadBoundedAsync(
+                async token =>
+                {
+                    await using var certificateConnection = await postgres.OpenConnectionAsync(token);
+                    return await StoreServerCertificate.ReadAsync(postgresConfig, certificateConnection, token);
+                },
+                StoreServerCertificate.ReadTimeout,
+                cancellationToken);
+
             var mcpDataDirectory = postgresConfig.Managed ? DarlingStoreHostProfile.TryResolveProfileDataDirectory(postgresConfig) : null;
 
             return JsonSerializer.Serialize(new
@@ -175,6 +216,15 @@ public sealed class DarlingMcpStoreHostTools
                         : "This is the service's own disk, not necessarily the store's: a bring-your-own postgres.connectionString may point at a different host entirely.",
                 },
                 managed = profile.IsManagedStore,
+                /* #8787 part D2: who owns the postmaster, from the service's own state (not SQL, and outside the 5-minute profile
+                   cache, so it is always current). The answer decides what a service stop does to the store. */
+                postgres_owner = new
+                {
+                    owner = !profile.IsManagedStore ? "not_managed" : StoreProcessOwnership.Name(owner),
+                    started_by_this_service = profile.IsManagedStore && owner == StoreProcessOwnership.Owner.StartedByThisService,
+                    on_service_stop = StoreProcessOwnership.Describe(profile.IsManagedStore, owner),
+                },
+                store_certificate = DescribeCertificate(certificate, DateTime.UtcNow),
                 store = new
                 {
                     postgres_version = profile.Store.PostgresVersion,
@@ -203,7 +253,23 @@ public sealed class DarlingMcpStoreHostTools
                     derived = s.DerivedValueDisplay,
                     source = DarlingStoreHostProfile.FormatSourceForMcp(s, mcpDataDirectory),
                     verdict = DarlingStoreHostProfile.DescribeVerdict(s.Verdict).Replace('-', '_'),
+                    provenance = ShapeProvenance(s.Provenance, mcpDataDirectory),
                 }),
+                provenance_unreadable = profile.Settings.Select(s => s.ProvenanceUnreadable).FirstOrDefault(note => note is not null),
+                /* #9179: the planner cost settings, with the same current/source fields the sizing settings carry plus
+                   the file (null when the role cannot read pg_settings.sourcefile) and whether each matches the value
+                   the managed file writes. managed_value and matches_managed are null where the managed file sets none
+                   and on a store that is not managed. */
+                planner_costs = profile.PlannerCosts.Select(c => new
+                {
+                    name = c.Name,
+                    current = c.Current,
+                    source = c.Source,
+                    source_file = c.SourceFile,
+                    managed_value = c.ManagedValue,
+                    matches_managed = c.MatchesManaged,
+                }),
+                planner_cost_warning = DarlingStoreHostProfile.DescribeRandomPageCostMismatch(profile.PlannerCosts),
                 any_stale = anyStale,
                 /* Round-1 review, correcting the original plan: naive-UTC (no trailing Z), matching every
                    other "_at" timestamp on an MCP payload in this codebase (DarlingFleetReader.GeneratedAt,
@@ -216,6 +282,55 @@ public sealed class DarlingMcpStoreHostTools
         {
             return McpHelpers.FormatError("get_store_host", FailureFor(ex));
         }
+    }
+
+    /// <summary>#9430: the <c>store_certificate</c> object. Times are UTC with a trailing Z, because a certificate's validity is a fixed instant.</summary>
+    internal static object DescribeCertificate(StoreServerCertificate.Report report, DateTime nowUtc) => new
+    {
+        tls = report.Tls,
+        source = report.Source,
+        message = report.Message,
+        server = report.Server is { } server
+            ? new
+            {
+                subject = server.Subject,
+                issuer = server.Issuer,
+                sha256 = server.Sha256,
+                not_before = server.NotBeforeUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
+                not_after = server.NotAfterUtc.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
+                days_to_expiry = (int?)StoreServerCertificate.DaysToExpiry(server.NotAfterUtc, nowUtc),
+            }
+            : null,
+        root = report.Root is { } root ? new { subject = root.Subject, sha256 = root.Sha256 } : null,
+    };
+
+    /// <summary>One setting's provenance as the MCP payload carries it (#9418), with every file path reduced to what a
+    /// remote caller may see. Null when the setting was not visible on the connection.</summary>
+    internal static object? ShapeProvenance(SettingProvenance? provenance, string? dataDirectory)
+    {
+        if (provenance is null)
+        {
+            return null;
+        }
+
+        Func<string, string> redact = file => DarlingStoreHostProfile.SanitizeSourcePathForMcp(file, dataDirectory);
+        return new
+        {
+            value = provenance.ValueDisplay,
+            file_value = provenance.AppliedFileValue,
+            source = provenance.Source,
+            source_file = provenance.SourceFile is null ? null : redact(provenance.SourceFile),
+            source_line = provenance.SourceLine,
+            pending_restart = provenance.PendingRestart,
+            not_applied = provenance.UnappliedFileRows.Select(r => new
+            {
+                file = r.File is null ? null : redact(r.File),
+                line = r.Line,
+                value = r.Value,
+                error = r.Error,
+            }),
+            summary = StoreSettingProvenance.Describe(provenance, redact),
+        };
     }
 
     /// <summary>

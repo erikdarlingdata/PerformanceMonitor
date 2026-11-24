@@ -14,6 +14,7 @@ using System.Net.Sockets;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -65,7 +66,9 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.Contains("job history read ", line, StringComparison.Ordinal);
         Assert.Contains("(stopped by a newer pick)", line, StringComparison.Ordinal);
         Assert.DoesNotContain("no store phase timed", line, StringComparison.Ordinal);
-        Assert.True(ClientWorkMs(line) < 300, line);
+        /* The read ran 400 ms. Counted as client work it would make the client's share at least the read's own time; the share here is only the gap between
+           MarkSuperseded and Finish, so compare the two lines of the same load and not a fixed wall-clock number (#9249). */
+        Assert.True(ClientWorkMs(line) < ReadMs(line, "job history read"), line);
         read.SetCanceled();
     }
 
@@ -86,7 +89,7 @@ public sealed class ViewerSlowLoadPhasesTests
         Assert.NotNull(line);
         Assert.Contains("job history read ", line, StringComparison.Ordinal);
         Assert.Contains("(stopped by a newer pick)", line, StringComparison.Ordinal);
-        Assert.True(ClientWorkMs(line) < 300, line);
+        Assert.True(ClientWorkMs(line) < ReadMs(line, "job history read"), line);
     }
 
     [Fact]
@@ -102,7 +105,7 @@ public sealed class ViewerSlowLoadPhasesTests
 
     [Theory]
     [InlineData("Overview", "CPU read,wait read,blocking read,deadlock read,memory read,file I/O read,CPU baseline read,wait baseline read,I/O baseline read,blocking baseline read")]
-    [InlineData("Queries", "query duration trend read,procedure duration trend read,Query Store duration trend read,execution count trend read")]
+    [InlineData("Queries", "query duration and execution count trend read,procedure duration trend read,Query Store duration trend read")]
     [InlineData("Daily Summary", "daily summary read")]
     [InlineData("Collection Health", "health summary read,collection log data start read,collection log read,duration trend read,caveats read")]
     [InlineData("File I/O", "latency trend read")]
@@ -147,6 +150,211 @@ public sealed class ViewerSlowLoadPhasesTests
         }
     }
 
+    private static long ReadMs(string line, string read)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(line, System.Text.RegularExpressions.Regex.Escape(read) + @" (\d+) ms");
+        Assert.True(m.Success, line);
+        return long.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// What the client steps the line names add up to (the grid builds and chart draws the load timed as steps).
+    /// </summary>
+    private static long ClientStepsMs(string line)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(line, @"\[client steps: ([^\]]*)\]");
+        Assert.True(m.Success, line);
+        return System.Text.RegularExpressions.Regex.Matches(m.Groups[1].Value, @"(\d+) ms")
+            .Sum(x => long.Parse(x.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// A seamed read's time must not be left in "client work after the last read". What may stay there is the draws, which the line names as client
+    /// steps, so the bound is a second plus their own time and not a fixed wall-clock number: a slow runner stretches its draws and the bound with them
+    /// (#9249). A read counted as client work adds its whole time and breaks the bound.
+    /// </summary>
+    private static void AssertClientWorkIsOnlyTheDraws(string line) =>
+        Assert.True(ClientWorkMs(line) < 1000 + ClientStepsMs(line), line);
+
+    [Fact]
+    public void CpuTab_ALoadWithSlowReads_NamesEachRead_AndLeavesOnlyTheUnaccountedTimeToClientWork()
+    {
+        /* #9112: a CPU refresh logged its whole read time as "client work after the last read" because none of its reads was handed to
+           the load's clock. The tab's reads here take known time (the scheduler pair runs side by side). */
+        const int utilizationMs = 1500;
+        const int trendMs = 1000;
+        const int snapshotMs = 700;
+        string? line = null;
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService(FailsAtOnceStore()),
+                new DarlingServer(1, "cpu-slow-load", "cpu-slow-load", true, null));
+            tab.CpuReadsOverride = new ViewerServerTab.CpuTabReads(
+                async (_, _) =>
+                {
+                    await Task.Delay(utilizationMs);
+                    return new List<CpuUtilizationSample>();
+                },
+                async (_, _) =>
+                {
+                    await Task.Delay(trendMs);
+                    return new List<CpuSchedulerTrendPoint>();
+                },
+                async (_, _) =>
+                {
+                    await Task.Delay(snapshotMs);
+                    return null;
+                });
+            tab.SlowLoadSink = text => line = text;
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                var inner = (TabControl)tab.FindName("InnerTabs");
+                var index = inner.Items.OfType<TabItem>().ToList().FindIndex(t => Equals(t.Header, "CPU"));
+                Assert.True(index >= 0);
+                await tab.LoadInnerTabAsync(index, new ViewerLoadTimer(0));
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.NotNull(line);
+        Assert.True(ReadMs(line, "CPU read") >= utilizationMs - 100, line);
+        Assert.True(ReadMs(line, "CPU scheduler trend read") >= trendMs - 100, line);
+        Assert.True(ReadMs(line, "CPU scheduler snapshot read") >= snapshotMs - 100, line);
+        Assert.Contains("CPU chart draw", line, StringComparison.Ordinal);
+        /* Untimed, the 3.2 s of reads would all sit here. Only the draws after the last read remain. */
+        AssertClientWorkIsOnlyTheDraws(line);
+    }
+
+    /// <summary>Loads one inner tab of a server tab whose reads <paramref name="seam"/> has replaced, on a clock that always writes its line, and returns the line.</summary>
+    private static string LoadTabAndReadTheLine(DarlingServer server, Action<ViewerServerTab> seam, Func<ViewerServerTab, int> tabIndex)
+    {
+        string? line = null;
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(new ViewerDataService(FailsAtOnceStore()), server);
+            seam(tab);
+            tab.SlowLoadSink = text => line = text;
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.LoadInnerTabAsync(tabIndex(tab), new ViewerLoadTimer(0));
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.NotNull(line);
+        return line;
+    }
+
+    private static int InnerTabIndexOf(ViewerServerTab tab, string header)
+    {
+        var inner = (TabControl)tab.FindName("InnerTabs");
+        var index = inner.Items.OfType<TabItem>().ToList().FindIndex(t => Equals(t.Header, header));
+        Assert.True(index >= 0);
+        return index;
+    }
+
+    [Fact]
+    public void MemoryTab_ALoadWithSlowReads_NamesEachRead_NestedPlanCacheAndSemaphoreOnesToo()
+    {
+        /* #9112: the Memory tab's refresh read its summary, trends, pressure events, Plan Cache and Resource Semaphore sub-tabs with none
+           of them on the load's clock, so the whole read time was logged as "client work after the last read". */
+        var line = LoadTabAndReadTheLine(
+            new DarlingServer(1, "memory-slow-load", "memory-slow-load", true, null),
+            tab => tab.MemoryReadsOverride = new ViewerServerTab.MemoryTabReads(
+                async () => { await Task.Delay(1200); return null; },
+                async (_, _) => { await Task.Delay(900); return new List<MemoryTrendPoint>(); },
+                async (_, _) => { await Task.Delay(300); return new List<MemoryGrantTrendPoint>(); },
+                async (_, _) => { await Task.Delay(300); return new List<string>(); },
+                async (_, _) => { await Task.Delay(300); return new List<MemoryGrantChartPoint>(); },
+                async (_, _) => { await Task.Delay(300); return (DateTime?)null; },
+                async (_, _) => { await Task.Delay(600); return new List<MemoryPressureEventRow>(); },
+                async (_, _, _) => { await Task.Delay(300); return new Dictionary<string, List<MemoryClerkTrendPoint>>(); },
+                async (_, _) => { await Task.Delay(700); return new List<PlanCacheTrendPoint>(); },
+                async (_, _) => { await Task.Delay(500); return new List<PlanCacheGroupRow>(); },
+                async (_, _) => { await Task.Delay(600); return new PlanCacheSummary(0, 0, null); },
+                async (_, _) => { await Task.Delay(800); return new List<MemoryGrantWindowRow>(); },
+                async (_, _) => { await Task.Delay(400); return new List<ResourceSemaphoreRow>(); }),
+            tab => InnerTabIndexOf(tab, "Memory"));
+
+        Assert.True(ReadMs(line, "Memory summary read") >= 1200 - 100, line);
+        Assert.True(ReadMs(line, "Memory trend read") >= 900 - 100, line);
+        Assert.True(ReadMs(line, "Memory pressure events read") >= 600 - 100, line);
+        Assert.True(ReadMs(line, "Memory grant trend read") >= 300 - 100, line);
+        Assert.True(ReadMs(line, "Memory clerk list read") >= 300 - 100, line);
+        Assert.True(ReadMs(line, "Memory grant chart read") >= 300 - 100, line);
+        Assert.True(ReadMs(line, "Memory pressure data start read") >= 300 - 100, line);
+        Assert.True(ReadMs(line, "Plan Cache by type read") >= 500 - 100, line);
+        Assert.True(ReadMs(line, "Plan Cache trend read") >= 700 - 100, line);
+        Assert.True(ReadMs(line, "Plan Cache summary read") >= 600 - 100, line);
+        Assert.True(ReadMs(line, "Resource Semaphore window read") >= 800 - 100, line);
+        Assert.True(ReadMs(line, "Resource Semaphore snapshot read") >= 400 - 100, line);
+        Assert.Contains("Memory chart draw", line, StringComparison.Ordinal);
+        /* Untimed, about 3 s of reads would all sit here. Only the draws and the unseamed probes (they fail at once here, #9249) remain. */
+        AssertClientWorkIsOnlyTheDraws(line);
+    }
+
+    [Fact]
+    public void WaitStatsTab_ALoadWithSlowReads_NamesEachRead_AndLeavesOnlyTheUnaccountedTimeToClientWork()
+    {
+        /* #9112: the Wait Stats tab's picker read and trend read were not on the load's clock. */
+        var line = LoadTabAndReadTheLine(
+            new DarlingServer(1, "waits-slow-load", "waits-slow-load", true, null),
+            tab => tab.WaitStatsReadsOverride = new ViewerServerTab.WaitStatsTabReads(
+                async (_, _) =>
+                {
+                    await Task.Delay(1500);
+                    return new List<string> { "CXPACKET", "PAGEIOLATCH_SH" };
+                },
+                async (_, _, _) =>
+                {
+                    await Task.Delay(1000);
+                    return new Dictionary<string, List<WaitStatsTrendPoint>>();
+                }),
+            tab => InnerTabIndexOf(tab, "Wait Stats"));
+
+        Assert.True(ReadMs(line, "Wait Stats picker read") >= 1500 - 100, line);
+        Assert.True(ReadMs(line, "Wait Stats trend read") >= 1000 - 100, line);
+        Assert.Contains("Wait Stats chart draw", line, StringComparison.Ordinal);
+        AssertClientWorkIsOnlyTheDraws(line);
+    }
+
+    [Fact]
+    public void PostgresStorageTab_ALoadWithSlowReads_NamesEachRead_AndLeavesOnlyTheUnaccountedTimeToClientWork()
+    {
+        /* #9112: a PostgreSQL tab's reads were not on the load's clock either. Storage is the one with two plain reads (they run side by side). */
+        var line = LoadTabAndReadTheLine(
+            new DarlingServer(1, "pg-storage-slow-load", "pg-storage-slow-load", true, sqlMajorVersion: 0,
+                engineKind: MonitoredEngineKind.Postgres, postgresMajorVersion: 17),
+            tab => tab.PgStorageReadsOverride = new ViewerServerTab.PgStorageTabReads(
+                async (_, _, _) =>
+                {
+                    await Task.Delay(1500);
+                    return new List<DarlingPgTableBloatReader.PgTableBloatRow>();
+                },
+                async (_, _, _) =>
+                {
+                    await Task.Delay(1000);
+                    return new List<DarlingPgIndexUsageReader.PgIndexUsageRow>();
+                }),
+            _ => ViewerServerTab.PgStorageInnerTabIndex);
+
+        Assert.True(ReadMs(line, "PostgreSQL table bloat read") >= 1500 - 100, line);
+        Assert.True(ReadMs(line, "PostgreSQL index usage read") >= 1000 - 100, line);
+        Assert.Contains("PostgreSQL table bloat grid build", line, StringComparison.Ordinal);
+        AssertClientWorkIsOnlyTheDraws(line);
+    }
+
     /// <summary>A phase is booked by a watcher that finishes just after the read's own awaiter, so wait for the last one.</summary>
     private static async Task<List<string>> PhasesAsync(ViewerLoadTimer timer, int expected)
     {
@@ -157,6 +365,11 @@ public sealed class ViewerSlowLoadPhasesTests
 
         return timer.PhaseNames.ToList();
     }
+
+    /// <summary>A store whose every read fails at once: a unix socket path nothing is at, so no connect attempt waits on the network. A closed TCP port makes
+    /// Windows retry the connect for about 2 s, and every read the test does not seam (a probe, a nested sub-tab's read) then sits in the line as client work
+    /// when its watcher has not booked it as the load ends (#9249).</summary>
+    private static string FailsAtOnceStore() => "Host=/no-such-socket-dir;Port=5432;Database=darling;Username=darling;Timeout=5";
 
     private static string ClosedStore(int port) => $"Host=127.0.0.1;Port={port};Database=darling;Username=darling;Timeout=5";
 
@@ -444,6 +657,162 @@ public sealed class ViewerSlowLoadPhasesTests
         var line = Assert.Single(lines);
         Assert.Contains("slow load: first open > Job History", line, StringComparison.Ordinal);
         Assert.Contains("waited for the shell to start this refresh", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Describe_AnOverTheThresholdLoad_SplitsStoreAndRender_AndNamesRowsAndWindow()
+    {
+        /* #9426: the store share ends when the last read is in hand, the render share is the rest of the load. */
+        var phases = new List<(string Phase, long StartedMs, long EndedMs)> { ("grid read", 0, 900), ("slicer read", 100, 700) };
+        var line = ViewerLoadTimer.Describe("Top Queries", 2500, phases, window: "2026-11-24 08:00 to 2026-11-24 09:00 UTC", rows: 42);
+
+        Assert.NotNull(line);
+        Assert.Contains("took 2500 ms (store 900 ms, render 1600 ms, 42 rows, window 2026-11-24 08:00 to 2026-11-24 09:00 UTC)", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ALoadUnderTheThreshold_WritesNoLine()
+    {
+        var lines = new List<string>();
+        var timer = new ViewerLoadTimer();
+        timer.Track("grid read", Task.FromResult(new List<int> { 1, 2 }));
+
+        timer.FinishAndLog("Top Queries", lines.Add);
+
+        Assert.Empty(lines);
+    }
+
+    [Fact]
+    public async Task ALoadOverTheThreshold_WritesOneLine_WithTheRowsItsReadsReturned()
+    {
+        var lines = new List<string>();
+        var timer = new ViewerLoadTimer(0) { Window = "last hour" };
+        await timer.Track("grid read", Task.FromResult(new List<int> { 1, 2, 3 }));
+        await timer.Track("slicer read", Task.FromResult(new List<string> { "a", "b" }));
+        await timer.Track("no rows read", Task.FromResult(7));
+
+        timer.FinishAndLog("Top Queries", lines.Add);
+
+        var line = Assert.Single(lines);
+        Assert.Contains(", 5 rows, window last hour)", line, StringComparison.Ordinal);
+        Assert.Contains("store ", line, StringComparison.Ordinal);
+        Assert.Contains(" ms, render ", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASinkThatThrows_DoesNotFailTheLoadItDescribes()
+    {
+        var timer = new ViewerLoadTimer(0);
+        var called = 0;
+
+        timer.FinishAndLog("Top Queries", _ =>
+        {
+            called++;
+            throw new System.IO.IOException("the log file cannot be written");
+        });
+
+        Assert.Equal(1, called);
+    }
+
+    [Fact]
+    public void AServerTabLoad_OverTheThreshold_WritesOneLine_SplitIntoStoreAndRender_WithTheWindow()
+    {
+        /* #9426: through the server tab's shared load path, with a read that takes known time. */
+        const int readMs = 400;
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService(FailsAtOnceStore()),
+                new DarlingServer(1, "panel-timing", "panel-timing", true, null));
+            tab.CpuReadsOverride = new ViewerServerTab.CpuTabReads(
+                async (_, _) =>
+                {
+                    await Task.Delay(readMs);
+                    return new List<CpuUtilizationSample>();
+                },
+                (_, _) => Task.FromResult(new List<CpuSchedulerTrendPoint>()),
+                (_, _) => Task.FromResult<CpuSchedulerSnapshot?>(null));
+            tab.SlowLoadSink = lines.Add;
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.LoadInnerTabAsync(InnerTabIndexOf(tab, "CPU"), new ViewerLoadTimer(0));
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        var line = Assert.Single(lines);
+        var m = System.Text.RegularExpressions.Regex.Match(line, @"\(store (\d+) ms, render (\d+) ms, (\d+) rows, window ([^)]* UTC)\)");
+        Assert.True(m.Success, line);
+        Assert.True(long.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) >= readMs - 100, line);
+        Assert.StartsWith("[panel-timing] slow load: CPU took ", line, StringComparison.Ordinal);
+        /* The render share ends after the layout pass the load's binds queued, which the line books as its own client step. */
+        Assert.Contains("layout and render ", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AServerTabLoad_TheReaderCancelled_WritesNoLine()
+    {
+        var lines = new List<string>();
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService(FailsAtOnceStore()),
+                new DarlingServer(1, "panel-timing", "panel-timing", true, null));
+            using var cts = new System.Threading.CancellationTokenSource();
+            tab.LoadStartHook = (_, _) =>
+            {
+                cts.Cancel();
+                return Task.CompletedTask;
+            };
+            tab.SlowLoadSink = lines.Add;
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.LoadInnerTabAsync(InnerTabIndexOf(tab, "CPU"), new ViewerLoadTimer(0), cts.Token);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Empty(lines);
+    }
+
+    [Fact]
+    public void AServerTabLoad_WhoseLogSinkThrows_StillEnds()
+    {
+        var called = 0;
+        RunThemed(async () =>
+        {
+            var tab = new ViewerServerTab(
+                new ViewerDataService(FailsAtOnceStore()),
+                new DarlingServer(1, "panel-timing", "panel-timing", true, null));
+            tab.SlowLoadSink = _ =>
+            {
+                called++;
+                throw new System.IO.IOException("the log file cannot be written");
+            };
+            var window = new Window { Content = tab, Width = 1600, Height = 900 };
+            StaTestThread.ShowOffScreen(window);
+            try
+            {
+                await tab.LoadInnerTabAsync(InnerTabIndexOf(tab, "CPU"), new ViewerLoadTimer(0));
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        Assert.Equal(1, called);
     }
 
     private static int FreePort()

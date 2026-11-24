@@ -14,8 +14,8 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// #7000: every Overview read must cost what its WINDOW holds, not what the archive holds (#6096: Top Queries by CPU ranked every
 /// archived procedure_stats row, 432,000 rows from one day of history at 344 databases). Each read runs against two stores in the
-/// shape a real install reaches over days (<c>ArchiveOldDataAsync</c> moves each day past the hot window into a compacted Parquet
-/// month file, one pass per day) that differ only in how many days sit in the archive behind the same window. The test sums the
+/// shape a real install reaches over days (<c>ArchiveOldDataAsync</c> moves every day past the hot window into Parquet, in one
+/// pass) that differ only in how many days sit in the archive behind the same window. The test sums the
 /// rows DuckDB's own profiler says the <c>READ_PARQUET</c> nodes scanned: a read that follows its window prunes the archive away
 /// (no node, or the same rows in both stores), a read that does not scans the archive in proportion to its size. Rows, never time.
 /// </summary>
@@ -140,8 +140,7 @@ FROM slots, range(10) b(c) ORDER BY t;
 
     /// <summary>
     /// A store as the app leaves it after days of running: <see cref="HotDays"/> days in DuckDB and <paramref name="archivedDays"/>
-    /// older days moved to Parquet by one real <c>ArchiveOldDataAsync</c> pass per day (each pass compacts, so the archive is a
-    /// merged month file). Rows are stamped from .NET UTC; DuckDB's <c>now()::TIMESTAMP</c> goes through the session time zone.
+    /// older days moved to Parquet by one real <c>ArchiveOldDataAsync</c> pass (the archive is one file per table). Rows are stamped from .NET UTC; DuckDB's <c>now()::TIMESTAMP</c> goes through the session time zone.
     /// </summary>
     private async Task<LocalDataService> BuildStoreAsync(string name, int archivedDays, int hotDays = HotDays)
     {
@@ -164,12 +163,16 @@ FROM slots, range(10) b(c) ORDER BY t;
             await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
         }
 
+        /* One real pass archives every day older than hotDays. #8754: a pass takes about four seconds whatever it moves, and
+           this used to run one pass per archived day (26 of them across the four stores, 85 of the class's 140 seconds).
+           Every read's Parquet rows scanned and rows out, and every WINDOW row count the tests below compare, came out the same
+           from one pass (the idle-coverage reads' rows out differ by about 0.1%, 87,484 against 87,420 at 12 days, well inside
+           the slack that test allows). */
         var archive = new ArchiveService(initializer, archiveDir);
-        for (var pass = 1; pass <= archivedDays; pass++)
+        if (archivedDays > 0)
         {
-            /* Pass n archives everything older than (totalDays - n) days: one more day per pass, the last leaves HotDays. */
-            archive.TimestampForTests = DateTime.UtcNow.AddMinutes(pass).ToString("yyyyMMdd_HHmm");
-            await archive.ArchiveOldDataAsync(hotDataHours: (totalDays - pass) * 24);
+            archive.TimestampForTests = DateTime.UtcNow.AddMinutes(1).ToString("yyyyMMdd_HHmm");
+            await archive.ArchiveOldDataAsync(hotDataHours: hotDays * 24);
         }
 
         return new LocalDataService(initializer);
@@ -334,7 +337,7 @@ FROM slots, range(10) b(c) ORDER BY t;
     /// 3 days, so the hot table cannot decide it and the archive does (#7014). The answer is true in both stores (every older day is
     /// archived, the 7 complete days before today are all sampled), and the archive rows the fleet rule and the per-server check read
     /// must not grow with the archived days: the per-day count reads only its window, and the oldest-sample question stops at the first
-    /// matching row. Measured by rows OUT of the scans: with the archive compacted into one month file, DuckDB's rows-scanned count is the
+    /// matching row. Measured by rows OUT of the scans: with the archive held in one file per table, DuckDB's rows-scanned count is the
     /// file's row count whatever the filter (864,000 for a one-hour window and for the whole archive alike), while rows out are what the
     /// pushed-down filter and a LIMIT let through (600 for one hour).
     /// </summary>

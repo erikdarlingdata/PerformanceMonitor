@@ -73,18 +73,20 @@ public partial class ViewerServerTab
     /// Loads the CPU Scheduler sub-tab over the toolbar's settable window: the pressure trend and the
     /// latest-snapshot metric read fire concurrently, then the chart and metric grid render.
     /// </summary>
-    private async Task LoadCpuSchedulerAsync()
+    private async Task LoadCpuSchedulerAsync(ViewerLoadTimer? timer = null)
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
         using var readFanOut = ViewerReadFanOut.Of(2);
 
-        var trendTask = _dataService.GetCpuSchedulerTrendAsync(_server.ServerId, startUtc, endUtc);
-        var snapshotTask = _dataService.GetCpuSchedulerSnapshotAsync(_server.ServerId, startUtc, endUtc);
+        /* #9112: both reads are named on the load's clock, the chart and grid builds are named client steps. */
+        var reads = CpuReads;
+        var trendTask = Timed(timer, "CPU scheduler trend read", reads.SchedulerTrend(startUtc, endUtc));
+        var snapshotTask = Timed(timer, "CPU scheduler snapshot read", reads.SchedulerSnapshot(startUtc, endUtc));
         await Task.WhenAll(trendTask, snapshotTask);
 
-        RenderCpuSchedulerChart(trendTask.Result);
-        CpuSchedulerGrid.ItemsSource = CpuSchedulerGridRow.Build(snapshotTask.Result);
+        ClientStep(timer, "CPU scheduler chart draw", () => RenderCpuSchedulerChart(trendTask.Result));
+        ClientStep(timer, "CPU scheduler grid build", () => CpuSchedulerGrid.ItemsSource = CpuSchedulerGridRow.Build(snapshotTask.Result));
 
         var gap = CpuSchedulerGapNote(_server.DisplayName, _server.EngineEdition, _server.EngineKind);
         CpuSchedulerNoDataMessage.Text = gap ?? "";

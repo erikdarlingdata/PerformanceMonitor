@@ -12,6 +12,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -58,28 +59,162 @@ public static class CollectionHealthRollupSupport
     /// writer, the parser and every read together. ONE predicate for the rollup's CREATE and both raw fleet
     /// reads, so the three cannot keep different runs.</summary>
     public const string PartialFailureRunPredicateSql =
-        "status = 'SUCCESS' AND error_message LIKE '%" + PartialDatabaseFailureNote.Marker + "%'";
+        "status = 'SUCCESS' AND " + PartialFailureNoteMatchSql;
+
+    /// <summary>The note half of <see cref="PartialFailureRunPredicateSql"/> (#8570): the <c>LIKE</c> on
+    /// <c>error_message</c>, NULL when the message is NULL. The raw fleet read evaluates it once per row, into a
+    /// group key, and applies the <c>status = 'SUCCESS'</c> half to the group's status.</summary>
+    public const string PartialFailureNoteMatchSql =
+        "error_message LIKE '%" + PartialDatabaseFailureNote.Marker + "%'";
+
+    /// <summary>The work memory the fleet collection-health reads run with (#8570), set with <c>SET LOCAL</c> inside
+    /// <see cref="OpenWorkMemReadAsync"/>'s transaction only. The two-level raw read groups the whole window, and at the
+    /// PostgreSQL default of 4 MB the planner over-counts the groups and picks a sort instead of a hash aggregate, which
+    /// runs two to three times longer than the one-level read it replaced. At 64 MB it picks the hash aggregate. The same
+    /// reasoning and the same value as <c>PgFactCollector.PlanRegressionWorkMemSql</c> (#5812), which lives in an assembly
+    /// the service and the viewer both reach only through this one.</summary>
+    public const string FleetReadWorkMemSql = "SET LOCAL work_mem = '64MB'";
+
+    /// <summary>One short transaction that has run <see cref="FleetReadWorkMemSql"/>, on a connection of its own. Disposing it
+    /// rolls the transaction back, which drops the <c>SET LOCAL</c>, before the connection goes back to the pool, so a pooled
+    /// connection never keeps the larger value.</summary>
+    public sealed class WorkMemReadScope : IAsyncDisposable
+    {
+        private readonly NpgsqlConnection _connection;
+        private readonly NpgsqlTransaction _transaction;
+
+        internal WorkMemReadScope(NpgsqlConnection connection, NpgsqlTransaction transaction)
+        {
+            _connection = connection;
+            _transaction = transaction;
+        }
+
+        /// <summary>A command on the scope's connection and transaction.</summary>
+        public NpgsqlCommand CreateCommand(string sql) => new(sql, _connection, _transaction);
+
+        /// <inheritdoc />
+        public async ValueTask DisposeAsync()
+        {
+            await _transaction.DisposeAsync();
+            await _connection.DisposeAsync();
+        }
+    }
+
+    /// <summary>Opens a connection, begins a transaction and runs <see cref="FleetReadWorkMemSql"/> in it, so the fleet
+    /// collection-health read the caller runs next gets its own work memory (#8570, as #5812 does for the plan regression
+    /// read). The caller disposes the scope after the reader has closed.</summary>
+    public static async Task<WorkMemReadScope> OpenWorkMemReadAsync(
+        NpgsqlDataSource postgres, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        try
+        {
+            var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await using var workMem = new NpgsqlCommand(FleetReadWorkMemSql, connection, transaction) { CommandTimeout = commandTimeoutSeconds };
+                await workMem.ExecuteNonQueryAsync(cancellationToken);
+                return new WorkMemReadScope(connection, transaction);
+            }
+            catch
+            {
+                await transaction.DisposeAsync();
+                throw;
+            }
+        }
+        catch
+        {
+            await connection.DisposeAsync();
+            throw;
+        }
+    }
 
     /// <summary>
-    /// The raw fleet reads' aggregate for <c>latest_run_note</c> (#4812): the note of the collector's NEWEST
-    /// run in the window when that run is a <see cref="PartialFailureRunPredicateSql"/> run, else NULL. Plain
-    /// aggregates only, on purpose: an ordered aggregate (<c>array_agg(... ORDER BY collection_time DESC)</c>)
-    /// cannot be hashed or run as a partial aggregate, so it would turn the fleet-wide parallel hash aggregate
-    /// over a week of <c>collection_log</c> into a serial sort - the cost <c>FleetCollectionHealthSql</c>'s own
-    /// comment (#3735) refuses to pay, and the raw read is exactly what answers in the first hour after the
-    /// rollup is rebuilt. The newest such run wins the <c>MAX</c> because its 20-character UTC timestamp prefix
-    /// sorts first (a tie on the exact microsecond falls to the greater text, so it is deterministic); the
-    /// outer <c>CASE</c> keeps the note only when that run IS the newest run of any status, so a clean run
-    /// after a partial-failure cycle reads NULL, which is what the per-server reads' <c>recency_rank = 1</c>
-    /// gate does. Only the rows that carry the sentence pay for the <c>TO_CHAR</c>.
+    /// The fleet collection-health raw read, in two levels (#8570), shared by the service's
+    /// <c>DarlingFleetReader.FleetCollectionHealthSql</c> and the viewer's <c>FleetCollectionHealthByServerSql</c> so
+    /// the two cannot drift, and the one <see cref="InsertHeadBound"/>, <see cref="InsertHoleBound"/> and
+    /// <see cref="ComposeFleetSql(string)"/> derive their slices from. One row per (server, collector) of
+    /// <c>v_collection_log</c> from <c>$1</c>, excluding the <c>server_id = 0</c> fleet-maintenance sentinel and the
+    /// cycle rows (<see cref="CollectionCycleRow.NotCycleRowSql"/>): fourteen columns, <c>server_id</c> first.
+    ///
+    /// <para><b>Why two levels.</b> The one-level form ran about thirteen <c>status</c> text comparisons per row,
+    /// each again for every aggregate, over every row of the window, and that was most of its time. The inner
+    /// query groups by what the aggregates test (the status, whether <c>rows_collected</c> is above zero, whether it
+    /// is zero, whether the note is the whole-cycle-budget note, whether it is the partial-database-failure note), so each per-row test runs
+    /// once, and carries a count and the newest time per group. The outer query runs the SAME eleven aggregates
+    /// of <see cref="TimescaleSupport.CreateCollectionHealthHourlySql"/> over those few group rows: COUNT becomes SUM
+    /// of the counts (cast back to bigint), MAX stays MAX of the group maxima. Both are lossless, as the hourly
+    /// rollup's own re-aggregation is.</para>
+    ///
+    /// <para><b>What each aggregate means</b> (the reasons the hourly rollup's CREATE and every per-server surface
+    /// share). #2926: SUCCESS excludes a run abandoned before #2803 gave abandonment its own status (zero rows plus
+    /// the budget note), so Success and Abandoned never count one run twice, and an ordinary empty run stays
+    /// counted. #2804, #3240, #4812: abandoned_count, extension_missing_count and latest_run_note are selected so the
+    /// fleet bands through the same classifier as the per-server grid. #3819, #3885: last_non_skip_time,
+    /// last_productive_time and last_zero_row_streak_break_time are plain aggregates so a regressed collector is a
+    /// number on the fleet card, with no window function to sort a week of the log. A NULL status counts as a
+    /// non-skip. The note keeps only the newest run's partial-failure note, and only when that run is the newest run
+    /// of any status, using plain aggregates (an ordered aggregate would replace the hash aggregate with a sort).</para>
+    ///
+    /// <para><b>NULL handling is the one-level form's.</b> The two boolean keys <c>rows_collected &gt; 0</c> and
+    /// <c>rows_collected = 0</c> keep positive, zero, negative and NULL apart (a NULL gives NULL in both), and the
+    /// outer tests apply the predicates the one-level read applied to <c>rows_collected</c>, so
+    /// <c>rows_collected = 0</c> over a NULL stays NULL. Boolean keys rather than <c>sign()</c> on purpose: the
+    /// planner knows a boolean has two values and guesses two hundred for an expression such as <c>sign()</c>, and
+    /// that guess steered the plan to a serial sort of the whole window.</para>
+    ///
+    /// <para>Contains <c>WHERE collection_time &gt;= $1</c> exactly once, the anchor the slice composers replace.</para>
     /// </summary>
-    public const string LatestRunNoteRawSql = $@"CASE WHEN MAX(CASE WHEN {PartialFailureRunPredicateSql} THEN collection_time END) = MAX(collection_time)
-         THEN SUBSTRING(MAX(CASE WHEN {PartialFailureRunPredicateSql}
-                            THEN TO_CHAR(collection_time, 'YYYYMMDDHH24MISSUS') || error_message END) FROM 21)
-    END AS {LatestRunNoteColumn}";
+    public const string FleetCollectionHealthRawSql = $@"
+SELECT
+    g.server_id,
+    g.collector_name,
+    SUM(g.runs)::bigint AS total_runs,
+    SUM(CASE WHEN g.status = 'SUCCESS'
+              AND NOT (g.rows_zero AND g.abandon_note)
+             THEN g.runs ELSE 0 END)::bigint AS success_count,
+    SUM(CASE WHEN g.status = 'ERROR' THEN g.runs ELSE 0 END)::bigint AS error_count,
+    MAX(CASE WHEN g.status IN ('SUCCESS', 'SKIPPED') THEN g.last_time END) AS last_success_time,
+    SUM(CASE WHEN g.status = 'PERMISSIONS' THEN g.runs ELSE 0 END)::bigint AS permission_denied_count,
+    MAX(g.last_time) AS last_run_time,
+    SUM(CASE WHEN (g.status = '{EnumeratedCollectorDriver.AbandonedStatus}' OR (g.rows_zero AND g.abandon_note))
+             THEN g.runs ELSE 0 END)::bigint AS abandoned_count,
+    SUM(CASE WHEN g.status = 'EXTENSION_MISSING' THEN g.runs ELSE 0 END)::bigint AS extension_missing_count,
+    MAX(CASE WHEN g.status IS NULL
+              OR g.status NOT IN ({CollectorRuntimePrecondition.NamedSkipStatusSqlList})
+             THEN g.last_time END) AS last_non_skip_time,
+    MAX(CASE WHEN g.rows_pos THEN g.last_time END) AS last_productive_time,
+    MAX(CASE WHEN NOT (g.status = 'SUCCESS'
+                       AND COALESCE(g.rows_zero, TRUE)
+                       AND NOT (g.rows_zero AND g.abandon_note))
+             THEN g.last_time END) AS last_zero_row_streak_break_time,
+    CASE WHEN MAX(CASE WHEN g.status = 'SUCCESS' AND g.partial_note THEN g.last_time END) = MAX(g.last_time)
+         THEN SUBSTRING(MAX(g.partial_text) FROM 21)
+    END AS {LatestRunNoteColumn}
+FROM
+(
+    SELECT
+        server_id,
+        collector_name,
+        status,
+        rows_collected > 0 AS rows_pos,
+        rows_collected = 0 AS rows_zero,
+        {EnumeratedCollectorDriver.AbandonedNoteMatchSql} AS abandon_note,
+        {PartialFailureNoteMatchSql} AS partial_note,
+        COUNT(*) AS runs,
+        MAX(collection_time) AS last_time,
+        MAX(CASE WHEN {PartialFailureRunPredicateSql}
+                 THEN TO_CHAR(collection_time, 'YYYYMMDDHH24MISSUS') || error_message END) AS partial_text
+    FROM v_collection_log
+    WHERE collection_time >= $1
+    AND   server_id <> 0
+    AND   {CollectionCycleRow.NotCycleRowSql}
+    GROUP BY server_id, collector_name, status, rows_pos, rows_zero, abandon_note, partial_note
+) g
+GROUP BY g.server_id, g.collector_name";
 
     /// <summary>
-    /// <see cref="LatestRunNoteRawSql"/> re-aggregated over the composed parts (#4812): the note of the part
+    /// <see cref="FleetCollectionHealthRawSql"/>'s <c>latest_run_note</c> re-aggregated over the composed parts (#4812): the note of the part
     /// with the greatest <c>last_run_time</c>. The rollup's hour buckets, the raw head slice and any hole hours
     /// cover DISJOINT hours, so exactly one part holds the collector's newest run, and its note (already
     /// reduced to "the newest run's note, or NULL" inside the part) is the collector's. It is the raw

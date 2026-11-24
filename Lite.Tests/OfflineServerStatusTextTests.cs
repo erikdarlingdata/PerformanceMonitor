@@ -30,7 +30,8 @@ namespace PerformanceMonitorLite.Tests;
 /// with the sidebar open beside the four counters the bar always carries, and follows the connection check while the tab stays
 /// selected: a server that goes down reads Offline on the next check, and one that comes back reads Connected again.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class OfflineServerStatusTextTests
 {
     [Fact]

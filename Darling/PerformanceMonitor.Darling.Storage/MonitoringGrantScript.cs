@@ -24,6 +24,9 @@ public enum GrantSet
     /// <summary>The per-database grants the FinOps Index Analysis tab needs (sp_IndexCleanup).</summary>
     FinOps,
 
+    /// <summary>The database-level SELECT the opt-in column_stats collector needs (#8798), only in the databases the operator lists.</summary>
+    ColumnStats,
+
     /// <summary>Azure SQL Database: a contained user and database-scoped grants, since there are no server logins.</summary>
     AzureSqlDatabase,
 }
@@ -39,6 +42,9 @@ public enum GrantScope
 
     /// <summary>In every user database (the FinOps grants).</summary>
     EachDatabase,
+
+    /// <summary>Only in the databases the operator names (the column_stats grant), never in every database.</summary>
+    ListedDatabases,
 
     /// <summary>In the one database an Azure SQL Database entry connects to.</summary>
     Database,
@@ -155,6 +161,8 @@ public static class MonitoringGrantScript
         new(GrantSet.FinOps, GrantScope.EachDatabase, "VIEW DEFINITION", null, true, "FinOps Index Analysis."),
         new(GrantSet.FinOps, GrantScope.EachDatabase, "SELECT", "sys.sql_expression_dependencies", true,
             "FinOps Index Analysis. Only db_owner has this by default, and VIEW DEFINITION does not include it."),
+        new(GrantSet.ColumnStats, GrantScope.ListedDatabases, "SELECT", null, true,
+            "The column_stats collector reads each statistic's density vector with DBCC SHOW_STATISTICS, which needs SELECT on the table's columns. The grant is database-wide, because SQL Server has no narrower one that covers tables created later."),
         new(GrantSet.AzureSqlDatabase, GrantScope.Database, "VIEW DATABASE STATE", null, true, "The database-scoped DMVs."),
         new(GrantSet.AzureSqlDatabase, GrantScope.Database, "VIEW DEFINITION", null, true,
             "The database-scoped form of catalog visibility: without it sys.tables, sys.indexes and sys.identity_columns return no rows."),
@@ -370,8 +378,13 @@ public static class MonitoringGrantScript
     /// <paramref name="awsRds"/> (#6889) is the Amazon RDS for SQL Server form: RDS has no sysadmin and refuses CONNECT ANY DATABASE, ALTER
     /// SETTINGS and eight msdb grants to its master user, so those are left out and the login gets a user in each current user database
     /// instead. It has no effect on an Azure SQL Database script.
+    /// <paramref name="columnStatsDatabases"/> (#8798) adds the database-level SELECT the column_stats collector needs, in exactly those
+    /// databases; no list or an empty one adds nothing, so the grant never defaults to every database. On an Azure SQL Database script, which runs
+    /// in one database, a non-empty list adds the database-level SELECT for the database it runs in and names the listed databases to run it in.
     /// </summary>
-    public static string Build(GrantPrincipal principal, bool finOps, bool azureSqlDatabase, string? serverLabel = null, bool awsRds = false)
+    public static string Build(
+        GrantPrincipal principal, bool finOps, bool azureSqlDatabase, string? serverLabel = null, bool awsRds = false,
+        IReadOnlyList<string>? columnStatsDatabases = null)
     {
         ArgumentNullException.ThrowIfNull(principal);
         var name = principal.Name;
@@ -397,6 +410,16 @@ public static class MonitoringGrantScript
         if (azureSqlDatabase)
         {
             AppendAzure(sb, principal, q, finOps);
+            var azureListed = (columnStatsDatabases ?? []).Where(d => !string.IsNullOrWhiteSpace(d)).Select(d => InComment(d.Trim())).ToList();
+            if (azureListed.Count > 0)
+            {
+                /* An Azure SQL Database script runs in one database, so the column_stats grant is the database-level SELECT there. */
+                sb.Append('\n').Append("/* ").Append(ColumnStatsGrantNote).Append(" */\n");
+                sb.Append("/* Azure SQL Database: this SELECT is granted in the database the script runs in. Run the script in each database listed: ")
+                    .Append(string.Join(", ", azureListed)).Append(". */\n");
+                sb.Append("GRANT SELECT TO ").Append(q).Append(";\n");
+            }
+
             return sb.ToString();
         }
 
@@ -476,6 +499,11 @@ public static class MonitoringGrantScript
             AppendEachDatabase(sb, name, finOps, awsRds);
         }
 
+        if (columnStatsDatabases is not null)
+        {
+            AppendListedDatabases(sb, name, columnStatsDatabases);
+        }
+
         return sb.ToString();
     }
 
@@ -483,6 +511,92 @@ public static class MonitoringGrantScript
     {
         sb.Append("IF NOT EXISTS\n(\n    SELECT\n        1/0\n    FROM sys.database_principals AS dp\n    WHERE dp.name = ")
             .Append(Literal(name)).Append("\n)\nBEGIN\n").Append(createStatement).Append("\nEND;\n\n");
+    }
+
+    /// <summary>Text that sits inside a string literal of the script: each quote doubles once.</summary>
+    private static string InString(string t) => t.Replace("'", "''", StringComparison.Ordinal);
+
+    /// <summary>
+    /// The text that runs inside one database: create the login's user when it is missing, then one statement per entry. The login arrives as the
+    /// <c>@login</c> parameter of the database's sp_executesql and is quoted there with QUOTENAME.
+    /// </summary>
+    private static string BuildPerDatabaseInner(IEnumerable<GrantEntry> entries)
+    {
+        var inner = new StringBuilder();
+        inner.Append("DECLARE\n");
+        inner.Append("    @statement nvarchar(max) = N'';\n\n");
+        inner.Append("IF NOT EXISTS\n(\n    SELECT\n        1/0\n    FROM sys.database_principals AS dp\n    WHERE dp.name = @login\n)\n");
+        inner.Append("BEGIN\n");
+        inner.Append("    SET @statement += N'CREATE USER ' + QUOTENAME(@login) + N' FOR LOGIN ' + QUOTENAME(@login) + N';';\n");
+        inner.Append("END;\n\n");
+        foreach (var entry in entries)
+        {
+            inner.Append("SET @statement += N'").Append(entry.GrantPrefix).Append("' + QUOTENAME(@login) + N';';\n");
+        }
+
+        inner.Append("\nEXECUTE sys.sp_executesql\n    @statement;");
+        return inner.ToString();
+    }
+
+    /// <summary>
+    /// The plain-language text of the optional column_stats grant (#8798), the same words in the script's block comment, in docs/permissions.md
+    /// and in the collector's schedule comment. Keep the three the same when one changes.
+    /// </summary>
+    public const string ColumnStatsGrantNote =
+        "Optional, for the column_stats collector (column selectivity). This grant lets the monitoring login read every row of the databases listed here. "
+        + "Darling copies into its store only statistic and column names, densities, row and sample counts and update times; it never copies column values, and it never reads histograms or filter expressions.";
+
+    /// <summary>
+    /// The column_stats block: one guarded block per listed database, creating the login's user there when it is missing and granting
+    /// database-level SELECT. It never loops over every database, and no list (or only blank names) writes nothing. A listed database that does not
+    /// exist is skipped with a message and never reached through USE, which would leave the batch in the previous database.
+    /// </summary>
+    private static void AppendListedDatabases(StringBuilder sb, string name, IReadOnlyList<string> databases)
+    {
+        var listed = databases.Where(d => !string.IsNullOrWhiteSpace(d)).Select(d => d.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (listed.Count == 0)
+        {
+            return;
+        }
+
+        var inner = BuildPerDatabaseInner(All.Where(e => e.Set == GrantSet.ColumnStats));
+        sb.Append('\n').Append("/* ").Append(ColumnStatsGrantNote).Append(" */\n");
+        sb.Append("DECLARE\n");
+        sb.Append("    @column_stats_login sysname = ").Append(Literal(name)).Append(",\n");
+        sb.Append("    @column_stats_sql nvarchar(max) = N'\n").Append(InString(inner)).Append("\n';\n\n");
+        foreach (var database in listed)
+        {
+            sb.Append("IF DB_ID(").Append(Literal(database)).Append(") IS NULL\n");
+            sb.Append("BEGIN\n    PRINT ").Append(Literal("Skipped " + QuoteName(database) + ": no such database.")).Append(";\nEND\n");
+            sb.Append("ELSE\nBEGIN\n");
+            sb.Append("    BEGIN TRY\n");
+            sb.Append("        EXECUTE ").Append(QuoteName(database)).Append(".sys.sp_executesql\n");
+            sb.Append("            @column_stats_sql,\n");
+            sb.Append("            N'@login sysname',\n");
+            sb.Append("            @login = @column_stats_login;\n");
+            sb.Append("        PRINT ").Append(Literal("Granted SELECT in " + QuoteName(database))).Append(";\n");
+            sb.Append("    END TRY\n");
+            sb.Append("    BEGIN CATCH\n");
+            sb.Append("        PRINT ").Append(Literal("Skipped " + QuoteName(database) + ": ")).Append(" + ERROR_MESSAGE();\n");
+            sb.Append("    END CATCH;\nEND;\n\n");
+        }
+    }
+
+    /// <summary>
+    /// The warning the connection test adds when the login lacks SELECT in a database listed for column_stats (#8798), or null when
+    /// none is missing. The statement names the database and the grant; the script's <c>--column-stats-databases</c> option prints the whole block.
+    /// </summary>
+    public static string? DescribeMissingColumnStatsSelect(IReadOnlyList<string> missingDatabases, string principal)
+    {
+        if (missingDatabases.Count == 0)
+        {
+            return null;
+        }
+
+        var lines = missingDatabases.Select(d =>
+            $"SELECT is missing in {Quote(d)} (USE {Quote(d)}; IF DATABASE_PRINCIPAL_ID({Literal(principal)}) IS NULL CREATE USER {Quote(principal)} FOR LOGIN {Quote(principal)}; GRANT SELECT TO {Quote(principal)};)");
+        return "The column_stats collector is on for databases this login cannot read: " + string.Join("; ", lines)
+            + ". Those databases return no column selectivity until it is granted. The --grant-script command with --column-stats-databases prints the full block.";
     }
 
     /// <summary>
@@ -496,20 +610,7 @@ public static class MonitoringGrantScript
            sp_MSforeachdb, which can skip databases and replaces every question mark in the batch, one inside the login's name too). The login goes in as a parameter of each database's sp_executesql and is quoted there with QUOTENAME,
            so its name is never spliced into the per-database text. The per-database text sits inside a string, so each quote in it
            doubles once. */
-        string InString(string t) => t.Replace("'", "''", StringComparison.Ordinal);
-        var inner = new StringBuilder();
-        inner.Append("DECLARE\n");
-        inner.Append("    @statement nvarchar(max) = N'';\n\n");
-        inner.Append("IF NOT EXISTS\n(\n    SELECT\n        1/0\n    FROM sys.database_principals AS dp\n    WHERE dp.name = @login\n)\n");
-        inner.Append("BEGIN\n");
-        inner.Append("    SET @statement += N'CREATE USER ' + QUOTENAME(@login) + N' FOR LOGIN ' + QUOTENAME(@login) + N';';\n");
-        inner.Append("END;\n\n");
-        foreach (var entry in All.Where(e => grants && e.Set == GrantSet.FinOps))
-        {
-            inner.Append("SET @statement += N'").Append(entry.GrantPrefix).Append("' + QUOTENAME(@login) + N';';\n");
-        }
-
-        inner.Append("\nEXECUTE sys.sp_executesql\n    @statement;");
+        var inner = BuildPerDatabaseInner(All.Where(e => grants && e.Set == GrantSet.FinOps));
 
         if (awsRds)
         {
@@ -526,7 +627,7 @@ public static class MonitoringGrantScript
         sb.Append("    @login sysname = ").Append(Literal(name)).Append(",\n");
         sb.Append("    @database_name sysname,\n");
         sb.Append("    @procedure nvarchar(600),\n");
-        sb.Append("    @sql nvarchar(max) = N'\n").Append(InString(inner.ToString())).Append("\n';\n\n");
+        sb.Append("    @sql nvarchar(max) = N'\n").Append(InString(inner)).Append("\n';\n\n");
         sb.Append("DECLARE\n    database_cursor CURSOR LOCAL FAST_FORWARD FOR\n");
         sb.Append("    SELECT\n        d.name\n    FROM sys.databases AS d\n");
         sb.Append("    WHERE d.database_id > 4\n");

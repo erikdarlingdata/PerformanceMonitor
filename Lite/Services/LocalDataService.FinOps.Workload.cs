@@ -35,12 +35,12 @@ public partial class LocalDataService
     /// <summary>
     /// Computes per-database resource usage from query_stats + file_io_stats deltas.
     /// </summary>
-    public async Task<List<DatabaseResourceUsageRow>> GetDatabaseResourceUsageAsync(int serverId, int hoursBack = 24)
+    public async Task<List<DatabaseResourceUsageRow>> GetDatabaseResourceUsageAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         /* #7256: a table whose archive holds nothing at or after the cutoff is read as the hot table alone, each of the two on its own. A view opens every Parquet file of its archive (one per day) however short the window is. */
-        var usage = await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
+        var usage = await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, cancellationToken);
 
         /* #7725: a database the server no longer lists keeps its row and is marked, the rule the Viewer's grid and the web page use. */
         var dropped = await GetDroppedDatabasesAsync(serverId, windowStartUtc: cutoff);
@@ -49,7 +49,7 @@ public partial class LocalDataService
 
         async Task<List<DatabaseResourceUsageRow>> ReadAsync(Func<string, string> relationFor)
         {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(null, cancellationToken);
         using var command = connection.CreateCommand();
 
 
@@ -122,8 +122,8 @@ ORDER BY c.cpu_time_ms DESC";
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
 
         var items = new List<DatabaseResourceUsageRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new DatabaseResourceUsageRow
             {
@@ -151,9 +151,9 @@ ORDER BY c.cpu_time_ms DESC";
     /// program_name: AVG/MAX for connection/running/sleeping/dormant counts and CPU/reads/writes/logical-reads
     /// (the resource columns are nullable, so AVG/MAX yield NULL until populated).
     /// </summary>
-    public async Task<List<ApplicationConnectionRow>> GetApplicationConnectionsAsync(int serverId)
+    public async Task<List<ApplicationConnectionRow>> GetApplicationConnectionsAsync(int serverId, CancellationToken cancellationToken = default)
     {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(null, cancellationToken);
         using var command = connection.CreateCommand();
 
         var cutoff = DateTime.UtcNow.AddHours(-24);
@@ -190,8 +190,8 @@ ORDER BY max_connections DESC";
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
 
         var items = new List<ApplicationConnectionRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new ApplicationConnectionRow
             {
@@ -229,12 +229,12 @@ ORDER BY max_connections DESC";
     /// full aggregations of the same window); this one statement plus client-side ranking averaged ~60-110ms —
     /// roughly half, mostly the second connection-open/read-lock it no longer pays for.
     /// </summary>
-    public async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> GetTopResourceConsumersAsync(int serverId, int hoursBack = 24, int topN = 5)
+    public async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> GetTopResourceConsumersAsync(int serverId, int hoursBack = 24, int topN = 5, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         /* #7256: a table whose archive holds nothing at or after the cutoff is read as the hot table alone, each of the two on its own. A view opens every Parquet file of its archive (one per day) however short the window is. */
-        var consumers = await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, CancellationToken.None);
+        var consumers = await ReadWindowSkippingEmptyArchivesAsync(WorkloadAndIoTables, "collection_time", cutoff, ReadAsync, cancellationToken);
 
         /* #7725: a database the server no longer lists keeps its row in both grids and is marked. */
         var dropped = await GetDroppedDatabasesAsync(serverId, windowStartUtc: cutoff);
@@ -244,7 +244,7 @@ ORDER BY max_connections DESC";
 
         async Task<(List<TopResourceConsumerRow> ByTotal, List<TopResourceConsumerRow> ByAvg)> ReadAsync(Func<string, string> relationFor)
         {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(null, cancellationToken);
         using var command = connection.CreateCommand();
 
 
@@ -305,8 +305,8 @@ ORDER BY lower(c.database_name), c.database_name";
         var totalCandidates = new List<TopResourceConsumerRow>();
         var avgCandidates = new List<TopResourceConsumerRow>();
 
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             var dbNameIsNull = reader.IsDBNull(0);
             var dbName = dbNameIsNull ? "" : reader.GetString(0);
@@ -361,9 +361,9 @@ ORDER BY lower(c.database_name), c.database_name";
     /// <summary>
     /// Gets wait stats grouped by cost category over the last 24 hours.
     /// </summary>
-    public async Task<List<WaitCategorySummaryRow>> GetWaitCategorySummaryAsync(int serverId, int hoursBack = 24)
+    public async Task<List<WaitCategorySummaryRow>> GetWaitCategorySummaryAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(null, cancellationToken);
         using var command = connection.CreateCommand();
 
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
@@ -441,8 +441,8 @@ ORDER BY bc.total_wait_time_ms DESC";
         command.Parameters.Add(new DuckDBParameter { Value = cutoff });
 
         var items = new List<WaitCategorySummaryRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new WaitCategorySummaryRow
             {
@@ -460,16 +460,16 @@ ORDER BY bc.total_wait_time_ms DESC";
     /// <summary>
     /// Gets top 20 most expensive queries by total CPU over the last 24 hours.
     /// </summary>
-    public async Task<List<ExpensiveQueryRow>> GetExpensiveQueriesAsync(int serverId, int hoursBack = 24, int topN = 20)
+    public async Task<List<ExpensiveQueryRow>> GetExpensiveQueriesAsync(int serverId, int hoursBack = 24, int topN = 20, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
-        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, CancellationToken.None);
+        return await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, cancellationToken);
 
         async Task<List<ExpensiveQueryRow>> ReadAsync(string relation)
         {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(null, cancellationToken);
         using var command = connection.CreateCommand();
 
 
@@ -501,8 +501,8 @@ LIMIT $3";
         command.Parameters.Add(new DuckDBParameter { Value = topN });
 
         var items = new List<ExpensiveQueryRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new ExpensiveQueryRow
             {
@@ -531,7 +531,19 @@ LIMIT $3";
     /// Names <c>v_query_stats</c> wherever it reads the window, so the archive relation swap finds every read.
     /// </summary>
     internal const string HighImpactQueriesSql = @"
-WITH per_database AS
+WITH win AS MATERIALIZED
+(
+    -- #9058: the window's rows, read once and without the query text. The per-database totals and the grant lookup below
+    -- both read from this set, so the statement scans the table (every Parquet file of it, when the window reaches the
+    -- archive) twice, here and for the text of the kept hashes, instead of four times.
+    SELECT query_hash, database_name, delta_execution_count, delta_worker_time, delta_elapsed_time,
+           delta_logical_reads, delta_logical_writes, max_grant_kb, collection_time, creation_time
+    FROM v_query_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   query_hash IS NOT NULL AND query_hash != ''
+),
+per_database AS
 (
     -- One group per (hash, database): its CPU subtotal picks the hash's database (#7695).
     SELECT query_hash, database_name,
@@ -540,11 +552,8 @@ WITH per_database AS
            SUM(delta_elapsed_time) AS elapsed_time,
            SUM(delta_logical_reads) AS logical_reads,
            SUM(delta_logical_writes) AS logical_writes
-    FROM v_query_stats
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   query_hash IS NOT NULL AND query_hash != ''
-    AND   delta_execution_count > 0
+    FROM win
+    WHERE delta_execution_count > 0
     GROUP BY query_hash, database_name
 ),
 per_hash AS
@@ -580,19 +589,23 @@ ranked AS
     FROM per_hash AS h
     -- #7166: max_grant_kb is a per-plan high-water mark since that plan was cached, so MAX across a hash's plans is
     -- the largest grant any plan ever had (the max_dop trap, #3648). The reading is the hash's newest row's, the same
-    -- choice max_dop makes: newest collection first, newest plan first within it. Explicit NULLS LAST: DuckDB and
-    -- Postgres default DESC null placement differently.
-    LEFT JOIN LATERAL
+    -- choice max_dop makes: newest collection first, newest plan first within it. #9233: one grouped pass over win,
+    -- where a per-hash LATERAL with ORDER BY ... LIMIT 1 sorted the whole window (the statement's costliest operator
+    -- after the scan). arg_max over a struct ranks a NULL field ABOVE every value (#9195), so each key that sorted
+    -- NULLS LAST maps to a value below every real one. The grant is the last key, so rows tied on the other three
+    -- agree on the largest grant, not on whichever the sort met first.
+    LEFT JOIN
     (
-        SELECT qs.max_grant_kb
-        FROM v_query_stats AS qs
-        WHERE qs.server_id = $1
-        AND   qs.query_hash = h.query_hash
-        AND   qs.collection_time >= $2
-        AND   qs.delta_execution_count > 0
-        ORDER BY qs.collection_time DESC, qs.creation_time DESC NULLS LAST, qs.delta_worker_time DESC NULLS LAST
-        LIMIT 1
-    ) AS g ON true
+        SELECT query_hash,
+               arg_max(COALESCE(max_grant_kb, 0),
+                       (collection_time,
+                        COALESCE(creation_time, '-infinity'::TIMESTAMP),
+                        COALESCE(delta_worker_time, -9223372036854775807),
+                        COALESCE(max_grant_kb, 0))) AS max_grant_kb
+        FROM win
+        WHERE delta_execution_count > 0
+        GROUP BY query_hash
+    ) AS g ON g.query_hash = h.query_hash
 ),
 kept AS
 (
@@ -600,6 +613,28 @@ kept AS
     FROM ranked
     WHERE cpu_rank <= $3 OR duration_rank <= $3 OR reads_rank <= $3
     OR    writes_rank <= $3 OR memory_rank <= $3 OR executions_rank <= $3
+),
+sample_text AS
+(
+    -- The sample text for the kept hashes only (#6803), from each hash's busiest row in the window. #9058: one pass for
+    -- the whole set. The two per-hash lookups this replaces each scanned the window again. A NULL count ranks last. A tie
+    -- on the count goes to the newest collection, then the newest plan creation, then the text itself, so the pick is
+    -- the same on every read even for rows of one collection (several plans or databases). #9233: the pick is an
+    -- arg_min over the key as a struct, not a ROW_NUMBER sort that carried the text of every row of the kept hashes.
+    -- Each DESC key is negated and its NULL maps to the largest value, so a NULL still ranks last, and the text is the
+    -- struct's last member, so a full tie still goes to the smallest text.
+    SELECT qs2.query_hash,
+           arg_min(qs2.query_text,
+                   (COALESCE(-qs2.delta_execution_count, 9223372036854775807),
+                    -epoch_us(qs2.collection_time),
+                    COALESCE(-epoch_us(qs2.creation_time), 9223372036854775807),
+                    qs2.query_text)) AS query_text
+    FROM v_query_stats AS qs2
+    JOIN kept AS kk ON kk.query_hash = qs2.query_hash
+    WHERE qs2.server_id = $1
+    AND   qs2.collection_time >= $2
+    AND   qs2.query_text IS NOT NULL AND qs2.query_text != ''
+    GROUP BY qs2.query_hash
 )
 SELECT
     k.query_hash,
@@ -611,34 +646,22 @@ SELECT
     k.total_writes,
     k.peak_grant_kb / 1024.0 AS peak_memory_mb,
     k.database_count,
-    -- The sample text for the kept hashes only (#6803), from each hash's busiest row in the window.
-    (SELECT LEFT(qs2.query_text, 200) FROM v_query_stats qs2
-     WHERE qs2.query_hash = k.query_hash
-     AND qs2.server_id = $1
-     AND qs2.collection_time >= $2
-     AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
-     ORDER BY qs2.delta_execution_count DESC NULLS LAST
-     LIMIT 1) AS sample_query_text,
-    (SELECT qs2.query_text FROM v_query_stats qs2
-     WHERE qs2.query_hash = k.query_hash
-     AND qs2.server_id = $1
-     AND qs2.collection_time >= $2
-     AND qs2.query_text IS NOT NULL AND qs2.query_text != ''
-     ORDER BY qs2.delta_execution_count DESC NULLS LAST
-     LIMIT 1) AS full_query_text
+    LEFT(t.query_text, 200) AS sample_query_text,
+    t.query_text AS full_query_text
 FROM kept AS k
+LEFT JOIN sample_text AS t ON t.query_hash = k.query_hash
 ORDER BY k.total_worker_time DESC, k.query_hash";
 
     /// <summary>
     /// Fetches high-impact queries — 80/20 analysis across CPU, duration, reads, writes, memory, executions.
     /// Aggregates to query_hash level from DuckDB, keeps the hashes the scorer can keep, then scores in C#.
     /// </summary>
-    public async Task<List<HighImpactQueryRow>> GetHighImpactQueriesAsync(int serverId, int hoursBack = 24)
+    public async Task<List<HighImpactQueryRow>> GetHighImpactQueriesAsync(int serverId, int hoursBack = 24, CancellationToken cancellationToken = default)
     {
         var cutoff = DateTime.UtcNow.AddHours(-hoursBack);
 
         /* #7256: a window that starts after the newest archived row of query_stats reads the hot table alone. The view opens every Parquet file of it (one per day) however short the window is. */
-        var impact = await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, CancellationToken.None);
+        var impact = await ReadWindowSkippingEmptyArchiveAsync("query_stats", "collection_time", cutoff, ReadAsync, cancellationToken);
 
         /* #7725: a row whose named database the server no longer lists is marked. */
         var dropped = await GetDroppedDatabasesAsync(serverId, windowStartUtc: cutoff);
@@ -647,7 +670,7 @@ ORDER BY k.total_worker_time DESC, k.query_hash";
 
         async Task<List<HighImpactQueryRow>> ReadAsync(string relation)
         {
-        using var connection = await OpenConnectionAsync();
+        using var connection = await OpenConnectionAsync(null, cancellationToken);
         using var command = connection.CreateCommand();
 
         command.CommandText = HighImpactQueriesSql.Replace("v_query_stats", relation, StringComparison.Ordinal);
@@ -658,8 +681,8 @@ ORDER BY k.total_worker_time DESC, k.query_hash";
 
         // Step 1: Read the hashes the scorer can keep
         var allRows = new List<HighImpactQueryRow>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             allRows.Add(new HighImpactQueryRow
             {

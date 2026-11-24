@@ -54,7 +54,7 @@ public sealed class EventTimeWindowSqlShapeTests
         var end = NextBoundary(statement, fromClause.Length);
         statement = statement[..end];
 
-        Assert.Contains($"{eventColumn} >= $2", statement, StringComparison.Ordinal);
+        Assert.Matches(eventColumn + @" >=? \$2", statement);
         Assert.Matches(@"collection_time >= \$\d", statement);
         Assert.DoesNotContain("collection_time <", statement, StringComparison.Ordinal);
     }

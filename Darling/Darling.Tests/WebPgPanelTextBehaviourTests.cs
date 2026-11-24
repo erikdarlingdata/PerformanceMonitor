@@ -125,6 +125,16 @@ public sealed class WebPgPanelTextBehaviourTests
     }
 
     [Fact]
+    public void BothIndexBloatPanelsEmptyForOneReason_TheSecondPointsAtTheFirst()
+    {
+        var r = Run();
+        var first = r.GetProperty("bloatEmptyFirst").GetProperty("line").GetString()!;
+        var second = r.GetProperty("bloatEmptySecond").GetProperty("line").GetString()!;
+        Assert.Contains("Index coverage was not measured in this window", first, StringComparison.Ordinal);
+        Assert.Equal("Empty for the same reason as Index Bloat (estimated).", second);
+    }
+
+    [Fact]
     public void IndexBloatRankingEmptyForAnotherCause_PointsAtTheTableThatListsTheReasons()
     {
         var p = Run().GetProperty("bloatOther");
@@ -136,6 +146,16 @@ public sealed class WebPgPanelTextBehaviourTests
         Assert.DoesNotContain("GRANT", line, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT ONE", line, StringComparison.Ordinal);
         Assert.Equal(1, p.GetProperty("hasDetails").GetInt32());
+    }
+
+    [Fact]
+    public void IndexBloatRankingWithATrustedIndexInTheCoverageRead_NeverSaysNoIndexHasAnEstimate()
+    {
+        var p = Run().GetProperty("bloatSomeTrusted");
+        var line = p.GetProperty("line").GetString()!;
+        Assert.Equal("No index in this range has a bloat estimate, but 1 index has one over a longer range. Choose a longer range to see it.", line);
+        Assert.DoesNotContain("NOT ONE", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("The Not Measured column", line, StringComparison.Ordinal);
     }
 
     [Theory]

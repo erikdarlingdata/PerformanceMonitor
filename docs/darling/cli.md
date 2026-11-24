@@ -53,6 +53,7 @@ Exit codes are numbers. The [exit code table](#exit-codes) below says what each 
 | `--remove-alert-source` | Drops an alert source's login and its queued alerts. | no | either (1) | `0`, `1`, `2` | [Alert sources](agents-and-alert-sources.md#make-a-login-for-a-system-that-sends-alerts---add-alert-source-and-friends) |
 | `--list-alert-sources` | Lists the alert sources. It never prints a password. | no | either (1) | `0`, `1`, `2` | [Alert sources](agents-and-alert-sources.md#make-a-login-for-a-system-that-sends-alerts---add-alert-source-and-friends) |
 | `--export-investigations` | Writes the investigation cases that have feedback, one JSON object per line. | no | either (1) | `0`, `1`, `2`, `130` | [Export the judged cases](agents-and-alert-sources.md#export-the-judged-cases-to-test-your-own-agent-6236) |
+| `--object-usage-compare` | Reads one database's object usage two ways, from the stored chain and from every snapshot, and says whether the answers match. It changes nothing. | no | either (1) | `0`, `1`, `2`, `3`, `4` | [`--object-usage-compare`](#--object-usage-compare) |
 | `--backfill-rollups` | Builds the retention rollups over existing history. | no | either (1) | `0`, `1` | [Retention hold runbook](../retention-hold-runbook.md) |
 | `--collapse-legacy-slices` | Repairs Query Store rows collected before the split-slice fix, then rebuilds the rollups they fed. | no | either (1) | `0`, `1` | [Retention hold runbook](../retention-hold-runbook.md) |
 | `--recompress-plan-dim` | Converts old plan text rows to gzip in batches, then compacts the table. | no | either (1) | `0`, `1` | [Retention hold runbook](../retention-hold-runbook.md) |
@@ -92,6 +93,8 @@ These verbs also use `1` for a few cases of their own:
 - An output file that cannot be written, or that exists when `--force` was not given. This is `--export-investigations`. When it cannot read the store, it exits `2`.
 
 `--export-investigations` also exits `130` when it is cancelled. It writes no file in that case.
+
+`--object-usage-compare` uses `0`, `1` and `2` as the collector verbs do, and adds `3` (the two answers differ) and `4` (the chain cannot answer the window). See [`--object-usage-compare`](#--object-usage-compare).
 
 `--check-settings` uses four numbers:
 
@@ -148,7 +151,7 @@ The service knows the correct permissions for its secret files but cannot apply 
 PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--account <name>] [--store-location LocalMachine|CurrentUser] [--store-name <name>]
 ```
 
-Adds one Read entry for one account to the private key of the certificate the thumbprint names, and keeps every existing entry. The account is the one the service is registered under unless `--account` names another. The location and the store name default as they do in `darling.json`: `LocalMachine` and `My`. It grants to one account and refuses every group except the local Administrators group, whatever `--account` names: it asks Windows what the account is, and refuses a group, a computer or an account it cannot identify. It accepts a user (a domain user, a local user, a group managed service account) and these service identities: LocalSystem, LocalService, NetworkService, a per-service virtual account (`NT SERVICE\<name>`, only when a service with that name is registered on this machine), an IIS application pool identity and the local Administrators group. An empty `--account` or `--store-name`, and a `--store-name` with a backslash or a slash in it, are refused. It needs an elevated prompt for `LocalMachine`, and says so and changes nothing without one. An account that already has Read gets `Already granted`. Restart the service after it. The rules and the failures are in [Certificate from the Windows certificate store](network-endpoints.md#certificate-from-the-windows-certificate-store).
+Adds one Read entry for one account to the private key of the certificate the thumbprint names, and keeps every existing entry. It handles a legacy CryptoAPI key too, such as one from the `Microsoft RSA SChannel Cryptographic Provider`: it changes the access list of the key file under `MachineKeys`. If that file is missing, it prints the `icacls` command with that path. A smart card or a hardware module may stop Windows from opening the key's provider without a prompt. Then the command opens no card or PIN prompt. It stops, prints the provider's own message, and shows how to find the key file with `certutil`. The account is the one the service is registered under unless `--account` names another. The location and the store name default as they do in `darling.json`: `LocalMachine` and `My`. It grants to one account and refuses every group except the local Administrators group, whatever `--account` names: it asks Windows what the account is, and refuses a group, a computer or an account it cannot identify. It accepts a user (a domain user, a local user, a group managed service account) and these service identities: LocalSystem, LocalService, NetworkService, a per-service virtual account (`NT SERVICE\<name>`, only when a service with that name is registered on this machine), an IIS application pool identity and the local Administrators group. An empty `--account` or `--store-name`, and a `--store-name` with a backslash or a slash in it, are refused. It needs an elevated prompt for `LocalMachine`, and says so and changes nothing without one. An account that already has Read gets `Already granted`. Restart the service after it. The rules and the failures are in [Certificate from the Windows certificate store](network-endpoints.md#certificate-from-the-windows-certificate-store).
 
 ### Collector settings
 
@@ -198,14 +201,24 @@ When the store cannot be reached, the registry cannot be read, so a server known
 
 Exit codes: see [Exit codes](#exit-codes). If the service log is not where the verb looks, the `service_log` section says so. Pass `--log-dir`.
 
+### `--object-usage-compare`
+
+```
+PerformanceMonitor.Darling.Service.exe --object-usage-compare <server> <database> [days] [--config <path>]
+```
+
+The `get_object_usage` tool reads a chain that the service builds each hour. This verb checks that the chain gives the same answer as reading every snapshot. It reads the window both ways for one database, then prints `identical` with the time each read took, or each difference. `days` is how far back the window reaches. It is 90 if you leave it out. The verb only reads: it never builds the chain and never writes to the store, so a login that can read the store is enough.
+
+The exit codes are the usual `0`, `1` and `2`, and two more. `3` means the two answers differ. `4` means the chain cannot answer that window yet, so there is nothing to compare. The tool reads every snapshot for such a window.
+
 ### `--grant-script`
 
 ```
-PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--rds] [--config <path>]
-PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--rds]
+PerformanceMonitor.Darling.Service.exe --grant-script <server-name> [--finops] [--azure] [--rds] [--column-stats-databases <db>]... [--config <path>]
+PerformanceMonitor.Darling.Service.exe --grant-script --host <host> [--auth sql|integrated|windows|serviceprincipal|managedidentity] [--username <login>] [--finops] [--azure] [--rds] [--column-stats-databases <db>]...
 ```
 
-The first form reads the server from the configuration. The second form is for a host that is not added yet. Both print T-SQL, and neither connects to a monitored server. The script is safe to run twice. `--azure` prints the Azure SQL Database form and a `*.database.windows.net` host implies it. `--rds` prints the Amazon RDS for SQL Server form, which a `*.rds.amazonaws.com` host implies. Run the RDS form as the RDS master user, see [AWS RDS for SQL Server](../permissions.md#aws-rds-for-sql-server).
+The first form reads the server from the configuration. The second form is for a host that is not added yet. Both print T-SQL, and neither connects to a monitored server. The script is safe to run twice. `--azure` prints the Azure SQL Database form and a `*.database.windows.net` host implies it. `--rds` prints the Amazon RDS for SQL Server form, which a `*.rds.amazonaws.com` host implies. Run the RDS form as the RDS master user, see [AWS RDS for SQL Server](../permissions.md#aws-rds-for-sql-server). `--column-stats-databases` adds the optional database-level `SELECT` for the column_stats collector, in the databases you list and nowhere else. Give it once per database (`--column-stats-databases SalesDb --column-stats-databases "Sales, Archive"`): each value is one name taken whole, so a name with a comma or a space works when it is quoted, and a comma never splits a list. See [Column selectivity](../permissions.md#column-selectivity-per-database-select-optional).
 
 ### `--export-investigations`
 

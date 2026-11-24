@@ -196,6 +196,12 @@ internal static class TrendBuckets
     /// deltas, weighted averages, DOP pair and plan facts.</summary>
     public const int QueryTrendMaxPoints = 750;
 
+    /// <summary><c>get_query_trend</c>'s own MCP auto-sizing target (#8812), narrower than the shared <see cref="McpPointBudget"/> for the
+    /// same reason as <see cref="PgIoMcpAutoPoints"/>: at about 345 bytes a point the shared target's hourly points over a week (169) answered
+    /// 58 KB, over <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). 70 keeps the answer under about 28 KB: a day is 30-minute points,
+    /// four days 2-hour ones and a week 3-hour ones. A width the caller names is still cut to the budget by the read.</summary>
+    public const int QueryTrendMcpAutoPoints = 70;
+
     /// <summary>
     /// The fixed origin every bucketing read aligns to, as a SQL literal both dialects accept (PostgreSQL
     /// <c>date_bin</c>, DuckDB <c>time_bucket</c>). A midnight, so every ladder width lands on round clock times.
@@ -381,6 +387,23 @@ internal static class TrendBuckets
     /// </summary>
     public static int OnHourlyTier(int? requested, int resolved) => requested ?? Math.Max(60, resolved);
 
+    /// <summary>
+    /// The sentence a trend read ends its budget cut note with (#8812): the first point the reply starts at (the oldest points are the ones left
+    /// off, so the newest are kept), then the bucket width whose points fit in <paramref name="keptPoints"/> over a window of <paramref name="hoursBack"/>
+    /// hours, at least <paramref name="floorMinutes"/> (the hourly rollup's hour), or the way to a shorter window when even the widest bucket holds
+    /// more points than that. <c>as_of</c> is the window's END, so setting it to <paramref name="firstKept"/> ends the next read where this one begins.
+    /// </summary>
+    public static string BudgetCutRemedy(int hoursBack, int keptPoints, int floorMinutes, DateTime firstKept)
+    {
+        var windowMinutes = hoursBack * 60;
+        var width = Math.Max(floorMinutes, AutoMinutes(windowMinutes, 1, keptPoints));
+        var stamp = firstKept.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
+        var before = $"set as_of to {stamp} to read the points before it";
+        return PointsFor(windowMinutes, width, 1) <= keptPoints
+            ? $"The oldest points were left off and the first point returned is at {stamp}. Use bucket_minutes {width.ToString(CultureInfo.InvariantCulture)} to read the whole window in one reply, or {before}."
+            : $"The oldest points were left off and the first point returned is at {stamp}. Narrow hours_back, or {before}.";
+    }
+
     /// <summary>The width as a word for the payload's <c>bucket</c> key: <c>1 minute</c>, <c>10 minutes</c>,
     /// <c>1 hour</c>, <c>6 hours</c>, <c>1 day</c>. The hourly tier's existing spelling (<c>1 hour</c>) is the same
     /// word, so an hourly answer reads as it always did.</summary>
@@ -411,7 +434,7 @@ internal static class TrendBuckets
     /// <see cref="LevelNote"/> instead.
     /// </summary>
     public static string AggregateNote(int bucketMinutes, bool requested, int budgetPoints) =>
-        $"Each point summarizes the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start). "
+        $"Each point summarizes the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (a point in the window's first bucket at the window's start). "
         + "Counts are summed across the bucket, and rates and ratios are recomputed from those sums over the seconds the collections covered, never averaged from per-collection values, so a bucket the window cuts short holds smaller counts but a true rate. "
         + "peak_* and worst_* are the single most extreme collection inside the bucket, so a spike survives the rollup. "
         + Sizing(requested, budgetPoints);
@@ -423,7 +446,7 @@ internal static class TrendBuckets
     /// sit on each sample's own instant and a collection can report a sample from before the window's start.
     /// </summary>
     public static string LevelNote(int bucketMinutes, bool requested, int budgetPoints, bool firstAtWindowStart = true) =>
-        $"Each point averages the samples in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start{(firstAtWindowStart ? " (the first point at the window's start)" : string.Empty)}. "
+        $"Each point averages the samples in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start{(firstAtWindowStart ? " (a point in the window's first bucket at the window's start)" : string.Empty)}. "
         + "A level is averaged, never summed, and peak_* is the highest single sample inside the bucket, so a spike survives the rollup. "
         + Sizing(requested, budgetPoints);
 
@@ -434,7 +457,7 @@ internal static class TrendBuckets
     /// averages, not rates over seconds, and it has no peak fields.
     /// </summary>
     public static string QueryTrendNote(int bucketMinutes, bool requested, int budgetPoints) =>
-        $"Each point holds the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (the first point at the window's start); collection_count says how many. "
+        $"Each point holds the collections in one {Adjective(bucketMinutes)} bucket and is stamped at the bucket's start (a point in the window's first bucket at the window's start); collection_count says how many. "
         + "execution_count, cpu_ms, elapsed_ms, logical_reads, logical_writes, physical_reads, rows and spills are summed across those collections, and avg_cpu_ms and avg_elapsed_ms are those sums divided by the summed executions, so a busy collection weighs more than a quiet one. "
         + "min_dop and max_dop are the extremes across the plans that ran in the bucket, query_plan_hash is null when more than one plan ran in it, and plan_count counts its distinct plans. "
         + Sizing(requested, budgetPoints);

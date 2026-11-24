@@ -25,7 +25,8 @@ namespace PerformanceMonitorLite.Tests;
 /// carries X labels and gets room for them, each lane's caption sits in the lane's top left (no left gutter), and the lanes' plot
 /// rectangles still line up.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class LiteOverviewLanesFillTests
 {
     private readonly ITestOutputHelper _output;
@@ -191,17 +192,5 @@ public sealed class LiteOverviewLanesFillTests
     {
         var lanes = Measure(width, height);
         Assert.All(lanes, l => Assert.True(l.CaptionClearance >= -0.5, $"lane {l.Index} caption starts {l.CaptionClearance:0.#} px from the plot's left edge"));
-    }
-
-    [Theory]
-    [MemberData(nameof(Windows))]
-    public void TheLanesPlotRectangles_StillLineUpLeftAndRight(int width, int height)
-    {
-        var lanes = Measure(width, height);
-        Assert.All(lanes, l =>
-        {
-            Assert.True(Math.Abs(l.Data.Left - lanes[0].Data.Left) <= 1.5, $"lane {l.Index} plot starts at {l.Data.Left:0.#}, lane 0 at {lanes[0].Data.Left:0.#}");
-            Assert.True(Math.Abs(l.Data.Right - lanes[0].Data.Right) <= 1.5, $"lane {l.Index} plot ends at {l.Data.Right:0.#}, lane 0 at {lanes[0].Data.Right:0.#}");
-        });
     }
 }

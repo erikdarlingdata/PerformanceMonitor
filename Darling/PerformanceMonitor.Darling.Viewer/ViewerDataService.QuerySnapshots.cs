@@ -162,7 +162,7 @@ public sealed partial class ViewerDataService
             SELECT DISTINCT collection_time AS head_time, blocking_session_id AS head_session
             FROM query_snapshots
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
             AND   blocking_session_id > 0
             AND   blocking_session_id <> session_id
@@ -170,7 +170,7 @@ public sealed partial class ViewerDataService
           ON  h.head_time = query_snapshots.collection_time
           AND h.head_session = query_snapshots.session_id
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
@@ -238,7 +238,7 @@ public sealed partial class ViewerDataService
         {QuerySnapshotColumns}
         FROM query_snapshots
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         AND   wait_type IN ($4, $4 || ' ')
@@ -332,7 +332,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified) });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = sessionId });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = requestId });
-        var result = await command.ExecuteScalarAsync(cancellationToken);
+        var result = await command.ExecuteScalarAsync(ViewerReadScope.Effective(cancellationToken));
         return result is string s ? s : null;
     }
 
@@ -392,7 +392,7 @@ public sealed partial class ViewerDataService
     {
         var rows = new List<ViewerQuerySnapshotRow>();
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(ReadQuerySnapshotRow(reader));
@@ -410,7 +410,7 @@ public sealed partial class ViewerDataService
         var rows = new List<ViewerQuerySnapshotRow>();
         var totalCount = 0;
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(ReadQuerySnapshotRow(reader));
@@ -438,7 +438,7 @@ public sealed partial class ViewerDataService
             COALESCE(SUM(writes), 0) AS total_writes
         FROM query_snapshots
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         AND   ($5::boolean OR {PerformanceMonitor.Common.MonitorApplicationNames.StoreNotMonitorProgramNamePredicate})
@@ -473,7 +473,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = includeMonitor });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = SlicerBuckets.MinutesFor(startUtc, endUtc) });
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             var sessions = reader.IsDBNull(1) ? 0 : Convert.ToInt64(reader.GetValue(1));

@@ -59,6 +59,13 @@ public sealed class CrossAppMcpToolInventoryPinTests
            or admin action there. Lite has no roles and no such viewer action, its only writer of that registry is
            the MCP mute tool, and the mcp_allow_writes setting that serves the mute serves its undo with it. */
         "unmute_analysis_finding",
+        /* #8788: the health of Lite's own DuckDB store (size against the 512 MB reset, parquet archives, housekeeping history).
+           Darling's store is PostgreSQL, and its own store-health page is its own issue (#8787), so there is no twin tool. */
+        "get_store_health",
+        /* #9423: the slow MCP calls and the per-tool call figures in one answer. Darling answers the same questions with get_slow_reads and
+           get_read_latency, which carry a different contract (statements, server_name, surface), and a shared name must carry a byte-identical
+           description head on both editions, so Lite has its own name. */
+        "get_slow_mcp_calls",
     };
 
     [Fact]

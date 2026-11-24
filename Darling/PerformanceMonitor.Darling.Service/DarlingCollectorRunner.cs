@@ -412,6 +412,12 @@ public sealed partial class DarlingCollectorRunner
        the store, because a probe costs more than the render it would save (#2831). */
     private readonly ConcurrentDictionary<int, PlanDigestCache<QueryStatsPlanKey>> _queryStatsPlanCaches = new();
 
+    /* #8994: the plan digest this host committed for each statement shape (QueryStatsPlanShapeKey), one cache per server
+       and per service lifetime, settled, evicted and aged out with _queryStatsPlanCaches. A row whose identity misses but
+       whose shape hits links to the stored plan, so literal-only variants of an ad hoc statement store one plan, not one
+       each. */
+    private readonly ConcurrentDictionary<int, PlanDigestCache<QueryStatsPlanShapeKey>> _queryStatsShapeCaches = new();
+
     /* #7419: the text digests of statements whose text the store already holds, by the same plan identity, one cache per
        server for the service's lifetime (a restart starts empty and each server reads its kept rows' texts once more).
        Aged out at QueryStatsPlanCacheMaxAge like the plan cache. */
@@ -473,6 +479,11 @@ public sealed partial class DarlingCollectorRunner
     private readonly Func<string, int, int> _collectorFrequencyMinutes;
 
     internal int CollectorFrequencyMinutesFor(string collectorName, int serverId) => _collectorFrequencyMinutes(collectorName, serverId);
+
+    /* #8798: whether a collector is enabled on one server, resolved live over the same overrides the dispatch reads to skip a disabled one. */
+    private readonly Func<string, int, bool> _collectorEnabled;
+
+    internal bool CollectorEnabledFor(string collectorName, int serverId) => _collectorEnabled(collectorName, serverId);
 
     /// <summary>The databases monitored as their own servers, for this runtime. Empty unless it is an Azure SQL Database logical server.</summary>
     internal IReadOnlyList<string> SeparatelyMonitoredDatabasesFor(ServerRuntime server) => _separatelyMonitoredDatabases(server);
@@ -781,6 +792,13 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     private readonly ConcurrentDictionary<(int ServerId, string Database), int> _consecutiveQueryStoreItemFailures = new();
 
+    /// <summary>#9088: which stale-watermark catch-up clamps were already warned about and recorded as holes, so a database
+    /// with no new Query Store rows reports its gap once, not every cycle. In memory: a restart reports once more.</summary>
+    private readonly QueryStoreClampReports _queryStoreClampReports = new();
+
+    /// <summary>Lets a test land a clamp report the way a cycle does, because the outage that makes a clamp a new gap outlasts a test (#9352).</summary>
+    internal QueryStoreClampReports QueryStoreClampReportsForTests => _queryStoreClampReports;
+
     private int ConsecutiveQueryStoreItemFailures(int serverId, string database)
         => _consecutiveQueryStoreItemFailures.TryGetValue((serverId, database), out var count) ? count : 0;
 
@@ -811,7 +829,7 @@ public sealed partial class DarlingCollectorRunner
             try
             {
                 /* The databases the store saw a non-primary replica_role for in the last 24 hours, with their newest collection_time. */
-                await using var seedConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+                await using var seedConnection = await _postgres.OpenConnectionAsync(StoreSessionNames.CollectorState, cancellationToken);
                 await using var seedCommand = new NpgsqlCommand(
                     "SELECT database_name, max(collection_time) FROM collect.query_store_stats WHERE server_id = $1 "
                     + "AND collection_time > (now() AT TIME ZONE 'UTC') - interval '24 hours' "
@@ -1278,7 +1296,7 @@ public sealed partial class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null, Func<int>? queryStoreFetchTopN = null, int? xeRingBufferMaxEvents = null, Func<string, int, int>? collectorFrequencyMinutes = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null, Func<ServerRuntime, IReadOnlyList<string>>? separatelyMonitoredDatabases = null, Func<string?>? installId = null, Func<bool>? queryStatsDeferredPlanFetch = null, Func<string?>? procedureStatsDeferredPlanFetch = null, Func<int>? queryStoreFetchTopN = null, int? xeRingBufferMaxEvents = null, Func<string, int, int>? collectorFrequencyMinutes = null, Func<string, int, bool>? collectorEnabled = null)
     {
         RingBufferMaxEvents = RingBufferTarget.Clamp(xeRingBufferMaxEvents);
         _queryStoreFetchTopN = queryStoreFetchTopN ?? (() => 0);
@@ -1309,6 +1327,8 @@ public sealed partial class DarlingCollectorRunner
         _databaseScope = databaseScope ?? ((_, _) => Array.Empty<string>());
         /* #7643: null provider = every collector's shipped cadence (what the worker schedules by when no override is stored). */
         _collectorFrequencyMinutes = collectorFrequencyMinutes ?? ((name, _) => CollectorScheduleDefaults.All[name].FrequencyMinutes);
+        /* #8798: null provider = every collector's shipped default (what the worker dispatches by when no override is stored). */
+        _collectorEnabled = collectorEnabled ?? ((name, _) => CollectorScheduleDefaults.All[name].DefaultEnabled);
         _separatelyMonitoredDatabases = separatelyMonitoredDatabases ?? (_ => Array.Empty<string>());
         /* #4961: null provider = no install id, so no long-query session can be named (what a test that builds a runner
            without one gets). The worker passes the id it made at start. */

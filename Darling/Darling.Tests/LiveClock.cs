@@ -29,6 +29,10 @@ namespace Darling.Tests;
 /// than the one it seeded (#6374: <c>CollectionHealthRecoveryLiveTests</c> reads STALE, the interval-table gate sends the
 /// read to raw). That is the override disagreeing with the clock, not an hour dependence: prove the hour with an override
 /// at or after the real clock.</para>
+///
+/// <para>An override on the UTC day after the real clock's puts <see cref="AnchoredEnd"/> after the real clock until 22:00 UTC.
+/// A test that asks the product about the anchored window (a tool's <c>as_of</c>, a write the store must see as late) anchors at
+/// <see cref="AnchoredEndNotAfterNow"/>, which both clocks have passed.</para>
 /// </summary>
 internal static class LiveClock
 {
@@ -50,4 +54,19 @@ internal static class LiveClock
     /// so a window of up to four hours never crosses a 24, 12 or 6 hour chunk boundary, whatever hour the test runs.
     /// </summary>
     public static DateTime AnchoredEnd() => Now().Date.AddDays(-1).AddHours(22);
+
+    /// <summary>
+    /// <see cref="AnchoredEnd"/> for a window the product is asked about: 22:00 UTC on the UTC day before the earlier of
+    /// <see cref="Now"/> and the real clock. The product reads its own clock: a tool refuses an <c>as_of</c> after it, and the
+    /// store marks a row late only when the row is older than the store's own hour. A test clock ahead of the real clock (the
+    /// pinned 00:30 pass, run before 22:00 UTC) puts <see cref="AnchoredEnd"/> after the real clock, and this stays behind both.
+    /// The two are the same instant unless the test clock is on a later UTC day than the real clock. Four hours before
+    /// 22:00 is 18:00 the same day, so a window of up to four hours stays inside one raw chunk at any hour.
+    /// </summary>
+    public static DateTime AnchoredEndNotAfterNow()
+    {
+        var testNow = Now();
+        var realNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        return (testNow < realNow ? testNow : realNow).Date.AddDays(-1).AddHours(22);
+    }
 }

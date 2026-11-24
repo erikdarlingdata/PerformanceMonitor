@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -133,9 +134,23 @@ public static class CollectorScheduleDefaults
         /* #6875 identity column capacity. A column fills over months, so a read every six hours is plenty and costs little: catalog views only,
            at most 21 rows per database. 90 days keeps enough samples for the time-to-exhaustion estimate. */
         ["identity_capacity"] = new(360, 90),
+        /* #8784 the list of procedures, functions and views per database, so get_object_usage can name the modules Query Store never saw run.
+           Objects are created and dropped by deployments, so daily is plenty; one catalog read per database. Only the newest capture is read,
+           so 30 days is generous. */
+        ["object_inventory"] = new(1440, 30),
+        /* #8784 part 2 the dependency list per database (sys.sql_expression_dependencies), so get_object_usage can see a view used only
+           through another view or an inline function. Changes only with deployments, like the object list, so daily; one catalog read per
+           database. Every read takes only the newest capture, so 3 days keeps it and a spare or two (#8784 review): 30 kept thirty times the
+           rows with no reader. The purge never deletes a database's newest capture, however old (#8784 follow-up), so a capture that fails
+           for days keeps the last list; a dropped database's list goes once database_states no longer names it (DarlingRetention). */
+        ["object_dependencies"] = new(1440, 3),
         /* #7643 schema tracking: table and view definitions kept as versions. Off until switched on, because the change-tracking session needs
            ALTER ANY EVENT SESSION. A pass reads the session and only the databases it names, so 15 minutes is cheap. Closed versions are kept 30 days. */
         ["schema_objects"] = new(15, 30, DefaultEnabled: false),
+        /* #8798 part of schema tracking: column selectivity from the statistics density vectors. Off by default because it needs SELECT in each database.
+           Optional, for the column_stats collector (column selectivity). This grant lets the monitoring login read every row of the databases listed here. Darling copies into its store only statistic and column names, densities, row and sample counts and update times; it never copies column values, and it never reads histograms or filter expressions.
+           Hourly: it re-reads only the statistics whose STATS_DATE changed, so a quiet hour costs one catalog read per database. Run records are kept 30 days. */
+        ["column_stats"] = new(60, 30, DefaultEnabled: false),
         /* #1951 ADR persistent version store. Cadence and retention deliberately MATCH
            database_size_stats (60/90) rather than the per-minute health tier: PVS size is the same
            kind of slow-moving disk-pressure telemetry, it is read beside database sizes, and pairing
@@ -515,6 +530,21 @@ public static class CollectorScheduleDefaults
     /// every on-load collector on this cadence, in addition to on connect.
     /// </summary>
     public const int OnLoadRecaptureMinutes = 1440;
+
+    /// <summary>
+    /// #9270: a <c>database_config</c> capture that holds a database in a transitional state (RESTORING, RECOVERING or
+    /// RECOVERY_PENDING, the minutes after a restart or failover) is taken again after this many minutes, not after
+    /// <see cref="OnLoadRecaptureMinutes"/>, so a database that has since come back is captured settled within minutes.
+    /// Defined in <see cref="TransitionalDatabaseRuns"/>, beside <see cref="TransitionalDatabaseRuns.StuckAfter"/> that the change diff uses.
+    /// </summary>
+    public const int TransitionalRecaptureMinutes = TransitionalDatabaseRuns.RecaptureMinutes;
+
+    /// <summary>
+    /// #9270: how many times in a row a transitional <c>database_config</c> capture is retaken after
+    /// <see cref="TransitionalRecaptureMinutes"/>. After that the collector keeps its normal interval, so a database that stays
+    /// restoring for good (a log-shipping standby) does not hold a recapture every ten minutes.
+    /// </summary>
+    public const int MaxTransitionalRecaptures = TransitionalDatabaseRuns.MaxRecaptures;
 
     /// <summary>
     /// How far back the newest CPU reading may be and still count as current (#7196, #3267), in minutes. One value for

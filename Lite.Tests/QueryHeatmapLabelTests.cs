@@ -27,7 +27,8 @@ namespace PerformanceMonitorLite.Tests;
 /// #8220: the Queries > Query Heatmap axes at the app's windows. The Y labels (seven duration buckets) do not touch and the X labels
 /// (one per few buckets) stay on one line with room between them, however many buckets the window holds.
 /// </summary>
-[Collection("credential-manager")]
+[InMemoryCredentials]
+[Collection("application-theme")]
 public sealed class QueryHeatmapLabelTests
 {
     private readonly ITestOutputHelper _output;

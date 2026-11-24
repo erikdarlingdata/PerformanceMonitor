@@ -30,6 +30,9 @@ public sealed class SkippedCycleSummary
     /// <summary>When the newest row was written (UTC, stored as a naive timestamp).</summary>
     public DateTime? LastAtUtc { get; init; }
 
+    /// <summary>#9339: when the oldest row in the window was written (UTC). Null when there are none.</summary>
+    public DateTime? FirstAtUtc { get; init; }
+
     /// <summary>The newest row's cause (<c>slowest_item</c>).</summary>
     public string? LastSlowestStep { get; init; }
 
@@ -57,8 +60,8 @@ public static class SkippedCycleReader
     public static readonly TimeSpan Window = TimeSpan.FromHours(24);
 
     /// <summary>
-    /// The statement. $1 server id, $2 collector name, $3 status, $4 window start, $5 window end. The window is
-    /// inclusive at both ends. The count and the sum are window aggregates, evaluated before the LIMIT, so the one row
+    /// The statement. $1 server id, $2 collector name, $3 status, $4 window start, $5 window end. The window leaves its
+    /// start out and keeps its end. The count and the sum are window aggregates, evaluated before the LIMIT, so the one row
     /// that comes back is the newest (collection_time, then log_id) and carries the totals; no rows means none.
     /// </summary>
     public const string SummarySql = @"
@@ -68,29 +71,32 @@ SELECT
     collection_time,
     slowest_item,
     slowest_item_ms,
-    error_message
+    error_message,
+    MIN(collection_time) OVER ()                              AS first_time
 FROM v_collection_log
 WHERE server_id = $1
 AND   collector_name = $2
 AND   status = $3
-AND   collection_time >= $4
+AND   collection_time > $4
 AND   collection_time <= $5
 ORDER BY collection_time DESC, log_id DESC
 LIMIT 1";
 
     /// <summary>
-    /// This server's skipped-slot rows in the <see cref="Window"/> ending at <paramref name="asOfUtc"/> (default now).
+    /// This server's skipped-slot rows in the <see cref="Window"/> ending at <paramref name="asOfUtc"/> (default now), or from <paramref name="windowStartUtc"/> when given.
     /// The deadline comes from the caller: the MCP tool passes <c>McpCommandDeadlines.ReadSeconds</c> like every other read
     /// in <c>get_collection_health</c>, the Viewer its interactive budget. The default is the named storage band, never a
     /// bare literal.
     /// </summary>
     public static async Task<SkippedCycleSummary> GetSkippedCycleSummaryAsync(
         NpgsqlDataSource postgres, int serverId, DateTime? asOfUtc = null,
-        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds, CancellationToken cancellationToken = default)
+        int commandTimeoutSeconds = StorageCommandDeadlines.McpReadSeconds, DateTime? windowStartUtc = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         var end = asOfUtc ?? DateTime.UtcNow;
-        var start = end - Window;
+        /* #9339: a caller that asks about its own window (an empty snapshot read) passes the window start; every older caller
+           keeps the trailing 24 hours. */
+        var start = windowStartUtc ?? end - Window;
 
         await using var command = postgres.CreateCommand(SummarySql);
         command.CommandTimeout = commandTimeoutSeconds;
@@ -113,7 +119,8 @@ LIMIT 1";
             LastAtUtc = DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc),
             LastSlowestStep = reader.IsDBNull(3) ? null : reader.GetString(3),
             LastSlowestStepMs = reader.IsDBNull(4) ? null : reader.GetInt32(4),
-            LastMessage = reader.IsDBNull(5) ? null : reader.GetString(5)
+            LastMessage = reader.IsDBNull(5) ? null : reader.GetString(5),
+            FirstAtUtc = reader.IsDBNull(6) ? null : DateTime.SpecifyKind(reader.GetDateTime(6), DateTimeKind.Utc)
         };
     }
 }

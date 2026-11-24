@@ -170,7 +170,6 @@ public sealed class ViewerQueriesSqlTests
         Assert.Contains("FROM procedure_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_procedure_stats", sql, StringComparison.Ordinal); /* no such view exists in Darling */
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY database_name, schema_name, object_name, object_type", sql, StringComparison.Ordinal);
         Assert.Contains("HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0", sql, StringComparison.Ordinal);
@@ -347,19 +346,23 @@ public sealed class ViewerQueriesSqlTests
     /// (#1892). Filtering on one instant while bucketing on another puts rows in bars outside the range the
     /// caller asked for; the delta slicers never had the problem because for them the two are one column.
     /// </param>
+    /// <param name="endOperator">
+    /// How the window's end is compared. The delta slicers read a closed range of collection times; Query Store's slicer
+    /// places an interval by its start and ends before the window's end, so the interval that starts at the end belongs to
+    /// the next window (#9100).
+    /// </param>
     [Theory]
-    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
-    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time")]
-    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(query_id) FILTER (WHERE qrn = 1)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)")]
-    public void SlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter)
+    [InlineData(nameof(ViewerDataService.QueryStatsSlicerSql), "query_stats", "COUNT(DISTINCT query_hash)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time", "<=")]
+    [InlineData(nameof(ViewerDataService.ProcStatsSlicerSql), "procedure_stats", "COUNT(DISTINCT object_name)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, TIMESTAMP '2000-01-01 00:00:00')", "collection_time", "<=")]
+    [InlineData(nameof(ViewerDataService.QueryStoreSlicerSql), "query_store_stats", "COUNT(query_id) FILTER (WHERE qrn = 1)", "date_bin(CAST($5 AS integer) * INTERVAL '1 minute', COALESCE(interval_start_time_utc, collection_time), TIMESTAMP '2000-01-01 00:00:00')", "COALESCE(interval_start_time_utc, collection_time)", "<")]
+    public void SlicerSql_BucketsAtTheWindowsWidth_SevenColumnShape(string sqlName, string table, string distinctCount, string bucketExpression, string windowFilter, string endOperator)
     {
         var sql = SqlByName(sqlName);
         Assert.Contains(bucketExpression, sql, StringComparison.Ordinal);
         Assert.Contains($"FROM {table}", sql, StringComparison.Ordinal);
         Assert.Contains(distinctCount, sql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
-        Assert.Contains($"{windowFilter} >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains($"{windowFilter} <= $3", sql, StringComparison.Ordinal);
+        Assert.Contains($"{windowFilter} {endOperator} $3", sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY bucket", sql, StringComparison.Ordinal);
 
         /* The bucket key and the window filter agree, stated as the invariant rather than left implicit in
@@ -382,12 +385,12 @@ public sealed class ViewerQueriesSqlTests
     /// cannot exclude chunks and an old fixed date range decompresses everything from the window through the
     /// present.
     ///
-    /// <para>Both are pinned in their SLACKENED form, which is the whole point: a bare
+    /// <para>The floor is pinned in its SLACKENED form, which is the whole point: a bare
     /// <c>collection_time &gt;= $2</c> / <c>&lt;= $3</c> pair would silently be the window filter again and
     /// re-introduce exactly the edge bug this fixed. The floor is provably implied by the COALESCE
-    /// predicate, so its slack is pure clock-skew margin, narrowed from a day to an hour (#3953); the ceiling
-    /// is unrelated to that margin and stays a month, being Query Store's 1-day maximum interval plus 29 days
-    /// of collector-outage allowance.</para>
+    /// predicate, so its slack is pure clock-skew margin, narrowed from a day to an hour (#3953). The ceiling
+    /// is <see cref="QueryStoreIntervalWide.CollectionCeiling"/> above the window end (#8570):
+    /// <c>QueryStoreCollectionCeilingTests</c> puts a row through the slicer at the longest lag and one past it.</para>
     /// </summary>
     [Fact]
     public void QueryStoreSlicerSql_KeepsSlackenedCollectionTimeBoundsForChunkExclusion()
@@ -395,7 +398,6 @@ public sealed class ViewerQueriesSqlTests
         var sql = SqlByName(nameof(ViewerDataService.QueryStoreSlicerSql));
 
         Assert.Contains("collection_time >= $2 - interval '1 hour'", sql, StringComparison.Ordinal);
-        Assert.Contains("collection_time <= $3 + interval '30 days'", sql, StringComparison.Ordinal);
 
         /* The tight forms, asserted absent: either one would be a window filter wearing a pruning bound's
            clothes, and the failure would look exactly like the bug #1892 fixed. */
@@ -585,19 +587,6 @@ public sealed class ViewerQueryStoreRegressionsTests
            Lite's LocalDataService each keep, because it cannot reference either project. Pinned so the three
            cannot silently drift apart. */
         Assert.Equal(7, ViewerDataService.BaselineLookbackDays);
-    }
-
-    [Fact]
-    public void RegressionsSql_CastsSummedExecCountToBigint_PlanCountToInteger_ConvertsUnits_HonorsDatabaseFilter()
-    {
-        var sql = ViewerDataService.QueryStoreRegressionsSql;
-        Assert.Contains("CAST(SUM(execution_count) AS bigint)", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(COUNT(DISTINCT plan_id) AS integer)", sql, StringComparison.Ordinal);
-        /* #5506: µs → ms on duration + CPU, weighted per execution (the summed cost over the summed executions). */
-        Assert.Contains("SUM(CAST(avg_duration_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0", sql, StringComparison.Ordinal);
-        Assert.Contains("SUM(CAST(avg_cpu_time_us AS numeric) * execution_count) AS double precision) / NULLIF(SUM(execution_count), 0) / 1000.0", sql, StringComparison.Ordinal);
-        /* #1319 global database filter, the same guarded ANY() idiom as the sibling reads ($4 here). */
-        Assert.Contains("$4::text[] IS NULL OR database_name = ANY($4)", sql, StringComparison.Ordinal);
     }
 
     [Fact]

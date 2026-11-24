@@ -60,7 +60,7 @@ public class ServerManager
     internal const string DetectionQueryText = @"
         SELECT /* PerformanceMonitorLite */
             @@VERSION AS sql_version,
-            CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')) AS major_version,
+            COALESCE(CONVERT(integer, SERVERPROPERTY('ProductMajorVersion')), CONVERT(integer, PARSENAME(CONVERT(nvarchar(128), SERVERPROPERTY('ProductVersion')), 4))) AS major_version,
             DATEDIFF(MINUTE, GETUTCDATE(), GETDATE()) AS utc_offset_minutes,
             CONVERT(integer, SERVERPROPERTY('EngineEdition')) AS engine_edition,
             CASE WHEN DB_ID('rdsadmin') IS NOT NULL THEN 1 ELSE 0 END AS is_aws_rds,
@@ -966,14 +966,32 @@ public class ServerManager
     }
 
     /// <summary>
-    /// Checks the connection status of all servers.
+    /// Checks the connection status of every server whose data collection is on.
     /// Background operation - will skip servers requiring interactive authentication (e.g., MFA).
+    ///
+    /// <para>#9084: a server whose collection is off gets no query from this check, the same as it gets none from the collectors.
+    /// Turning collection off is how a person tells Lite to leave a server alone, so the check also forgets the answer it last had
+    /// for it: nothing shows a live status for a server Lite is no longer looking at. A person's own Connect (or the Edit dialog's
+    /// Test) calls <see cref="CheckConnectionAsync"/> directly and can still check it. Turning collection back on puts the server
+    /// back in the next cycle's check, with no restart.</para>
     /// </summary>
-    public async Task CheckAllConnectionsAsync()
+    public Task CheckAllConnectionsAsync() =>
+        CheckAllConnectionsAsync(id => CheckConnectionAsync(id, allowInteractiveAuth: false));
+
+    /// <summary>
+    /// <see cref="CheckAllConnectionsAsync()"/> with the per-server check passed in, so a test sees which servers the sweep
+    /// checks without opening a connection.
+    /// </summary>
+    internal async Task CheckAllConnectionsAsync(Func<string, Task> checkServer)
     {
         var servers = GetAllServers();
+        foreach (var disabled in servers.Where(s => !s.IsEnabled))
+        {
+            _connectionStatuses.TryRemove(disabled.Id, out _);
+        }
+
         // Explicitly pass allowInteractiveAuth: false to prevent MFA popups during background checks
-        var tasks = servers.Select(s => CheckConnectionAsync(s.Id, allowInteractiveAuth: false));
+        var tasks = servers.Where(s => s.IsEnabled).Select(s => checkServer(s.Id));
         await Task.WhenAll(tasks);
     }
 

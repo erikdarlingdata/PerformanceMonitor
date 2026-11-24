@@ -27,17 +27,24 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// </summary>
 public sealed class ViewerLoadTimer
 {
-    /// <summary>A load slower than this is logged. The walk called anything over three seconds slow.</summary>
-    internal const int SlowLoadThresholdMs = 3000;
+    /// <summary>#9426: a load whose total (store reads plus the client's render) reaches this is logged. Two seconds is where a panel stops
+    /// feeling instant to the reader, so a timing check reads the log instead of a click-through with a stopwatch.</summary>
+    internal const int SlowLoadThresholdMs = 2000;
 
     private readonly Stopwatch _total = Stopwatch.StartNew();
     private readonly List<(string Phase, long StartedMs, long EndedMs)> _phases = new();
     private readonly List<(string Step, long Ms)> _clientSteps = new();
     /* #8549: reads handed to Track that have not ended (the key is a running number), and reads that ended cancelled. A load that is
        finished before such a read's watcher has run must still name it: with only the ended reads booked, the stretch the read ran
-       was left to "client work". */
-    private readonly Dictionary<int, (string Phase, long StartedMs)> _inFlight = new();
+       was left to "client work".
+       #9249: the entry keeps the read's task. The loader awaits the same task on the UI thread and then calls Finish, and nothing orders
+       that continuation against the watcher's, so Finish can run while a read that has already completed is still here. Finish reads the
+       task's state to tell that read from one still running. */
+    private readonly Dictionary<int, (string Phase, long StartedMs, Task Task)> _inFlight = new();
     private readonly List<(string Phase, long StartedMs, long EndedMs)> _cancelled = new();
+    /* #9365: every read handed to Track, kept for the load's life, so a failed load can name the read whose task carries the exception. */
+    private readonly List<(string Phase, long StartedMs, Task Task, Func<long?> Rows)> _tracked = new();
+    private readonly Dictionary<string, string> _phaseNotes = new();
     private int _nextReadId;
     private bool _superseded;
     private readonly object _gate = new();
@@ -55,6 +62,10 @@ public sealed class ViewerLoadTimer
     /// ran before the clock could exist. The line's total and every phase's time count from the load's true start.</summary>
     internal ViewerLoadTimer(int slowThresholdMs, long alreadyElapsedMs) : this(slowThresholdMs) => _alreadyElapsedMs = alreadyElapsedMs;
 
+    /// <summary>#9249: test-only. When set, a watcher waits on it after its read ends and before it books the read, so a test holds the
+    /// watcher back and runs <see cref="Finish"/> in the gap the loader's own continuation can hit. Null in the product.</summary>
+    internal Task? BookingGate { get; set; }
+
     /// <summary>Milliseconds on the load's clock, counting any stretch the load ran before this clock started.</summary>
     internal long ElapsedMs => _alreadyElapsedMs + _total.ElapsedMilliseconds;
 
@@ -62,22 +73,57 @@ public sealed class ViewerLoadTimer
     /// whichever sub-tab loader then names its own surface.</summary>
     internal string Lead { get; set; } = "";
 
+    /// <summary>#9426: the time range the load asked for, as the text its slow-load line shows. Empty for a load with no range of its own.</summary>
+    internal string Window { get; set; } = "";
+
     /// <summary>What the load is: set by a loader that knows its sub-tab ("Queries > Top Queries by Duration").</summary>
     internal string Surface { get; set; } = "";
 
     /// <summary>Times <paramref name="task"/> (already started) as <paramref name="phase"/> and hands it back unchanged, so a
-    /// caller awaits it exactly as before. A faulted or cancelled task is still recorded; its own awaiter sees the error.</summary>
+    /// caller awaits it exactly as before. A faulted or cancelled task is still recorded; its own awaiter sees the error. #9249: the
+    /// task handed back is the caller's own, not a wrapper, so the watcher and the caller's await are two unordered continuations. <see cref="Finish"/> covers
+    /// the gap by treating a read whose task has ended as booked.</summary>
     internal Task<T> Track<T>(string phase, Task<T> task)
     {
-        _ = Watch(phase, StartRead(phase), task);
+        /* #9426: the rows the read returned, counted once it has finished. Only a result that is a collection has a count. */
+        _ = Watch(phase, StartRead(phase, task, () => task.IsCompletedSuccessfully && task.Result is System.Collections.ICollection rows ? rows.Count : null), task);
         return task;
     }
 
     /// <summary><see cref="Track{T}"/> for a task with no result.</summary>
     internal Task Track(string phase, Task task)
     {
-        _ = Watch(phase, StartRead(phase), task);
+        _ = Watch(phase, StartRead(phase, task, static () => null), task);
         return task;
+    }
+
+    /// <summary>#9287: says what a read read, shown after the read's time in the slow-load line (a Query Store read names the days it took
+    /// from the rollups and the days it read from the interval table). The latest note for a phase name wins.</summary>
+    internal void NotePhase(string phase, string note)
+    {
+        lock (_gate)
+        {
+            _phaseNotes[phase] = note;
+        }
+    }
+
+    /// <summary>#9365: the tracked read whose task failed with <paramref name="failure"/>, and the milliseconds from its start to now (the caller
+    /// reports at once, so that is the read's own time). Null when no tracked read carries that exception, for a failure the loader raised
+    /// itself or wrapped.</summary>
+    internal (string Phase, long Ms)? FailedRead(Exception failure)
+    {
+        lock (_gate)
+        {
+            foreach (var (phase, startedMs, task, _) in _tracked)
+            {
+                if (task.IsFaulted && task.Exception!.InnerExceptions.Contains(failure))
+                {
+                    return (phase, Math.Max(0, ElapsedMs - startedMs));
+                }
+            }
+        }
+
+        return null;
     }
 
     /// <summary>#8549: the load was stopped by a newer one (a tab that cancels its superseded load calls this from its cancel path). A read
@@ -91,13 +137,14 @@ public sealed class ViewerLoadTimer
         }
     }
 
-    private (int Id, long StartedMs) StartRead(string phase)
+    private (int Id, long StartedMs) StartRead(string phase, Task task, Func<long?> rows)
     {
         var started = ElapsedMs;
         lock (_gate)
         {
             var id = ++_nextReadId;
-            _inFlight[id] = (phase, started);
+            _inFlight[id] = (phase, started, task);
+            _tracked.Add((phase, started, task, rows));
             return (id, started);
         }
     }
@@ -179,9 +226,16 @@ public sealed class ViewerLoadTimer
             /* The awaiter of the task sees the failure; this watcher only needs to know when it ended. */
         }
 
+        if (BookingGate is { } gate)
+        {
+            await gate.ConfigureAwait(false);
+        }
+
         var ended = ElapsedMs;
         lock (_gate)
         {
+            /* #9249: booking and leaving _inFlight happen together under the gate, so Finish sees a read in one list or the other, never
+               both. Finish only copies the lists, so a line it already built cannot gain this read afterwards. */
             _inFlight.Remove(read.Id);
             (task.IsCanceled ? _cancelled : _phases).Add((phase, read.StartedMs, ended));
         }
@@ -199,7 +253,8 @@ public sealed class ViewerLoadTimer
     /// <summary>The log line for a load of <paramref name="totalMs"/>, or null when it was not slow. Pure, so a test reads the text.</summary>
     internal static string? Describe(string surface, long totalMs, IReadOnlyList<(string Phase, long StartedMs, long EndedMs)> phases,
         IReadOnlyList<(string Step, long Ms)>? clientSteps = null, int slowThresholdMs = SlowLoadThresholdMs,
-        IReadOnlyList<(string Phase, long StartedMs, long EndedMs, string Marker)>? stoppedReads = null)
+        IReadOnlyList<(string Phase, long StartedMs, long EndedMs, string Marker)>? stoppedReads = null,
+        IReadOnlyDictionary<string, string>? phaseNotes = null, string? window = null, long? rows = null)
     {
         if (totalMs < slowThresholdMs)
         {
@@ -215,8 +270,14 @@ public sealed class ViewerLoadTimer
         var clientMs = Math.Max(0, totalMs - lastReadEnded);
         var split = reads.Count == 0
             ? "no store phase timed"
-            : string.Join(", ", reads.Select(p => $"{p.Phase} {p.EndedMs - p.StartedMs} ms{(p.Marker.Length == 0 ? "" : $" ({p.Marker})")}"));
-        var line = $"slow load: {surface} took {totalMs} ms: store reads [{split}], then {clientMs} ms of client work after the last read";
+            : string.Join(", ", reads.Select(p => $"{p.Phase} {p.EndedMs - p.StartedMs} ms{(p.Marker.Length == 0 ? "" : $" ({p.Marker})")}"
+                + (phaseNotes is not null && phaseNotes.TryGetValue(p.Phase, out var note) ? $" ({note})" : "")));
+        /* #9426: the load in two parts. The store share runs from the load's start to the last read in hand, the render share is what is left
+           (shaping, binding and the layout pass the load waited for). Rows and the window come after, when the load knows them. */
+        var summary = $"store {lastReadEnded} ms, render {clientMs} ms"
+            + (rows is { } n ? $", {n} rows" : "")
+            + (string.IsNullOrEmpty(window) ? "" : $", window {window}");
+        var line = $"slow load: {surface} took {totalMs} ms ({summary}): store reads [{split}], then {clientMs} ms of client work after the last read";
         if (clientSteps is { Count: > 0 })
         {
             /* #8549: the client's share by named step, in the order the load first ran each one. */
@@ -267,9 +328,17 @@ public sealed class ViewerLoadTimer
     /// the load was slow. For a fleet tab, which has no inner-tab shell to do it. <paramref name="surface"/> names the tab. A <paramref name="sink"/> takes the line in place of the log (a test reads it).</summary>
     internal void FinishAndLog(string surface, Action<string>? sink = null)
     {
-        if (Finish(surface) is { } slow)
+        try
         {
-            (sink ?? (line => ViewerLogger.Warn("SlowLoad", line)))(slow);
+            if (Finish(surface) is { } slow)
+            {
+                (sink ?? (line => ViewerLogger.Warn("SlowLoad", line)))(slow);
+            }
+        }
+        catch (Exception ex)
+        {
+            /* #9426: the line is a diagnostic. A sink that fails (a log file that cannot be written) must not fail the load it describes. */
+            Debug.WriteLine($"slow-load line not written: {ex.GetType().Name}");
         }
     }
 
@@ -279,7 +348,7 @@ public sealed class ViewerLoadTimer
         _total.Stop();
         lock (_gate)
         {
-            /* A load nothing stopped lists only the reads it saw end: a side read still out when the load finished is not part of its time.
+            /* A load nothing stopped lists only the reads that ended (see below for the ones not yet booked): a side read still out when the load finished is not part of its time.
                A load a newer one stopped lists the reads that were in flight or cancelled too, marked, and counts them as ended where
                they stopped, so their time is not booked as client work. */
             var now = ElapsedMs;
@@ -295,9 +364,23 @@ public sealed class ViewerLoadTimer
             else
             {
                 phases.AddRange(_cancelled);
+
+                /* #9249: a read whose task has ended but whose watcher has not run yet is part of the load's time. The loader's own await of
+                   the task can resume first and call Finish, and without this the read's whole run was booked as client work. It is booked as
+                   ended now (the watcher's own timestamp is not in yet). A read still running stays off the line, as above. */
+                phases.AddRange(_inFlight.Values.Where(f => f.Task.IsCompleted).Select(f => (f.Phase, f.StartedMs, now)));
             }
 
-            return Describe(Lead + (string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface), now, phases, _clientSteps.ToList(), _slowThresholdMs, stopped);
+            long? rows = null;
+            foreach (var read in _tracked)
+            {
+                if (read.Rows() is { } count)
+                {
+                    rows = (rows ?? 0) + count;
+                }
+            }
+
+            return Describe(Lead + (string.IsNullOrEmpty(Surface) ? fallbackSurface : Surface), now, phases, _clientSteps.ToList(), _slowThresholdMs, stopped, new Dictionary<string, string>(_phaseNotes), Window, rows);
         }
     }
 }

@@ -50,15 +50,15 @@ public sealed class QueryStoreWideUpperBoundLiveTests
     {
         (1, W0.AddHours(1), W0.AddHours(-20)),         // began before the window, still running
         (2, W0, W0.AddHours(-25).AddMinutes(-30)),     // collected exactly at the start, inside the 26 h floor
-        (3, W1, W1.AddHours(-1)),                      // collected exactly at the end
-        (4, W1, W1.AddHours(12).AddMinutes(-1)),       // monitored clock 11 h 59 min ahead: inside the 12 h slack
+        (3, W1, W1.AddHours(-1)),                      // collected exactly at the end: the long-window read's trailing edge stops before it
+        (4, W1.AddMinutes(-1), W1.AddHours(12).AddMinutes(-1)),  // monitored clock 11 h 59 min ahead: inside the 12 h slack
         (5, W1.AddMinutes(-1), W1.AddMinutes(30)),
         (6, W0.AddMinutes(-1), W0.AddHours(-1)),       // collected just before the window
         (7, W1.AddMinutes(1), W1),                     // collected just after the window
         (8, W1.AddDays(3), W1.AddDays(3)),             // newer rows the old range walked and filtered out
         (9, W0.AddHours(5), W0.AddHours(4)),           // ordinary
         (10, new DateTime(2026, 9, 11, 12, 0, 0), new DateTime(2026, 9, 11, 11, 0, 0)),  // the middle day
-        (11, W1, W1.AddHours(12).AddMinutes(1)),       // past the slack: dropped by every upper bound
+        (11, W1.AddMinutes(-1), W1.AddHours(12).AddMinutes(1)),  // past the slack: dropped by every upper bound
         (12, S.AddMinutes(-1), S.AddHours(12).AddMinutes(-1)),  // collected just before the long-window read's first edge, first execution inside the slack past it
         (13, S.AddMinutes(-1), S.AddHours(12).AddMinutes(1)),   // the same, one minute past the slack: only the long-window read's first edge drops it
     };
@@ -68,7 +68,7 @@ public sealed class QueryStoreWideUpperBoundLiveTests
     {
         (21, W0, W0, W0.AddMinutes(30)),                                        // starts at the window start
         (22, W0.AddMinutes(10), W0.AddMinutes(-59), W0.AddHours(1)),            // first execution 59 minutes below the window start: inside the 1 h floor
-        (23, W1, W1.AddHours(24), W1.AddHours(25)),                             // starts at the end, spans the whole day
+        (23, W1.AddMinutes(-1), W1.AddHours(24).AddMinutes(-1), W1.AddHours(25)),  // starts a minute before the end, spans the whole day
         (24, W1.AddMinutes(-10), W1.AddHours(23).AddMinutes(50), W1.AddHours(24)),
         (25, W0.AddMinutes(-1), W0.AddMinutes(-1), W0.AddMinutes(10)),          // starts just before the window
         (26, W1.AddMinutes(1), W1.AddMinutes(1), W1.AddMinutes(5)),             // starts just after the window
@@ -79,17 +79,19 @@ public sealed class QueryStoreWideUpperBoundLiveTests
         (31, null, W1.AddHours(12).AddMinutes(1), W1.AddMinutes(-3)),           // legacy, one minute past the slack: dropped
     };
 
-    private static readonly int[] ExpectedTop = { 1, 2, 3, 4, 5, 9, 10, 12, 13 };
-    private static readonly int[] ExpectedDaily = { 1, 2, 3, 4, 5, 9, 12 };
+    /* The history read places a row by the instant it was collected, in (start, end]: row 3, collected exactly at the end, is in, and
+       row 2, collected exactly at the start, is not. */
+    private static readonly int[] ExpectedHistory = { 1, 3, 4, 5, 9, 10, 12, 13 };
+    private static readonly int[] ExpectedDaily = { 1, 2, 4, 5, 9, 12 };
     private static readonly DateTime[] ExpectedTrendPoints =
     {
-        W0, W0.AddMinutes(10), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1,
+        W0, W0.AddMinutes(10), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1.AddMinutes(-1),
     };
 
     /* What the same trend statement returns with its new bounds cut out: the two rows the bounds exist to drop come back. */
     private static readonly DateTime[] OldTrendPoints =
     {
-        W0, W0.AddMinutes(10), W0.AddMinutes(20), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1.AddMinutes(-3), W1,
+        W0, W0.AddMinutes(10), W0.AddMinutes(20), W0.AddHours(1), W0.AddHours(2), W1.AddMinutes(-10), W1.AddMinutes(-5), W1.AddMinutes(-3), W1.AddMinutes(-1),
     };
 
     [Fact]
@@ -157,7 +159,7 @@ public sealed class QueryStoreWideUpperBoundLiveTests
                 Assert.Equal(viaOld, viaNew);
             }
 
-            Assert.Equal(ExpectedTop.Contains(q), viaNew.Count == 1);
+            Assert.Equal(ExpectedHistory.Contains(q), viaNew.Count == 1);
         }
 
         /* ---- The duration trend's table read: both arms. ---- */

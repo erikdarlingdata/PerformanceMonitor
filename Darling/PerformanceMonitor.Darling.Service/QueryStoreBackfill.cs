@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -246,7 +247,7 @@ public sealed class QueryStoreBackfill
 
             /* Holes before the tail: a recorded outage gap is the history closest to expiring. */
             if (state.TryGetValue(QueryStoreBackfillState.HoleKeyPrefix + databaseName, out var encoded)
-                && QueryStoreBackfillState.TryDecodeHole(encoded, out var holeFrom, out var holeTo))
+                && QueryStoreBackfillState.TryDecodeNewestHole(encoded, out var holeFrom, out var holeTo))
             {
                 if (holeTo <= floorLimit)
                 {
@@ -488,9 +489,17 @@ public sealed class QueryStoreBackfill
                    ships nothing, so the derived ceiling would re-ask the same chunk forever). The
                    tail marks done in the same breath — the hole owns the rest of the dig, and the
                    scan services holes first. */
-                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, sliceFloor), cancellationToken);
-                if (!isHole)
+                if (isHole)
                 {
+                    await RetireDugHoleRangeAsync(PooledState(server.ServerId), databaseName, sliceFloor, ceilingUtc, floorUtc, cancellationToken);
+                }
+                else
+                {
+                    var existingState = await _runner.GetCollectorStateAsync(server.ServerId, StateCollectorName, cancellationToken);
+                    await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName,
+                        QueryStoreBackfillState.AddHole(
+                            existingState.TryGetValue(QueryStoreBackfillState.HoleKeyPrefix + databaseName, out var existingHole) ? existingHole : null, floorUtc, sliceFloor),
+                        cancellationToken);
                     await SaveStateAsync(server.ServerId, QueryStoreBackfillState.DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
                 }
 
@@ -505,7 +514,7 @@ public sealed class QueryStoreBackfill
                for this range, and cheaper to record than to re-ask every tick. */
             if (isHole)
             {
-                await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
+                await RetireDugHoleRangeAsync(PooledState(server.ServerId), databaseName, floorUtc, ceilingUtc, floorUtc, cancellationToken);
             }
             else
             {
@@ -518,39 +527,160 @@ public sealed class QueryStoreBackfill
             return;
         }
 
+        await StoreSliceAsync(server, databaseName, floorUtc, ceilingUtc, sliceFloor, isHole, rows, context, cancellationToken);
+    }
+
+    /// <summary>Test-only seam (#9359): runs inside the slice's state step, right before the state is written, so a test can
+    /// fail the slice between its rows and its state. Null in production, where it changes nothing.</summary>
+    internal Func<Task>? BeforeSliceStateForTests { get; set; }
+
+    /// <summary>Test-only seam (#9359): runs after a hole slice has read, locked and changed its hole key and before the transaction
+    /// commits, so a test can land a live hole record in that window. Null in production, where it changes nothing.</summary>
+    internal Func<Task>? AfterSliceStateForTests { get; set; }
+
+    /// <summary>The write half of a slice: stores its rows and then its state (the hole's remainder or the done mark), in ONE
+    /// transaction (#9359). Split from <see cref="RunSliceAsync"/> so the read against the monitored server is the only part a
+    /// test cannot reach.</summary>
+    internal async Task StoreSliceAsync(
+        ServerRuntime server, string databaseName, DateTime floorUtc, DateTime ceilingUtc, DateTime sliceFloor, bool isHole,
+        List<QueryStoreCollector.Row> rows, CollectorContext context, CancellationToken cancellationToken)
+    {
+        var definition = QueryStoreCollector.Instance;
         /* Backdated so the rows land beside their own activity — see the class doc's horizon
            contract. The ceiling, not each row's interval, keeps the write one batch. */
-        var written = await _runner.WriteBackfillBatchAsync(definition, rows, server, ceilingUtc, context, cancellationToken);
-
         var boundary = context.PerItemShippedBoundary;
+
+        /* #9359: the slice's state (the hole's remainder, the done mark) commits in the SAME transaction as its rows.
+           collect.query_store_stats has no unique index, so a slice whose rows committed while its state did not (a stop, a
+           failed save) was walked again and stored a second time. The rows and the state live in one store, so one transaction
+           removes the window: a fault anywhere rolls both back and the re-walk starts clean. A tail slice with more range
+           below it saves nothing (the derived ceiling is read off the stored rows), so it needs no hook. */
+        Func<DbConnection, DbTransaction, CancellationToken, Task>? sliceState = null;
         if (isHole)
         {
             /* A chunked slice's rows all sit at or above its own chunk floor, so a missing shipped
                boundary falls back to the chunk floor rather than deleting (#2102) — deletion under
                a bounded window would orphan the unexplored range below it. */
             var shippedTo = boundary ?? sliceFloor;
-            if (shippedTo <= floorUtc)
+            sliceState = async (connection, transaction, token) =>
             {
-                await _runner.DeleteCollectorStateKeyAsync(server.ServerId, StateCollectorName, QueryStoreBackfillState.HoleKeyPrefix + databaseName, cancellationToken);
-            }
-            else
-            {
-                /* Shrink the ceiling to the oldest shipped row; the from-side stays at the floor we
-                   actually used (anything below it is horizon-expired either way). */
-                await SaveStateAsync(server.ServerId, QueryStoreBackfillState.HoleKeyPrefix + databaseName, QueryStoreBackfillState.EncodeHole(floorUtc, shippedTo), cancellationToken);
-            }
+                if (BeforeSliceStateForTests is { } beforeState)
+                {
+                    await beforeState();
+                }
+
+                await RetireDugHoleRangeAsync(
+                    TransactionState(server.ServerId, (NpgsqlConnection)connection, (NpgsqlTransaction)transaction), databaseName, shippedTo > floorUtc ? shippedTo : floorUtc, ceilingUtc, floorUtc, token);
+
+                if (AfterSliceStateForTests is { } afterState)
+                {
+                    await afterState();
+                }
+            };
         }
         else if (boundary is not null && boundary <= floorUtc)
         {
-            await SaveStateAsync(server.ServerId, QueryStoreBackfillState.DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), cancellationToken);
+            sliceState = async (connection, transaction, token) =>
+            {
+                if (BeforeSliceStateForTests is { } beforeState)
+                {
+                    await beforeState();
+                }
+
+                await TransactionState(server.ServerId, (NpgsqlConnection)connection, (NpgsqlTransaction)transaction)
+                    .Save(QueryStoreBackfillState.DoneKeyPrefix + databaseName, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), token);
+            };
         }
+
+        context.StoreTransactionWrite = sliceState;
+        var written = await _runner.WriteBackfillBatchAsync(definition, rows, server, ceilingUtc, context, cancellationToken);
 
         _logger?.LogInformation(
             "query_store backfill on '{Server}' [{Database}]: shipped {Rows} rows ({ShippedMB:F1}MB) down to {Boundary:o} ({Range}, ceiling {Ceiling:o}).",
             server.Config.DisplayName, databaseName, written,
             context.PerItemTextBytesShipped / (1024.0 * 1024.0),
             boundary ?? floorUtc, isHole ? "hole" : "tail", ceilingUtc);
+    
     }
+
+    /// <summary>Takes the range a hole slice just dug out of the database's recorded holes and saves what is left, or
+    /// deletes the key when nothing is (#9352). Reads the value as it is now, so a hole the live collector recorded
+    /// while the slice ran stays. Lite's twin is <c>RetireDugHoleRangeAsync</c>.</summary>
+    private static async Task RetireDugHoleRangeAsync(
+        SliceStateAccess state, string databaseName, DateTime dugFromUtc, DateTime dugToUtc, DateTime floorUtc, CancellationToken cancellationToken)
+    {
+        var key = QueryStoreBackfillState.HoleKeyPrefix + databaseName;
+        var encoded = await state.Read(key, cancellationToken);
+        if (encoded is null)
+        {
+            /* A state read that fails returns no rows, and the slice's own hole key was there when the scan found it. Writing
+               nothing leaves the hole as it was, where deleting it would lose the backfill opportunity. */
+            return;
+        }
+
+        var remaining = QueryStoreBackfillState.RemoveDugRange(encoded, dugFromUtc, dugToUtc, floorUtc);
+        if (remaining is null)
+        {
+            await state.Delete(key, cancellationToken);
+        }
+        else
+        {
+            await state.Save(key, remaining, cancellationToken);
+        }
+    }
+
+    /// <summary>How a slice reads and writes its <c>collector_state</c> keys: through the runner's own best-effort statements
+    /// (<see cref="PooledState"/>), or on the slice write's transaction (<see cref="TransactionState"/>, #9359).</summary>
+    private sealed record SliceStateAccess(
+        Func<string, CancellationToken, Task<string?>> Read,
+        Func<string, string, CancellationToken, Task> Save,
+        Func<string, CancellationToken, Task> Delete);
+
+    private SliceStateAccess PooledState(int serverId) => new(
+        async (key, token) => (await _runner.GetCollectorStateAsync(serverId, StateCollectorName, token)).TryGetValue(key, out var value) ? value : null,
+        (key, value, token) => SaveStateAsync(serverId, key, value, token),
+        (key, token) => _runner.DeleteCollectorStateKeyAsync(serverId, StateCollectorName, key, token));
+
+    /// <summary>The same three operations on the slice write's own connection and transaction. Unlike the pooled statements these
+    /// are not best-effort: a fault throws, which rolls the slice's rows back with it. The read locks the key's row, and the live
+    /// collector's hole recorder reads the same row FOR UPDATE (<c>RecordQueryStoreBackfillHoleAsync</c>), so a hole it records
+    /// during the commit window merges after this transaction and not under it.</summary>
+    private static SliceStateAccess TransactionState(int serverId, NpgsqlConnection connection, NpgsqlTransaction transaction) => new(
+        async (key, token) =>
+        {
+            using var command = new NpgsqlCommand(
+                "SELECT state_value FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3 FOR UPDATE", connection, transaction);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(StateCollectorName);
+            command.Parameters.AddWithValue(key);
+            return await command.ExecuteScalarAsync(token) as string;
+        },
+        async (key, value, token) =>
+        {
+            using var command = new NpgsqlCommand(
+                "INSERT INTO collector_state (server_id, collector_name, state_key, state_value, updated_at) VALUES ($1, $2, $3, $4, $5) "
+                + "ON CONFLICT (server_id, collector_name, state_key) DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at",
+                connection, transaction);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(StateCollectorName);
+            command.Parameters.AddWithValue(key);
+            command.Parameters.AddWithValue(value);
+            /* Naive UTC, Kind-Unspecified: updated_at is timestamp WITHOUT time zone (see SaveCollectorStateRowsAsync). */
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified) });
+            await command.ExecuteNonQueryAsync(token);
+        },
+        async (key, token) =>
+        {
+            using var command = new NpgsqlCommand(
+                "DELETE FROM collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3", connection, transaction);
+            command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(StateCollectorName);
+            command.Parameters.AddWithValue(key);
+            await command.ExecuteNonQueryAsync(token);
+        });
 
     private Task SaveStateAsync(int serverId, string key, string value, CancellationToken cancellationToken)
         => _runner.SaveCollectorStateAsync(
@@ -706,7 +836,7 @@ public sealed class QueryStoreBackfill
         var databases = new List<string>();
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreBackfill, cancellationToken);
             var sql = await ChooseCandidateSqlAsync(connection, floorLimit, cancellationToken);
 
             /* #5518: only the cut-chunk read is cached. The floor-bound statement's window moves every tick, and the
@@ -844,7 +974,7 @@ public sealed class QueryStoreBackfill
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreBackfill, cancellationToken);
 
             var snapshotDatabases = new HashSet<string>(StringComparer.Ordinal);
             DateTime? newest = null;
@@ -962,7 +1092,7 @@ public sealed class QueryStoreBackfill
     {
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryStoreBackfill, cancellationToken);
 
             using (var exists = new NpgsqlCommand(
                 "SELECT 1 FROM query_store_stats WHERE server_id = $1 AND database_name = $2 AND collection_time <= $3 LIMIT 1", connection))

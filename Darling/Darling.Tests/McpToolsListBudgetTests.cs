@@ -212,7 +212,7 @@ public sealed class McpToolsListBudgetTests
             .SelectMany(m => m.GetParameters())
             .Select(p => p.ParameterType)
             .Where(McpServedSchema.IsServiceParameter)
-            .Where(t => t != typeof(McpToolGuideCatalog))
+            .Where(t => t != typeof(McpToolGuideCatalog) && t != typeof(ModelContextProtocol.Server.McpServer))
             .Distinct())
         {
             services.AddSingleton(serviceType, _ => null!);
@@ -253,6 +253,8 @@ internal static class McpServedSchema
 
         return !(underlying.IsPrimitive || underlying.IsEnum || underlying == typeof(string) || underlying == typeof(decimal)
             || underlying == typeof(DateTime) || underlying == typeof(DateTimeOffset) || underlying == typeof(Guid)
-            || underlying == typeof(TimeSpan));
+            || underlying == typeof(TimeSpan)
+            /* #9388: call_tool's arguments are a JSON value the client sends, not a DI service. */
+            || underlying == typeof(System.Text.Json.JsonElement));
     }
 }

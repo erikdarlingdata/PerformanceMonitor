@@ -61,6 +61,7 @@ public sealed class DarlingSelfAlertTests
         public int ClientTimeoutsCriticalMultiple { get; set; } = 10;
         public bool LongRunningQueryEnabled { get; set; }
         public bool TempDbSpaceEnabled { get; set; }
+        public bool TempDbGrowthFitEnabled { get; set; } = true;
         public bool LowDiskEnabled { get; set; }
         public bool LongRunningJobEnabled { get; set; }
         public bool FailedJobEnabled { get; set; }
@@ -385,6 +386,9 @@ public sealed class DarlingSelfAlertTests
         /// in this file assume. The hold tests set it true.</summary>
         public bool HoldSelfHealth { get; set; }
 
+        /// <summary>#9000: the Store Growth switch and floors the evaluator reads, at the shipped defaults.</summary>
+        public StoreGrowthSettings StoreGrowth { get; set; } = new(true, 5, 2);
+
         private DarlingSelfAlertEvaluator BuildCore() => new(
             Settings, Deliverer, History,
             _ => MuteThrows ? throw new InvalidOperationException("mute check boom") : Muted,
@@ -407,7 +411,8 @@ public sealed class DarlingSelfAlertTests
             checkDbOverdueEnabled: () => CheckDbOverdueEnabled,
             protectionThresholds: ProtectionThresholds,
             identityCapacityEnabled: () => IdentityCapacityEnabled,
-            resolveThreshold: ResolveThreshold);
+            resolveThreshold: ResolveThreshold,
+            storeGrowthSettings: () => StoreGrowth);
     }
 
     /* ---------------- #991 Availability Group fixtures ---------------- */
@@ -6163,6 +6168,10 @@ public sealed class DarlingSelfAlertTests
             Task.FromResult(new List<DatabaseFileGrowthInfo>());
         public Task<TempDbSpaceInfo?> GetTempDbSpaceAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult<TempDbSpaceInfo?>(null);
+        public Task<List<TempDbFileInfo>> GetTempDbFilesAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new List<TempDbFileInfo>());
+        public Task<InstanceEventInfo> GetInstanceEventsAsync(string serverKey, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new InstanceEventInfo(null, null));
         public Task<List<PvsPressureInfo>> GetPvsPressureAsync(string serverKey, CancellationToken cancellationToken = default) =>
             Task.FromResult(new List<PvsPressureInfo>());
         public Task<AnomalousJobsResult> GetAnomalousJobsAsync(string serverKey, int multiplier, CancellationToken cancellationToken = default) =>

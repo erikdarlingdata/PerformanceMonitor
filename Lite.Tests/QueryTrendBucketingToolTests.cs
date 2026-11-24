@@ -75,10 +75,7 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         var asOf = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
         /* One collection a minute for the whole 24-hour window, every one 10 executions and 10 ms of CPU. */
         var first = asOf.AddHours(-24).AddSeconds(30);
-        for (var i = 0; i < 1440; i++)
-        {
-            await SeedQueryAsync(first.AddMinutes(i), executions: 10, cpuUs: 10_000);
-        }
+        await SeedQueriesAsync(first, count: 1440, stepMinutes: 1, executions: 10, cpuUs: 10_000);
 
         var root = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
             service, _serverManager, Hash, Database, ServerName, 24, asOf.ToString("o"))).RootElement;
@@ -115,10 +112,7 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         var service = new LocalDataService(_duckDb);
         var asOf = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
         var first = asOf.AddHours(-1).AddSeconds(30);
-        for (var i = 0; i < 60; i++)
-        {
-            await SeedQueryAsync(first.AddMinutes(i), executions: 2, cpuUs: 4_000);
-        }
+        await SeedQueriesAsync(first, count: 60, stepMinutes: 1, executions: 2, cpuUs: 4_000);
 
         var root = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
             service, _serverManager, Hash, Database, ServerName, 1, asOf.ToString("o"))).RootElement;
@@ -149,10 +143,7 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         var service = new LocalDataService(_duckDb);
         var asOf = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
         var first = asOf.AddHours(-24).AddSeconds(30);
-        for (var i = 0; i < 1440; i += 5)
-        {
-            await SeedQueryAsync(first.AddMinutes(i), executions: 5, cpuUs: 5_000);
-        }
+        await SeedQueriesAsync(first, count: 288, stepMinutes: 5, executions: 5, cpuUs: 5_000);
 
         var method = typeof(McpQueryTools).GetMethod(nameof(McpQueryTools.GetQueryTrend), BindingFlags.Public | BindingFlags.Static)!;
         var parameters = method.GetParameters();
@@ -175,6 +166,73 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
     }
 
     /// <summary>
+    /// #8812: a week at the default width stays inside the 32,768-byte response budget (the shared 200-point target put 169 hourly
+    /// points, about 56 KB, on the wire), and a width the caller names that is still over it is cut to the newest whole points that fit (the
+    /// oldest are left off, the rest stay oldest first), with <c>budget_truncated</c> and a <c>budget_note</c> that names the width that reads the whole window.
+    /// </summary>
+    [Fact]
+    public async Task AWeekAtTheDefaultWidth_FitsTheResponseBudget_AndANamedWidthOverItIsCutAndSaysSo()
+    {
+        var service = new LocalDataService(_duckDb);
+        var asOf = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
+        var first = asOf.AddHours(-168).AddSeconds(30);
+        await SeedQueriesAsync(first, count: 168 * 12, stepMinutes: 5, executions: 10, cpuUs: 10_000);
+
+        var whole = await McpQueryTools.GetQueryTrend(service, _serverManager, Hash, Database, ServerName, 168, asOf.ToString("o"));
+        var wholeRoot = JsonDocument.Parse(whole).RootElement;
+        Assert.False(wholeRoot.TryGetProperty("status", out _), whole);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(whole) <= PerformanceMonitor.Common.McpResponseBudget.DefaultBytes,
+            $"a week at the default width answered {System.Text.Encoding.UTF8.GetByteCount(whole):N0} bytes");
+        Assert.False(wholeRoot.TryGetProperty("budget_truncated", out var wholeCut) && wholeCut.ValueKind == JsonValueKind.True, whole);
+        Assert.Equal(168 * 12, wholeRoot.GetProperty("trend").EnumerateArray().Sum(p => p.GetProperty("collection_count").GetInt64()));
+
+        /* Hourly points over a week are 169, inside the 750-point cap and over the byte budget. */
+        var cut = await McpQueryTools.GetQueryTrend(service, _serverManager, Hash, Database, ServerName, 168, asOf.ToString("o"), bucket_minutes: 60);
+        var cutRoot = JsonDocument.Parse(cut).RootElement;
+        Assert.False(cutRoot.TryGetProperty("status", out _), cut);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(cut) <= PerformanceMonitor.Common.McpResponseBudget.DefaultBytes,
+            $"a named hourly width over a week answered {System.Text.Encoding.UTF8.GetByteCount(cut):N0} bytes");
+        Assert.True(cutRoot.GetProperty("budget_truncated").GetBoolean(), cut);
+        var points = cutRoot.GetProperty("trend").EnumerateArray().ToList();
+        Assert.InRange(points.Count, 20, 168);
+        Assert.Equal(points.Count, cutRoot.GetProperty("data_points").GetInt32());
+
+        /* The newest point of the window (its last hour) is in the reply, and the window's oldest (its start) is the one left off. */
+        var oldestStamp = DateTime.SpecifyKind(asOf.AddHours(-168), DateTimeKind.Unspecified).ToString("o");
+        Assert.Equal(DateTime.SpecifyKind(asOf.AddHours(-1), DateTimeKind.Unspecified).ToString("o"), points[^1].GetProperty("collection_time").GetString());
+        Assert.NotEqual(oldestStamp, points[0].GetProperty("collection_time").GetString());
+
+        var note = cutRoot.GetProperty("budget_note").GetString()!;
+        Assert.Contains("response budget", note, StringComparison.Ordinal);
+        Assert.Contains($"only {points.Count:N0} fit", note, StringComparison.Ordinal);
+        var firstStamp = DateTime.Parse(points[0].GetProperty("collection_time").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind);
+        Assert.Contains($"first point returned is at {firstStamp:yyyy-MM-dd'T'HH:mm:ss}Z", note, StringComparison.Ordinal);
+        var named = int.Parse(System.Text.RegularExpressions.Regex.Match(note, @"bucket_minutes (\d+)").Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.True(PerformanceMonitor.Common.TrendBuckets.PointsFor(168 * 60, named, 1) <= points.Count, note);
+
+        /* Following the note's as_of reads the points before the first one returned, and repeating it reaches the window's oldest point. */
+        var reachedOldest = false;
+        var asOfToRead = asOf.ToString("o");
+        for (var page = 0; page < 12 && !reachedOldest; page++)
+        {
+            var pageRoot = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
+                service, _serverManager, Hash, Database, ServerName, 168, asOfToRead, bucket_minutes: 60)).RootElement;
+            var pageStamps = pageRoot.GetProperty("trend").EnumerateArray().Select(p => p.GetProperty("collection_time").GetString()!).ToList();
+            if (pageStamps.Contains(oldestStamp, StringComparer.Ordinal))
+            {
+                reachedOldest = true;
+                break;
+            }
+
+            var next = System.Text.RegularExpressions.Regex.Match(pageRoot.GetProperty("budget_note").GetString()!, @"set as_of to (\S+Z) to read the points before it");
+            Assert.True(next.Success, pageRoot.GetRawText());
+            asOfToRead = next.Groups[1].Value;
+        }
+
+        Assert.True(reachedOldest, "following the note's as_of never reached the window's oldest point");
+    }
+
+    /// <summary>
     /// The buckets are cut on the shared grid from <see cref="PerformanceMonitor.Common.TrendBuckets.OriginSql"/>, and
     /// only the first point is moved: an <c>as_of</c> off a boundary puts the window's start inside a grid bucket, and
     /// that bucket is stamped at the window's start, as every bucketed trend stamps its first point, while the rest
@@ -188,10 +246,7 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         var asOf = new DateTime(2026, 11, 5, 12, 17, 0, DateTimeKind.Utc);
         var windowStart = asOf.AddHours(-4);
         var first = windowStart.AddSeconds(30);
-        for (var i = 0; i < 240; i++)
-        {
-            await SeedQueryAsync(first.AddMinutes(i), executions: 3, cpuUs: 3_000);
-        }
+        await SeedQueriesAsync(first, count: 240, stepMinutes: 1, executions: 3, cpuUs: 3_000);
 
         var root = JsonDocument.Parse(await McpQueryTools.GetQueryTrend(
             service, _serverManager, Hash, Database, ServerName, 4, asOf.ToString("o"), bucket_minutes: 60)).RootElement;
@@ -232,7 +287,12 @@ public sealed class QueryTrendBucketingToolTests : IClassFixture<SharedDuckDbFix
         return await (Task<string>)method.Invoke(null, args)!;
     }
 
-    private async Task SeedQueryAsync(DateTime collectionTimeUtc, long executions, long cpuUs)
+    /// <summary>
+    /// <paramref name="count"/> <c>query_stats</c> rows, one every <paramref name="stepMinutes"/> from <paramref name="firstUtc"/>, in ONE
+    /// statement (#8754). One INSERT per row cost a commit each: 1,440 of them took 118 s in the release run for a read that takes
+    /// milliseconds. The rows are the same ones, so the tool reads the same store.
+    /// </summary>
+    private async Task SeedQueriesAsync(DateTime firstUtc, int count, int stepMinutes, long executions, long cpuUs)
     {
         using var readLock = _duckDb.AcquireReadLock();
         if (_seedConn is null)
@@ -247,22 +307,22 @@ INSERT INTO query_stats
     (collection_id, collection_time, server_id, server_name, database_name,
      query_hash, sql_handle, query_plan_hash, last_execution_time, delta_execution_count,
      delta_worker_time, delta_elapsed_time, min_dop, max_dop, query_text)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 1, 1, $13)";
-        var naive = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified);
+SELECT CAST($1 AS BIGINT) + i, CAST($2 AS TIMESTAMP) + to_minutes(CAST(i * $3 AS BIGINT)), $4, $5, $6, $7, '0xSQLH', '0xPLAN',
+       CAST($2 AS TIMESTAMP) + to_minutes(CAST(i * $3 AS BIGINT)), $8, $9, $10, 1, 1, 'SELECT * FROM Orders'
+FROM range(CAST($11 AS BIGINT)) t(i)";
         void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
-        P(_nextId++);
-        P(naive);
+        P(_nextId);
+        P(DateTime.SpecifyKind(firstUtc, DateTimeKind.Unspecified));
+        P((long)stepMinutes);
         P(_serverId);
         P(ServerName);
         P(Database);
         P(Hash);
-        P("0xSQLH");
-        P("0xPLAN");
-        P(naive);
         P(executions);
         P(cpuUs);
         P(cpuUs * 2);
-        P("SELECT * FROM Orders");
+        P((long)count);
         await cmd.ExecuteNonQueryAsync();
+        _nextId += count;
     }
 }

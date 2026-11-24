@@ -104,7 +104,7 @@ internal static class DarlingAlertReader
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log a
 LEFT JOIN servers s ON s.server_id = a.server_id
-WHERE a.alert_time >= $1
+WHERE a.alert_time > $1
 AND   a.alert_time <= $2
 AND   a.server_id = $3
 AND   (a.dismissed = FALSE OR $5)
@@ -120,7 +120,7 @@ LIMIT $4";
 SELECT" + AlertHistorySelectColumns + @"
 FROM config_alert_log a
 LEFT JOIN servers s ON s.server_id = a.server_id
-WHERE a.alert_time >= $1
+WHERE a.alert_time > $1
 AND   a.alert_time <= $2
 AND   (a.dismissed = FALSE OR $4)
 AND   ($5::text IS NULL OR lower(a.metric_name) = lower($5))
@@ -136,7 +136,7 @@ LIMIT $3";
     public const string DismissedAlertCountSql = @"
 SELECT COUNT(*)
 FROM config_alert_log
-WHERE alert_time >= $1
+WHERE alert_time > $1
 AND   alert_time <= $2
 AND   server_id = $3
 AND   dismissed = TRUE
@@ -148,7 +148,7 @@ AND   TRUE /* family */";
     public const string DismissedAlertCountAllServersSql = @"
 SELECT COUNT(*)
 FROM config_alert_log
-WHERE alert_time >= $1
+WHERE alert_time > $1
 AND   alert_time <= $2
 AND   dismissed = TRUE
 AND   ($3::text IS NULL OR lower(metric_name) = lower($3))
@@ -171,7 +171,7 @@ SELECT a.server_id,
        COUNT(*) AS alert_count,
        MAX(a.alert_time) AS latest_alert_time
 FROM config_alert_log a
-WHERE a.alert_time >= $1
+WHERE a.alert_time > $1
 AND   a.alert_time <= $2
 AND   a.muted = FALSE
 AND   a.dismissed = FALSE
@@ -279,7 +279,7 @@ GROUP BY a.server_id, a.metric_name, 3";
 SELECT a.server_id, a.metric_name, a.alert_time
 FROM unnest($1::int[], $2::text[]) AS p(server_id, metric_name)
 JOIN config_alert_log AS a ON a.server_id = p.server_id AND a.metric_name = p.metric_name
-WHERE a.alert_time >= $3
+WHERE a.alert_time > $3
 AND   a.alert_time <= $4";
 
     /// <summary>#6261: the streak of each row of <paramref name="page"/>, aligned with it, in one read for the whole page. Null on
@@ -702,7 +702,19 @@ LIMIT 1";
         /* #7611 (V245): the three Database Protection ages (integer NOT NULL: 168 hours, 60 minutes, 336 hours). APPENDED, same reason. */
         int BackupOverdueThresholdHours,
         int LogBackupOverdueThresholdMinutes,
-        int CheckDbOverdueThresholdHours);
+        int CheckDbOverdueThresholdHours,
+        /* #8881 (V269): the TempDB Log Space switch and bar. APPENDED, same reason. */
+        bool TempDbLogSpaceEnabled,
+        int TempDbLogSpaceThresholdPercent,
+        /* #8882 (V270): the TempDB Growth Fit switch (boolean NOT NULL DEFAULT TRUE). APPENDED, same reason. */
+        bool TempDbGrowthFitEnabled,
+        /* #8884 (V271): the Instance Restarted and Memory Dumps switches (boolean NOT NULL, default on). APPENDED, same reason. */
+        bool InstanceRestartedEnabled,
+        bool MemoryDumpsEnabled,
+        /* #9000 (V276): the Store Growth switch and its two floors in GB. APPENDED, same reason. */
+        bool SelfStoreGrowthEnabled,
+        int SelfStoreGrowthFloorGb,
+        int SelfStoreGrowthObjectFloorGb);
 
     /// <summary>The single global alert-settings row (id=1) — the viewer's <c>AlertSettingsSelectSql</c>. The
     /// columns are read in the SAME order the service reads them (<c>StoreConfigProvider</c>), and
@@ -746,7 +758,11 @@ SELECT enabled, cpu_enabled, cpu_threshold_percent, cpu_mode, blocking_enabled, 
        blocking_warn_per_hour, blocking_critical_per_hour, blocking_warn_wait_seconds, blocking_critical_wait_seconds,
        blocking_warn_snapshot_wait_seconds, blocking_critical_snapshot_wait_seconds,
        daily_report_enabled, daily_report_send_at, daily_report_time_zone, daily_report_title,
-       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours
+       backup_overdue_threshold_hours, log_backup_overdue_threshold_minutes, checkdb_overdue_threshold_hours,
+       tempdb_log_space_enabled, tempdb_log_space_threshold_percent,
+       tempdb_growth_fit_enabled,
+       instance_restarted_enabled, memory_dumps_enabled,
+       self_store_growth_enabled, self_store_growth_floor_gb, self_store_growth_object_floor_gb
 FROM config_alert_settings
 WHERE id = 1";
 
@@ -828,7 +844,15 @@ WHERE id = 1";
             reader.IsDBNull(94) ? null : reader.GetString(94),
             reader.IsDBNull(95) ? null : reader.GetString(95),
             /* #7611 (V245): the three Database Protection ages at 96-98. */
-            reader.GetInt32(96), reader.GetInt32(97), reader.GetInt32(98));
+            reader.GetInt32(96), reader.GetInt32(97), reader.GetInt32(98),
+            /* #8881 (V269): the TempDB Log Space switch and bar at 99-100. */
+            reader.GetBoolean(99), reader.GetInt32(100),
+            /* #8882 (V270): the TempDB Growth Fit switch at 101. */
+            reader.GetBoolean(101),
+            /* #8884 (V271): the Instance Restarted and Memory Dumps switches at 102-103. */
+            reader.GetBoolean(102), reader.GetBoolean(103),
+            /* #9000 (V276): the Store Growth switch and its two floors at 104-106. */
+            reader.GetBoolean(104), reader.GetInt32(105), reader.GetInt32(106));
     }
 
     /* ─────────────────────── delivery cooldown (a SECOND config table) ─────────────────────── */

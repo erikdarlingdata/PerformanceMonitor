@@ -50,12 +50,15 @@ public sealed partial class ChangeWatchEvaluator
         return MonitoredEngineKind.IsPostgres(kind as string);
     }
 
-    /* A window is closed at its end and opens one microsecond after its start, so a sample on the boundary of two windows counts in one. */
+    /* A window is closed at its end and open at its start, so a sample on the boundary of two windows counts in one. The statements in this
+       file bound the start with >=, so they take the instant one microsecond after it, and so does the sampled-profile reader, which reads the
+       row on its start as a baseline; the other shared readers leave out the row at their start themselves. */
     private static DateTime Open(DateTime start) => start.AddTicks(10);
 
     private async Task<long> CountRowsAsync(string sql, int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
-        await using var command = _dataSource.CreateCommand(sql);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter { Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(Open(start)) });
@@ -127,7 +130,8 @@ FROM d";
     private async Task<(double First, double Second, long Rows)> ReadCoverageAsync(
         string sql, int serverId, DateTime start, DateTime end, CancellationToken cancellationToken)
     {
-        await using var command = _dataSource.CreateCommand(sql);
+        await using var connection = await _dataSource.OpenConnectionAsync(StoreSessionNames.ChangeWatch, cancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.CommandTimeout = _commandTimeoutSeconds;
         command.Parameters.Add(new NpgsqlParameter { Value = serverId });
         command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Naive(Open(start)) });
@@ -159,6 +163,8 @@ FROM d";
             return default;
         }
 
+        /* The reader differences against the row on its start as the baseline. The coverage above starts at the first collection after
+           the window's start, so the reader is given the same instant and both figures cover the same span. */
         var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(_dataSource, serverId, Open(start), end, PostgresWaitSamplingRows, cancellationToken);
         var waitedMs = page.Rows.Where(r => !string.Equals(r.EventType, "CPU", StringComparison.OrdinalIgnoreCase)).Sum(r => (double)r.EstimatedWaitMs);
         return new RateSample(coverage.First > 0 ? waitedMs / coverage.First : 0, coverage.Second, coverage.Rows);
@@ -169,7 +175,7 @@ FROM d";
         /* The reader filters on collection_time, and a sample is collected after it was taken (the collector runs every few minutes, and a backlog
            after a gap arrives later still), so the scan runs a day past the window's end, as the SQL Server read does, and the sample's own
            instant decides below (#6234). */
-        var all = await DarlingPgCpuUtilizationReader.GetHistoryAsync(_dataSource, serverId, Open(start), end.AddDays(1), cancellationToken);
+        var all = await DarlingPgCpuUtilizationReader.GetHistoryAsync(_dataSource, serverId, start, end.AddDays(1), cancellationToken);
         /* A sample counts in the window its own instant falls in: a backlog ingested after a gap carries the later collection_time. */
         var samples = all.Where(s => s.SampleTimeUtc > start && s.SampleTimeUtc <= end).ToList();
         if (samples.Count == 0)
@@ -187,7 +193,7 @@ FROM d";
         /* #7567: the monitoring service's own statements (the wait sampler's sleep, the collectors' reads) are left out, so they cannot
            take a slot of the top-N a change is compared on. */
         var page = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(
-            _dataSource, serverId, Open(start), end, limit, includeServiceStatements: false, cancellationToken);
+            _dataSource, serverId, start, end, limit, includeServiceStatements: false, cancellationToken);
         var rows = new Dictionary<(long, long), DarlingPgStatementReader.PgStatementRow>();
         foreach (var row in page.Rows)
         {

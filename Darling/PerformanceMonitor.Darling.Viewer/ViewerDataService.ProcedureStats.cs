@@ -138,7 +138,7 @@ public sealed partial class ViewerDataService
             bool_or(query_plan_xml IS NOT NULL OR query_plan_digest IS NOT NULL OR query_plan_xml_bytes IS NOT NULL) AS has_query_plan
         FROM procedure_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($5::text[] IS NULL OR database_name = ANY($5))
         AND   ($6::text[] IS NULL OR database_name IS NULL OR database_name <> ALL($6))
@@ -286,7 +286,7 @@ public sealed partial class ViewerDataService
             command.Parameters.Add(DatabaseFilterParameter(databaseNames));
             command.Parameters.Add(databases.ExcludeParameter());
             AddHourlyCeilingParameter(command, ceiling);
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
             while (await reader.ReadAsync(cancellationToken))
             {
                 rows.Add(new ViewerProcedureStatsRow
@@ -356,7 +356,7 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
         command.Parameters.Add(databases.ExcludeParameter());
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new ViewerProcedureStatsRow
@@ -408,7 +408,7 @@ public sealed partial class ViewerDataService
              WHERE server_id = $1 AND collector_name = 'procedure_stats' AND status = 'SUCCESS' AND collection_time <= $3) AS last_success,
             (SELECT COUNT(*) FROM v_collection_log
              WHERE server_id = $1 AND collector_name = 'procedure_stats' AND status = 'SUCCESS'
-             AND   collection_time >= $2 AND collection_time <= $3) AS in_window
+             AND   collection_time > $2 AND collection_time <= $3) AS in_window
         """;
 
     /// <summary>#6651: <see cref="ProcedureStatsRunFactsSql"/> for the window [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
@@ -418,7 +418,7 @@ public sealed partial class ViewerDataService
         await using var command = _dataSource.CreateCommand(ProcedureStatsRunFactsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         if (!await reader.ReadAsync(cancellationToken))
         {
             return CollectorRunFacts.None;
@@ -464,7 +464,7 @@ public sealed partial class ViewerDataService
             SELECT database_name, schema_name, object_name
             FROM procedure_stats
             WHERE server_id = $1
-            AND   collection_time >= $2 AND collection_time <= $3
+            AND   collection_time > $2 AND collection_time <= $3
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
             AND   delta_execution_count > 0
             GROUP BY database_name, schema_name, object_name
@@ -475,7 +475,7 @@ public sealed partial class ViewerDataService
             SELECT database_name, schema_name, object_name
             FROM procedure_stats
             WHERE server_id = $1
-            AND   collection_time >= $4 AND collection_time <= $5
+            AND   collection_time > $4 AND collection_time <= $5
             AND   ($6::text[] IS NULL OR database_name = ANY($6))
             AND   delta_execution_count > 0
             GROUP BY database_name, schema_name, object_name
@@ -503,7 +503,7 @@ public sealed partial class ViewerDataService
                        MAX(ps.sql_handle) AS sql_handle
                 FROM procedure_stats ps
                 WHERE ps.server_id = $1
-                AND   ps.collection_time >= $2 AND ps.collection_time <= $3
+                AND   ps.collection_time > $2 AND ps.collection_time <= $3
                 AND   ($6::text[] IS NULL OR ps.database_name = ANY($6))
                 AND   ps.delta_execution_count > 0
                 GROUP BY ps.database_name, ps.schema_name, ps.object_name
@@ -528,7 +528,7 @@ public sealed partial class ViewerDataService
                        MAX(ps.sql_handle) AS sql_handle
                 FROM procedure_stats ps
                 WHERE ps.server_id = $1
-                AND   ps.collection_time >= $4 AND ps.collection_time <= $5
+                AND   ps.collection_time > $4 AND ps.collection_time <= $5
                 AND   ($6::text[] IS NULL OR ps.database_name = ANY($6))
                 AND   ps.delta_execution_count > 0
                 GROUP BY ps.database_name, ps.schema_name, ps.object_name
@@ -557,8 +557,8 @@ public sealed partial class ViewerDataService
             SELECT DISTINCT ON (qs.sql_handle) qs.sql_handle, qs.query_text
             FROM v_query_stats qs
             WHERE qs.server_id = $1
-            AND   ((qs.collection_time >= $2 AND qs.collection_time <= $3)
-               OR  (qs.collection_time >= $4 AND qs.collection_time <= $5))
+            AND   ((qs.collection_time > $2 AND qs.collection_time <= $3)
+               OR  (qs.collection_time > $4 AND qs.collection_time <= $5))
             AND   qs.sql_handle IN (SELECT sql_handle FROM current_period UNION SELECT sql_handle FROM baseline_period)
             AND   qs.query_text IS NOT NULL
             ORDER BY qs.sql_handle, qs.collection_time DESC, qs.collection_id DESC
@@ -605,7 +605,7 @@ public sealed partial class ViewerDataService
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddComparisonParameters(command, serverId, currentStart, currentEnd, baselineStart, baselineEnd);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await using var reader = await command.ExecuteReaderAsync(ViewerReadScope.Effective(cancellationToken));
         while (await reader.ReadAsync(cancellationToken))
         {
             items.Add(new ProcedureStatsComparisonItem
@@ -648,7 +648,7 @@ public sealed partial class ViewerDataService
             COALESCE(SUM(delta_physical_reads), 0) AS total_physical_reads
         FROM procedure_stats
         WHERE server_id = $1
-        AND   collection_time >= $2
+        AND   collection_time > $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         GROUP BY 1

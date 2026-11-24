@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,10 +33,32 @@ namespace PerformanceMonitor.Darling.Storage;
 /// next one. A key with no sightings left (retention removed them) leaves the map at the next rebuild; the extend path
 /// never deletes.</para>
 ///
-/// <para><b>The cursor is in memory, and a server without one rebuilds.</b> A server with no cursor (a fresh process, a
-/// newly listed server) gets the same one-transaction rebuild a rule change gets, then a cursor two minutes behind the
-/// clock. It does not drain from the start of time: a restart would otherwise re-read the whole sighting history, one
-/// aggregate-and-sort statement per page, once a minute until it finished, to re-derive a map that was already right.</para>
+/// <para><b>The cursor is in memory, and a copy is stored (#9308).</b> A server with no in-memory cursor (a fresh process,
+/// a newly listed server) first looks for the cursor the last process stored, and extends from it when the map it
+/// describes is still current: its <c>rules_version</c> equals the current one, <c>built_version</c> equals it too, and
+/// the cursor is under <see cref="MaxStoredCursorAge"/> old. Otherwise it gets the one-transaction rebuild a rule change
+/// gets, then a cursor two minutes behind the clock. It never drains from the start of time: that would re-read the whole
+/// sighting history, one aggregate-and-sort statement per page, once a minute until it finished. Each rebuild and each
+/// extend stores its cursor in the transaction of the map write it describes
+/// (<see cref="QueryTagMapStore.ReplaceMapAsync"/>, <see cref="QueryTagMapStore.UpsertMapAsync"/>), so a stored cursor is never
+/// ahead of the map, and a rebuild-all stamp drops the stored cursor of every server outside the pass.</para>
+///
+/// <para><b>A weekly staggered rebuild trims the map (#9308).</b> A process that extends from a stored cursor never
+/// rebuilds on its own, and only a rebuild removes a key whose sightings retention deleted or re-resolves a key whose
+/// winning sighting retention deleted. So each cursor also carries <c>rebuilt_at</c>, the store clock at the server's last
+/// rebuild (an extend carries it forward). A server whose last rebuild is <see cref="MaxRebuildAge"/> old is due, and a
+/// pass rebuilds at most ONE due server, the one with the oldest <c>rebuilt_at</c>, never within
+/// <see cref="RebuildStartupGrace"/> of the builder's construction, so the minutes after a start stay clear (#9302,
+/// #9303). A due server that is skipped extends as usual. A cursor stored before this field decodes as due, and the
+/// one-a-pass limit spreads those out. A rebuild-all ignores all of this.</para>
+///
+/// <para><b>A failed age rebuild backs off and the server still extends (#9308).</b> A rebuild that throws leaves the
+/// server's cursor and <c>rebuilt_at</c> as they were, so it would be the oldest due server again a minute later, and
+/// every pass would take the rebuild path and never extend it: its tags would freeze while a failing all-sightings read
+/// ran once a minute. So when the rebuild the age rule picked fails, the server is not picked for age for
+/// <see cref="AgeRebuildBackoff"/> (store clock, held in memory), the slot goes to the next due server, and the pass
+/// runs the server's extend from its intact cursor. A rebuild that succeeds clears the back-off. A rebuild from a failed
+/// stored-cursor adopt and a rebuild-all are not age rebuilds and do not back off.</para>
 ///
 /// <para><b>Caller carry-forward (decision 3 of #5971).</b> A hash key is resolved against every sighting row it has,
 /// each carrying the application, login and host it was seen under, so a rule on application X tags a hash seen under
@@ -61,16 +84,40 @@ public sealed class QueryTagMapBuilder
     /// </summary>
     public static readonly TimeSpan ExtendOverlap = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// #9308: the oldest stored cursor a fresh process extends from. An older one rebuilds, so a long outage does not turn
+    /// into a page-at-a-time drain of everything sighted meanwhile.
+    /// </summary>
+    public static readonly TimeSpan MaxStoredCursorAge = TimeSpan.FromHours(24);
+
+    /// <summary>#9308: how old a server's last rebuild may get before the weekly staggered rebuild takes it.</summary>
+    public static readonly TimeSpan MaxRebuildAge = TimeSpan.FromDays(7);
+
+    /// <summary>#9308: the time after the builder is constructed in which the staggered rebuild never runs.</summary>
+    public static readonly TimeSpan RebuildStartupGrace = TimeSpan.FromMinutes(20);
+
+    /// <summary>#9308: how long a server whose age-picked rebuild failed is left out of the age pick, on the store clock.</summary>
+    public static readonly TimeSpan AgeRebuildBackoff = TimeSpan.FromHours(1);
+
     private readonly NpgsqlDataSource _postgres;
     private readonly ILogger? _logger;
+    private readonly TimeSpan _maxRebuildAge;
+    private readonly TimeSpan _rebuildStartupGrace;
+    private readonly TimeSpan _ageRebuildBackoff;
+    private readonly Dictionary<int, DateTime> _ageBackoffUntil = new();
+    private readonly Stopwatch _sinceConstruction = Stopwatch.StartNew();
     private readonly int _keysPerServerPerPass;
     private readonly QueryTagSightingBuffer? _sightings;
     private readonly Dictionary<int, Cursor> _cursors = new();
 
     /// <param name="sightings">The buffer the collectors append to; each pass flushes it first. Null for a builder that only
     /// reads sightings other code wrote.</param>
-    public QueryTagMapBuilder(NpgsqlDataSource postgres, ILogger? logger = null, int keysPerServerPerPass = MapKeysPerServerPerPass, QueryTagSightingBuffer? sightings = null)
+    public QueryTagMapBuilder(NpgsqlDataSource postgres, ILogger? logger = null, int keysPerServerPerPass = MapKeysPerServerPerPass, QueryTagSightingBuffer? sightings = null,
+        TimeSpan? maxRebuildAge = null, TimeSpan? rebuildStartupGrace = null, TimeSpan? ageRebuildBackoff = null)
     {
+        _maxRebuildAge = maxRebuildAge ?? MaxRebuildAge;
+        _rebuildStartupGrace = rebuildStartupGrace ?? RebuildStartupGrace;
+        _ageRebuildBackoff = ageRebuildBackoff ?? AgeRebuildBackoff;
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
         _sightings = sightings;
@@ -95,7 +142,7 @@ public sealed class QueryTagMapBuilder
         QueryTagMapSnapshot snapshot;
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
             snapshot = await QueryTagMapStore.ReadSnapshotAsync(connection, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -106,13 +153,71 @@ public sealed class QueryTagMapBuilder
 
         bool rebuildAll = snapshot.RulesVersion > snapshot.BuiltVersion;
         bool allSucceeded = true;
+
+        /* Which servers rebuild this pass, decided before any of them runs so the staggered rebuild can pick the oldest. */
+        var rebuilds = new HashSet<int>();
+        var failedAdopt = new HashSet<int>();
+        int? ageRebuild = null;
+        DateTime ageClock = default;
+        if (!rebuildAll)
+        {
+            foreach (int serverId in serverIds)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_cursors.ContainsKey(serverId))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
+                    if (!await TryAdoptStoredCursorAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false))
+                    {
+                        rebuilds.Add(serverId);
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    allSucceeded = false;
+                    failedAdopt.Add(serverId);
+                    _logger?.LogWarning("Query-tag map: the extend for server {ServerId} failed and its previous map stays: {Message}", serverId, ex.Message);
+                }
+            }
+
+            if (_sinceConstruction.Elapsed >= _rebuildStartupGrace)
+            {
+                try
+                {
+                    var due = await PickOldestDueServerAsync(serverIds.Where(id => !rebuilds.Contains(id) && !failedAdopt.Contains(id)), cancellationToken).ConfigureAwait(false);
+                    if (due is var (dueServer, clock))
+                    {
+                        rebuilds.Add(dueServer);
+                        ageRebuild = dueServer;
+                        ageClock = clock;
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    allSucceeded = false;
+                    _logger?.LogWarning("Query-tag map: reading the clock for the staggered rebuild failed; no server is rebuilt for age this pass: {Message}", ex.Message);
+                }
+            }
+        }
+
         foreach (int serverId in serverIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            bool rebuild = rebuildAll || !_cursors.ContainsKey(serverId);
+            if (failedAdopt.Contains(serverId))
+            {
+                continue;
+            }
+
+            bool rebuild = rebuildAll || rebuilds.Contains(serverId);
+            bool agePicked = rebuild && !rebuildAll && ageRebuild == serverId;
             try
             {
-                await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+                await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
                 if (rebuild)
                 {
                     await RebuildServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
@@ -128,6 +233,22 @@ public sealed class QueryTagMapBuilder
                 _logger?.LogWarning(
                     "Query-tag map: the {Step} for server {ServerId} failed and its previous map stays: {Message}",
                     rebuild ? "rebuild" : "extend", serverId, ex.Message);
+
+                if (agePicked)
+                {
+                    /* The cursor is intact (a rebuild moves it only after its map write commits), so extend from it now and keep
+                       this server out of the age pick for a while: the next pass hands the slot to the next due server. */
+                    _ageBackoffUntil[serverId] = ageClock + _ageRebuildBackoff;
+                    try
+                    {
+                        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
+                        await ExtendServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception extendEx) when (extendEx is not OperationCanceledException)
+                    {
+                        _logger?.LogWarning("Query-tag map: the extend for server {ServerId} after its failed rebuild also failed and its previous map stays: {Message}", serverId, extendEx.Message);
+                    }
+                }
             }
         }
 
@@ -136,18 +257,26 @@ public sealed class QueryTagMapBuilder
            rows would keep the tags of the old rules while the state row says the map is current (#5971). So the stamp also
            drops the cursor of every server outside this pass, and each of them is rebuilt (no cursor) when it returns. That
            is also why an empty list may stamp: no map is claimed current that was not built, which matches Lite, whose pass
-           covers every server that has sightings. A failed stamp changes nothing: the next pass is rebuild-all again. */
+           covers every server that has sightings. The in-memory cursors go FIRST: if the stamp or the drop then fails, the
+           next pass is rebuild-all anyway, but a cursor kept after a committed stamp would extend a returning server over map
+           rows tagged under the old rules. The stamp and the stored-cursor drop commit in ONE transaction, so a failed drop
+           leaves the stamp unwritten (and a stored cursor that outlived it carries the old rules_version, which the adopt
+           check rejects). A failed stamp changes nothing: the next pass is rebuild-all again. */
         if (rebuildAll && allSucceeded)
         {
             try
             {
-                await using var connection = await _postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-                await QueryTagMapStore.StampBuiltVersionAsync(connection, snapshot.RulesVersion, cancellationToken).ConfigureAwait(false);
                 var inPass = new HashSet<int>(serverIds);
                 foreach (int cursorServer in _cursors.Keys.Where(id => !inPass.Contains(id)).ToList())
                 {
                     _cursors.Remove(cursorServer);
                 }
+
+                await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
+                await using var transaction = await connection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+                await QueryTagMapStore.StampBuiltVersionAsync(connection, snapshot.RulesVersion, cancellationToken, transaction).ConfigureAwait(false);
+                await QueryTagMapStore.DropCursorsOutsideAsync(connection, serverIds, cancellationToken, transaction).ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -157,6 +286,46 @@ public sealed class QueryTagMapBuilder
         }
 
         return allSucceeded;
+    }
+
+    /// <summary>
+    /// The listed server with the oldest <c>rebuilt_at</c> among those whose last rebuild is at least
+    /// <see cref="MaxRebuildAge"/> old on the store clock, or null when none is due. Only servers with a cursor count: a server
+    /// with none rebuilds this pass anyway.
+    /// </summary>
+    private async Task<(int ServerId, DateTime Clock)?> PickOldestDueServerAsync(IEnumerable<int> serverIds, CancellationToken cancellationToken)
+    {
+        var candidates = serverIds.Where(_cursors.ContainsKey).Distinct().ToList();
+        if (candidates.Count == 0)
+        {
+            return null;
+        }
+
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
+        DateTime clock = await QueryTagMapStore.ClockAsync(connection, cancellationToken).ConfigureAwait(false);
+        int? oldest = null;
+        DateTime oldestRebuiltAt = DateTime.MaxValue;
+        foreach (int serverId in candidates)
+        {
+            DateTime rebuiltAt = _cursors[serverId].RebuiltAt;
+            if (_ageBackoffUntil.TryGetValue(serverId, out DateTime until))
+            {
+                if (until > clock)
+                {
+                    continue;
+                }
+
+                _ageBackoffUntil.Remove(serverId);
+            }
+
+            if (clock - rebuiltAt >= _maxRebuildAge && rebuiltAt < oldestRebuiltAt)
+            {
+                oldest = serverId;
+                oldestRebuiltAt = rebuiltAt;
+            }
+        }
+
+        return oldest is { } picked ? (picked, clock) : null;
     }
 
     private async Task RebuildServerAsync(NpgsqlConnection connection, int serverId, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
@@ -170,9 +339,41 @@ public sealed class QueryTagMapBuilder
             AddResolved(rows, serverId, sightings, snapshot);
         }
 
-        await QueryTagMapStore.ReplaceMapAsync(connection, serverId, rows, cancellationToken).ConfigureAwait(false);
-        _cursors[serverId] = new Cursor(clock - ExtendOverlap, string.Empty, string.Empty);
+        var next = new Cursor(clock - ExtendOverlap, string.Empty, string.Empty, clock);
+        await QueryTagMapStore.ReplaceMapAsync(connection, serverId, rows, cancellationToken, Stored(next, snapshot)).ConfigureAwait(false);
+        _cursors[serverId] = next;
+        _ageBackoffUntil.Remove(serverId);
     }
+
+    /// <summary>
+    /// A server with no in-memory cursor takes the cursor the last process stored, when every condition says the map on disk is
+    /// the one that cursor describes (#9308). False means rebuild.
+    /// </summary>
+    private async Task<bool> TryAdoptStoredCursorAsync(NpgsqlConnection connection, int serverId, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        if (snapshot.BuiltVersion != snapshot.RulesVersion)
+        {
+            return false;
+        }
+
+        var stored = await QueryTagMapStore.ReadCursorAsync(connection, serverId, cancellationToken).ConfigureAwait(false);
+        if (stored is null || stored.RulesVersion != snapshot.RulesVersion)
+        {
+            return false;
+        }
+
+        DateTime clock = await QueryTagMapStore.ClockAsync(connection, cancellationToken).ConfigureAwait(false);
+        if (clock - stored.Since >= MaxStoredCursorAge)
+        {
+            return false;
+        }
+
+        _cursors[serverId] = new Cursor(stored.Since, stored.AfterKind, stored.AfterKey, stored.RebuiltAt);
+        return true;
+    }
+
+    private static QueryTagMapStoredCursor Stored(Cursor cursor, QueryTagMapSnapshot snapshot) =>
+        new(snapshot.RulesVersion, cursor.Since, cursor.AfterKind, cursor.AfterKey, cursor.RebuiltAt);
 
     private async Task ExtendServerAsync(NpgsqlConnection connection, int serverId, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
     {
@@ -182,10 +383,10 @@ public sealed class QueryTagMapBuilder
 
         var changed = await QueryTagMapStore.ReadChangedKeysAsync(
             connection, serverId, cursor.Since, cursor.AfterKind, cursor.AfterKey, _keysPerServerPerPass, cancellationToken).ConfigureAwait(false);
+        var rows = new List<QueryTagMapRow>();
         if (changed.Count > 0)
         {
             var sightingsByKey = await QueryTagMapStore.ReadSightingsOfKeysAsync(connection, serverId, changed, cancellationToken).ConfigureAwait(false);
-            var rows = new List<QueryTagMapRow>();
             foreach (var key in changed)
             {
                 if (sightingsByKey.TryGetValue((key.KeyKind, key.Key), out var sightings))
@@ -193,14 +394,14 @@ public sealed class QueryTagMapBuilder
                     AddResolved(rows, serverId, sightings, snapshot);
                 }
             }
-
-            await QueryTagMapStore.UpsertMapAsync(connection, serverId, rows, cancellationToken).ConfigureAwait(false);
         }
 
         /* A full page means more may wait: step past the last key. A short page drained everything up to the clock. */
-        _cursors[serverId] = changed.Count >= _keysPerServerPerPass
-            ? new Cursor(changed[^1].LastSeen, changed[^1].KeyKind, changed[^1].Key)
-            : new Cursor(clock - ExtendOverlap, string.Empty, string.Empty);
+        var next = changed.Count >= _keysPerServerPerPass
+            ? new Cursor(changed[^1].LastSeen, changed[^1].KeyKind, changed[^1].Key, cursor.RebuiltAt)
+            : new Cursor(clock - ExtendOverlap, string.Empty, string.Empty, cursor.RebuiltAt);
+        await QueryTagMapStore.UpsertMapAsync(connection, serverId, rows, cancellationToken, Stored(next, snapshot)).ConfigureAwait(false);
+        _cursors[serverId] = next;
     }
 
     private static void AddResolved(List<QueryTagMapRow> rows, int serverId, List<QueryTagSighting> sightings, QueryTagMapSnapshot snapshot)
@@ -222,5 +423,5 @@ public sealed class QueryTagMapBuilder
             resolution.MatchedValue));
     }
 
-    private readonly record struct Cursor(DateTime Since, string AfterKind, string AfterKey);
+    private readonly record struct Cursor(DateTime Since, string AfterKind, string AfterKey, DateTime RebuiltAt);
 }

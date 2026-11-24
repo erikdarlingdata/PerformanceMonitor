@@ -941,4 +941,340 @@ public sealed class DarlingMcpSchemaToolsLiveTests
             }
         });
     }
+
+    /* #8798: column selectivity beside the definition, over rows the column_stats collector's own store writers produced. */
+
+    private static readonly DateTime s_statsRead = DateTime.UtcNow.AddHours(-1);
+
+    private static string K(SchemaHistoryKey key) => PerformanceMonitor.Darling.Service.DarlingSchemaCapture.KeyText(key);
+
+    private static async Task EnableSelectivityAsync(Store s, CancellationToken ct, int serverId = 0, string[]? ownList = null)
+    {
+        var id = serverId == 0 ? s_serverId : serverId;
+        foreach (var collector in new[] { "schema_objects", "column_stats" })
+        {
+            await DarlingMcpTestData.ExecAsync(
+                s.Connection, ct,
+                "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled, databases) VALUES ($1, $2, true, $3)",
+                id, collector, collector == "column_stats" && ownList is not null ? ownList : (object)DBNull.Value);
+        }
+    }
+
+    private static (StatCandidate Stat, StatHeader Header, IReadOnlyList<StatPrefix> Prefixes) StatEntry(
+        int objectId, int statsId, string table, string name, string[] columns, double[] densities, long rows = 1000, bool clusteringTail = false)
+    {
+        var stat = new StatCandidate(objectId, "dbo", table, statsId, name, "index", s_statsRead.AddDays(-1), s_statsRead.AddDays(-1).AddHours(5), columns, Array.Empty<string>(), rows);
+        var prefixes = densities
+            .Select((d, i) => new StatPrefix(objectId, statsId, i + 1, columns.Take(i + 1).ToList(), clusteringTail && i == densities.Length - 1, d))
+            .ToList();
+        return (stat, new StatHeader(rows, rows, null), prefixes);
+    }
+
+    private static Task SeedRunAsync(Store s, CancellationToken ct, SchemaHistoryKey key, string? refused, int serverId = 0, DateTime? at = null) =>
+        DarlingMcpTestData.ExecAsync(
+            s.Connection, ct,
+            "INSERT INTO collect.column_stats_runs (collection_id, collection_time, server_id, server_name, database_name, history_key, kind, refused, complete) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(at ?? s_statsRead.AddMinutes(1)), serverId == 0 ? s_serverId : serverId, ServerName, Db,
+            K(key), "baseline", refused is null ? (object)DBNull.Value : refused, refused is null);
+
+    [Fact]
+    public async Task Selectivity_OnColumns_AndCombinations_FromTheStore()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "CustomerId", "Status" }));
+            await EnableSelectivityAsync(s, ct);
+            await ColumnStatsStore.ReplaceStatisticsAsync(
+                s.Connection, s_serverId, K(s_key), Db,
+                new[]
+                {
+                    StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }),
+                    StatEntry(10, 2, "Orders", "IX_Orders_Customer", new[] { "CustomerId", "Status" }, new[] { 0.01, 0.002 }),
+                },
+                s_statsRead, ct);
+            await SeedRunAsync(s, ct, s_key, null);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(s_key), null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders"));
+
+            Assert.Equal("current", answer.GetProperty("selectivity_status").GetString());
+            Assert.NotNull(answer.GetProperty("selectivity_checked_at").GetString());
+            var columns = answer.GetProperty("columns");
+            Assert.Equal("unique", columns[0].GetProperty("selectivity").GetProperty("label").GetString());
+            Assert.Equal(1.0, columns[0].GetProperty("selectivity").GetProperty("selectivity").GetDouble());
+            Assert.Equal("PK_Orders", columns[0].GetProperty("selectivity").GetProperty("statistic").GetString());
+            /* stats_updated_at is the UTC column; the entries' server-local STATS_DATE is five hours behind it. */
+            Assert.Equal(
+                DateTime.SpecifyKind(s_statsRead.AddDays(-1).AddHours(5), DateTimeKind.Utc),
+                columns[0].GetProperty("selectivity").GetProperty("stats_updated_at").GetDateTime().ToUniversalTime(),
+                TimeSpan.FromMilliseconds(1));
+            Assert.Equal(100.0, columns[1].GetProperty("selectivity").GetProperty("distinct_estimate").GetDouble(), 6);
+            Assert.Equal(JsonValueKind.Null, columns[2].GetProperty("selectivity").ValueKind);
+            Assert.Equal("no statistic leads with this column", columns[2].GetProperty("selectivity_note").GetString());
+            Assert.Equal(1, answer.GetProperty("column_combinations_returned").GetInt32());
+            var combination = answer.GetProperty("column_combinations")[0];
+            Assert.Equal(new[] { "CustomerId", "Status" }, combination.GetProperty("columns").EnumerateArray().Select(e => e.GetString()).ToArray());
+            Assert.Equal(500.0, combination.GetProperty("distinct_estimate").GetDouble(), 6);
+
+            var past = await Parse(Definition(s, ct, "dbo.Orders", asOf: Iso(s_t0.AddHours(1))));
+            Assert.Equal("current_only", past.GetProperty("selectivity_status").GetString());
+            Assert.Equal(JsonValueKind.Null, past.GetProperty("columns")[0].GetProperty("selectivity").ValueKind);
+            Assert.Equal(JsonValueKind.Null, past.GetProperty("column_combinations").ValueKind);
+        });
+    }
+
+    [Fact]
+    public async Task Selectivity_ReadThroughASecondary_AnswersFromTheGroupsRows()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var secondary = ServerIdHelper.GetDeterministicHashCode("schema-secondary");
+            await DarlingMcpTestData.RegisterServerAsync(s.Connection, secondary, "schema-secondary", ct);
+            var group = Guid.NewGuid();
+            var agKey = new SchemaHistoryKey(null, group, "SalesAg");
+            await SchemaVersionStore.ApplyAsync(s.Connection, Write(new[] { Table(10, "Orders", new[] { "Id", "Total" }) }, s_t0, baseline: true, by: "baseline", key: agKey), ct);
+            await SchemaCaptureStateStore.SaveAsync(s.Connection, new SchemaCaptureStateRow { ServerId = secondary, DatabaseName = string.Empty, LastSeenInScopeAt = s_t0 }, ct);
+            await DarlingMcpTestData.ExecAsync(
+                s.Connection, ct,
+                "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, group_id) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5)), secondary, "schema-secondary", "SalesAg", Db, group.ToString("D"));
+            await EnableSelectivityAsync(s, ct, secondary);
+            await EnableSelectivityAsync(s, ct);
+            await ColumnStatsStore.ReplaceStatisticsAsync(
+                s.Connection, s_serverId, K(agKey), Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
+            await SeedRunAsync(s, ct, agKey, null);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(agKey), null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
+
+            var viaSecondary = await Parse(Definition(s, ct, "dbo.Orders", server: "schema-secondary"));
+
+            Assert.True(viaSecondary.GetProperty("resolved_from_ag").GetBoolean());
+            Assert.Equal("current", viaSecondary.GetProperty("selectivity_status").GetString());
+            Assert.Equal("unique", viaSecondary.GetProperty("columns")[0].GetProperty("selectivity").GetProperty("label").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task SelectivityReadFails_StatusUnavailable_DefinitionStillReturned()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "Total" }));
+            await EnableSelectivityAsync(s, ct);
+            /* The current rows' table is gone, so the selectivity read fails part way. */
+            await DarlingMcpTestData.ExecAsync(s.Connection, ct, "DROP TABLE collect.column_stats");
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders"));
+
+            Assert.Equal("unavailable", answer.GetProperty("selectivity_status").GetString());
+            /* The fixed note: the store's own message (here 'relation ... does not exist') stays in the log. */
+            Assert.Equal(ColumnSelectivity.UnavailableNote, answer.GetProperty("selectivity_note").GetString());
+            Assert.DoesNotContain("relation", answer.GetRawText(), StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(new[] { "Id", "Total" }, Names(answer.GetProperty("columns"), "name"));
+            Assert.Equal(JsonValueKind.Null, answer.GetProperty("column_combinations").ValueKind);
+        });
+    }
+
+    [Fact]
+    public async Task CollectorOff_StatusNotCollected_DefinitionStillReturned()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "Total" }));
+            await ColumnStatsStore.ReplaceStatisticsAsync(
+                s.Connection, s_serverId, K(s_key), Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders"));
+
+            /* Not opted in: the answer is the one get_object_definition gave before column selectivity existed, plus selectivity_status
+               only. No per-column field and no combinations, not even as nulls. */
+            Assert.Equal("not_collected", answer.GetProperty("selectivity_status").GetString());
+            Assert.Equal(
+                new[]
+                {
+                    "server", "database_name", "ag_name", "resolved_from_ag", "as_of", "state", "dropped_at", "note", "object", "version", "versions_kept",
+                    "history_starts_at", "properties", "column_count", "column_offset", "columns_returned", "columns_has_more", "next_column_offset", "truncated",
+                    "budget_note", "selectivity_status", "columns", "index_count", "indexes", "constraint_count", "constraints", "trigger_count", "triggers",
+                },
+                answer.EnumerateObject().Select(p => p.Name).ToArray());
+            var columnKeys = new[]
+            {
+                "ordinal", "name", "type_name", "max_length", "precision", "scale", "is_nullable", "identity_seed", "identity_increment",
+                "computed_definition", "is_persisted", "default_name", "default_definition", "collation_name", "is_sparse", "is_rowguidcol",
+            };
+            Assert.All(answer.GetProperty("columns").EnumerateArray(), c => Assert.Equal(columnKeys, c.EnumerateObject().Select(p => p.Name).ToArray()));
+            Assert.Equal(new[] { "Id", "Total" }, Names(answer.GetProperty("columns"), "name"));
+        });
+    }
+
+    [Fact]
+    public async Task SchemaObjectsOff_ColumnStatsOn_KeepsTheSelectivityFields()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id", "Total" }));
+            await DarlingMcpTestData.ExecAsync(
+                s.Connection, ct, "INSERT INTO config.config_collector_schedules (server_id, collector_name, enabled) VALUES ($1, 'column_stats', true)", s_serverId);
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders"));
+
+            /* Opted in, but schema_objects is off: the full shape, with the note that says why there are no numbers. */
+            Assert.Equal("not_collected", answer.GetProperty("selectivity_status").GetString());
+            Assert.Contains("schema_objects", answer.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, answer.GetProperty("columns")[0].GetProperty("selectivity").ValueKind);
+            Assert.Equal(JsonValueKind.Null, answer.GetProperty("column_combinations").ValueKind);
+        });
+    }
+
+    [Fact]
+    public async Task OutOfScopeDatabase_StatusNotCollected()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id" }));
+            await EnableSelectivityAsync(s, ct, ownList: new[] { "OtherDb" });
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders"));
+
+            Assert.Equal("not_collected", answer.GetProperty("selectivity_status").GetString());
+            Assert.Contains("outside", answer.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task NotReadYet_WhenInScopeWithNoRowsAndNoRun()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id" }));
+            await EnableSelectivityAsync(s, ct);
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders"));
+
+            Assert.Equal("not_read_yet", answer.GetProperty("selectivity_status").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task PreconditionStatus_CarriesGrant_FromTheNewestRun()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            await Baseline(s, ct, Table(10, "Orders", new[] { "Id" }));
+            await EnableSelectivityAsync(s, ct, ownList: new[] { Db });
+            await SeedRunAsync(s, ct, s_key, "no_select");
+            await DarlingMcpTestData.ExecAsync(
+                s.Connection, ct,
+                "INSERT INTO trace_flags (config_id, capture_time, server_id, server_name, trace_flag, status, is_global, is_session) VALUES (1, $1, $2, $3, $4, true, true, false)",
+                DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5)), s_serverId, ServerName, 9485);
+
+            var named = await Parse(Definition(s, ct, "dbo.Orders"));
+
+            Assert.Equal("precondition", named.GetProperty("selectivity_status").GetString());
+            Assert.Contains("GRANT SELECT", named.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+            Assert.Contains("[SalesDb]", named.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+            Assert.Contains("9485", named.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task Budget_CutsCombinationsBeforeColumns()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var columnNames = Enumerable.Range(1, 40).Select(i => "Column" + i.ToString("D2", System.Globalization.CultureInfo.InvariantCulture) + "_" + new string('x', 40)).ToArray();
+            await Baseline(s, ct, Table(10, "Wide", columnNames));
+            await EnableSelectivityAsync(s, ct);
+            /* Forty statistics, each leading with a different column and running eight deep: 280 combinations, far over the response budget. */
+            var entries = Enumerable.Range(0, 40)
+                .Select(i => StatEntry(10, i + 1, "Wide", "IX_Wide_" + i, columnNames.Skip(i).Concat(columnNames.Take(i)).Take(8).ToArray(), Enumerable.Range(1, 8).Select(d => 0.5 / (d * 10)).ToArray()))
+                .ToArray();
+            await ColumnStatsStore.ReplaceStatisticsAsync(s.Connection, s_serverId, K(s_key), Db, entries, s_statsRead, ct);
+            await SeedRunAsync(s, ct, s_key, null);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(s_key), null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
+
+            var json = await Definition(s, ct, "dbo.Wide");
+            var answer = await Parse(Task.FromResult(json));
+
+            Assert.True(Encoding.UTF8.GetByteCount(json) <= McpResponseBudget.DefaultBytes, "the answer fits the response budget");
+            Assert.Equal(40, answer.GetProperty("columns_returned").GetInt32());
+            Assert.True(answer.GetProperty("column_combinations_has_more").GetBoolean());
+            Assert.True(answer.GetProperty("column_combinations_returned").GetInt32() < 280);
+            Assert.True(answer.GetProperty("truncated").GetBoolean());
+            Assert.Contains("column combinations", answer.GetProperty("budget_note").GetString(), StringComparison.Ordinal);
+            Assert.Equal(answer.GetProperty("column_combinations_returned").GetInt32(), answer.GetProperty("column_combinations").GetArrayLength());
+        });
+    }
+
+    private static async Task<SchemaHistoryKey> SeedAgDefinitionAsync(Store s, CancellationToken ct)
+    {
+        var secondary = ServerIdHelper.GetDeterministicHashCode("schema-secondary");
+        await DarlingMcpTestData.RegisterServerAsync(s.Connection, secondary, "schema-secondary", ct);
+        var group = Guid.NewGuid();
+        var agKey = new SchemaHistoryKey(null, group, "SalesAg");
+        await SchemaVersionStore.ApplyAsync(s.Connection, Write(new[] { Table(10, "Orders", new[] { "Id", "Total" }) }, s_t0, baseline: true, by: "baseline", key: agKey), ct);
+        await SchemaCaptureStateStore.SaveAsync(s.Connection, new SchemaCaptureStateRow { ServerId = secondary, DatabaseName = string.Empty, LastSeenInScopeAt = s_t0 }, ct);
+        await DarlingMcpTestData.ExecAsync(
+            s.Connection, ct,
+            "INSERT INTO ag_database_replica_states (collection_id, collection_time, server_id, server_name, ag_name, database_name, group_id) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(DateTime.UtcNow.AddMinutes(-5)), secondary, "schema-secondary", "SalesAg", Db, group.ToString("D"));
+        return agKey;
+    }
+
+    [Fact]
+    public async Task Selectivity_ThroughASecondary_UsesTheWritingServersSwitches()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var agKey = await SeedAgDefinitionAsync(s, ct);
+            /* Only the primary, which wrote the rows, has the collectors on; the secondary has no schedule row at all. */
+            await EnableSelectivityAsync(s, ct);
+            await ColumnStatsStore.ReplaceStatisticsAsync(
+                s.Connection, s_serverId, K(agKey), Db, new[] { StatEntry(10, 1, "Orders", "PK_Orders", new[] { "Id" }, new[] { 0.001 }) }, s_statsRead, ct);
+            await SeedRunAsync(s, ct, agKey, null);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(agKey), null, s_statsRead.AddMinutes(1), s_statsRead.AddMinutes(1)), ct);
+
+            var viaSecondary = await Parse(Definition(s, ct, "dbo.Orders", server: "schema-secondary"));
+
+            Assert.Equal("current", viaSecondary.GetProperty("selectivity_status").GetString());
+            Assert.Equal("unique", viaSecondary.GetProperty("columns")[0].GetProperty("selectivity").GetProperty("label").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task AfterAFailover_TheNewPrimarysUnfinishedBaseline_IsNotReadYet_NotTheOldPrimarysFullRead()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var agKey = await SeedAgDefinitionAsync(s, ct);
+            var newPrimary = ServerIdHelper.GetDeterministicHashCode("schema-secondary");
+            await EnableSelectivityAsync(s, ct);
+            await EnableSelectivityAsync(s, ct, newPrimary);
+
+            /* The old primary finished its read and keeps stamping its state; the new primary's baseline ran last and has not reached the table. */
+            await SeedRunAsync(s, ct, agKey, null, at: s_statsRead);
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(s_serverId, Db, K(agKey), null, s_statsRead.AddMinutes(30), s_statsRead), ct);
+            await SeedRunAsync(s, ct, agKey, null, serverId: newPrimary, at: s_statsRead.AddMinutes(20));
+            await ColumnStatsStore.SaveStateAsync(s.Connection, new ColumnStatsStateRow(newPrimary, Db, K(agKey), null, s_statsRead.AddMinutes(20), null), ct);
+
+            var answer = await Parse(Definition(s, ct, "dbo.Orders", server: "schema-secondary"));
+
+            Assert.Equal("not_read_yet", answer.GetProperty("selectivity_status").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task PreconditionStatus_ThroughASecondary_UsesThePrimarysOwnList()
+    {
+        await WithStoreAsync(async (s, ct) =>
+        {
+            var agKey = await SeedAgDefinitionAsync(s, ct);
+            await EnableSelectivityAsync(s, ct, ownList: new[] { Db });
+            await SeedRunAsync(s, ct, agKey, "no_select");
+
+            var viaSecondary = await Parse(Definition(s, ct, "dbo.Orders", server: "schema-secondary"));
+
+            Assert.Equal("precondition", viaSecondary.GetProperty("selectivity_status").GetString());
+            Assert.Contains("GRANT SELECT", viaSecondary.GetProperty("selectivity_note").GetString(), StringComparison.Ordinal);
+        });
+    }
 }

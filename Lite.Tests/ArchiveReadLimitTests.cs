@@ -328,10 +328,15 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
         _duckDb = new DuckDbInitializer(_dbPath);
     }
 
+    /* The builder instance of the seeded template (below) keeps its files; the process-exit hook removes them. */
+    private bool _keepFiles;
+
     public void Dispose()
     {
         _duckDb.Dispose();
         CollectionResetGate.ResetForTests();
+        if (_keepFiles)
+            return;
         try
         {
             if (Directory.Exists(_tempDir))
@@ -428,6 +433,49 @@ public sealed class ArchiveGroupedWatermarkReadTests : IDisposable
     /// server 2's Active. Hot (live table) after the reset: Active (recent) and LiveOnly.
     /// </summary>
     private async Task SeedHotAndParquetAsync()
+    {
+        if (_storeBuilt)
+        {
+            await SeedHotAndParquetCoreAsync();
+            return;
+        }
+
+        /* #8754: all but two of this class's tests start from this same store, and the seed ends in a real
+           archive-and-reset, about a second of the test's two. The store is built once per class by the real
+           sequence below (SeedHotAndParquetCoreAsync) and each test starts from a copy of its files, the way
+           PreinitializedDuckDb hands out the empty schema. The views are rebuilt over the test's own archive
+           folder, which also bumps the archive generation, as the end of the seed did. */
+        var (templateDb, templateArchive) = s_seededTemplate.Value;
+        File.Copy(templateDb, _dbPath);
+        foreach (var file in Directory.GetFiles(templateArchive))
+            File.Copy(file, Path.Combine(_archiveDir, Path.GetFileName(file)));
+        _duckDb.AdoptInitializedFileForTests();
+        await _duckDb.CreateArchiveViewsAsync();
+        _storeBuilt = true;
+    }
+
+    private static readonly Lazy<(string Db, string Archive)> s_seededTemplate =
+        new(BuildSeededTemplate, LazyThreadSafetyMode.ExecutionAndPublication);
+
+    private static (string Db, string Archive) BuildSeededTemplate()
+    {
+        var builder = new ArchiveGroupedWatermarkReadTests { _keepFiles = true };
+        try { builder.SeedHotAndParquetCoreAsync().GetAwaiter().GetResult(); }
+        finally { builder.Dispose(); }
+
+        /* Disposing the initializer checkpoints the file; a WAL left beside it would hold rows the copies lack. */
+        if (File.Exists(builder._dbPath + ".wal"))
+            throw new InvalidOperationException($"The seeded template at {builder._dbPath} still has a WAL file.");
+
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { Directory.Delete(builder._tempDir, recursive: true); }
+            catch { /* best-effort cleanup */ }
+        };
+        return (builder._dbPath, builder._archiveDir);
+    }
+
+    private async Task SeedHotAndParquetCoreAsync()
     {
         await ExecuteAsync(
             QueryStore(1, Now.AddHours(-6), "Active", Now.AddHours(-6)),

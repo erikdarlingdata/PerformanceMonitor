@@ -44,6 +44,7 @@ public class InferenceEngine
         "QUERY_STORE_ERROR",
         "SERVER_CONFIG",
         "FILE_AUTOGROWTH_PERCENT",
+        "TEMPDB_FILE_SETUP",
         // WS3: bad server-level config. Each per-setting CONFIG_* fact scores 0.4 ONLY when
         // bad (FactScorer) and roots its own standalone advisory card here, bypassing the 0.5
         // incident threshold — a standing misconfig should surface on a quiet, healthy server.
@@ -403,15 +404,19 @@ public class InferenceEngine
     /// (blocked sessions pinning workers) is fixed by clearing the blocking. Mirrors the THREADPOOL
     /// amplifier peers (CXPACKET, blocking/LCK). Returns the generic "THREADPOOL" when neither
     /// co-fired (unattributed — the advice then tells the operator how to tell which it is).
-    /// factsByKey here contains only facts that scored above zero, so presence == fired.
+    /// factsByKey here contains only facts that scored above zero. A fact counts as co-fired only when it also clears the root bar
+    /// (<see cref="FactElevated"/>), so being in the dictionary is not enough.
     /// </summary>
     private static string ClassifyThreadpool(Dictionary<string, Fact> factsByKey)
     {
-        var parallel = factsByKey.ContainsKey("CXPACKET")
-                    || factsByKey.ContainsKey("QUERY_HIGH_DOP");
-        var blocking = factsByKey.ContainsKey("BLOCKING_EVENTS")
-                    || factsByKey.ContainsKey("BLOCKING_CHAIN")
-                    || factsByKey.ContainsKey("LCK");
+        /* #9340: each half counts as elevated only when its fact clears the bar that roots a story by itself
+           (FactScorer.ClearsRootBar: base severity at MinimumSeverityThreshold), not at any positive score: a few seconds of CX waits
+           at DOP 1, or one short lock wait, scores above zero. */
+        var parallel = FactElevated(factsByKey, "CXPACKET")
+                    || FactElevated(factsByKey, "QUERY_HIGH_DOP");
+        var blocking = FactElevated(factsByKey, "BLOCKING_EVENTS")
+                    || FactElevated(factsByKey, "BLOCKING_CHAIN")
+                    || FactElevated(factsByKey, "LCK");
         return (parallel, blocking) switch
         {
             (true, true) => "THREADPOOL_MIXED",
@@ -420,6 +425,11 @@ public class InferenceEngine
             _ => "THREADPOOL"
         };
     }
+
+    /// <summary>#9340: true when the fact <paramref name="key"/> (a parallelism or a blocking fact) is present AND clears the bar that roots a story
+    /// by itself (<see cref="FactScorer.ClearsRootBar"/>), so a trace score does not count as elevated.</summary>
+    private static bool FactElevated(Dictionary<string, Fact> factsByKey, string key)
+        => factsByKey.TryGetValue(key, out var fact) && FactScorer.ClearsRootBar(fact);
 
     /// <summary>
     /// Groups a run's stories into INCIDENTS — sets of stories that are causally related — via

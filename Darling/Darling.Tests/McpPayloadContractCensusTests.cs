@@ -592,39 +592,42 @@ public sealed class McpPayloadContractCensusTests
         Assert.False(McpHelpers.IsRefusalEnvelope(null));
         Assert.False(McpHelpers.IsRefusalEnvelope(""));
 
-        /* Every validator, past its bound, IS Refusal(its parameter, its sentence) — and the sentence is the
-           pre-#3739 text, so the fragments the tool tests pin survive inside message. */
-        AssertRefusal(McpHelpers.ValidateHoursBack(0), "hours_back", "Invalid hours_back value '0'. Must be a positive integer (1-168).");
-        AssertRefusal(McpHelpers.ValidateHoursBack(169), "hours_back", "hours_back value '169' exceeds maximum of 168 hours (7 days). Use a smaller value.");
-        AssertRefusal(McpHelpers.ValidateDaysBack(0, 60), "days_back", "Invalid days_back value '0'. Must be a positive integer (1-60).");
-        AssertRefusal(McpHelpers.ValidateTop(0), "limit", "Invalid limit value '0'. Must be a positive integer (1-1000).");
-        AssertRefusal(McpHelpers.ValidateTop(1001, "top"), "top", "top value '1001' exceeds maximum of 1000. Use a smaller value.");
-        AssertRefusal(McpHelpers.ValidateWindow(0, null, out _), "hours_back", "Invalid hours_back value '0'. Must be a positive integer (1-168).");
-        AssertRefusal(McpHelpers.ValidateWindow(4, "last tuesday", out _), "as_of", "Invalid as_of value 'last tuesday'. Expected an ISO-8601 UTC instant: '2026-08-18T14:30:00Z', '2026-08-18T14:30:00' (read as UTC), '2026-08-18T16:30:00+02:00', or '2026-08-18' for midnight UTC.");
-        AssertRefusal(McpHelpers.ValidateUncappedWindow(-24, null, out _), "hours_back", "Invalid hours_back value '-24'. Must be a positive integer. A negative or zero window has no meaning and is refused rather than read as its absolute value. This read has no upper bound on hours_back.");
-        AssertRefusal(McpHelpers.ResolveAsOf("2099-01-01T00:00:00Z", out _), "as_of", "as_of value '2099-01-01T00:00:00Z' is in the future. A stored read cannot cover data that has not been collected yet; anchor at or before now (UTC).");
-        AssertRefusal(McpHelpers.ParseSummaryDate("01/02/2026", out _), "summary_date", "Invalid summary_date value '01/02/2026'. Expected an ISO-8601 calendar date, yyyy-MM-dd (e.g. 2026-07-09), read as a UTC day. Other spellings, including 07/09/2026, are refused rather than guessed at, because 01/02/2026 reads as two different days depending on who wrote it.");
-        AssertRefusal(McpHelpers.ValidateChoice("perfmon", new[] { "dmv", "xe" }, "source"), "source", "Invalid source value 'perfmon'. Accepted values: dmv, xe. Omit it for all.");
-        AssertRefusal(McpHelpers.ValidateMinMs(-1, "min_duration_ms"), "min_duration_ms", "Invalid min_duration_ms value '-1'. A duration floor cannot be negative. Use 0 to admit every row, or omit it entirely.");
+        /* Every validator, past its bound, IS Refusal(its parameter, its sentence). */
+        AssertRefusal(McpHelpers.ValidateHoursBack(0), "hours_back");
+        AssertRefusal(McpHelpers.ValidateHoursBack(169), "hours_back");
+        AssertRefusal(McpHelpers.ValidateDaysBack(0, 60), "days_back");
+        AssertRefusal(McpHelpers.ValidateTop(0), "limit");
+        AssertRefusal(McpHelpers.ValidateTop(1001, "top"), "top");
+        AssertRefusal(McpHelpers.ValidateWindow(0, null, out _), "hours_back");
+        AssertRefusal(McpHelpers.ValidateWindow(4, "last tuesday", out _), "as_of");
+        AssertRefusal(McpHelpers.ValidateUncappedWindow(-24, null, out _), "hours_back");
+        AssertRefusal(McpHelpers.ResolveAsOf("2099-01-01T00:00:00Z", out _), "as_of");
+        AssertRefusal(McpHelpers.ParseSummaryDate("01/02/2026", out _), "summary_date");
+        AssertRefusal(McpHelpers.ValidateChoice("perfmon", new[] { "dmv", "xe" }, "source"), "source");
+        AssertRefusal(McpHelpers.ValidateMinMs(-1, "min_duration_ms"), "min_duration_ms");
 
         /* And the producers outside McpHelpers that the census accepts as shared: the watch-state validator, the
            trend-width resolvers (#3897) — out of range, over the read's cap (naming the width that fits), and a
            width the hourly rollup cannot serve — and the resolver. */
-        AssertRefusal(DarlingFleetSweepEndpoints.ValidateWatchState("garbage", "watch_state"), "watch_state", "Unknown state 'garbage'. Legal values: pending, open, carried, closed; omit for open + carried.");
-        AssertRefusal(TrendBuckets.Resolve(24, 0, 1, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), out _), "bucket_minutes", "Invalid bucket_minutes value '0'. Must be between 1 and 1440 (one day), or omitted to size the points to the window.");
-        AssertRefusal(TrendBuckets.ValidateWidth(1441), "bucket_minutes", "Invalid bucket_minutes value '1441'. Must be between 1 and 1440 (one day), or omitted to size the points to the window.");
-        AssertRefusal(TrendBuckets.Resolve(24, 1, 6, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), out _), "bucket_minutes", "bucket_minutes 1 over 24 hours across 6 series is up to 8646 points, over this read's 1000-point cap. Use bucket_minutes 9 or wider, or narrow hours_back (as_of moves the window) for finer points.");
-        AssertRefusal(TrendBuckets.RequireWholeHours(30, 4), "bucket_minutes", "bucket_minutes 30 cannot be served for this window: it reaches past the raw tier's 4-day retention, so the hourly rollup answers it, and that rollup's points are whole hours. Use a multiple of 60, or a window inside the last 4 days for finer points.");
+        AssertRefusal(DarlingFleetSweepEndpoints.ValidateWatchState("garbage", "watch_state"), "watch_state");
+        AssertRefusal(TrendBuckets.Resolve(24, 0, 1, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), out _), "bucket_minutes");
+        AssertRefusal(TrendBuckets.ValidateWidth(1441), "bucket_minutes");
+        AssertRefusal(TrendBuckets.Resolve(24, 1, 6, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), out _), "bucket_minutes");
+        AssertRefusal(TrendBuckets.RequireWholeHours(30, 4), "bucket_minutes");
         var (_, miss) = DarlingServerResolver.ResolveOrError(new[] { new RegisteredServer(1, "box-a", null) }, "box-b", DarlingPeerDirectory.Snapshot.Empty);
-        AssertRefusal(miss, "server_name", "Could not resolve server. No monitored server matches 'box-b'. Available servers:\nbox-a");
+        AssertRefusal(miss, "server_name");
     }
 
-    private static void AssertRefusal(string? wire, string parameter, string sentence)
+    private static void AssertRefusal(string? wire, string parameter)
     {
         Assert.NotNull(wire);
-        Assert.Equal(McpHelpers.Refusal(parameter, sentence), wire);
         Assert.True(McpHelpers.IsRefusalEnvelope(wire));
-        Assert.Equal(sentence, McpHelpers.ErrorMessageOf(wire!));
+        /* The envelope is what Refusal builds for exactly this parameter around whatever sentence the validator
+           worded. The sentence itself is not pinned (#9390): each reword of a served sentence only ever edited the
+           literal here, and the tool tests pin the fragments a caller depends on. */
+        var message = McpHelpers.ErrorMessageOf(wire!);
+        Assert.False(string.IsNullOrWhiteSpace(message));
+        Assert.Equal(McpHelpers.Refusal(parameter, message!), wire);
     }
 
     /// <summary>The guarded pass-through idiom, witnessed on the shapes the tree uses and not on its
@@ -1563,6 +1566,10 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string Key, string[] Files, string WhatWasCut)[] SecondBoundCutKeys =
     [
+        ("indexes_truncated", ["DarlingMcpStoreTableHealthTools.cs"],
+            "#8787: get_store_table_health's indexes section is capped at top, beside the tables section's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
+        ("partition_index_coverage_truncated", ["DarlingMcpStoreTableHealthTools.cs"],
+            "#8787: get_store_table_health's partition_index_coverage list is capped at top, a third bound beside the tables section's truncated and the indexes section's indexes_truncated, observed off the row count"),
         ("databases_truncated", ["DarlingMcpFinOpsTools.IndexAnalysis.cs"],
             "get_finops index_analysis' per-database roll-up list is capped at MaxIndexAnalysisDatabases (13), beside the recommendation list's own truncated — two bounds in one payload, the second spelled <bound>_truncated"),
         ("points_truncated", ["DarlingMcpQueryStoreHistoryTools.cs"],
@@ -1579,10 +1586,14 @@ public sealed class McpPayloadContractCensusTests
             "the #2364 / #2353 WINDOW floor (#3653 item 17): the tier that answered did not hold the whole requested window, so the served series begins later than asked — beside effective_start / effective_hours_back, observed off the served head against the shared ninety-minute TruncationSlack, no cap involved; get_query_trend and get_query_store_top write it in their initializers, the duration-trend trio through TrendDisclosure.WriteTo (Darling) and WriteDisclosure (Lite); get_store_query_history (#5097) writes it beside hours_back from the history's own first capture, not a collector probe; get_query_store_clutter (#3797) writes it in its initializer for its plan-churn and wait arms, which read the same raw tier get_query_store_top does, off the same window-floor read and the same ninety-minute slack; Lite's get_active_queries and get_waiting_tasks (QuerySnapshots / WaitingTasks, read by coverage), get_query_store_regressions (checked against the baseline's start, the earlier of its two windows) and get_query_heatmap (#4966) write it in their initializers through McpQueryTools.WindowNotice, beside a page cut of their own (truncated), so they publish effective_start without effective_hours_back, which the window-floor rule below holds apart for the window floor; Darling's get_server_config_changes, get_database_config_changes and get_trace_flag_changes (#4966) write them after hours_back from the coverage probe of server_config, database_config and trace_flags (the same rule as the viewer's and the web's Config Changes notes), and on their empty answer inside the hints; Darling's get_collection_log (one server), get_plan_corrections and get_memory_pressure_events (#4966) write them after hours_back too: the log from its own coverage probe, which ignores the collector, status and duration filters so the note says where the log starts, plan corrections from plan_correction's coverage, where an answer of only automatic-tuning rows is a data answer, and memory pressure from the events' sample_time with its edge at the purge cutoff, each on its empty answer inside the hints; Darling's get_active_queries, get_waiting_tasks, get_query_heatmap and get_query_store_regressions (#4966) write the same three keys after hours_back through DarlingMcpWindowNotice, with the same wording and the same absence of effective_hours_back (the regressions tool checks its baseline's start, as Lite's does); Darling's get_active_queries (DarlingMcpSessionTools.cs) writes them only when the window was cut, so a covered default call stays inside the response budget and a missing key there means covered (Lite's writes them always), and each of the four leaves them off when its coverage probe failed, since a failed probe costs the notice and never the rows; Darling's get_wait_stats, get_latch_stats and get_spinlock_stats (#4966) write it on a data answer only, and Lite's config-change, collection-log, plan-correction and memory-pressure tools write it as well; and Darling's six PostgreSQL reads get_pg_wait_stats, get_pg_wait_sampling, get_pg_kernel_stats, get_pg_lock_stats, get_pg_predicate_stats and get_pg_server_config_changes (#4966): the coverage of the web's probe source for each read did not reach the start of the requested window; and Darling's five PostgreSQL window reads get_pg_top_queries, get_pg_database_stats, get_pg_io_stats, get_pg_plans and get_pg_cpu_utilization (#4966): the store's coverage did not reach the start of the requested window; and Darling's get_pg_blocking, get_pg_session_states, get_pg_replication_stats and get_pg_xmin_horizon (#4966), the same floor read from the collector's logged runs (the xmin horizon from its table's schedule edge), because a row is stored only while a chain, a held transaction, a replica or a holder exists; Darling's nine get_health_parser_* tools and get_default_trace_events (#4966) write the same three keys after hours_back through DarlingMcpWindowNotice, always on a data answer, and leave them off when their coverage probe failed; so do Lite's get_default_trace_events, get_wait_stats and get_blocking_stats (#4966), the last one once for its two series, from the earlier of the blocked-process and deadlock coverages; Darling's get_blocking, get_deadlocks, get_deadlock_detail, get_blocked_process_xml and get_long_query_completions (#4966) write the three keys after hours_back through DarlingMcpWindowNotice.ReadEventAsync, beside a page cut of their own (truncated), and leave them off when the coverage probe failed; Darling's get_blocking_stats (#4966) writes them after hours_back as one notice for its two series (blocking and deadlock severity), at the later of the two series' floors (blocking: the earlier of blocked_process_reports and dmv_blocking_snapshots), and leaves them off when the probe failed"),
         ("cycles_truncated", ["DarlingMcpPgBlockingTools.cs"],
             "#7455: get_pg_blocking's lock cycles[] share the tool's limit with the chain page and are fetched limit + 1, so the cycle list says on its own whether the window held more cycles than it shows, beside the chain page's truncated — two bounds in one payload, the second spelled <bound>_truncated"),
-        ("has_more", ["DarlingMcpSchemaTools.cs"],
-            "#7643: the offset-paged schema reads (get_schema_changes and find_schema_objects) say whether another page follows, observed off a limit + 1 fetch (or the response-budget cut), beside next_offset and the page's own truncated, the paging flag get_forced_plans and get_query_store_hints already publish — a caller pages on has_more and next_offset"),
-        ("budget_truncated", ["DarlingMcpAlertTools.cs", "DarlingMcpFleetTools.cs", "DarlingMcpForcedPlanTools.cs", "DarlingMcpHealthTools.cs", "DarlingMcpObjectStatsTools.cs", "DarlingMcpPgServerStateTools.cs", "DarlingMcpPgSessionStatesTools.cs", "DarlingMcpStoreLogTools.cs", "McpAlertTools.cs", "McpHealthTools.cs", "McpObjectStatsTools.cs"],
-            "#8568: the 32,768-byte response budget ended the page before the row limit did, whole rows only, observed off the serialized answer (McpResponseBudget.FitPrefix); truncated beside it is true for either bound, and budget_note says how many rows of how many fit and how to read the rest. #8655: get_table_index_sizes' 100-table page on both SKUs, the same way"),
+        ("has_more", ["DarlingMcpSchemaTools.cs", "DarlingMcpStoreTableHealthTools.cs"],
+            "#7643: the offset-paged schema reads (get_schema_changes and find_schema_objects) say whether another page follows, observed off a limit + 1 fetch (or the response-budget cut), beside next_offset and the page's own truncated, the paging flag get_forced_plans and get_query_store_hints already publish — a caller pages on has_more and next_offset. #8787: get_store_table_health, the same way, over its tables, indexes and partition index coverage sections"),
+        ("budget_truncated", ["DarlingMcpAlertTools.cs", "DarlingMcpBlockingTools.cs", "DarlingMcpChangeWatchTools.cs", "DarlingMcpFleetTools.cs", "DarlingMcpForcedPlanTools.cs", "DarlingMcpHealthTools.cs", "DarlingMcpLongQueryTools.cs", "DarlingMcpObjectStatsTools.cs", "DarlingMcpPgServerStateTools.cs", "DarlingMcpPgSessionStatesTools.cs", "DarlingMcpPlanCorrectionTools.cs", "DarlingMcpServiceStartTools.cs", "DarlingMcpStoreLogTools.cs", "DarlingMcpStorePassStepsTools.cs", "DarlingMcpStoreTableHealthTools.cs", "DarlingMcpTools.cs", "McpAlertTools.cs", "McpAnalysisTools.cs", "McpBlockingTools.cs", "McpHealthTools.cs", "McpLongQueryTools.cs", "McpObjectStatsTools.cs", "McpPlanCorrectionTools.cs"],
+            "#8568: the 32,768-byte response budget ended the page before the row limit did, whole rows only, observed off the serialized answer (McpResponseBudget.FitPrefix); truncated beside it is true for either bound, and budget_note says how many rows of how many fit and how to read the rest. #8655: get_table_index_sizes' 100-table page on both SKUs, the same way. #8787: get_store_table_health's page, the same number of rows from each section. #8901: get_change_watches keeps whole watches newest first, and one watch over the budget keeps its newest changes (changes_left_out). get_blocking, get_deadlocks, get_long_query_completions and get_plan_corrections keep the leading whole events that fit, with every count and time bound describing the kept events, and the same note; Lite's get_blocked_process_reports, get_deadlocks, get_long_query_completions and get_plan_corrections the same way. #9415: get_service_starts keeps the newest whole starts that fit"),
+        ("log_lines_truncated", ["DarlingMcpServiceStartTools.cs"],
+            "#9415: get_service_starts lists at most 5 kept ERROR and WARN lines of 160 characters per start, and each start says on its own row when a line was dropped or cut, beside the page's truncated: two bounds in one payload, the second spelled <bound>_truncated"),
+        ("rungs_truncated", ["DarlingMcpServiceStartTools.cs"],
+            "#9415: get_service_starts lists at most 10 migration rungs per start and cuts each rung's error text at 160 characters, and each start says on its own row when a rung was left out or its text cut (rungs_total and rungs_omitted give the count), beside the page's truncated: two bounds in one payload, the second spelled <bound>_truncated"),
         ("findings_truncated", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: get_analysis_findings' GROUP PAGE cut — limit caps the collapsed per-chain groups returned (default 18), independent of the pre-existing truncated above (the raw WindowCoveringLimit occurrence read, beside truncation_note): truncated warns occurrence stats may under-report, findings_truncated warns other diagnostic chains exist but are not on this page at all"),
     ];
@@ -1664,6 +1675,7 @@ public sealed class McpPayloadContractCensusTests
     public static readonly (string Key, string[] Files, string WhatItActuallyIs)[] CutHomonyms =
     [
         ("is_partial", ["DarlingMcpPgIndexUsageTools.cs"], "a PARTIAL INDEX (CREATE INDEX … WHERE) — an index property the collector reads off pg_index, not a cut"),
+        ("log_truncation_holdup_reason", ["DarlingDataReader.cs"], "#8881: the SQL Server transaction-log truncation holdup reason read off sys.dm_db_log_stats (why the tempdb log cannot clear), a tempdb column name, not a cut"),
         ("partial_count", ["DarlingMcpPgLoggingAuditTools.cs"], "the number of logging-audit facets whose verdict is `partial` (DarlingPgLoggingAudit.Partial) — a verdict tally, not a cut"),
         ("window_truncated_servers", ["DarlingMcpFleetTools.cs"], "#7010: get_fleet_overview's sorted names (at most 20) of the cards whose own window_truncated is true — a roster of which servers were cut, not a cut flag; the flag keeps its window_truncated spelling on each card and at the top level"),
         ("window_truncated_servers_more", ["DarlingMcpFleetTools.cs"], "#7010: the count of window-truncated servers beyond the 20 named in window_truncated_servers, written only when there are more — a tally of the roster's overflow, not a cut flag"),

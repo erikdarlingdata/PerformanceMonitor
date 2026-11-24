@@ -77,11 +77,14 @@ internal static partial class QueryStoreClutterChurnProbe
 
     internal static int RowCount => Model().Count;
 
-    /// <summary>What the statement must return for the window and the database choice, by the model.</summary>
+    /// <summary>
+    /// What the statement must return for the window and the database choice, by the model. A collection is placed by the instant
+    /// it ran, so a window counts the collections after its start up to and including its end.
+    /// </summary>
     internal static List<Expected> ExpectedFor(DateTime anchor, DateTime start, DateTime end, string[]? databases)
     {
         var inWindow = Model()
-            .Where(r => CollectionTime(anchor, r.Index) >= start && CollectionTime(anchor, r.Index) <= end)
+            .Where(r => CollectionTime(anchor, r.Index) > start && CollectionTime(anchor, r.Index) <= end)
             .Where(r => databases is null || databases.Contains(r.Database))
             .ToList();
         var result = new List<Expected>();

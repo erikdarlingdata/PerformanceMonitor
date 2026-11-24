@@ -190,6 +190,8 @@ export function queryHeatmapCard({ server, hours, label, columns, emptyText, emp
       params,
       /* viz stays "table": the page's window note, source wording and database chip key off it. `render` draws the grid in its place. */
       viz: "table",
+      /* #9116: the cut-window strip says where the heat map starts, from effective_start to the window's end. */
+      floorSpan: { subject: "The heat map", endKey: "window_end" },
       render: (data, desc) => renderHeatmapBody(data, { server, columns, desc }),
       emptyText,
       emptyLine,

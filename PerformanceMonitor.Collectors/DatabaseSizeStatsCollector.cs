@@ -53,6 +53,10 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
     /// <para><c>TotalSizeMb</c> is nullable for one row: the LOG file of an Azure SQL Database Hyperscale
     /// database, whose size is not allocated storage (the log lives in the log service). See
     /// <see cref="PerformanceMonitor.Common.HyperscaleLogSize"/>.</para>
+    ///
+    /// <para><c>IsAutogrowAllFiles</c> (#8882) is tempdb's DATA-file rows only: whether the file's filegroup grows all
+    /// its files together (<c>sys.filegroups.is_autogrow_all_files</c>). NULL on the log file, on every other
+    /// database, and where the column does not exist (before SQL Server 2016).</para>
     /// </summary>
     public readonly record struct Row(
         string DatabaseName,
@@ -73,7 +77,8 @@ public sealed class DatabaseSizeStatsCollector : CollectorDefinitionBase<Databas
         decimal? VolumeFreeMb,
         bool? IsPercentGrowth,
         int? GrowthPct,
-        int? VlfCount);
+        int? VlfCount,
+        bool? IsAutogrowAllFiles = null);
 
     private const string OnPremQueryText = @"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -89,6 +94,15 @@ CREATE TABLE #file_space
        reported used (current) against total (startup) and produced a used% above 100. Every database
        benefits — master_files can lag any autogrowth — but tempdb is where it is guaranteed to. */
     current_size_mb decimal(19,2) NULL
+);
+
+/* #8882: tempdb's filegroup flag for 'autogrow all files', joined to tempdb's data files in the payload below.
+   sys.filegroups has the column from SQL Server 2016 on, so the read is dynamic and only runs where the column
+   exists: older servers keep the table empty and every row's flag NULL. */
+CREATE TABLE #tempdb_filegroups
+(
+    data_space_id integer NOT NULL,
+    is_autogrow_all_files bit NULL
 );
 
 /* #1851: every failure below used to die in an empty CATCH, so a database that was mid-restore or
@@ -145,6 +159,24 @@ END;
 CLOSE db_cursor;
 DEALLOCATE db_cursor;
 
+IF COL_LENGTH(N'sys.filegroups', N'is_autogrow_all_files') IS NOT NULL
+BEGIN
+    BEGIN TRY
+        EXECUTE tempdb.sys.sp_executesql N'
+INSERT #tempdb_filegroups (data_space_id, is_autogrow_all_files)
+SELECT /* PerformanceMonitorLite */
+    fg.data_space_id,
+    fg.is_autogrow_all_files
+FROM sys.filegroups AS fg;';
+    END TRY
+    BEGIN CATCH
+        /* Same contract as the file-space probe above: a failure is reported, the cycle carries on, and tempdb's
+           rows then carry a NULL flag. */
+        INSERT @probe_failures (name, error_text)
+        VALUES (N'tempdb', ERROR_MESSAGE());
+    END CATCH;
+END;
+
 SELECT /* PerformanceMonitorLite */
     database_name = d.name,
     database_id = d.database_id,
@@ -191,7 +223,14 @@ SELECT /* PerformanceMonitorLite */
     growth_pct =
         CASE WHEN mf.is_percent_growth = 1 THEN mf.growth ELSE NULL END,
     vlf_count =
-        CASE WHEN mf.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(mf.database_id) AS li WHERE li.file_id = mf.file_id) ELSE NULL END
+        CASE WHEN mf.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(mf.database_id) AS li WHERE li.file_id = mf.file_id) ELSE NULL END,
+    is_autogrow_all_files =
+        CASE
+            WHEN mf.database_id = 2
+            AND  mf.type = 0 /*ROWS*/
+            THEN tfg.is_autogrow_all_files
+            ELSE CONVERT(bit, NULL)
+        END
 FROM sys.master_files AS mf
 JOIN sys.databases AS d
   ON d.database_id = mf.database_id
@@ -199,6 +238,9 @@ CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.file_id) AS vs
 LEFT JOIN #file_space AS fs
   ON  fs.database_id = mf.database_id
   AND fs.file_id = mf.file_id
+LEFT JOIN #tempdb_filegroups AS tfg
+  ON  tfg.data_space_id = mf.data_space_id
+  AND mf.database_id = 2
 WHERE d.state_desc = N'ONLINE'
 /*EXCLUSION_FILTER_OUTER*/
 ORDER BY
@@ -267,7 +309,8 @@ DECLARE
     volume_free_mb decimal(19,2) NULL,
     is_percent_growth bit NULL,
     growth_pct integer NULL,
-    vlf_count integer NULL
+    vlf_count integer NULL,
+    is_autogrow_all_files bit NULL
 );
 
 INSERT
@@ -331,7 +374,9 @@ SELECT /* PerformanceMonitorLite */
             ELSE NULL
         END,
     vlf_count =
-        CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END
+        CASE WHEN df.type = 1 /*LOG*/ THEN (SELECT CONVERT(integer, COUNT_BIG(*)) FROM sys.dm_db_log_info(DB_ID()) AS li WHERE li.file_id = df.file_id) ELSE NULL END,
+    is_autogrow_all_files =
+        CONVERT(bit, NULL)
 FROM sys.database_files AS df
 CROSS APPLY
 (
@@ -373,12 +418,21 @@ SELECT /* PerformanceMonitorLite */
     ds.volume_free_mb,
     ds.is_percent_growth,
     ds.growth_pct,
-    ds.vlf_count
+    ds.vlf_count,
+    ds.is_autogrow_all_files
 FROM @database_sizes AS ds
 ORDER BY
     ds.database_name,
     ds.file_id
 OPTION(RECOMPILE);";
+
+    /// <summary>
+    /// Whole-collector version floor (#9099): the SQL below reads columns or objects that SQL Server 2014 and older do not have
+    /// (sys.dm_db_log_info), so on a target below the supported floor the collector does not run and reads as not collected, instead of failing
+    /// every cycle. Unknown version (0) assumes newest, and Azure SQL Database and Managed Instance are never version-gated.
+    /// </summary>
+    public override bool AppliesTo(CollectorTargetInfo target) =>
+        target.MeetsMinimumVersion(CollectorTargetInfo.SupportedFloorMajorVersion, unknownIsNewest: true);
 
     public override string Name => "database_size_stats";
 
@@ -455,6 +509,7 @@ OPTION(RECOMPILE);";
         new CollectorColumn("is_percent_growth", CollectorColumnType.Boolean),
         new CollectorColumn("growth_pct", CollectorColumnType.Integer),
         new CollectorColumn("vlf_count", CollectorColumnType.Integer),
+        new CollectorColumn("is_autogrow_all_files", CollectorColumnType.Boolean),
     };
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
@@ -488,7 +543,8 @@ OPTION(RECOMPILE);";
                 reader.IsDBNull(15) ? null : reader.GetDecimal(15),
                 reader.IsDBNull(16) ? null : (bool?)(Convert.ToInt32(reader.GetValue(16), CultureInfo.InvariantCulture) == 1),
                 reader.IsDBNull(17) ? null : Convert.ToInt32(reader.GetValue(17), CultureInfo.InvariantCulture),
-                reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18), CultureInfo.InvariantCulture)));
+                reader.IsDBNull(18) ? null : Convert.ToInt32(reader.GetValue(18), CultureInfo.InvariantCulture),
+                reader.IsDBNull(19) ? null : (bool?)(Convert.ToInt32(reader.GetValue(19), CultureInfo.InvariantCulture) == 1)));
         }
 
         return rows;
@@ -515,6 +571,7 @@ OPTION(RECOMPILE);";
             .Value(row.VolumeFreeMb)
             .Value(row.IsPercentGrowth)
             .Value(row.GrowthPct)
-            .Value(row.VlfCount);
+            .Value(row.VlfCount)
+            .Value(row.IsAutogrowAllFiles);
     }
 }

@@ -62,6 +62,7 @@ import {
   clampText,
   plainEmptyStrip,
   noteStrip,
+  chartNote,
   disclosure,
   markPartialSubtitle,
   applyDataSubtitle,
@@ -124,6 +125,18 @@ export function emptyHeadline(desc, res) {
      session), "unavailable" or "precondition" envelope is a different statement, and "No deadlocks" over it would be a false
      all-clear that also drops the server's own engine-gate line; those keep the read's message. */
   return desc && desc.emptyWins && desc.emptyText && res.status === "empty" ? desc.emptyText : res.message;
+}
+
+/**
+ * #8840: what two panels that read the same tool with different parameters share, so the second can point at the first when both come back
+ * empty with one message. `fanout` does this for panels over ONE read; two reads cannot, so the page makes one of these per tab build and
+ * gives it to both panels as `emptyShare: { holder, leads }`. The leading panel records what it said; the follower waits for the leader's
+ * read to settle (in any way) and points at it only when the leader said the same message.
+ */
+export function emptyShare() {
+  let settle;
+  const settled = new Promise((resolve) => { settle = resolve; });
+  return { said: null, settled, settle };
 }
 
 /**
@@ -225,6 +238,8 @@ async function loadPanel(desc, body, signal, onSettled, onRetry = null) {
   try {
     await loadPanelBody(desc, body, signal, onRetry);
   } finally {
+    /* #8840: the follower of a shared empty message must never wait on a leader that was aborted or failed. */
+    if (desc.emptyShare && desc.emptyShare.leads) desc.emptyShare.holder.settle();
     if (onSettled) onSettled();
   }
 }
@@ -281,6 +296,19 @@ async function loadPanelBody(desc, body, signal, onRetry = null) {
        window's start (the server adds the note to that envelope only, never to an unavailable or not_collected one), so a
        new server's empty week does not read as a quiet one. windowFloorStrip is null for a chart and for an envelope
        without the note. */
+    const share = desc.emptyShare;
+    if (share && res.status === "empty") {
+      if (share.leads) {
+        share.holder.said = { title: desc.title, message: res.message };
+      } else {
+        await share.holder.settled;
+        const said = share.holder.said;
+        if (said && said.message === res.message) {
+          mount(body, [kept, readPinStrip(desc, res), windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), emptyStrip("Empty for the same reason as " + said.title + ".")]);
+          return;
+        }
+      }
+    }
     mount(body, [kept, readPinStrip(desc, res), windowFloorStrip(res.data, desc), leftOutStrip(res.data, desc), panelEmptyStrip(desc, res)]);
     return;
   }
@@ -1533,7 +1561,7 @@ function vizStat(data, desc) {
   if (desc.emptyText && stats.every((s) => getPath(data, s.key) == null)) return emptyStrip(desc.emptyText);
   /* `hideWhenEmpty` drops a tile whose value is missing (and that has no sentence of its own to show instead): a panel
      of fifteen tiles, half of them dashes, said less than the seven that had a value. */
-  const shown = stats.filter((s) => !s.pageCut && !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))));
+  const shown = stats.filter((s) => !s.pageCut && !(s.hideWhenEmpty && getPath(data, s.key) == null && !(s.nullKey && getPath(data, s.nullKey))) && !(s.hideWhenDisplayEmpty && typeof s.display === "function" && s.display(data) == null));
   /* #7410: a stat with `pageCut` is no tile. The read's "the window held more than this page" flag is about the grid, not the server,
      so when it is true the panel says so in words (the stat's `pageCut` sentence, or what its `pageCut(data)` returns when the sentence carries a count, #7551) under the tiles. */
   const cutNotes = stats.filter((s) => s.pageCut && getPath(data, s.key) === true).map((s) => noticeStrip(typeof s.pageCut === "function" ? s.pageCut(data) : s.pageCut));
@@ -1734,6 +1762,12 @@ function vizLine(data, desc) {
   const under = [];
   if (typeof footNote === "string" && footNote) under.push(noticeStrip(footNote));
   if (typeof seamCaption === "string" && seamCaption) under.push(captionStrip(seamCaption));
+  /* #8881: `captionKey` names a text field of the reply drawn as a plain line under the chart when it has text, and nothing when it is null or empty. */
+  const lineCaption = desc.captionKey ? getPath(data, desc.captionKey) : null;
+  if (typeof lineCaption === "string" && lineCaption) under.push(captionStrip(lineCaption));
+  /* #8927: `noteKind` ("summed" or "level", as chartNote takes it) draws what a point covers under the chart and, when the read's `source` is "hourly", the sentence that the newest hours are not in it yet. Opt-in per chart: the Queries tab's three hourly-rollup trends name it. */
+  const widthNote = desc.noteKind ? chartNote(data, desc.noteKind) : null;
+  if (widthNote) under.push(widthNote);
   return under.length ? el("div", {}, [chart, ...under]) : chart;
 }
 

@@ -31,14 +31,23 @@ public partial class DuckDbFactCollector : IFactCollector
     /// </summary>
     private readonly IQueryStorePlanSource? _queryStorePlanSource;
 
+    /// <summary>
+    /// What the inputs check decided about plan pairs it already compared (#9195), so a later pass does not fetch
+    /// them again. <see cref="AnalysisService"/> passes the store's own cache; a collector built without one keeps a private
+    /// cache of its own, which only lives as long as it does.
+    /// </summary>
+    private readonly PlanInputOutcomeCache _planInputCache;
+
     public DuckDbFactCollector(
         DuckDbInitializer duckDb,
         Func<int, string, int?>? collectorFrequencyMinutes = null,
-        IQueryStorePlanSource? queryStorePlanSource = null)
+        IQueryStorePlanSource? queryStorePlanSource = null,
+        PlanInputOutcomeCache? planInputCache = null)
     {
         _duckDb = duckDb;
         _collectorFrequencyMinutes = collectorFrequencyMinutes;
         _queryStorePlanSource = queryStorePlanSource;
+        _planInputCache = planInputCache ?? new PlanInputOutcomeCache();
     }
 
     /// <summary>
@@ -135,10 +144,13 @@ public partial class DuckDbFactCollector : IFactCollector
            calls through a local step is what buys the per-collector check without writing it out
            thirty-one times. The two grouping helpers below rewrite facts already in hand rather
            than reading the store, so they stay inline where their ordering matters. */
-        async Task RunCollectorAsync(Func<AnalysisContext, List<Fact>, Task> collect)
+        /* #9195: each collector's own elapsed time is logged (Debug), and a slow pass names its three slowest (Info), so a field log says
+           which collectors a long get_analysis_facts went to. The name is the method group the caller wrote. */
+        var timer = new CollectorPassTimer(context.ServerName, context.ServerId);
+        async Task RunCollectorAsync(Func<AnalysisContext, List<Fact>, Task> collect, [CallerArgumentExpression(nameof(collect))] string collectorName = "")
         {
             context.CancellationToken.ThrowIfCancellationRequested();
-            await collect(context, facts);
+            await timer.RunAsync(collectorName, () => collect(context, facts));
         }
 
         /* #3538 A2: the coverage stamp comes FIRST, because every rate and fraction fact below divides by
@@ -176,6 +188,7 @@ public partial class DuckDbFactCollector : IFactCollector
         await RunCollectorAsync(CollectMemoryPressureEventFactsAsync);
         await RunCollectorAsync(CollectDatabaseConfigFactsAsync);
         await RunCollectorAsync(CollectFileAutogrowthFactsAsync);
+        await RunCollectorAsync(CollectTempDbFileSetupFactsAsync);
         await RunCollectorAsync(CollectProcedureStatsFactsAsync);
         await RunCollectorAsync(CollectActiveQueryFactsAsync);
         await RunCollectorAsync(CollectRunningJobFactsAsync);
@@ -185,6 +198,7 @@ public partial class DuckDbFactCollector : IFactCollector
         await RunCollectorAsync(CollectDiskSpaceFactsAsync);
         await RunCollectorAsync(CollectPlanAdvisoryFactsAsync);
 
+        timer.Finish();
         return facts;
     }
 

@@ -287,7 +287,7 @@
                 </Grid>
             </TabItem>
 
-            <TabItem Header="_Profiles">
+            <TabItem Header="Prof_iles">
                 <Grid Margin="8">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -312,10 +312,10 @@
                     </StackPanel>
                 </Grid>
             </TabItem>
-            <TabItem Header="_Agent changes">
+            <TabItem Header="A_gent changes">
                 <local:AgentChangesTab x:Name="AgentChangesView"/>
             </TabItem>
-            <TabItem Header="Server a_ctions">
+            <TabItem Header="Server ac_tions">
                 <local:ServerActionsTab x:Name="ServerActionsView"/>
             </TabItem>
         </TabControl>

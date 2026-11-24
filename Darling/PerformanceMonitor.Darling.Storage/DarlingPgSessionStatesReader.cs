@@ -193,7 +193,7 @@ public static class DarlingPgSessionStatesReader
                 reportable_sessions
             FROM pg_session_states
             WHERE server_id = $1
-            AND   collection_time >= $2
+            AND   collection_time > $2
             AND   collection_time <= $3
         ),
         capture_shape AS (
@@ -392,7 +392,7 @@ public static class DarlingPgSessionStatesReader
         WHERE l.server_id = $1
         AND   l.collector_name = 'pg_session_states'
         AND   l.status = 'SUCCESS'
-        AND   l.collection_time >= $2
+        AND   l.collection_time > $2
         AND   l.collection_time <= $3
         """;
 
@@ -584,6 +584,7 @@ public static class DarlingPgSessionStatesReader
             AND   s.is_idle_in_transaction = false
             AND   coalesce(s.backend_type, 'client backend') = 'client backend'
             AND   coalesce(s.command_tag, '') NOT IN ('VACUUM', 'ANALYZE', 'REINDEX', 'CLUSTER')
+            AND   s.database_name IS DISTINCT FROM '{4}'
             {0}
         )
         SELECT
@@ -604,6 +605,13 @@ public static class DarlingPgSessionStatesReader
         ORDER BY s.query_duration_ms DESC, s.pid
         LIMIT $4
         """;
+
+    /// <summary>The managed-platform maintenance database (#8970): the platform's own sessions run there, the
+    /// operator cannot see, tune or stop them, and the read leaves them out ahead of the cap — always, the way the
+    /// per-database collector fan-out leaves the database out (#2995, which spells it from this constant). Not the
+    /// opt-out knob and not <c>excludedDatabases</c>, so none of the read's three counts includes them. The test is
+    /// <c>IS DISTINCT FROM</c>, so a session with no database name is kept.</summary>
+    public const string ManagedMaintenanceDatabase = "rdsadmin";
 
     /// <summary>The <c>program_name</c> twin the knob's prefix arm is built over — libpq's
     /// <c>application_name</c>, the same column the backups opt-out filters on. Qualified with the
@@ -674,7 +682,8 @@ public static class DarlingPgSessionStatesReader
             .Replace("{0}", excludeBackups ? BackupUtilitiesFilter : "")
             .Replace("{1}", programPrefixPredicate)
             .Replace("{2}", loginPredicate)
-            .Replace("{3}", databasePredicate);
+            .Replace("{3}", databasePredicate)
+            .Replace("{4}", ManagedMaintenanceDatabase);
     }
 
     /// <summary>

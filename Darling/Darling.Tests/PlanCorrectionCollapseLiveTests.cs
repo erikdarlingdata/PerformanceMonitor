@@ -96,9 +96,10 @@ public sealed class PlanCorrectionCollapseLiveTests
             Assert.Equal(2, capped.Count);
             Assert.Equal(2, capped.Select(r => r.QueryId).Distinct().Count());
 
-            /* A window that holds only the last two captures counts those two, and first_seen is the oldest in the window. */
+            /* A window that holds only the last two captures counts those two, and first_seen is the oldest in the window. It starts
+               two minutes before the older of the two, clear of the open start edge. */
             var narrow = await DarlingPlanCorrectionReader.GetCollapsedPlanCorrectionsAsync(
-                postgres, ServerId, newest.AddMinutes(-5), end, cap: 50, cancellationToken: ct);
+                postgres, ServerId, newest.AddMinutes(-7), end, cap: 50, cancellationToken: ct);
             Assert.Equal(Recommendations, narrow.Count);
             Assert.All(narrow, r =>
             {

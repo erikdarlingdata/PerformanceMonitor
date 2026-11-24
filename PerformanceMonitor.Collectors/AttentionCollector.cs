@@ -103,17 +103,29 @@ public sealed class AttentionCollector : CollectorDefinitionBase<AttentionCollec
     public override string TargetTable => "attention_events";
 
     /// <summary>
-    /// A plain table on every store (#5640). The 73rd hypertable is a grid decision (#3035, #3044, #3107: the compression
-    /// band, the worker sizing and the refresh watch lines all derive from the hypertable count), and attention rows are
-    /// low volume: the ring buffer caps the detail at 1,000 events per read (its MAX_EVENTS_LIMIT default), and a healthy server reads near zero.
-    /// The 30-day retention is the time-sliced DELETE the sweep runs for any table that is not a hypertable. The only
-    /// holder of this opt-out; <c>AttentionPlainTableTests</c> pins it.
+    /// A hypertable on a TimescaleDB store that is outside the compression grid (#8967). It was a plain table from #5640 on, with a
+    /// 30-day time-sliced DELETE, but the table holds about 0.7 GB a day on a busy store, so those deletes left dead space that only a
+    /// vacuum reclaims. As a hypertable, retention drops a whole day's chunk at once. The 73rd compression slot is a grid decision
+    /// (#3035, #3044, #3107: the compression band, the worker sizing and the refresh watch lines all derive from the hypertable
+    /// count), so it takes no phase slot and <c>HypertableCount</c> does not move. Its compression settings and policy are added by
+    /// <c>TimescaleSupport.EnsureAttentionEventsCompressionAsync</c> (#9216), without a phase. A store without TimescaleDB keeps a
+    /// plain table and the DELETE.
     /// </summary>
-    public override bool StaysPlainTable => true;
+    public override bool CompressionOffGrid => true;
 
     public override string PrefixIdColumnName => "attention_event_id";
 
     public override string? WatermarkColumn => "event_time";
+
+    /// <summary>
+    /// #8967: the newest <c>event_time</c> a written batch carried, so the Darling runner keeps this server's watermark in
+    /// memory (<c>ServerWatermarkCache</c>) and reads <c>MAX(event_time)</c> from the store once per server per service
+    /// start, not every run. A count row's event_time is NULL and moves nothing, exactly as the store's MAX skips it. The
+    /// runner advances the value only after the batch's write returns, floors it to the microsecond the store keeps, and
+    /// drops it on any fault, a reconnect or a re-add, so the next run reads the store again. On Azure SQL Database this
+    /// collector runs per database, which takes the per-database read and never this cache. Lite ignores the accessor.
+    /// </summary>
+    public override Func<Row, DateTime?>? WatermarkValueAccessor => static row => row.EventTime;
 
     /// <summary>#6893: not dispatched on an Amazon RDS Web or Express instance, where RDS refuses every Extended Events session create.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) => CollectorTargetInfo.XeSessionSupported(target);

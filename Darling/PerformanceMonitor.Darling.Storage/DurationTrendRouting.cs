@@ -44,7 +44,13 @@ public static class DurationTrendRouting
     /// text parameter, so the name never needs splitting on a dot a procedure name may itself hold. Case-sensitive, as the grid's
     /// own filter is.
     /// </summary>
-    public const string ProcedureFullNameMatchSql = "COALESCE(NULLIF(schema_name, '') || '.', '') || object_name = $5";
+    public const string ProcedureFullNameMatchSql = ProcedureFullNameSql + " = $5";
+
+    /// <summary>
+    /// The name <see cref="ProcedureFullNameMatchSql"/> compares: <c>schema.object</c>, or the bare object when the schema is empty or
+    /// NULL. <see cref="ProcedureStatsNameIndex"/> indexes this expression, so the predicate and the index key are one text.
+    /// </summary>
+    public const string ProcedureFullNameSql = "COALESCE(NULLIF(schema_name, '') || '.', '') || object_name";
 
     /// <summary>
     /// The seconds in one hourly-rollup bucket, as the SQL literal the hourly-tier duration trends divide by.
@@ -213,7 +219,7 @@ public static class DurationTrendRouting
     /// spread over the full 3,600 seconds.</para>
     ///
     /// <para><b>Materialized-only</b>, like every rollup here (#1759): the current hour is never materialized
-    /// and the previous one lands on the next refresh, so this series trails the clock by up to two hours.</para>
+    /// and an hour is added one to two hours after it ends, so this series trails the clock by up to three hours.</para>
     ///
     /// <para>With <paramref name="withDatabaseFilter"/>, $4 is the viewer's guarded <c>text[]</c> database
     /// filter (#1319) — both hourly rollups group by <c>database_name</c>, so the filter survives the routing.
@@ -418,20 +424,64 @@ public static class DurationTrendRouting
         var maxGap = CollectorDeltaCalculator.DefaultMaxGapSeconds;
         var elapsedSum = !includeElapsed ? ""
             : withDatabaseFilter
-                ? $"COALESCE(SUM(delta_elapsed_time) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n                "
-                : "SUM(delta_elapsed_time) / 1000.0 AS total_elapsed_ms,\n                ";
+                ? $"COALESCE(SUM(elapsed) FILTER (WHERE {match}), 0) / 1000.0 AS total_elapsed_ms,\n                "
+                : "SUM(elapsed) / 1000.0 AS total_elapsed_ms,\n                ";
         var executionSum = withDatabaseFilter
-            ? $"COALESCE(SUM(delta_execution_count) FILTER (WHERE {match}), 0) AS total_executions,\n"
-              + $"                COUNT(*) FILTER (WHERE {match}) AS matched_rows,"
-            : "SUM(delta_execution_count) AS total_executions,";
+            ? $"COALESCE(SUM(executions) FILTER (WHERE {match}), 0) AS total_executions,\n"
+              + $"                COALESCE(SUM(row_count) FILTER (WHERE {match}), 0)::bigint AS matched_rows,"
+            : "SUM(executions) AS total_executions,";
         var elapsedOut = includeElapsed ? "total_elapsed_ms, " : "";
         var matchedOut = withDatabaseFilter ? ", matched_rows" : "";
+
+        /* #9147: query_stats has a per-collection summary (QueryStatsCollectionSummary, V286). The collections are read from it, in place of the
+           rows, when the summary covers the whole window for this server: its oldest row is at or before $2 and so is the server's floor
+           (#9193, V290; no floor row means no floor), so every collection after $2 has a summary row, and so does the one before it that the LAG
+           needs (the first collection after $2 finds its previous collection at or after the floor). The cover also needs the other end: no raw collection of the server lies after the newest summary row and
+           at or before $3. A build older than V286 that ran after a rollback writes raw rows with no summary row, and until the next batch
+           moves the floor up (FloorMoveSql) the summary would drop them from a window that ends after them. The probe is one look at the
+           (server_id, collection_time) index past the newest summary row and normally finds nothing. A server with no summary row (a store fresh from V286, or a server first collected after it) has no floor and
+           reads the rows, as does a window that starts before the oldest summary row. Both arms carry the same one-time test, so only one of
+           them runs. A summary row stands for the rows of one (collection, database): its sums add, its n adds to the filtered row count and
+           its max_interval maxes, which is what the aggregates below take over the rows. */
+        var fromSummary = rawTable == "query_stats";
+        var coverCte = fromSummary ? $"""
+        summary_cover AS
+        (
+            SELECT COALESCE(s.oldest <= $2, false)
+                   AND COALESCE((SELECT f.valid_from FROM {QueryStatsCollectionSummary.FloorTable} AS f WHERE f.server_id = $1) <= $2, true)
+                   AND NOT EXISTS
+                       (
+                           SELECT 1
+                           FROM {rawTable} AS q
+                           WHERE q.server_id = $1
+                           AND   q.collection_time > s.newest
+                           AND   q.collection_time <= $3
+                       ) AS covered
+            FROM
+            (
+                SELECT MIN(collection_time) AS oldest, MAX(collection_time) AS newest
+                FROM {QueryStatsCollectionSummary.Table}
+                WHERE server_id = $1
+            ) AS s
+        ),
+        """ : "";
+        var coverFilter = fromSummary ? "AND   NOT (SELECT covered FROM summary_cover)" : "";
+        var summaryArm = fromSummary ? $"""
+                    UNION ALL
+                    SELECT collection_time, database_name, sum_elapsed, sum_exec, n, max_interval
+                    FROM {QueryStatsCollectionSummary.Table}
+                    WHERE server_id = $1
+                    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+                    AND   collection_time <= $3
+                    AND   (SELECT covered FROM summary_cover)
+        """ : "";
 
         // #7161: the collection's seconds are its gap to the previous collection (the shape ProcedureCollectionsCte settled on in
         // #5449), not MAX(sample_interval_seconds): that is the longest interval of ANY query in the collection, and a query that
         // returns every 15 or 30 minutes stretched a 60 s collection to 900 s, cutting the rate about 15-fold. The table is read from
         // maxGap before $2 so the first in-window collection has its previous one; the rows before $2 are dropped after the LAG.
         return $"""
+        {coverCte}
         raw AS
         (
             SELECT
@@ -447,15 +497,21 @@ public static class DurationTrendRouting
                 SELECT
                     collection_time,
                     {elapsedSum}{executionSum}
-                    MAX(sample_interval_seconds) AS stored_interval,
+                    MAX(seconds) AS stored_interval,
                     extract(epoch FROM (date_trunc('second', collection_time) - date_trunc('second', LAG(collection_time) OVER (ORDER BY collection_time)))) AS gap_seconds
-                FROM {rawTable}
-                WHERE server_id = $1
-                AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
-                AND   collection_time <= $3
+                FROM
+                (
+                    SELECT collection_time, database_name, delta_elapsed_time AS elapsed, delta_execution_count AS executions, 1 AS row_count, sample_interval_seconds AS seconds
+                    FROM {rawTable}
+                    WHERE server_id = $1
+                    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+                    AND   collection_time <= $3
+                    {coverFilter}
+        {summaryArm}
+                ) AS src
                 GROUP BY collection_time
             ) AS g
-            WHERE collection_time >= $2
+            WHERE collection_time > $2
         )
         """;
     }
@@ -510,7 +566,7 @@ public static class DurationTrendRouting
     /// applied inside the sums as in <see cref="RawCollectionsCte"/>, and an idle point carries <c>matched_rows</c> 0. Ends in a
     /// CTE named <c>raw</c> with the query grain's columns. $1 server_id, $2/$3 window (naive UTC).</para>
     /// </summary>
-    private static string ProcedureCollectionsCte(bool withDatabaseFilter, bool withProcedureFilter)
+    private static string ProcedureCollectionsCte(bool withDatabaseFilter, bool withProcedureFilter, bool procedureRowsByName)
     {
         /* #6303: with the procedure filter the database clause is parenthesized and ANDed with the procedure's name ($5); off, the text is unchanged. */
         var match = withProcedureFilter
@@ -536,10 +592,77 @@ public static class DurationTrendRouting
         var matched = withDatabaseFilter ? ", matched_rows" : "";
         var idleMatched = withDatabaseFilter ? ", CAST(0 AS bigint)" : "";
 
-        /* #6303: the totals table holds one row per (collection, database) and has no procedure columns, so a read of ONE procedure
-           cannot use it. With the procedure filter the raw rows are read for the whole window (the totals are a copy of their sums,
-           and the rows are kept), which is the read #3897 ran before #5638; off, the text is unchanged. */
-        var storedCte = withProcedureFilter
+        /* #6303: a read of ONE procedure. The totals table holds one row per (collection, database) and has no procedure columns, so
+           it cannot give the procedure's sums. The rows are read for the whole window with the filter inside the sums (the totals are
+           a copy of their sums, and the rows are kept), which is the read #3897 ran before #5638.
+
+           #8570: procedureRowsByName is the same read for a store that has ProcedureStatsNameIndex. The totals do give what the read
+           needs from every OTHER row of a collection: that the collection exists, and its longest stored interval. At or after the
+           server's floor the collections and their interval are read from the totals, and the procedure's own rows are read with the
+           name and the database in the WHERE (named), which the index seeks, so the aggregate takes in that procedure's rows and not
+           every procedure's. A collection the procedure has no row in joins to nothing and is zero work with matched_rows 0, which is
+           what the filtered sums give over a collection's rows. Before the floor (collections written before the totals table
+           existed) the rows are the only source, and they are read with the filter inside the sums. Each collection comes from one
+           side, as in the all-procedures read. Without the index the named read filters every row of the server in the window after
+           fetching it, slower than the sums over the same rows, so the caller picks this text only when the index is there. */
+        var storedCte = withProcedureFilter && procedureRowsByName
+            ? $"""
+totals_floor AS
+(
+    SELECT COALESCE(MIN(collection_time), 'infinity'::timestamp) AS floor_time
+    FROM {ProcedureStatsTotals.Table}
+    WHERE server_id = $1
+),
+named AS
+(
+    SELECT
+        collection_time,
+        SUM(delta_elapsed_time) AS elapsed_time,
+        SUM(delta_execution_count) AS execution_count,
+        COUNT(*) AS matched_rows
+    FROM procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    AND   collection_time >= (SELECT floor_time FROM totals_floor)
+    AND   {match}
+    GROUP BY collection_time
+),
+stored AS
+(
+    SELECT
+        collection_time,
+        {sums}
+        MAX(sample_interval_seconds) AS max_interval_seconds
+    FROM procedure_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+    AND   collection_time <= $3
+    AND   collection_time < (SELECT floor_time FROM totals_floor)
+    GROUP BY collection_time
+    UNION ALL
+    SELECT
+        collections.collection_time,
+        COALESCE(named.elapsed_time, 0) / 1000.0 AS total_elapsed_ms,
+        COALESCE(named.execution_count, 0) AS total_executions,
+        COALESCE(named.matched_rows, 0) AS matched_rows,
+        collections.max_interval_seconds
+    FROM
+    (
+        SELECT
+            collection_time,
+            MAX(max_sample_interval_seconds) AS max_interval_seconds
+        FROM {ProcedureStatsTotals.Table}
+        WHERE server_id = $1
+        AND   collection_time >= $2 - INTERVAL '{maxGap} seconds'
+        AND   collection_time <= $3
+        GROUP BY collection_time
+    ) AS collections
+    LEFT JOIN named
+      ON named.collection_time = collections.collection_time
+),
+"""
+            : withProcedureFilter
             ? $"""
 stored AS
 (
@@ -654,7 +777,7 @@ stored AS
                      WHEN is_stored THEN NULLIF(max_interval_seconds, 0)
                 END AS interval_seconds{matched}
             FROM gapped
-            WHERE collection_time >= $2
+            WHERE collection_time > $2
             AND   collection_time <= $3
         )
         """;
@@ -686,10 +809,20 @@ stored AS
     /// <c>unrated_collections</c>, are unaffected; the viewer's chart uses it to tell a true singleton bucket from
     /// one the bucketing actually merged (see <c>ViewerDataService.QueryTrends.cs</c>'s bucketed reader).
     /// $1 server_id, $2/$3 window (naive UTC), [$4 database filter], the last $ the bucket width in minutes.</para>
+    ///
+    /// <para><paramref name="procedureRowsByName"/> (#8570) is the one-procedure read for a store that has
+    /// <see cref="ProcedureStatsNameIndex"/>: the same rows out, with the procedure's rows read by name and the collections taken
+    /// from the per-collection totals. Off, the one-procedure text is the read with the filter inside the sums.</para>
     /// </summary>
-    public static string BuildBucketedRawTrendSql(string rawTable, bool withDatabaseFilter, bool withProcedureFilter = false)
+    public static string BuildBucketedRawTrendSql(string rawTable, bool withDatabaseFilter, bool withProcedureFilter = false, bool procedureRowsByName = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
+        /* #8570: the by-name text is a shape of the one-procedure read and of nothing else. */
+        if (procedureRowsByName && !withProcedureFilter)
+        {
+            throw new ArgumentException("Reading the procedure's rows by name is a one-procedure read.", nameof(procedureRowsByName));
+        }
+
         /* #6303: one procedure of procedure_stats, by $5 (ProcedureFullNameMatchSql); the width moves to $6. Only the database-filtered procedure read takes it. */
         if (withProcedureFilter && (!withDatabaseFilter || rawTable != "procedure_stats"))
         {
@@ -699,7 +832,7 @@ stored AS
         var widthParam = withProcedureFilter ? "$6" : withDatabaseFilter ? "$5" : "$4";
         /* #5449: procedure_stats stores no row for a cycle in which nothing ran, so its collections are read through the
            collector's runs (ProcedureCollectionsCte); every other table stores every cycle and reads its own rows. */
-        var collections = rawTable == "procedure_stats" ? ProcedureCollectionsCte(withDatabaseFilter, withProcedureFilter) : RawCollectionsCte(rawTable, withDatabaseFilter);
+        var collections = rawTable == "procedure_stats" ? ProcedureCollectionsCte(withDatabaseFilter, withProcedureFilter, procedureRowsByName) : RawCollectionsCte(rawTable, withDatabaseFilter);
         /* #5414 M1: every bucket is read over EVERY collection in it. Round 2: whether the chosen databases had any
            row at all is decided once, for the whole window (the tool's empty), and never per bucket: a bucket the
            databases were quiet in is a measured 0 and a bucket the store covered, and dropping it made it read missing
@@ -848,7 +981,7 @@ stored AS
                        SUM(delta_worker_time) / 1000.0 / NULLIF(SUM(delta_execution_count), 0) AS avg_cpu_ms
                 FROM procedure_stats
                 WHERE server_id = $1
-                AND   collection_time >= $2
+                AND   collection_time > $2
                 AND   collection_time <= $3
                 AND   sample_interval_seconds IS DISTINCT FROM 0
                 AND   {match}
@@ -921,6 +1054,70 @@ stored AS
             AND   query_hash = $3
             AND   bucket >= $4
             AND   bucket < $5
+        ) AS h
+        GROUP BY bucket_start
+        ORDER BY bucket_start
+        """;
+    }
+
+    /// <summary>
+    /// #8801: <see cref="BuildQueryHistoryHourlySql"/> with the hours the rollup has not built read from the raw rows. The
+    /// rollup side stops below <c>$7</c>, the rollup's measured end (<see cref="RollupCoverage.HourlyEndCeiling"/>), and the
+    /// raw side sums <c>query_stats</c> from <c>$7</c> to the window's end into the same buckets, so each hour comes from one
+    /// side and the window's totals are the raw totals. A raw row's first collection is its hour's start, the stamp the rollup
+    /// keeps for an hour, and the columns the rollup does not carry stay typed NULLs on every point. $1 to $6 as
+    /// <see cref="BuildQueryHistoryHourlySql"/> (the window's end is inclusive on the raw side), $7 the rollup's end (naive UTC).
+    /// </summary>
+    public static string BuildQueryHistoryHourlyWithRawTailSql(string hourlyRelation)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(hourlyRelation);
+
+        return $"""
+        SELECT
+            bucket_start AS collection_time,
+            CAST(SUM(execution_count_sum) AS bigint) AS delta_execution_count,
+            CAST(SUM(worker_time_sum) AS bigint) AS delta_worker_time,
+            CAST(SUM(elapsed_time_sum) AS bigint) AS delta_elapsed_time,
+            CAST(NULL AS bigint) AS delta_logical_reads,
+            CAST(NULL AS bigint) AS delta_logical_writes,
+            CAST(NULL AS bigint) AS delta_physical_reads,
+            CAST(NULL AS bigint) AS delta_rows,
+            CAST(NULL AS bigint) AS delta_spills,
+            CAST(NULL AS int) AS min_dop,
+            CAST(NULL AS int) AS max_dop,
+            CAST(NULL AS text) AS query_plan_hash,
+            CAST(NULL AS int) AS plan_count,
+            MIN(bucket) AS first_collection_time,
+            CAST(NULL AS int) AS collection_count
+        FROM
+        (
+            SELECT
+                bucket,
+                execution_count_sum,
+                worker_time_sum,
+                elapsed_time_sum,
+                GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', bucket, {TrendBucketSql.OriginSql}), $4) AS bucket_start
+            FROM {hourlyRelation}
+            WHERE server_id = $1
+            AND   database_name = $2
+            AND   query_hash = $3
+            AND   bucket >= $4
+            AND   bucket < $5
+            AND   bucket < $7
+            UNION ALL
+            SELECT
+                GREATEST(date_trunc('hour', qs.collection_time), $4) AS bucket,
+                COALESCE(qs.delta_execution_count, 0) AS execution_count_sum,
+                COALESCE(qs.delta_worker_time, 0) AS worker_time_sum,
+                COALESCE(qs.delta_elapsed_time, 0) AS elapsed_time_sum,
+                GREATEST(date_bin(CAST($6 AS integer) * INTERVAL '1 minute', qs.collection_time, {TrendBucketSql.OriginSql}), $4) AS bucket_start
+            FROM query_stats AS qs
+            WHERE qs.server_id = $1
+            AND   qs.database_name = $2
+            AND   qs.query_hash = $3
+            AND   qs.collection_time >= $7
+            AND   qs.collection_time > $4
+            AND   qs.collection_time <= $5
         ) AS h
         GROUP BY bucket_start
         ORDER BY bucket_start

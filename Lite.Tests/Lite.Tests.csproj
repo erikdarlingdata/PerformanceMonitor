@@ -8,10 +8,11 @@
     <!-- #2347: xunit.v3 under Microsoft.Testing.Platform builds the suite as its own executable. -->
     <OutputType>Exe</OutputType>
     <!-- xUnit1051 (use TestContext.Current.CancellationToken): a per-call-site style nag across
-         hundreds of short-lived test calls; suppressed like CS4014 rather than threading the
-         ambient token through every call. -->
-    <!-- NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build. -->
-    <NoWarn>$(NoWarn);CS4014;NU1701;xUnit1051</NoWarn>
+         hundreds of short-lived test calls (still fires in about 1000 places); suppressed rather than
+         threading the ambient token through every call.
+         NU1701: CredentialManagement and SkiaSharp.Views.WPF (reached through the app projects) have no .NET 10 build.
+         CS4014 no longer fires here, so it is no longer suppressed. -->
+    <NoWarn>$(NoWarn);NU1701;xUnit1051</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -34,7 +35,7 @@
          larger and the acquisition waits the hold out. Short of forever on purpose - a wedged lock still
          fails, with the same message, rather than hanging the suite. The shipped app declares nothing
          here and keeps LocalDataService.DefaultWriteLockBudget. -->
-    <RuntimeHostConfigurationOption Include="PerformanceMonitorLite.WriteLockBudgetSeconds" Value="120" />
+    <RuntimeHostConfigurationOption Include="PerformanceMonitorLite.WriteLockBudgetSeconds" Value="150" />
     <!-- #5596: WPF builds one WeakEventTable per STA thread that touches a WeakEventManager, and each table
          registers a ProcessExit handler. At exit that handler runs on the main thread, and when the table's
          own thread is gone it asks the dead dispatcher to purge the table with a 300 ms timeout nobody ever

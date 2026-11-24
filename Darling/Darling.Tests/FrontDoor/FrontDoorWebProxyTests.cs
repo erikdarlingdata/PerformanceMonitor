@@ -146,7 +146,8 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
 
     internal static Task<FrontDoorWebHarness> StartAsync(
         IReadOnlyList<(FakeWebPeer Peer, string[] Servers)> peers, TimeSpan? peerTimeout = null, TimeProvider? time = null,
-        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null)
+        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null, bool? oidcRoleMapping = null,
+        IPAddress? remoteIp = null, string? allowFrom = null)
     {
         var secrets = new WebFakeSecrets();
         var directory = new WebFakeDirectory(peers.Select(p =>
@@ -154,12 +155,13 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
             secrets.SetWebToken(p.Peer.Name, p.Peer.Token);
             return (new FrontDoorStore(p.Peer.Name, new Uri("http://127.0.0.1:1/"), p.Peer.BaseUri, null), p.Servers);
         }));
-        return StartAsync(directory, secrets, peerTimeout, time, ct, logger, collector);
+        return StartAsync(directory, secrets, peerTimeout, time, ct, logger, collector, oidcRoleMapping, remoteIp, allowFrom);
     }
 
     internal static async Task<FrontDoorWebHarness> StartAsync(
         WebFakeDirectory directory, WebFakeSecrets secrets, TimeSpan? peerTimeout = null, TimeProvider? time = null,
-        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null)
+        CancellationToken ct = default, ILogger? logger = null, CollectorRuntimeState? collector = null, bool? oidcRoleMapping = null,
+        IPAddress? remoteIp = null, string? allowFrom = null)
     {
         collector ??= new CollectorRuntimeState();
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -173,18 +175,18 @@ internal sealed class FrontDoorWebHarness : IAsyncDisposable
         var app = builder.Build();
 
         var session = new DarlingFrontDoorWebSession(secrets, time);
-        var proxy = new DarlingFrontDoorWebProxy(directory, session, peerTimeout ?? TimeSpan.FromSeconds(30), logger ?? NullLogger.Instance, time, collector.Read);
+        var proxy = new DarlingFrontDoorWebProxy(directory, session, peerTimeout ?? TimeSpan.FromSeconds(30), logger ?? NullLogger.Instance, time, collector.Read, oidcRoleMapping);
 
         app.Use(next => context =>
         {
-            context.Connection.RemoteIpAddress ??= IPAddress.Loopback;
+            context.Connection.RemoteIpAddress ??= remoteIp ?? IPAddress.Loopback;
             return next(context);
         });
 
         var host = new DarlingWebHostService(
             NullLogger<DarlingWebHostService>.Instance, new WebRuntimeState(), collector, new WebTlsCertificateState());
         host.ConfigurePipeline(app, null, networkMode: false, networkListenIp: null,
-            allowedCidr: IPNetwork.Parse("127.0.0.1/32"), accessToken: FrontDoorToken, oidcClient: null,
+            allowedCidr: IPNetwork.Parse(allowFrom ?? "127.0.0.1/32"), accessToken: FrontDoorToken, oidcClient: null,
             requireTokenWhenLoopbackOnly: true, sessionSigningKeyForTests: SigningKey, frontDoorProxy: proxy);
         await app.StartAsync(ct == default ? TestContext.Current.CancellationToken : ct);
         return new FrontDoorWebHarness(app, app.GetTestServer().CreateClient(), directory, secrets, session);
@@ -341,6 +343,57 @@ public sealed class FrontDoorWebProxyTests
     }
 
     [Fact(Timeout = 60_000)]
+    public async Task ApiMe_IsAnsweredByTheFrontDoor_WithoutAskingAStore()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+
+        var (response, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/me", store: "use1"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = System.Text.Json.Nodes.JsonNode.Parse(body)!.AsObject();
+        Assert.Equal("shared_token", (string?)json["method"]);
+        Assert.Equal("admin", (string?)json["seat"]);
+        Assert.Null(json["subject"]);
+        Assert.False((bool?)json["personal_tokens"]);
+        Assert.Empty(a.Api);
+        Assert.Empty(b.Api);
+
+        var (viewerResponse, viewerBody) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/me", FrontDoorSeat.Viewer, store: "use1"));
+
+        Assert.Equal(HttpStatusCode.OK, viewerResponse.StatusCode);
+        var viewerJson = System.Text.Json.Nodes.JsonNode.Parse(viewerBody)!.AsObject();
+        Assert.Equal("read_only", (string?)viewerJson["seat"]);
+        Assert.Equal("oidc", (string?)viewerJson["method"]);
+        Assert.Equal("viewer@example.test", (string?)viewerJson["subject"]);
+        Assert.Null(viewerJson["role_mapping"]);
+        Assert.False((bool?)viewerJson["personal_tokens"]);
+        Assert.Empty(a.Api);
+        Assert.Empty(b.Api);
+    }
+
+    [Theory(Timeout = 60_000)]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ApiMe_AnOidcSession_CarriesTheFrontDoorsOwnRoleMapping(bool mapped)
+    {
+        await using var a = await FakeWebPeer.StartAsync("use1");
+        await using var door = await FrontDoorWebHarness.StartAsync(
+            new[] { (a, UseServers) }, ct: TestContext.Current.CancellationToken, oidcRoleMapping: mapped);
+
+        var (response, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/me", FrontDoorSeat.Viewer, store: "use1"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = System.Text.Json.Nodes.JsonNode.Parse(body)!.AsObject();
+        Assert.Equal("oidc", (string?)json["method"]);
+        Assert.Null(json["granted_by"]);
+        Assert.Equal(mapped, (bool?)json["role_mapping"]);
+        Assert.Empty(a.Api);
+    }
+
+    [Fact(Timeout = 60_000)]
     public async Task AnUnknownStoreName_Is400_AndNothingIsSent()
     {
         var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
@@ -363,8 +416,10 @@ public sealed class FrontDoorWebProxyTests
     [Theory(Timeout = 60_000)]
     [InlineData("/api/ping")]
     [InlineData("/api/session")]
+    [InlineData("/api/me")]
     [InlineData("/api/front-door")]
     [InlineData("/api/front-door/locate?server=sql-east-1")]
+    [InlineData("/api/mcp-tokens")]
     [InlineData("/api/fleet")]
     public async Task ASignedOutRequest_ToEachLocalRoute_Is401(string url)
     {
@@ -378,6 +433,48 @@ public sealed class FrontDoorWebProxyTests
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
         Assert.Empty(a.Api);
         Assert.Empty(a.Logins);
+    }
+
+    /// <summary>#8737 (E5): the front door forwards every /api/* route it does not answer itself, so the personal-token paths are local routes
+    /// that answer 404 and reach no store, whatever the method, the query, the case or a trailing slash.</summary>
+    [Theory(Timeout = 60_000)]
+    [InlineData("GET", "/api/mcp-tokens")]
+    [InlineData("GET", "/api/mcp-tokens?all=1")]
+    [InlineData("POST", "/api/mcp-tokens")]
+    [InlineData("GET", "/api/mcp-tokens/0123456789abcdef")]
+    [InlineData("POST", "/api/mcp-tokens/0123456789abcdef/revoke")]
+    [InlineData("POST", "/api/mcp-tokens/")]
+    [InlineData("POST", "/API/MCP-Tokens")]
+    [InlineData("DELETE", "/api/mcp-tokens/0123456789abcdef")]
+    public async Task McpTokens_AnsweredLocally404_NeverForwarded(string method, string url)
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+
+        var (response, body) = await door.SendAsync(door.Request(new HttpMethod(method), url, store: "use1", body: method == "GET" ? null : "{}"));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("personal_tokens_unavailable", (string?)Json(body)["error"]);
+        Assert.Empty(a.Api);
+        Assert.Empty(b.Api);
+        Assert.Empty(a.Logins);
+        Assert.Empty(b.Logins);
+    }
+
+    [Fact(Timeout = 60_000)]
+    public async Task AnotherPathThatOnlyStartsLikeMcpTokens_IsStillForwarded()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+
+        var (response, _) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/mcp-tokens-other", store: "use1"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Single(a.Api);
     }
 
     [Theory(Timeout = 60_000)]
@@ -798,6 +895,51 @@ public sealed class FrontDoorWebProxyTests
         Assert.Null(list[0]!["admin_writes_off"]);
         Assert.Null(list[0]!["managed_store"]);
         Assert.True((bool)list[1]!["admin_writes_off"]!);
+    }
+
+    /// <summary>#9203: the front door's own <c>/api/session</c> names its own build, the string the Viewer's About shows for the same build,
+    /// and a store's build never stands in for it.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task TheFrontDoorsSession_NamesItsOwnBuild_AsTheViewerAboutWouldForTheSameAssembly()
+    {
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+        a.Build = "Version 0.0.1 (commit aaaaaaaaa)";
+
+        var (_, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/session"));
+
+        var build = (string?)Json(body)["build"];
+        Assert.False(string.IsNullOrWhiteSpace(build));
+        Assert.Equal(PerformanceMonitor.Darling.Viewer.AboutVersionText.ForAssembly(typeof(DarlingCliCommands).Assembly), build);
+        Assert.NotEqual(a.Build, build);
+    }
+
+    /// <summary>#9203: two stores on different builds each show their own next to their name, and a store that says none shows none.</summary>
+    [Fact(Timeout = 60_000)]
+    public async Task TheStoreList_CarriesEachStoresOwnServiceBuild_AndNoKeyForAStoreThatSaidNone()
+    {
+        var time = new ManualTime();
+        var (a, b, door) = await TwoStoresAsync(TestContext.Current.CancellationToken, time: time);
+        await using var _a = a;
+        await using var _b = b;
+        await using var _door = door;
+        a.Build = "Version 3.12.0 (commit 111111111)";
+        b.Build = "Version 3.13.0 (commit 222222222)";
+
+        var (_, body) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/front-door"));
+
+        var list = Json(body)["stores"]!.AsArray();
+        Assert.Equal("Version 3.12.0 (commit 111111111)", (string?)list[0]!["service_build"]);
+        Assert.Equal("Version 3.13.0 (commit 222222222)", (string?)list[1]!["service_build"]);
+
+        a.Build = null;
+        time.Advance(TimeSpan.FromMinutes(5));
+        var (_, again) = await door.SendAsync(door.Request(HttpMethod.Get, "/api/front-door"));
+        var second = Json(again)["stores"]!.AsArray();
+        Assert.False(second[0]!.AsObject().ContainsKey("service_build"));
+        Assert.Equal("Version 3.13.0 (commit 222222222)", (string?)second[1]!["service_build"]);
     }
 
     [Fact(Timeout = 60_000)]

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Analysis;
 
@@ -273,7 +274,10 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
     /// same across an upgrade; the match is on the lower-cased column, the key through
     /// <see cref="PgTargetFactKeys.WaitKey"/>. Everything else in the profile (BufferPin, Extension, other
     /// Lock/LWLock/IO/IPC events) is summed INTO its rollup and into the share denominator but is not a fact
-    /// of its own in v1.
+    /// of its own in v1. PostgreSQL 19 renames the <c>BufferPin</c> type to <c>Buffer</c> (its <c>BufferPin</c>
+    /// event becomes <c>BufferCleanup</c>, read the same way: denominator only) and moves the buffer content-lock
+    /// waits out of <c>LWLock:BufferContent</c>; <see cref="FoldBufferContentWaits"/> puts them back under the
+    /// <c>LWLock</c> rollup before anything is grouped (#9131).
     /// </summary>
     private static readonly (string Type, string? Event, string Display)[] s_waitVocabulary =
     [
@@ -286,6 +290,42 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
         ("IO", "DataFileRead", "IO:DataFileRead"),
         ("IO", "WALSync", "IO:WALSync"),
     ];
+
+    /// <summary>
+    /// PostgreSQL 19 removed <c>LWLock:BufferContent</c>; the same waits are now <c>Buffer:BufferShared</c>,
+    /// <c>Buffer:BufferShareExclusive</c> and <c>Buffer:BufferExclusive</c> (#9131). Folds those three rows into
+    /// one <c>LWLock:BufferContent</c> row (adding to an existing one: a window that spans a pg_upgrade holds both
+    /// spellings), so a 19 profile groups, rolls up and scores exactly as the same samples named the 18 way.
+    /// <c>Buffer:BufferCleanup</c> is left alone, as <c>BufferPin:BufferPin</c> is. Rows are the lower-cased keys
+    /// both reads produce. Returns the input list when nothing needs folding.
+    /// </summary>
+    internal static List<WaitProfileRow> FoldBufferContentWaits(List<WaitProfileRow> rows)
+    {
+        static bool IsBufferContent(WaitProfileRow r) =>
+            r.TypeKey.Equals("buffer", StringComparison.Ordinal)
+            && r.EventKey is "buffershared" or "buffershareexclusive" or "bufferexclusive";
+
+        if (!rows.Exists(IsBufferContent)) return rows;
+
+        var folded = new List<WaitProfileRow>(rows.Count);
+        WaitProfileRow? content = null;
+        foreach (var row in rows)
+        {
+            var isContent = IsBufferContent(row)
+                || (row.TypeKey.Equals("lwlock", StringComparison.Ordinal)
+                    && string.Equals(row.EventKey, "buffercontent", StringComparison.Ordinal));
+            if (!isContent)
+            {
+                folded.Add(row);
+                continue;
+            }
+            content = content is { } c
+                ? new WaitProfileRow("lwlock", "buffercontent", c.WaitMs + row.WaitMs, c.Count + row.Count, Math.Max(c.PeakBackends, row.PeakBackends))
+                : new WaitProfileRow("lwlock", "buffercontent", row.WaitMs, row.Count, row.PeakBackends);
+        }
+        if (content is { } merged) folded.Add(merged);
+        return folded;
+    }
 
     /// <summary>One (type, event) row of either read, already summed over the window. <c>PeakBackends</c> is the
     /// sampled read's most-backends-in-one-collection for the series; 0 on the Aurora read, which has no such column.</summary>
@@ -337,7 +377,7 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
 
         try
         {
-            await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
             var rows = new List<WaitProfileRow>();
             double observedSec = 0;
@@ -453,6 +493,7 @@ ORDER BY b.estimated_wait_ms DESC NULLS LAST";
     {
         if (observedSec <= 0) return;
         var waitObservedMs = observedSec * 1000.0;
+        rows = FoldBufferContentWaits(rows);
 
         /* The share denominator: every wait the profile holds except on-CPU time. */
         double totalWaitMs = 0;

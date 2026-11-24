@@ -8,6 +8,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Text;
 using Microsoft.AspNetCore.Http;
 
 namespace PerformanceMonitor.Darling.Service.Hosting;
@@ -29,8 +31,10 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// the length floor.</para>
 ///
 /// <para><b>How the role survives the round-trip.</b> The session cookie's subject slot (#2583) carries an
-/// ENCODED seat — <c>o2:a:{ownerKey}:{subject}</c> / <c>o2:v:{ownerKey}:{subject}</c> (<c>o1:a:{subject}</c> /
-/// <c>o1:v:{subject}</c> from an older build still reads, with no owner key) — because the role decided at sign-in has to
+/// ENCODED seat — <c>o3:a:{ownerKey}:{b64u(displayName)}:{b64u(grantedBy)}:{subject}</c> / <c>o3:v:...</c> (an empty name or grant
+/// segment is null; the base64url segments hold no <c>:</c>, so the subject, last, may). <c>o2:{a|v}:{ownerKey}:{subject}</c> and
+/// <c>o1:a:{subject}</c> / <c>o1:v:{subject}</c> from older builds still read, with no display name or grant (and, for <c>o1</c>,
+/// no owner key). The display name and the granting role value are display-only: nothing authorizes on them. Because the role decided at sign-in has to
 /// come back on every later request, and the cookie is the only thing that does. The prefix rides INSIDE the
 /// HMAC-signed region, so a viewer cannot promote themselves by editing it. A subject-bearing cookie whose
 /// slot decodes to neither shape is REFUSED (the session reads as invalid, the user re-authenticates):
@@ -44,7 +48,9 @@ namespace PerformanceMonitor.Darling.Service.Hosting;
 /// </summary>
 /// <param name="AllowedTagIds">The scoped reader's server tag ids, or null for every other seat. The tag tree and the tag map are read
 /// on each request, so a tag change applies to the next request without a new sign-in.</param>
-internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null, IReadOnlyList<int>? AllowedTagIds = null, Guid? GroupId = null, Guid? GroupGeneration = null)
+/// <param name="SessionExpiresAt">When the session cookie that carried this request ends (its signed expiry, whole seconds), or null for a request
+/// admitted with no cookie.</param>
+internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? OwnerKey = null, string? TokenName = null, IReadOnlyList<int>? AllowedTagIds = null, Guid? GroupId = null, Guid? GroupGeneration = null, string? DisplayName = null, string? GrantedBy = null, DateTimeOffset? SessionExpiresAt = null)
 {
     /// <summary>The shared-token seat: full edit reach, exactly what the token granted before per-user identity
     /// existed.</summary>
@@ -90,13 +96,15 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
         return seat.CanEdit ? ReadsOnly : seat;
     }
 
-    /// <summary>Seat-encoding prefixes inside the session cookie's subject slot. Versioned (<c>o1</c>, <c>o2</c>) so a
+    /// <summary>Seat-encoding prefixes inside the session cookie's subject slot. Versioned (<c>o1</c>, <c>o2</c>, <c>o3</c>) so a
     /// future shape can coexist with cookies already in browsers instead of signing everyone out. <c>o1</c> carries no
-    /// owner key and is only ever read; sign-in writes <c>o2</c> (#6214).</summary>
+    /// owner key and <c>o2</c> no display name or grant; both are only ever read. Sign-in writes <c>o3</c> (#6214, #8737).</summary>
     private const string AdminPrefix = "o1:a:";
     private const string ViewerPrefix = "o1:v:";
     private const string AdminPrefixV2 = "o2:a:";
     private const string ViewerPrefixV2 = "o2:v:";
+    private const string AdminPrefixV3 = "o3:a:";
+    private const string ViewerPrefixV3 = "o3:v:";
 
     /// <summary>The prefix of a named web token's cookie subject (#7735): <c>t1:{name}</c>, the name alone.</summary>
     private const string TokenPrefix = "t1:";
@@ -104,9 +112,83 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// <summary>The length of an owner key: base64url (no padding) of a SHA-256 hash is 43 characters. It has no <c>:</c>.</summary>
     internal const int OwnerKeyLength = 43;
 
-    /// <summary>The longest raw subject that still fits the cookie's <c>MaxSessionSubjectLength</c> once the
-    /// seat prefix, the owner key and its separator are prepended. Enforced at sign-in with a REFUSAL, mirroring the cookie's own rule.</summary>
-    internal const int MaxSubjectLength = Mcp.DarlingWebHostService.MaxSessionSubjectLength - 5 - OwnerKeyLength - 1;
+    /// <summary>The longest raw subject sign-in accepts, fixed at 207 characters (it was the room left in the 256-character cookie slot
+    /// by the <c>o2</c> prefix, the owner key and its separator). It no longer follows <c>MaxSessionSubjectLength</c>, which grew to
+    /// make room for the <c>o3</c> display name and grant: <c>MaxSessionSubjectLength</c> = 5 + 43 + 1 + 171 + 1 + 171 + 1 +
+    /// <c>MaxSubjectLength</c>. Enforced at sign-in with a REFUSAL, mirroring the cookie's own rule.</summary>
+    internal const int MaxSubjectLength = 207;
+
+    /// <summary>The most UTF-8 bytes a display name or a granting role value keeps in the <c>o3</c> slot (base64url: 171 characters).
+    /// See <see cref="CapDisplayField"/>.</summary>
+    internal const int DisplayFieldMaxBytes = 128;
+
+    /// <summary>Cuts a display-only field to at most <see cref="DisplayFieldMaxBytes"/> UTF-8 bytes at a text-element boundary
+    /// (<see cref="StringInfo"/>), so a flag, a ZWJ emoji sequence or a letter with its combining mark is never split. Null stays null.
+    /// Only for display fields: a subject is refused, never cut.</summary>
+    internal static string? CapDisplayField(string? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        var bytes = 0;
+        var end = 0;
+        while (end < value.Length)
+        {
+            var length = StringInfo.GetNextTextElementLength(value, end);
+            bytes += Encoding.UTF8.GetByteCount(value.AsSpan(end, length));
+            if (bytes > DisplayFieldMaxBytes)
+            {
+                break;
+            }
+
+            end += length;
+        }
+
+        return end == value.Length ? value : value.Substring(0, end);
+    }
+
+    private static string EncodeSegment(string? value)
+        => string.IsNullOrEmpty(value)
+            ? string.Empty
+            : Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    /* An empty segment is null. False when the segment is not base64url or does not decode to valid UTF-8. */
+    private static bool TryDecodeSegment(ReadOnlySpan<char> segment, out string? value)
+    {
+        value = null;
+        if (segment.IsEmpty)
+        {
+            return true;
+        }
+
+        if (!IsBase64Url(segment) || segment.Length % 4 == 1)
+        {
+            return false;
+        }
+
+        var b64 = segment.ToString().Replace('-', '+').Replace('_', '/');
+        b64 = (b64.Length % 4) switch
+        {
+            2 => b64 + "==",
+            3 => b64 + "=",
+            _ => b64,
+        };
+        try
+        {
+            value = new System.Text.UTF8Encoding(false, true).GetString(Convert.FromBase64String(b64));
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>
     /// The stable owner key of a signed-in person (#6214): base64url(SHA-256(issuer + "\n" + sub)) of the validated ID token. The display
@@ -155,9 +237,11 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     internal static bool IsSignedInAdmin(HttpContext context)
         => context.Items.TryGetValue(HttpContextItemKey, out var value) && value is DarlingWebSeat { CanEdit: true };
 
-    /// <summary>Encodes an OIDC seat for the session cookie's subject slot. With an owner key it writes the <c>o2</c> shape
-    /// (<c>o2:a:{ownerKey}:{subject}</c>); without one the <c>o1</c> shape an older build wrote.</summary>
-    internal static string EncodeCookieSubject(string subject, WebOidcRole role, string? ownerKey = null)
+    /// <summary>Encodes an OIDC seat for the session cookie's subject slot. With an owner key it writes the <c>o3</c> shape
+    /// (<c>o3:a:{ownerKey}:{b64u(displayName)}:{b64u(grantedBy)}:{subject}</c>, an empty segment meaning null); without one the <c>o1</c>
+    /// shape an older build wrote (which has no room for a name or a grant). <c>o2</c> is no longer written. The caller caps the name and
+    /// the grant with <see cref="CapDisplayField"/>.</summary>
+    internal static string EncodeCookieSubject(string subject, WebOidcRole role, string? ownerKey = null, string? displayName = null, string? grantedBy = null)
     {
         if (role is not (WebOidcRole.Admin or WebOidcRole.Viewer))
         {
@@ -167,7 +251,7 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
         var admin = role == WebOidcRole.Admin;
         return ownerKey is null
             ? (admin ? AdminPrefix : ViewerPrefix) + subject
-            : (admin ? AdminPrefixV2 : ViewerPrefixV2) + ownerKey + ":" + subject;
+            : (admin ? AdminPrefixV3 : ViewerPrefixV3) + ownerKey + ":" + EncodeSegment(displayName) + ":" + EncodeSegment(grantedBy) + ":" + subject;
     }
 
     /// <summary>Encodes a named web token's seat for the session cookie's subject slot (#7735): <c>t1:{name}</c>.</summary>
@@ -178,7 +262,7 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
 
     /// <summary>
     /// Resolves a validated session cookie's subject slot to a seat. Null (the two-segment shared-token
-    /// cookie) is the shared-token seat; a recognized <c>o1:</c> or <c>o2:</c> encoding is that OIDC seat (<c>o1</c> with no owner key); a
+    /// cookie) is the shared-token seat; a recognized <c>o1:</c>, <c>o2:</c> or <c>o3:</c> encoding is that OIDC seat (<c>o1</c> with no owner key, <c>o1</c> and <c>o2</c> with no display name or grant; a malformed <c>o3</c> is refused); a
     /// <c>t1:</c> encoding is a named web token's seat, handed back READ-ONLY with <see cref="TokenName"/> set, for the middleware to look up
     /// in the live token set (an unknown name is then no seat at all); anything else is
     /// FALSE — treat the session as invalid and re-authenticate. Only sign-in ever writes this slot, so an
@@ -224,6 +308,38 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
             return true;
         }
 
+        foreach (var (prefix, canEdit) in new[] { (AdminPrefixV3, true), (ViewerPrefixV3, false) })
+        {
+            if (!cookieSubject.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            /* o3:{a|v}:{ownerKey}:{name}:{grant}:{subject}. The key is exactly OwnerKeyLength base64url characters; name and grant are
+               base64url (possibly empty, never containing ':'); the subject is whatever follows the fifth separator, non-empty, and may contain ':'. */
+            var rest = cookieSubject.AsSpan(prefix.Length);
+            if (rest.Length > OwnerKeyLength + 1 && rest[OwnerKeyLength] == ':' && IsBase64Url(rest.Slice(0, OwnerKeyLength)))
+            {
+                var tail = rest.Slice(OwnerKeyLength + 1);
+                var nameEnd = tail.IndexOf(':');
+                if (nameEnd >= 0)
+                {
+                    var afterName = tail.Slice(nameEnd + 1);
+                    var grantEnd = afterName.IndexOf(':');
+                    if (grantEnd >= 0 && afterName.Length > grantEnd + 1 &&
+                        TryDecodeSegment(tail.Slice(0, nameEnd), out var displayName) &&
+                        TryDecodeSegment(afterName.Slice(0, grantEnd), out var grantedBy))
+                    {
+                        seat = new DarlingWebSeat(afterName.Slice(grantEnd + 1).ToString(), canEdit, rest.Slice(0, OwnerKeyLength).ToString(),
+                            DisplayName: displayName, GrantedBy: grantedBy);
+                        return true;
+                    }
+                }
+            }
+
+            break;
+        }
+
         foreach (var (prefix, canEdit) in new[] { (AdminPrefixV2, true), (ViewerPrefixV2, false) })
         {
             if (!cookieSubject.StartsWith(prefix, StringComparison.Ordinal))
@@ -262,7 +378,7 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// <summary>
     /// The group-level write gate: may THIS seat make THIS request? Pure over (seat, method, path) so the
     /// matrix pins without a server. An edit seat may do anything. A read-only seat gets every safe method,
-    /// plus exactly one unsafe-method exception: <c>POST /api/compose/run</c>, which is read-only by
+    /// plus three unsafe-method exceptions, each a POST matched exactly. The first is <c>POST /api/compose/run</c>, which is read-only by
     /// construction (it compiles a panel spec into bound SELECTs on the viewer-role pool — the SPA runs every
     /// custom-view panel through it, so blocking it would break the read surface the viewer seat exists to
     /// grant). Everything else non-GET is refused — INCLUDING write endpoints that do not exist yet, which is
@@ -272,6 +388,10 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
     /// A grant gives the approve power to a person whatever the role of their sign-in, so the press endpoint, not this gate, decides: a seat
     /// that cannot edit presses only as the enabled person its key maps to, and the press API checks that person's grant. A seat with no
     /// owner key (the reads-only shared token, a front door's viewer, an older cookie) names nobody and stays refused here.</para>
+    /// <para>The third (#8737): a seat signed in with an <see cref="OwnerKey"/> may POST <c>/api/mcp-tokens</c> and
+    /// <c>/api/mcp-tokens/{id}/revoke</c>, matched exactly (<see cref="IsPersonalTokenWritePath"/>), to make and revoke their own personal MCP
+    /// tokens. The route decides the rest: a read-only seat makes <c>reader</c> tokens only, revokes only its own, and is held by the per-person
+    /// cap and the 24-hour create ceiling. A seat with no owner key stays refused here.</para>
     /// </summary>
     internal static bool IsRequestAllowed(DarlingWebSeat seat, string method, string path)
     {
@@ -291,7 +411,50 @@ internal sealed record DarlingWebSeat(string? Subject, bool CanEdit, string? Own
         }
 
         return string.Equals(path, "/api/compose/run", StringComparison.OrdinalIgnoreCase)
-            || (seat.OwnerKey is not null && IsProposalPressPath(path));
+            || (seat.OwnerKey is not null && (IsProposalPressPath(path) || IsPersonalTokenWritePath(path)));
+    }
+
+    /// <summary>True for exactly <c>/api/mcp-tokens</c> or <c>/api/mcp-tokens/{id}/revoke</c>, the id 16 lowercase hex characters, with no
+    /// other segment and no trailing slash (#8737). A person signed in with an owner key makes and revokes their own personal MCP tokens whatever
+    /// the role of their sign-in; the route, not this gate, decides which role a token may take and whose token may be revoked.</summary>
+    internal static bool IsPersonalTokenWritePath(string path)
+    {
+        const string Route = "/api/mcp-tokens";
+        if (string.Equals(path, Route, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        const string Suffix = "/revoke";
+        if (!path.StartsWith(Route + "/", StringComparison.OrdinalIgnoreCase) || !path.EndsWith(Suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var start = Route.Length + 1;
+        var length = path.Length - Suffix.Length - start;
+        return length == PersonalTokenIdLength && IsPersonalTokenId(path.Substring(start, length));
+    }
+
+    private const int PersonalTokenIdLength = 16;
+
+    /// <summary>True for a personal token id: 16 lowercase hex characters.</summary>
+    internal static bool IsPersonalTokenId(string? id)
+    {
+        if (id is null || id.Length != PersonalTokenIdLength)
+        {
+            return false;
+        }
+
+        foreach (var c in id)
+        {
+            if (!(c is >= '0' and <= '9' or >= 'a' and <= 'f'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>True for exactly <c>/api/proposals/{id}/first-press</c> or <c>/api/proposals/{id}/confirm</c>, the id a GUID in its hyphenated

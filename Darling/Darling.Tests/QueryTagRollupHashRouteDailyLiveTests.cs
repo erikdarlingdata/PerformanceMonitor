@@ -30,7 +30,8 @@ namespace Darling.Tests;
 /// executions are all within 12 hours of the window end: a row first executed later than that is dropped by the wide statement's
 /// <c>first_execution_time</c> bound and kept by the tables, the one difference (see <see cref="QueryTagRollupHashRoute"/>). The seed is nine days of
 /// wide rows for four servers (a stamp every 20 minutes, six queries, two plans, a NULL hash, products past a bigint), every hour and every
-/// whole day built, the anchored end (<see cref="LiveClock.AnchoredEnd"/>) 22:00 yesterday, so the newest day is open.
+/// whole day built, the anchored end (<see cref="LiveClock.AnchoredEndNotAfterNow"/>) 22:00 on the day before the earlier of the test clock and the
+/// real clock, so the newest day is open and the tool's <c>as_of</c> is never after the real clock.
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test reaches DARLING_TEST_PG only to CREATE and DROP its
    own database through ScratchPostgres and works entirely inside it, so it never touches the shared database and cannot race the
@@ -49,7 +50,7 @@ public sealed class QueryTagRollupHashRouteDailyLiveTests
 
     private sealed record Arranged(ScratchPostgres Scratch, NpgsqlConnection Connection, NpgsqlDataSource Source, DateTime HourNow)
     {
-        /// <summary>The newest UTC midnight before the anchored end (yesterday 00:00): the day of the open hours.</summary>
+        /// <summary>The newest UTC midnight before the anchored end (00:00 of the anchor's day): the day of the open hours.</summary>
         public DateTime Newest => HourNow.Date;
 
         /// <summary>The window end, past the coverage claim's applied_through (30 minutes into the open hour), as the gate wants.</summary>
@@ -95,7 +96,7 @@ public sealed class QueryTagRollupHashRouteDailyLiveTests
         var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        var hourNow = LiveClock.AnchoredEnd();
+        var hourNow = LiveClock.AnchoredEndNotAfterNow();
         foreach (var server in Servers)
         {
             await ComposeStampLiveSupport.EnrollAsync(connection, server, hourNow, ct);

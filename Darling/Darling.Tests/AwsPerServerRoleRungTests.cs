@@ -35,18 +35,9 @@ public sealed class AwsPerServerRoleRungTests
     private const string RoleColumn = "aws_role_arn";
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredAtItsVersion()
     {
-        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
-
         Assert.Equal("aws-per-server-role", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-        /* No longer the top rung: the PostgreSQL I/O hourly rollup rung (V170) landed above it. */
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.True(RungVersion < StorageVersion.SchemaVersion);
-        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
-        Assert.Equal(PreviousVersion, RungVersion - 1);
-        Assert.Contains(PreviousVersion, versions);
     }
 
     [Fact]

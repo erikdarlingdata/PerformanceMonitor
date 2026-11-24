@@ -104,7 +104,8 @@ public sealed partial class DarlingWorker : BackgroundService
        finish-to-start tick, so the delivered count sits just under that) at ~2.5 s each is ~11.9 min/day of
        this loop's wall time, of which the ~2% that crossed 5 s were the only part that logged anything. */
     private static readonly TimeSpan s_diskCheckInterval = TimeSpan.FromMinutes(5);
-    /// <summary>#7368: the Store Autovacuum Behind read runs hourly, and the alert needs it true twice in a row.</summary>
+    /// <summary>#7368: the Store Autovacuum Behind read runs hourly, and the alert needs it true twice in a row. The Store Vacuum
+    /// Stalled read (#8950) runs on the same stamp.</summary>
     private static readonly TimeSpan s_autovacuumCheckInterval = TimeSpan.FromHours(1);
 
     /* The custom-alert-rule health check's cadence (fleet-level, #3304). An integrity heuristic, not an urgent
@@ -360,7 +361,8 @@ public sealed partial class DarlingWorker : BackgroundService
     /// are on the steps. The two that are worth an operator's attention: the compression ENABLE statements
     /// (<c>ALTER TABLE ... SET (timescaledb.compress ...)</c>, inside
     /// <see cref="TimescaleSupport.ApplyCompressionPolicyAsync"/> and
-    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/>) take an ACCESS EXCLUSIVE lock even
+    /// <see cref="TimescaleSupport.EnsureCollectionLogHypertableAsync"/> and
+    /// <see cref="TimescaleSupport.EnsureAttentionEventsCompressionAsync"/>) take an ACCESS EXCLUSIVE lock even
     /// when they change nothing, so since #3817 each is issued only for a table whose compression settings
     /// differ from what the product wants, and a converged store's pass issues none. collection_log's waits at
     /// most <see cref="TimescaleSupport.HourlyDdlLockTimeout"/> for its lock (#4951). The summary
@@ -384,7 +386,17 @@ public sealed partial class DarlingWorker : BackgroundService
         new("collection_log hypertable", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
             async (connection, logger, ct) => await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, logger, ct) ? 1 : 0),
 
-        /* #1778: AFTER both compression steps, so it covers collection_log in the same pass. Selects only
+        /* #9349: the two per-snapshot object usage chain tables are outside the collector catalog too. Hypertable, compression settings and policy,
+           the same width and age as index_object_stats, the ALTER only when the settings differ. */
+        new("object usage chain hypertables", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
+            async (connection, logger, ct) => await TimescaleSupport.EnsureObjectUsageHypertablesAsync(connection, logger, ct) ? 1 : 0),
+
+        /* #9216: attention_events is a hypertable (#8967) in the catalog but off the compression grid, so the sweep above never
+           reaches it either. Its settings and policy, the ALTER only when the settings differ and with a bounded lock wait. */
+        new("attention_events compression", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.InPlace,
+            async (connection, logger, ct) => await TimescaleSupport.EnsureAttentionEventsCompressionAsync(connection, logger, ct) ? 1 : 0),
+
+        /* #1778: AFTER all the compression steps, so it covers collection_log and attention_events in the same pass. Selects only
            policies whose cadence or phase DIFFERS — no rows, no DDL, on a converged store. */
         new("compression schedule converge", StoreObjectConvergenceStage.Timescale, StoreObjectChangeSignal.Delta,
             (connection, logger, ct) => TimescaleSupport.ConvergeCompressionScheduleAsync(connection, logger, ct)),
@@ -484,7 +496,7 @@ public sealed partial class DarlingWorker : BackgroundService
            Then create every missing day through today + 3 (the DEFAULT drain is the default) and drop whole expired
            days (and the legacy table once it is bounded below the cutoff). No ANALYZE here: the daily one is the
            background task's, because it samples the 91 GB legacy table too on PostgreSQL 16 and 17. Catalog-only, 5 s
-           lock_timeout per DDL, no sleeping. Last in the list and in the Tuning segment, so on the start path it runs
+           lock_timeout per DDL, no sleeping. Last in the Tuning segment, so on the start path it runs
            BEFORE the collectors and every hour after that, inside this pass's budget: one lock timeout costs an hour,
            not the 24 h purge's day. One table's failure never stops the other; a failure is thrown after both ran so
            the pass counts it. Counted as a delta: partitions created or dropped, and an arm, re-arm or promotion. */
@@ -500,6 +512,15 @@ public sealed partial class DarlingWorker : BackgroundService
 
                 return pass.Changed;
             }),
+
+        /* #9274: LAST in the list, so a budget cut can skip no step after it, and on the hourly pass only (the start path carries the
+           compression catch-up and runs nothing here). A chunk of a rollup written once by its refresh can keep zero all-visible pages for
+           days when its one autovacuum ran beside an old open snapshot, and autovacuum never returns to it. One catalog read; a VACUUM only
+           for a chunk that lags, paced like autovacuum, and none started after RollupVacuumStepBudget, so a settled store issues none and a
+           large one takes the rest next hour. Stage TimescaleAfterRepairLaunch only so a store without TimescaleDB skips it. */
+        new("rollup chunk visibility", StoreObjectConvergenceStage.TimescaleAfterRepairLaunch, StoreObjectChangeSignal.Delta,
+            (connection, logger, ct) => Task.FromResult(0),
+            (connection, logger, ct) => TimescaleSupport.EnsureRollupChunkVisibilityAsync(connection, logger, cancellationToken: ct)),
     };
 
     /// <summary>What one convergence pass did, accumulated across its segments so the start path's three
@@ -639,11 +660,24 @@ public sealed partial class DarlingWorker : BackgroundService
     internal Func<string, string?>? RunOneRefusalOverride { get; set; }
 
     /// <summary>
+    /// Test seam (#8891): with <see cref="RunOneBodyOverride"/> set and no refusal answer, a non-null message here stands for
+    /// that collector's statement timing out (an ERROR run with this message, which carries the run's own elapsed time as
+    /// the real one does). The override's run is recorded the way the real run's outcome is, so the backoff sees it.
+    /// </summary>
+    internal Func<string, string?>? RunOneTimeoutOverride { get; set; }
+
+    /// <summary>
     /// Test seam (#8361): the answer to whether the server with this id is a readable secondary for every Query Store database,
     /// which decides whether a <c>query_store_hints</c> slot runs. Null in production, which asks the store
     /// (<see cref="QueryStoreHintsStandsDownAsync"/>).
     /// </summary>
     internal Func<int, bool>? QueryStoreReadableSecondaryOverride { get; set; }
+
+    /// <summary>
+    /// Test seam (#9270): when set, stands for <see cref="TransitionalDatabaseRuns.RecaptureIsDue"/> over the stored <c>database_config</c>
+    /// captures of a server id. Null in production, which reads the store.
+    /// </summary>
+    internal Func<int, bool>? RecaptureDueOverride { get; set; }
 
     /// <summary>
     /// The fleet sweep gate (#5941), set once the collection loop builds it. A <c>snapshot_now</c> takes a permit from it
@@ -999,6 +1033,17 @@ public sealed partial class DarlingWorker : BackgroundService
     internal FleetSlotWaiters SlotWaiters => LazyInitializer.EnsureInitialized(ref _slotWaiters, static () => new FleetSlotWaiters());
 
     private FleetSlotWaiters? _slotWaiters;
+
+    /// <summary>#9192: the last bodies that held a fleet collection slot, each with its slowest collector run. A body that
+    /// waited past <see cref="DarlingCycleSkip.CauseFloorMs"/> for a slot names the longest of the bodies that held slots
+    /// meanwhile in the row it writes. Created on first use, like <see cref="SlotWaiters"/>. Internal so a test can read it.</summary>
+    internal FleetSlotHolds SlotHolds => LazyInitializer.EnsureInitialized(ref _slotHolds, static () => new FleetSlotHolds());
+
+    private FleetSlotHolds? _slotHolds;
+
+    /// <summary>Test seam (#9192): maps the time a body really waited for its fleet slot to the time it reports, so a test states
+    /// a wait past <see cref="DarlingCycleSkip.CauseFloorMs"/> without waiting that long. Null in production.</summary>
+    internal Func<TimeSpan, TimeSpan>? GateWaitedForTests { get; set; }
 
     /* How far past its budget an in-flight pass must be before the sweep starts reporting it. The
        ordinary overrun already gets the "exceeded Ns" warning; this is for the pass that ignored the
@@ -1551,7 +1596,7 @@ LIMIT 1";
         CancellationToken cancellationToken)
     {
         if (registry is null || !registry.ById.TryGetValue(serverId, out var server)) return null;
-        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.AnalysisInput, cancellationToken);
         using var command = new NpgsqlCommand(StoredEngineEditionSql, connection)
         { CommandTimeout = McpCommandDeadlines.ReadSeconds };
         command.Parameters.AddWithValue(serverId);
@@ -1781,6 +1826,18 @@ LIMIT 1";
     internal sealed class RunOutcome
     {
         public bool Succeeded { get; set; }
+
+        /// <summary>#9192: the run's monitored-server read and store write, in milliseconds, as the collection log records them.
+        /// Null when the run did not report them (it faulted, or never started).</summary>
+        public long? SqlMs { get; set; }
+
+        /// <summary>See <see cref="SqlMs"/>.</summary>
+        public long? StorageMs { get; set; }
+
+        /// <summary>#9270: for a successful <c>database_config</c> run, whether the stored captures say the collector is due again in minutes
+        /// (<see cref="TransitionalDatabaseRuns.RecaptureIsDue"/>). Null for every other run, and for a <c>database_config</c> run whose read of
+        /// the captures failed, which leaves the collector's schedule as it was.</summary>
+        public bool? RecaptureEarly { get; set; }
     }
 
     /// <summary>The failed-jobs list the body read from msdb at <paramref name="FetchedUtc"/> (#5642).</summary>
@@ -1823,9 +1880,9 @@ LIMIT 1";
            the old strict single-threaded invariant (INV-1) existed to protect from tearing. */
         public ConcurrentDictionary<string, DateTime> NextDue { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-        /* #6186: the collectors this server keeps refusing with the same answer, and how long each waits for its next try. In
-           memory, so a restart (and a changed definition, which clears NextDue beside it) tries every collector once at its
-           normal interval. */
+        /* #6186: the collectors this server keeps refusing with the same answer, or whose statement keeps timing out (#8891),
+           and how long each waits for its next try. In memory, so a restart (and a changed definition, which clears NextDue
+           beside it) tries every collector once at its normal interval. */
         public RefusedCollectorBackoff RefusedBackoff { get; } = new();
 
         /* The verdict of this server's last liveness probe (#4710), reused for the command timeouts that follow it within
@@ -1859,6 +1916,10 @@ LIMIT 1";
         public string? LastBodySlowestName;
         public long LastBodySlowestMs;
         public long LastGateWaitMs;
+
+        /* #9192: what held the fleet slots during the current body's wait, when the wait was past the cause floor and bodies
+           held slots meanwhile. Set with LastGateWaitMs when the body gets its slot, read by the same body's flush. */
+        public SlotHolder? LastGateWaitHolder;
 
         /* #5824: the last finished body's scheduled analysis pass length (0 when no pass ran in it), and how many analysis
            passes held fleet slots when the current body got its slot. LastBodyMs ends with the collectors, before the

@@ -244,7 +244,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var target = new AgentActionTarget(resolved.ServerId, resolved.ServerName, plan_id.ToString(CultureInfo.InvariantCulture), database_name.Trim());
 
             /* 1: SQL Server only. A PostgreSQL target is refused with its own reason, before the gate is asked, and the refusal is journaled. */
-            var (_, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (_, engineKind, _, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 var problem = InvestigationToolCore.ParseAgentAction(agent_action, out var parsed);
@@ -442,7 +442,7 @@ public sealed partial class DarlingMcpPlanForceTools
             }
 
             /* 2: SQL Server only. */
-            var (_, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (_, engineKind, _, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
             {
                 return await RefuseBeforeGateAsync(store, agent_action, tool, PostgresTarget,
@@ -534,7 +534,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var store = new InvestigationRequestStore(postgres, ServiceCommandDeadlines.SerialLoopSeconds, agentActionSource: owner);
 
             /* 1: the engine decides how the session is named. A PostgreSQL target has its own arm (pid plus start second from backend_id). */
-            var (engineEdition, engineKind, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
+            var (engineEdition, engineKind, _, _) = await DarlingEngineCapability.ReadServerEngineAsync(postgres, resolved.ServerId, ct);
             if (engineKind is not null && engineKind.Contains("postgres", StringComparison.OrdinalIgnoreCase))
                 return await RunKillPostgresAsync(owner, logger, store, resolved, session_id, backend_id, agent_action, dry_run, ct, agentTokenName, namedAgentNames);
 
@@ -1211,9 +1211,9 @@ SELECT EXISTS (SELECT 1 FROM v_dmv_blocking_snapshots WHERE server_id = $1 AND d
         new(AzureDatabaseExcluded, $"Database {database} is excluded in this server's entry, so Darling does not act in it. Nothing was run."
             + (string.IsNullOrEmpty(guidance) ? "" : " " + guidance));
 
-    /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632).</summary>
+    /// <summary>Whether the server entry's excluded list names <paramref name="database"/>: entries are compared trimmed, and without regard to case (#5632). An entry holding <c>*</c> is a pattern (#9050).</summary>
     internal static bool IsExcludedDatabase(string[]? excluded, string database) =>
-        excluded is not null && excluded.Any(e => string.Equals(e?.Trim(), database, StringComparison.OrdinalIgnoreCase));
+        PerformanceMonitor.Common.DatabaseNamePattern.MatchesAnyTrimmed(excluded, database);
 
     internal const string AzureDatabaseRequiredMessage =
         "This server is an Azure SQL Database, where a session is reached only from inside its own database: pass database_name, the database_name of the get_blocking row you read (never master). Nothing was run.";

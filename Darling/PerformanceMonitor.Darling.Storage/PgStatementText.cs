@@ -9,8 +9,12 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -370,17 +374,79 @@ LIMIT $1";
     }
 
     /// <summary>
+    /// The <c>collect.collector_state</c> key (under <see cref="CollectorName"/>) that holds the naive-UTC time of a server's
+    /// last successful text fetch (#8988), written by <see cref="WriteFetchAsync"/> in <see cref="MarkerFormat"/>.
+    /// </summary>
+    public const string FetchMarkerStateKey = "last_fetch";
+
+    /// <summary>The round-trip format of the fetch marker: ISO 8601 with seven fractional digits and no zone, which the
+    /// store's <c>::timestamp</c> cast reads back exactly.</summary>
+    public const string MarkerFormat = "O";
+
+    /// <summary>
     /// Whether this server is due a text fetch — asked of the STORE rather than remembered in the service, so a
     /// restart does not re-fetch the whole fleet and two hosts cannot disagree about when they last wrote.
     ///
-    /// <para>Returns true when the server has no rows at all (the first fetch) or its newest row is older than
-    /// the interval. <c>$2</c> is the caller's naive-UTC now, passed in rather than read from <c>now()</c> so the
-    /// decision uses the same clock as the timestamps it writes — mixing the store's clock with the service's is
-    /// how a cadence check drifts by exactly the offset nobody measures.</para>
+    /// <para>Returns true when the server has no marker and no rows at all (the first fetch), or when its last fetch is
+    /// older than the interval. The last fetch is the server's marker (<see cref="FetchMarkerStateKey"/>) when it has one
+    /// (#8988: the upsert leaves an unchanged row's <c>last_seen</c> alone for up to
+    /// <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/> hours, so <c>last_seen</c> no longer says when the fetch
+    /// ran), and otherwise its newest <c>last_seen</c>, which is what the marker replaces and what an upgraded store holds
+    /// until its first fetch writes one. <c>$2</c> is the caller's naive-UTC now less the interval, passed in rather than
+    /// read from <c>now()</c> so the decision uses the same clock as the timestamps it writes — mixing the store's clock
+    /// with the service's is how a cadence check drifts by exactly the offset nobody measures.</para>
     /// </summary>
     public const string IsDueSql = @"SELECT COALESCE(
-    (SELECT max(last_seen) FROM collect.pg_statement_text WHERE server_id = $1) < $2::timestamp,
+    COALESCE(
+        (SELECT state_value::timestamp FROM collect.collector_state
+         WHERE server_id = $1 AND collector_name = '" + CollectorName + "' AND state_key = '" + FetchMarkerStateKey + @"'),
+        (SELECT max(last_seen) FROM collect.pg_statement_text WHERE server_id = $1)) < $2::timestamp,
     TRUE) AS is_due";
+
+    /// <summary>Writes the fetch marker: <c>$1</c> server id, <c>$2</c> the marker text (<see cref="MarkerFormat"/>),
+    /// <c>$3</c> the same time as <c>updated_at</c>.</summary>
+    public const string MarkerUpsertSql = @"INSERT INTO collect.collector_state (server_id, collector_name, state_key, state_value, updated_at)
+VALUES ($1, '" + CollectorName + "', '" + FetchMarkerStateKey + @"', $2, $3)
+ON CONFLICT (server_id, collector_name, state_key)
+DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at";
+
+    /// <summary>
+    /// Stores one fetch (#8988): the batch upsert (<see cref="UpsertSql"/>), then the server's fetch marker, so the due
+    /// check measures from the fetch and not from <c>last_seen</c>. The marker follows the upsert, so a fetch whose upsert
+    /// failed leaves the old marker and is retried at the next pass. Returns the rows the upsert wrote, which is fewer than the
+    /// rows fetched when the guard skipped unchanged ones.
+    /// </summary>
+    public static async Task<int> WriteFetchAsync(
+        NpgsqlDataSource postgres, int serverId, IReadOnlyList<long> queryIds, IReadOnlyList<string> texts,
+        IReadOnlyList<string?> ownEntries, IReadOnlyList<string?> candidates, DateTime naiveNow,
+        int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        System.ArgumentNullException.ThrowIfNull(postgres);
+
+        var stamps = new DateTime[queryIds.Count];
+        Array.Fill(stamps, naiveNow);
+
+        int written;
+        await using (var upsert = postgres.CreateCommand(UpsertSql))
+        {
+            upsert.CommandTimeout = commandTimeoutSeconds;
+            upsert.Parameters.AddWithValue(Enumerable.Repeat(serverId, queryIds.Count).ToArray());
+            upsert.Parameters.AddWithValue(queryIds.ToArray());
+            upsert.Parameters.AddWithValue(texts.ToArray());
+            upsert.Parameters.AddWithValue(stamps);
+            upsert.Parameters.AddWithValue(ownEntries.ToArray());
+            upsert.Parameters.AddWithValue(candidates.ToArray());
+            written = await upsert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var marker = postgres.CreateCommand(MarkerUpsertSql);
+        marker.CommandTimeout = commandTimeoutSeconds;
+        marker.Parameters.AddWithValue(serverId);
+        marker.Parameters.AddWithValue(naiveNow.ToString(MarkerFormat, CultureInfo.InvariantCulture));
+        marker.Parameters.AddWithValue(naiveNow);
+        await marker.ExecuteNonQueryAsync(cancellationToken);
+        return written;
+    }
 
     /// <summary>
     /// Upserts a batch. <c>first_seen</c> is preserved on conflict — it records when this statement shape was
@@ -397,28 +463,52 @@ LIMIT $1";
     /// text is stable in practice, but not by guarantee across versions — and if it ever differs, the newer text
     /// is the one that matches the stats being collected now.</para>
     ///
+    /// <para><b>An unchanged row is not written (#8988).</b> <c>last_seen</c> is indexed twice, so no update of it can be HOT, and
+    /// restamping every statement still in the target's view each hour rewrote the whole table and both indexes (about 236 K
+    /// non-HOT updates an hour on a 5 M row table). A row is now written only when its <c>query_text</c> or <c>own_entries</c>
+    /// differs (<c>IS DISTINCT FROM</c>, so a NULL on either side counts as a difference only when the other is not NULL, and
+    /// <c>own_entries</c> compares as <c>jsonb</c>) or when its <c>last_seen</c> is more than
+    /// <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/> hours behind the batch. The same test sits twice: in the select
+    /// list's filter, so an unchanged row never reaches the insert and takes no row lock, and in the conflict arm, which decides
+    /// when a concurrent writer got there first. The prune's horizon is at least 32 days
+    /// (<see cref="PruneMarginDays"/> past the 30-day baseline floor), so a live statement's <c>last_seen</c>, at most this guard
+    /// stale, is far inside it. Nothing else reads <c>last_seen</c> as the time of the fetch: the due check reads the fetch marker
+    /// (<see cref="IsDueSql"/>).</para>
+    ///
     /// <para>Ordered by the conflict key for the #1801 reason <see cref="QueryStorePlanMap.UpsertSql"/> gives:
     /// concurrent batch upserts taking row locks in different relative orders deadlock, and this runs per server
     /// across a fleet. Cheap to keep, expensive to rediscover.</para>
     /// </summary>
-    public const string UpsertSql = @"INSERT INTO collect.pg_statement_text
+    public static readonly string UpsertSql = @"INSERT INTO collect.pg_statement_text
     (server_id, queryid, query_text, first_seen, last_seen, own_entries)
-SELECT batch.server_id, batch.queryid, batch.query_text, batch.stamped, batch.stamped,
-       (SELECT jsonb_agg(DISTINCT e.entry)
-        FROM (SELECT jsonb_array_elements(batch.own_entries::jsonb) AS entry
-              UNION ALL
-              SELECT k.entry FROM jsonb_array_elements(stored.own_entries) AS k(entry)
-              WHERE batch.candidates::jsonb @> jsonb_build_array(k.entry)) AS e)
-FROM unnest($1::integer[], $2::bigint[], $3::text[], $4::timestamp[], $5::text[], $6::text[])
-     AS batch(server_id, queryid, query_text, stamped, own_entries, candidates)
-LEFT JOIN collect.pg_statement_text AS stored
-       ON stored.server_id = batch.server_id AND stored.queryid = batch.queryid
+SELECT x.server_id, x.queryid, x.query_text, x.stamped, x.stamped, x.own_entries
+FROM (
+    SELECT batch.server_id, batch.queryid, batch.query_text, batch.stamped,
+           (SELECT jsonb_agg(DISTINCT e.entry)
+            FROM (SELECT jsonb_array_elements(batch.own_entries::jsonb) AS entry
+                  UNION ALL
+                  SELECT k.entry FROM jsonb_array_elements(stored.own_entries) AS k(entry)
+                  WHERE batch.candidates::jsonb @> jsonb_build_array(k.entry)) AS e) AS own_entries,
+           stored.queryid AS stored_queryid, stored.query_text AS stored_text,
+           stored.own_entries AS stored_own_entries, stored.last_seen AS stored_last_seen
+    FROM unnest($1::integer[], $2::bigint[], $3::text[], $4::timestamp[], $5::text[], $6::text[])
+         AS batch(server_id, queryid, query_text, stamped, own_entries, candidates)
+    LEFT JOIN collect.pg_statement_text AS stored
+           ON stored.server_id = batch.server_id AND stored.queryid = batch.queryid
+) AS x
+WHERE x.stored_queryid IS NULL
+   OR x.query_text IS DISTINCT FROM x.stored_text
+   OR x.own_entries IS DISTINCT FROM x.stored_own_entries
+   OR x.stored_last_seen < x.stamped - " + PayloadDimensions.LastSeenRefreshGuardInterval + @"
 ORDER BY server_id, queryid
 ON CONFLICT (server_id, queryid) DO UPDATE SET
     query_text = EXCLUDED.query_text,
     own_entries = EXCLUDED.own_entries,
     last_seen = EXCLUDED.last_seen
-WHERE EXCLUDED.last_seen >= pg_statement_text.last_seen";
+WHERE EXCLUDED.last_seen >= pg_statement_text.last_seen
+AND   (pg_statement_text.query_text IS DISTINCT FROM EXCLUDED.query_text
+       OR pg_statement_text.own_entries IS DISTINCT FROM EXCLUDED.own_entries
+       OR pg_statement_text.last_seen < EXCLUDED.last_seen - " + PayloadDimensions.LastSeenRefreshGuardInterval + @")";
 
     /// <summary>
     /// Strips the <see cref="DateTimeKind"/> before binding to any <c>::timestamp</c> parameter here — the #1969
@@ -454,8 +544,9 @@ WHERE EXCLUDED.last_seen >= pg_statement_text.last_seen";
     /// time-sliced like every sibling purge so one sweep cannot take an unbounded lock.
     ///
     /// <para>Timestamp-driven, NOT an anti-join against <c>pg_statement_stats</c>. The anti-join is the cost this
-    /// shape avoids, and it is unnecessary because every fetch refreshes <c>last_seen</c> for everything still in
-    /// the target's <c>pg_stat_statements</c> — so a statement that falls out of the view stops being touched and
+    /// shape avoids, and it is unnecessary because a fetch keeps <c>last_seen</c> within
+    /// <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/> hours of now for everything still in the target's
+    /// <c>pg_stat_statements</c> (#8988) — so a statement that falls out of the view stops being touched and
     /// ages out on its own.</para>
     /// </summary>
     public static string PruneSql(int chunkIntervalDays) =>

@@ -77,7 +77,7 @@ public sealed class McpPvsTools
 
                 /* #5244: every answer shape says which database it was limited to (null for every database). */
                 var notCollected = McpHelpers.WithDatabase(
-                    await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.DisplayName, "pvs_stats", awsRdsKind: AwsRdsKind.None),
+                    await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "pvs_stats"),
                     McpDatabaseSelection.Describe(names));
                 if (notCollected != null) return notCollected;
 

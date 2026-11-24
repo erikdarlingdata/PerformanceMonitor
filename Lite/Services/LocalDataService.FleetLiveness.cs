@@ -25,6 +25,7 @@ public partial class LocalDataService
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = collectorName });
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = windowStartUtc });
         command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = windowEndUtc });
+        command.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = CollectorFleetLiveness.BandWindowStart(windowEndUtc) });
 
         var rows = new List<CollectorFleetLiveness.RunFacts>();
         using var reader = await command.ExecuteReaderAsync();
@@ -37,7 +38,14 @@ public partial class LocalDataService
                 ToInt64(reader.GetValue(3)),
                 ToInt64(reader.GetValue(4)),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6)));
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                ToInt64(reader.GetValue(7)),
+                ToInt64(reader.GetValue(8)),
+                ToInt64(reader.GetValue(9)),
+                reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+                reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+                ToInt64(reader.GetValue(13))));
         }
 
         return rows;

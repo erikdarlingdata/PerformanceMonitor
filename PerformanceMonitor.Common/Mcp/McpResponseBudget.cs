@@ -193,7 +193,21 @@ public static class McpResponseBudget
     /// the rows left out (#8568), a whole sentence, in place of the shared one: a ranked page keeps its heaviest rows,
     /// so fewer rows asked for returns the same ones, and the read names the filter that lists the lighter ones.
     /// </summary>
-    public static string CapPage(System.Text.Json.Nodes.JsonObject payload, string arrayKey, string order, string noun, string? remedy, int budgetBytes = DefaultBytes)
+    public static string CapPage(System.Text.Json.Nodes.JsonObject payload, string arrayKey, string order, string noun, string? remedy, int budgetBytes = DefaultBytes) =>
+        CapArray(payload, arrayKey, order, noun, remedy is null ? null : _ => remedy, budgetBytes, "truncated", "budget_note", null);
+
+    /// <summary>
+    /// The general form of <see cref="CapPage(System.Text.Json.Nodes.JsonObject, string, string, string, string?, int)"/> for a read whose own
+    /// payload already uses <c>truncated</c> (a limit cut) or <c>window_truncated</c>, or that carries counts of the array it cuts (#8812). The
+    /// cut is written under <paramref name="truncatedKey"/> and <paramref name="noteKey"/> (the fleet overview's <c>budget_truncated</c> and
+    /// <c>budget_note</c>), the remedy is built from the count that was kept (a trend names the bucket width that fits that many points), and
+    /// <paramref name="onKept"/> rewrites the payload's own counts for the rows kept. By default the rows left off are the last ones, so a ranked page
+    /// loses its lightest rows. With <paramref name="keepNewest"/> they are the FIRST ones instead and the rows kept are the last that fit, still in
+    /// their order: a trend loses its oldest points and keeps the newest, which a caller checking a recent change needs.
+    /// </summary>
+    public static string CapArray(
+        System.Text.Json.Nodes.JsonObject payload, string arrayKey, string order, string noun, Func<int, string?>? remedyForKept, int budgetBytes,
+        string truncatedKey, string noteKey, Action<System.Text.Json.Nodes.JsonObject, int>? onKept, bool keepNewest = false)
     {
         if (payload[arrayKey] is not System.Text.Json.Nodes.JsonArray page)
         {
@@ -206,13 +220,39 @@ public static class McpResponseBudget
         string Measure(int n)
         {
             var cut = n < inScope;
-            payload[arrayKey] = new System.Text.Json.Nodes.JsonArray(rowNodes.Take(n).Select(x => x?.DeepClone()).ToArray());
-            payload["truncated"] = cut;
-            payload["budget_note"] = !cut ? null : remedy is null ? PageCutNote(inScope, n, order, noun) : PageCutNote(inScope, n, order, noun, remedy);
+            payload[arrayKey] = new System.Text.Json.Nodes.JsonArray((keepNewest ? rowNodes.Skip(inScope - n) : rowNodes.Take(n)).Select(x => x?.DeepClone()).ToArray());
+            onKept?.Invoke(payload, n);
+            payload[truncatedKey] = cut;
+            var remedy = cut ? remedyForKept?.Invoke(n) : null;
+            payload[noteKey] = !cut ? null : remedy is null ? PageCutNote(inScope, n, order, noun) : PageCutNote(inScope, n, order, noun, remedy);
             return payload.ToJsonString(McpHelpers.JsonOptions);
         }
 
         var fit = RowsThatFit(inScope, n => System.Text.Encoding.UTF8.GetByteCount(Measure(n)), budgetBytes);
         return Measure(fit);
+    }
+
+    /// <summary>
+    /// <see cref="CapArray"/> for a reply that is already text and may be a status answer with no array (#9195): the analysis facts read
+    /// is finished (window notice attached) before it is cut, so the notice's own keys count against the budget. An answer that is not a
+    /// JSON object holding <paramref name="arrayKey"/> as an array is returned as it came.
+    /// </summary>
+    public static string CapArrayInReply(
+        string reply, string arrayKey, string order, string noun, Func<int, string?>? remedyForKept, string truncatedKey, string noteKey,
+        int budgetBytes = DefaultBytes)
+    {
+        System.Text.Json.Nodes.JsonNode? root;
+        try
+        {
+            root = System.Text.Json.Nodes.JsonNode.Parse(reply);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return reply;
+        }
+
+        return root is System.Text.Json.Nodes.JsonObject payload && payload[arrayKey] is System.Text.Json.Nodes.JsonArray
+            ? CapArray(payload, arrayKey, order, noun, remedyForKept, budgetBytes, truncatedKey, noteKey, null)
+            : reply;
     }
 }

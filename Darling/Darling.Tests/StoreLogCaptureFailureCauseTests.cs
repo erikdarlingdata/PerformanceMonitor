@@ -1,0 +1,47 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using Npgsql;
+using PerformanceMonitor.Darling.Service;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #9333: the store-log capture's warning names the cause the fault proves. A 58P01 is a store with no log folder
+/// (the compose store ran without logging_collector), and the old text blamed missing privileges for it.
+/// </summary>
+[Trait("Stage", "Guard")]
+public class StoreLogCaptureFailureCauseTests
+{
+    private static PostgresException Pg(string sqlState)
+        => new("boom", "ERROR", "ERROR", sqlState);
+
+    [Fact]
+    public void AMissingLogFolderIsNotBlamedOnPrivileges()
+    {
+        var missingFolder = DarlingWorker.StoreLogCaptureFailureCause(Pg(PostgresErrorCodes.UndefinedFile));
+        var denied = DarlingWorker.StoreLogCaptureFailureCause(Pg(PostgresErrorCodes.InsufficientPrivilege));
+
+        /* The privilege cause names the roles the read needs; the missing-folder cause must name none of them. */
+        Assert.NotEqual(denied, missingFolder);
+        Assert.DoesNotContain("pg_read_server_files", missingFolder, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_binary_file", missingFolder, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnyFaultButAMissingFolderKeepsThePrivilegeCause()
+    {
+        var denied = DarlingWorker.StoreLogCaptureFailureCause(Pg(PostgresErrorCodes.InsufficientPrivilege));
+
+        Assert.Equal(denied, DarlingWorker.StoreLogCaptureFailureCause(Pg(PostgresErrorCodes.QueryCanceled)));
+        Assert.Equal(denied, DarlingWorker.StoreLogCaptureFailureCause(new InvalidOperationException("x")));
+        Assert.Contains("pg_read_server_files", denied, StringComparison.Ordinal);
+    }
+}

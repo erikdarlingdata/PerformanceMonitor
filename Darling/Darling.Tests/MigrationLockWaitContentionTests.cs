@@ -230,7 +230,7 @@ public sealed class MigrationLockWaitContentionTests
 
                The budget is two orders of magnitude past the token's lifetime so that the token, not
                the budget, is what ends the wait — a budget near 250 ms would pass whether or not
-               cancellation works. It is 60 s rather than the shipped 1500 s because the failure mode
+               cancellation works. It is 60 s rather than the shipped 2400 s because the failure mode
                of a regression here is a HANG, and a minute is long enough to prove the point while
                capping what a broken build costs every CI run. */
             using var cancelSoon = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));

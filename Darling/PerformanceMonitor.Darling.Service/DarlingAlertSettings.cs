@@ -141,6 +141,8 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public bool ClientTimeoutsEnabled => _config.Alerts.ClientTimeoutsEnabled;
     public bool LongRunningQueryEnabled => _config.Alerts.LongRunningQueryEnabled;
     public bool TempDbSpaceEnabled => _config.Alerts.TempDbSpaceEnabled;
+    public bool TempDbLogSpaceEnabled => _config.Alerts.TempDbLogSpaceEnabled;
+    public bool TempDbGrowthFitEnabled => _config.Alerts.TempDbGrowthFitEnabled;
     public bool LowDiskEnabled => _config.Alerts.LowDiskEnabled;
     public bool LongRunningJobEnabled => _config.Alerts.LongRunningJobEnabled;
     public bool FailedJobEnabled => _config.Alerts.FailedJobEnabled;
@@ -150,6 +152,10 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /* #2157: ON with no store column yet — see AppAlertEngineSettings for the reasoning, including why a
        darling.json-only flag would not survive a store reload (ApplyToConfig swaps Alerts wholesale). */
     public bool ForcePlanFailureEnabled => true;
+
+    /* #8884: on by default, switched off in the store (V271 columns) or in darling.json, which seeds a fresh store. */
+    public bool InstanceRestartedEnabled => _config.Alerts.InstanceRestartedEnabled;
+    public bool MemoryDumpsEnabled => _config.Alerts.MemoryDumpsEnabled;
 
     public int CpuThresholdPercent => _config.Alerts.CpuThresholdPercent;
 
@@ -216,6 +222,7 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     public int CheckDbOverdueThresholdHours => DatabaseProtectionThresholdSettings.Clamp(_config.Alerts.CheckDbOverdueThresholdHours, DatabaseProtectionThresholdSettings.CheckDbHoursKey);
     public int LongRunningQueryThresholdMinutes => _config.Alerts.LongRunningQueryThresholdMinutes;
     public int TempDbSpaceThresholdPercent => _config.Alerts.TempDbSpaceThresholdPercent;
+    public int TempDbLogSpaceThresholdPercent => Math.Clamp(_config.Alerts.TempDbLogSpaceThresholdPercent, 1, 100);
     public int LowDiskThresholdPercent => Math.Clamp(_config.Alerts.LowDiskThresholdPercent, 0, 100);
     public int LowDiskThresholdGb => Math.Max(0, _config.Alerts.LowDiskThresholdGb);
 
@@ -232,6 +239,12 @@ public sealed class DarlingAlertSettings : IAlertEngineSettings, IAlertSettings
     /// a 4 TB store) stops paging CRITICAL. Zero removes the floor (the percent-only pre-#3528 condition);
     /// the 0-floor GB shape is <see cref="PvsFloorGb"/>'s, whose AND-qualifier composition this mirrors.</summary>
     public int SelfDiskFreeWarnGb => Math.Max(0, _config.Alerts.SelfDiskFreeWarnGb);
+
+    /// <summary>#9000: the Store Growth alert's switch and its two daily growth floors in GB, clamped on read like Store Disk Pressure's floor
+    /// (0 removes a floor).</summary>
+    public bool SelfStoreGrowthEnabled => _config.Alerts.SelfStoreGrowthEnabled;
+    public int SelfStoreGrowthFloorGb => Math.Max(0, _config.Alerts.SelfStoreGrowthFloorGb);
+    public int SelfStoreGrowthObjectFloorGb => Math.Max(0, _config.Alerts.SelfStoreGrowthObjectFloorGb);
     public int CollectionStaleMinutes => Math.Clamp(_config.Alerts.CollectionStaleMinutes, 5, 1440);
 
     /// <summary>#2136: the Store Job Over Cadence warning percent. Clamped [5, 100].

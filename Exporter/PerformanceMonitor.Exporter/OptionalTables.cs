@@ -268,6 +268,24 @@ public static class OptionalTables
         },
         new("servers", Collect, null, OptionalTableKind.Snapshot, [], Group7a, OptionalTableStatus.Candidate,
             "Daily snapshot: the exporter stamps snapshot_time and exports it only in the 00:00Z fresh window."),
+        new("attention_events", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Client-timeout events. All columns are exported, including statement_text and client_hostname, in clear: the owner ruled on 2026-11-19 to keep them, the same as the deadlock and blocked-process reports. " +
+            "Index (server_id, collection_time) serves the window read. #8967 makes it a hypertable on a store with the extension, outside the compression grid (CompressionOffGrid), with a compression policy of its own (#9216), so a window read of an older day decompresses only the batches whose collection_time range overlaps the window, not the whole chunk. " +
+            "The swapped-out attention_events_legacy and attention_events_legacy_copy tables are never read.")
+        {
+            MinDarlingSchemaVersion = 179,
+        },
+        new("column_stats", Collect, null, OptionalTableKind.Snapshot, [], Group7a, OptionalTableStatus.Blocked,
+            "Blocked(LATER): current-state rows replaced in place, no collection_time (read_at), so it would be a daily whole-table snapshot like servers. " +
+            "Its columns text[] has no DuckDbTypeMapper entry and the exporter has no array path, so a read would fail on that column.")
+        {
+            MinDarlingSchemaVersion = 272,
+        },
+        new("column_stats_runs", Collect, CollectionTime, OptionalTableKind.Window, [], Group7a, OptionalTableStatus.Candidate,
+            "Run log, one row per database per run, plain table. Index (server_id, collection_time) serves the window read.")
+        {
+            MinDarlingSchemaVersion = 272,
+        },
         new("query_snapshots", Collect, CollectionTime, OptionalTableKind.Window, [], Group7b, OptionalTableStatus.Blocked,
             "Blocked(LATER): inline query_plan/live_query_plan handled specially; live_query_plan is never selected, query_plan is parsed and dropped from the fact row."),
 
@@ -328,8 +346,8 @@ public static class OptionalTables
             Grain = ExportGrain.Hourly,
             RollupName = "pg_io_stats_hourly",
         },
-        new("pg_lock_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Blocked,
-            "Blocked(LATER): numeric/state only, small."),
+        new("pg_lock_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
+            "Numeric/state only, small. A one-hour read uses the collection_time index."),
         new("pg_log_events", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
             "Text-heavy: message/detail/context from the Postgres log; keep-only column list.")
         {

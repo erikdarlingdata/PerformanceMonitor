@@ -149,13 +149,14 @@ try {
       path.join(scratch, "editor.js"),
       fs.readFileSync(path.join(jsDir, "editor.js"), "utf8") + "\nexport { ensureFieldConfigs };\n"
     );
-    fs.writeFileSync(path.join(scratch, "compose.js"), "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\n");
+    fs.writeFileSync(path.join(scratch, "compose.js"), "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\nexport function forgetStoppedCells() {}\n");
   }
   if (alertNotebookScenario) {
     /* The alert notebook page draws no composed chart here, so compose.js (and the chart renderers it needs) is a stand-in with the names the page and the notebook editor import. */
     fs.writeFileSync(
       path.join(scratch, "compose.js"),
       "export function renderComposedPanelCard() { throw new Error('not drawn here'); }\n" +
+        "export function forgetStoppedCells() {}\n" +
         "export function cellRange() { return null; }\n" +
         "export function formatComposedValue(v) { return String(v); }\n" +
         'export { pinRangeLabel } from "./util.js";\n'
@@ -461,7 +462,7 @@ const scenarios = {
   floorClutter: () => tabFloor("queries", "get_query_store_clutter", {
     databases: [{ database_name: "db1" }],
     qs_overhead: { wait_stats: { included: [{ wait_type: "QDS_X" }] }, memory_clerk: { latest_memory_mb: 1 } },
-    window: { window_truncated: true, truncation_note: "nested: the raw tier starts later" },
+    window: { window_truncated: true, truncation_note: "nested: the raw tier starts later", plan_churn_effective_hours_back: 96, wait_effective_hours_back: 72 },
   }),
   // A hand-built composite over one read (File I/O).
   fileIoRefused: () => {

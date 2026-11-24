@@ -417,6 +417,62 @@ public sealed class DarlingWebOidcTests
     public void MapRole_Matrix(string[] claims, string[] admin, string[] viewer, string expected)
         => Assert.Equal(expected, DarlingWebOidc.MapRole(claims, admin, viewer).ToString());
 
+    [Fact]
+    public void MapRoleWithGrant_NamesTheFirstMatchingValue_InTheConfiguredOrder()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
+            new[] { "b-admins", "a-admins" }, new[] { "a-admins", "b-admins" }, null);
+        Assert.Equal("Admin", role.ToString());
+        Assert.Equal("a-admins", grantedBy);
+    }
+
+    [Fact]
+    public void MapRoleWithGrant_Viewer_NamesTheViewerValue()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
+            new[] { "readers" }, new[] { "dba" }, new[] { "readers" });
+        Assert.Equal("Viewer", role.ToString());
+        Assert.Equal("readers", grantedBy);
+    }
+
+    [Fact]
+    public void MapRoleWithGrant_BothAdminAndViewerValues_IsAdmin_NamingTheAdminValue()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
+            new[] { "eng", "dba" }, new[] { "dba" }, new[] { "eng" });
+        Assert.Equal("Admin", role.ToString());
+        Assert.Equal("dba", grantedBy);
+    }
+
+    [Fact]
+    public void MapRoleWithGrant_NoMapping_IsAdminWithNoGrant()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(new[] { "anything" }, null, null);
+        Assert.Equal("Admin", role.ToString());
+        Assert.Null(grantedBy);
+    }
+
+    [Fact]
+    public void MapRoleWithGrant_NoMatch_IsDeniedWithNoGrant()
+    {
+        var (role, grantedBy) = DarlingWebOidc.MapRoleWithGrant(
+            new[] { "other" }, new[] { "dba" }, new[] { "eng" });
+        Assert.Equal("Denied", role.ToString());
+        Assert.Null(grantedBy);
+    }
+
+    [Theory]
+    [InlineData("{\"name\":\"  Alice Smith \"}", "Alice Smith")]
+    [InlineData("{}", null)]
+    [InlineData("{\"name\":\"\"}", null)]
+    [InlineData("{\"name\":42}", null)]
+    [InlineData("{\"name\":\"a\\u0007b\"}", null)]
+    [InlineData("{\"name\":\"   \"}", null)]
+    [InlineData("{\"name\":\"a\\tb\"}", null)]
+    [InlineData("{\"name\":\"a\\u2028b\"}", null)]
+    public void DisplayNameClaim_Theory(string payloadJson, string? expected)
+        => Assert.Equal(expected, DarlingWebOidc.DisplayNameClaim((JsonObject)JsonNode.Parse(payloadJson)!));
+
     /* ---- THE SEAT CODEC (the role's round-trip through the session cookie's subject slot) ---- */
 
     /* The role enum is internal, so the rows carry admin-ness as a bool (the same convention as the verdict
@@ -434,7 +490,7 @@ public sealed class DarlingWebOidcTests
 
     private const string SampleKey = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_";
 
-    /// <summary>The o2 shape carries the owner key in the signed slot and round-trips it with the subject and the role (#6214).</summary>
+    /// <summary>The o3 shape carries the owner key in the signed slot and round-trips it with the subject and the role (#6214).</summary>
     [Theory]
     [InlineData("erik@example.com", true)]
     [InlineData("reader@example.com", false)]
@@ -443,7 +499,7 @@ public sealed class DarlingWebOidcTests
     {
         Assert.Equal(DarlingWebSeat.OwnerKeyLength, SampleKey.Length);
         var encoded = DarlingWebSeat.EncodeCookieSubject(subject, admin ? WebOidcRole.Admin : WebOidcRole.Viewer, SampleKey);
-        Assert.StartsWith(admin ? "o2:a:" : "o2:v:", encoded, StringComparison.Ordinal);
+        Assert.StartsWith(admin ? "o3:a:" : "o3:v:", encoded, StringComparison.Ordinal);
         Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
         Assert.Equal(subject, seat.Subject);
         Assert.Equal(SampleKey, seat.OwnerKey);
@@ -463,12 +519,163 @@ public sealed class DarlingWebOidcTests
         Assert.Equal(cookieSubject, DarlingWebSeat.EncodeCookieSubject(subject, admin ? WebOidcRole.Admin : WebOidcRole.Viewer));
     }
 
-    /// <summary>The longest subject sign-in accepts still fits the session cookie's own limit once the o2 prefix and key ride with it.</summary>
+    /// <summary>The longest subject sign-in accepts still fits the session cookie's own limit once the o3 prefix, key, name and grant ride with it.</summary>
     [Fact]
     public void SeatCodec_TheLongestAllowedSubject_FitsTheCookieSlot()
     {
-        var encoded = DarlingWebSeat.EncodeCookieSubject(new string('s', DarlingWebSeat.MaxSubjectLength), WebOidcRole.Admin, SampleKey);
+        var max = new string('x', DarlingWebSeat.DisplayFieldMaxBytes);
+        var encoded = DarlingWebSeat.EncodeCookieSubject(new string('s', DarlingWebSeat.MaxSubjectLength), WebOidcRole.Admin, SampleKey, max, max);
         Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingWebHostService.MaxSessionSubjectLength, encoded.Length);
+    }
+
+    [Fact]
+    public void O3_RoundTrips_NameAndGrant()
+    {
+        var encoded = DarlingWebSeat.EncodeCookieSubject("alice@corp", WebOidcRole.Viewer, SampleKey, "Alice Smith", "readers");
+        Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
+        Assert.Equal("alice@corp", seat.Subject);
+        Assert.False(seat.CanEdit);
+        Assert.Equal(SampleKey, seat.OwnerKey);
+        Assert.Equal("Alice Smith", seat.DisplayName);
+        Assert.Equal("readers", seat.GrantedBy);
+    }
+
+    [Fact]
+    public void O3_NullFields_RoundTripAsNull()
+    {
+        var encoded = DarlingWebSeat.EncodeCookieSubject("alice@corp", WebOidcRole.Admin, SampleKey);
+        Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
+        Assert.True(seat.CanEdit);
+        Assert.Null(seat.DisplayName);
+        Assert.Null(seat.GrantedBy);
+    }
+
+    [Fact]
+    public void O3_SubjectWithColons_RoundTrips()
+    {
+        var encoded = DarlingWebSeat.EncodeCookieSubject("a:b:c", WebOidcRole.Viewer, SampleKey, "N", "G");
+        Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
+        Assert.Equal("a:b:c", seat.Subject);
+        Assert.Equal("N", seat.DisplayName);
+        Assert.Equal("G", seat.GrantedBy);
+    }
+
+    [Fact]
+    public void O2_StillResolves_WithNullNameAndGrant()
+    {
+        Assert.True(DarlingWebSeat.TryResolveSeat("o2:a:" + SampleKey + ":erik@example.com", out var seat));
+        Assert.Equal("erik@example.com", seat.Subject);
+        Assert.True(seat.CanEdit);
+        Assert.Equal(SampleKey, seat.OwnerKey);
+        Assert.Null(seat.DisplayName);
+        Assert.Null(seat.GrantedBy);
+    }
+
+    [Theory]
+    [InlineData("o3:a:short::: s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:QQ:QQ")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:!!:QQ:s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:QQ:!!:s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:QQ")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_::")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:::")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_X:QQ:QQ:s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:gA:QQ:s")]
+    [InlineData("o3:a:abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO-_:QQQQQ:QQ:s")]
+    public void O3_Malformed_IsRefused(string cookieSubject)
+        => Assert.False(DarlingWebSeat.TryResolveSeat(cookieSubject, out _));
+
+    private static void AssertWellFormed(string text)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (char.IsHighSurrogate(text[i]))
+            {
+                Assert.True(i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]), "unpaired high surrogate at " + i);
+                i++;
+            }
+            else
+            {
+                Assert.False(char.IsLowSurrogate(text[i]), "unpaired low surrogate at " + i);
+            }
+        }
+
+        var strict = new UTF8Encoding(false, throwOnInvalidBytes: true);
+        Assert.Equal(text, strict.GetString(strict.GetBytes(text)));
+    }
+
+    [Fact]
+    public void CapDisplayField_CutsAtACharacterBoundary()
+    {
+        Assert.Null(DarlingWebSeat.CapDisplayField(null));
+        Assert.Equal("short", DarlingWebSeat.CapDisplayField("short"));
+
+        var accents = DarlingWebSeat.CapDisplayField(new string('é', 200))!;
+        Assert.Equal(64, accents.Length);
+
+        var emoji = DarlingWebSeat.CapDisplayField(string.Concat(Enumerable.Repeat("😀", 40)))!;
+        Assert.Equal(64, emoji.Length);
+        Assert.Equal(32, emoji.EnumerateRunes().Count());
+        AssertWellFormed(emoji);
+        Assert.True(Encoding.UTF8.GetByteCount(emoji) <= DarlingWebSeat.DisplayFieldMaxBytes);
+
+        /* The limit falls INSIDE a 4-byte emoji: 1 + 31 * 4 = 125 bytes fit, the 32nd emoji would reach 129. */
+        var inside = DarlingWebSeat.CapDisplayField("a" + string.Concat(Enumerable.Repeat("😀", 40)))!;
+        Assert.Equal("a" + string.Concat(Enumerable.Repeat("😀", 31)), inside);
+        Assert.Equal(125, Encoding.UTF8.GetByteCount(inside));
+        AssertWellFormed(inside);
+
+        /* 127 ASCII bytes then a 2-byte character: the character does not fit, so it is dropped whole. */
+        var odd = DarlingWebSeat.CapDisplayField(new string('a', 127) + "é")!;
+        Assert.Equal(new string('a', 127), odd);
+    }
+
+    [Fact]
+    public void CapDisplayField_NeverSplitsATextElement()
+    {
+        const string flag = "\U0001F1FA\U0001F1E6";
+
+        /* Flags are 8 bytes each: 16 fit in 128 bytes exactly, so 17 are cut back to 16 whole flags. */
+        var flags = DarlingWebSeat.CapDisplayField(string.Concat(Enumerable.Repeat(flag, 17)))!;
+        Assert.Equal(string.Concat(Enumerable.Repeat(flag, 16)), flags);
+        AssertWellFormed(flags);
+
+        /* A leading 'a' puts the limit between the two halves of a flag: the flag is dropped whole, not cut to one indicator. */
+        var straddle = DarlingWebSeat.CapDisplayField("a" + string.Concat(Enumerable.Repeat(flag, 17)))!;
+        Assert.Equal("a" + string.Concat(Enumerable.Repeat(flag, 15)), straddle);
+        AssertWellFormed(straddle);
+
+        /* 3 bytes each after a leading 'x': 1 + 3 * 42 = 127 bytes fit, and a cut by character would end on a bare 'e'. */
+        var accents = DarlingWebSeat.CapDisplayField("x" + string.Concat(Enumerable.Repeat("e\u0301", 60)))!;
+        Assert.EndsWith("\u0301", accents);
+        Assert.Equal(1 + 3 * 42, Encoding.UTF8.GetByteCount(accents));
+
+        /* A ZWJ family is 18 bytes (4 + 3 + 4 + 3 + 4): 7 fit in 128, the 8th is dropped whole. */
+        const string family = "\U0001F468\u200D\U0001F469\u200D\U0001F467";
+        Assert.Equal(string.Concat(Enumerable.Repeat(family, 7)), DarlingWebSeat.CapDisplayField(string.Concat(Enumerable.Repeat(family, 8))));
+    }
+
+    [Fact]
+    public void Cookie_AtEveryMaximum_FitsABrowserCookie()
+    {
+        var name = new string('n', DarlingWebSeat.DisplayFieldMaxBytes);
+        var grant = new string('g', DarlingWebSeat.DisplayFieldMaxBytes);
+        var slot = DarlingWebSeat.EncodeCookieSubject(new string('s', 207), WebOidcRole.Admin, SampleKey, name, grant);
+        var value = DarlingWebHostService.BuildSessionCookieValue(new byte[32], DateTimeOffset.UtcNow.AddHours(12), slot);
+        Assert.True(Encoding.UTF8.GetByteCount(DarlingWebHostService.SessionCookieName + "=" + value) < 4096);
+        Assert.True(DarlingWebSeat.TryResolveSeat(slot, out var seat));
+        Assert.Equal(name, seat.DisplayName);
+        Assert.Equal(grant, seat.GrantedBy);
+    }
+
+    [Fact]
+    public void Markup_InTheName_RoundTripsVerbatim()
+    {
+        const string markup = "<img src=x onerror=alert(1)>";
+        var encoded = DarlingWebSeat.EncodeCookieSubject("alice", WebOidcRole.Viewer, SampleKey, markup, markup);
+        Assert.True(DarlingWebSeat.TryResolveSeat(encoded, out var seat));
+        Assert.Equal(markup, seat.DisplayName);
+        Assert.Equal(markup, seat.GrantedBy);
     }
 
     /// <summary>The owner key is base64url(SHA-256(issuer + newline + sub)): stable, 43 characters with no ':', different for a
@@ -693,6 +900,40 @@ public sealed class DarlingWebOidcTests
     [InlineData(true, false, "POST", "/api/proposals/" + PressId + "/confirm", true)]            // the edit seat is unchanged
     [InlineData(true, true, "DELETE", "/api/proposals/" + PressId, true)]
     public void IsRequestAllowed_ProposalPressException(bool canEdit, bool hasOwnerKey, string method, string path, bool expected)
+        => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(
+            new DarlingWebSeat("who", canEdit, hasOwnerKey ? new string('k', DarlingWebSeat.OwnerKeyLength) : null), method, path));
+
+    private const string TokenId = "0123456789abcdef";
+
+    [Theory]
+    [InlineData("/api/mcp-tokens", true)]
+    [InlineData("/api/mcp-tokens/" + TokenId + "/revoke", true)]
+    [InlineData("/API/MCP-Tokens/" + TokenId + "/Revoke", true)]               // routing ignores case, so the gate does too
+    [InlineData("/api/mcp-tokens/", false)]                                    // trailing slash
+    [InlineData("/api/mcp-tokens/" + TokenId + "/revoke/", false)]
+    [InlineData("/api/mcp-tokens/0123456789ABCDEF/revoke", false)]             // an uppercase id
+    [InlineData("/api/mcp-tokens/0123456789abcde/revoke", false)]              // 15 characters
+    [InlineData("/api/mcp-tokens/0123456789abcdef0/revoke", false)]            // 17 characters
+    [InlineData("/api/mcp-tokens/0123456789abcdeg/revoke", false)]             // not hex
+    [InlineData("/api/mcp-tokens/x/revoke/extra", false)]
+    [InlineData("/api/mcp-tokens/" + TokenId, false)]                          // no verb
+    [InlineData("/api/mcp-tokens/" + TokenId + "/delete", false)]
+    [InlineData("/api/mcp-tokens//revoke", false)]
+    [InlineData("/api/mcp-tokens-other", false)]
+    [InlineData("/x/api/mcp-tokens", false)]
+    public void IsPersonalTokenWritePath_Shapes(string path, bool expected)
+        => Assert.Equal(expected, DarlingWebSeat.IsPersonalTokenWritePath(path));
+
+    [Theory]
+    [InlineData(false, true, "POST", "/api/mcp-tokens", true)]                 // a read-only OIDC seat makes its own token
+    [InlineData(false, true, "POST", "/api/mcp-tokens/" + TokenId + "/revoke", true)]
+    [InlineData(false, false, "POST", "/api/mcp-tokens", false)]               // a seat with no owner key names nobody
+    [InlineData(false, false, "POST", "/api/mcp-tokens/" + TokenId + "/revoke", false)]
+    [InlineData(false, true, "PUT", "/api/mcp-tokens", false)]
+    [InlineData(false, true, "DELETE", "/api/mcp-tokens/" + TokenId, false)]
+    [InlineData(false, true, "POST", "/api/mcp-tokens/" + TokenId + "/revoke/", false)]
+    [InlineData(true, false, "POST", "/api/mcp-tokens", true)]                 // the edit seat is unchanged
+    public void IsRequestAllowed_PersonalTokenException(bool canEdit, bool hasOwnerKey, string method, string path, bool expected)
         => Assert.Equal(expected, DarlingWebSeat.IsRequestAllowed(
             new DarlingWebSeat("who", canEdit, hasOwnerKey ? new string('k', DarlingWebSeat.OwnerKeyLength) : null), method, path));
 

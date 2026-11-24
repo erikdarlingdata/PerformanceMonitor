@@ -117,16 +117,16 @@ public partial class ViewerServerTab
         $"one point per {TrendBuckets.Word(bucketMinutes)}";
 
     /// <summary>The Trends sub-tab of Activity: database and query-duration trends, both over the toolbar's window.</summary>
-    private async Task LoadPgActivityTrendsAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadPgActivityTrendsAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
         var dbGated = PgCollectorIsGatedOff("pg_database_stats");
         var qGated = PgCollectorIsGatedOff("pg_statement_stats");
         var dbTask = dbGated
             ? Task.FromResult(ViewerDataService.NoPgTrend<DarlingPgTrendReader.PgDatabaseTrendPoint>(0))
-            : _dataService.GetPgDatabaseTrendAsync(_server.ServerId, startUtc, endUtc);
+            : Timed(timer, "PostgreSQL database trend read", _dataService.GetPgDatabaseTrendAsync(_server.ServerId, startUtc, endUtc));
         var qTask = qGated
             ? Task.FromResult(ViewerDataService.NoPgTrend<DarlingPgTrendReader.PgQueryDurationTrendPoint>(0))
-            : _dataService.GetPgQueryDurationTrendAsync(_server.ServerId, startUtc, endUtc);
+            : Timed(timer, "PostgreSQL query duration trend read", _dataService.GetPgQueryDurationTrendAsync(_server.ServerId, startUtc, endUtc));
         await Task.WhenAll(dbTask, qTask);
 
         var db = dbTask.Result;
@@ -177,14 +177,14 @@ public partial class ViewerServerTab
     /// <summary>The Waits tab's Wait Trend: the window's dominant wait event over time, from the arm this server's wait history
     /// is on (#8074): the engine's cumulative counters (pg_wait_stats) on an Aurora target, the sampler (pg_wait_sampling)
     /// elsewhere. The gate and the note name that arm's collector, so an Aurora target is never told the sampler's gap.</summary>
-    private async Task LoadPgWaitTrendAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadPgWaitTrendAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
         var engineCounters = MonitoredEngineKind.IsAurora(_server.EngineKind);
         var collector = engineCounters ? "pg_wait_stats" : "pg_wait_sampling";
         var gated = PgCollectorIsGatedOff(collector);
         var trend = gated
             ? ViewerDataService.NoPgTrend<DarlingPgTrendReader.PgWaitTrendPoint>(0)
-            : await _dataService.GetPgWaitTrendAsync(_server.ServerId, startUtc, endUtc);
+            : await Timed(timer, "PostgreSQL wait trend read", _dataService.GetPgWaitTrendAsync(_server.ServerId, startUtc, endUtc));
         var p = trend.Points;
 
         ShowNote(PgWaitTrendNote, p.Count == 0
@@ -208,12 +208,12 @@ public partial class ViewerServerTab
     }
 
     /// <summary>The I/O tab's I/O Trend: the window's busiest (backend, context) pair over time.</summary>
-    private async Task LoadPgIoTrendAsync(DateTime startUtc, DateTime endUtc)
+    private async Task LoadPgIoTrendAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
         var gated = PgCollectorIsGatedOff("pg_io_stats");
         var trend = gated
             ? new ViewerDataService.PgIoTrend(null, 0, Array.Empty<DarlingPgTrendReader.PgIoTrendPoint>(), false, false)
-            : await _dataService.GetPgIoTrendAsync(_server.ServerId, startUtc, endUtc);
+            : await Timed(timer, "PostgreSQL I/O trend read", _dataService.GetPgIoTrendAsync(_server.ServerId, startUtc, endUtc));
         var p = trend.Points;
 
         PgIoTrendNote.Text = p.Count == 0
