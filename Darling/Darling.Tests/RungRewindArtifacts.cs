@@ -995,6 +995,10 @@ ALTER TABLE config.store_statement_baseline DROP COLUMN IF EXISTS shared_blks_di
         // store that never had them.
         new(307, "hasServiceStartHistory", @"DROP TABLE IF EXISTS collect.service_start_rungs;
 DROP TABLE IF EXISTS collect.service_starts;"),
+        // V308 (#9413): the per-table activity capture and its baseline. They are the probe's newest sentinel. The rewind drops both, so a re-run of V308 creates them empty.
+        // Safe on a store that never had them.
+        new(308, "hasStoreTableActivity", @"DROP TABLE IF EXISTS collect.store_table_activity;
+DROP TABLE IF EXISTS collect.store_table_activity_baseline;"),
     ];
 
     /// <summary>
