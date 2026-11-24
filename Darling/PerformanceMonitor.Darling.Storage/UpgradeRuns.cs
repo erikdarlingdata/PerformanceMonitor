@@ -39,7 +39,7 @@ namespace PerformanceMonitor.Darling.Storage;
 public static class UpgradeRuns
 {
     /// <summary>The store migration that creates <c>collect.upgrade_runs</c>. One constant so a renumber is mechanical.</summary>
-    public const int Version = 306;
+    public const int Version = 309;
 
     /// <summary>How long a row is kept: the same as the other store self-metrics series, <see cref="StoreSelfMetrics.RetentionDays"/>.</summary>
     public const int RetentionDays = StoreSelfMetrics.RetentionDays;

@@ -294,6 +294,70 @@ public sealed class QueryStoreClutterLivePostgresTests
     }
 
     /// <summary>
+    /// #9478: a fleet reference that runs past its own budget fails soft. The seam fires the fleet bound (or raises the
+    /// <c>57014</c> the bound's cancel request produces) with no wait, and the per-server rows must still come back with a null
+    /// <c>fleet_median</c> and a note naming the overrun. With the caller's own token cancelled the cancellation still
+    /// propagates, because that is not an overrun.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AFleetReferenceOverBudget_ReturnsThePerServerRows_WithANullMedianAndANote(bool queryCanceledError)
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live Query Store clutter test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        var anchor = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, null, ct);
+            await PlantAsync(connection, anchor, ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString);
+        var asOf = Stamp(anchor);
+
+        DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = fleetBudget =>
+        {
+            fleetBudget.Cancel();
+            if (queryCanceledError) throw new PostgresException("canceling statement due to user request", "ERROR", "ERROR", "57014");
+            return Task.Delay(Timeout.Infinite, fleetBudget.Token);
+        };
+        try
+        {
+            var json = await DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(postgres, PrimaryName, hours_back: 24, include_fleet_median: true, as_of: asOf);
+            Assert.False(McpHelpers.IsErrorEnvelope(json), json);
+            using (var doc = JsonDocument.Parse(json))
+            {
+                var root = doc.RootElement;
+                Assert.Equal(4, root.GetProperty("database_count").GetInt32());
+                Assert.Equal(Alpha, root.GetProperty("databases").EnumerateArray().First().GetProperty("database_name").GetString());
+                Assert.Equal(JsonValueKind.Null, root.GetProperty("fleet_median").ValueKind);
+                Assert.Equal(DarlingMcpQueryStoreClutterTools.FleetOverrunNote, root.GetProperty("fleet_median_note").GetString());
+            }
+
+            using var callerCancelled = new CancellationTokenSource();
+            DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = _ =>
+            {
+                callerCancelled.Cancel();
+                return Task.Delay(Timeout.Infinite, callerCancelled.Token);
+            };
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(
+                postgres, PrimaryName, hours_back: 24, include_fleet_median: true, as_of: asOf, logger: null, cancellationToken: callerCancelled.Token));
+        }
+        finally
+        {
+            DarlingMcpQueryStoreClutterTools.FleetReadSeam.Value = null;
+        }
+    }
+
+    /// <summary>
     /// The reader agrees with the pure judgment's arithmetic on the same planted rows — the cross-check that
     /// the SQL's <c>percentile_disc</c> and the C# <see cref="QueryStoreClutter.DiscreteMedian"/> are one
     /// definition: the fleet share median the tool published (40) is the discrete median of the three

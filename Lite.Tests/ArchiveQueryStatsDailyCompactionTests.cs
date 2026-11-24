@@ -68,7 +68,8 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
         return initializer;
     }
 
-    private ArchiveService NewService() => new(NewInitializer(), _archiveDir);
+    /* These tests read pruning and order off small row groups of a few thousand rows, so the sorted merges write the old size (#9407). */
+    private ArchiveService NewService() => new(NewInitializer(), _archiveDir) { SortedRowGroupSizeOverride = ParquetCompaction.ArchiveRowGroupSize };
 
     private static void Exec(string sql)
     {
@@ -223,7 +224,7 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
         var monthBytes = File.ReadAllBytes(P($"202609_{table}.parquet").Replace("/", "\\"));
         var partBytes = File.ReadAllBytes(P($"202609_{table}_pt001.parquet").Replace("/", "\\"));
 
-        var service = new ArchiveService(initializer, _archiveDir);
+        var service = new ArchiveService(initializer, _archiveDir) { SortedRowGroupSizeOverride = ParquetCompaction.ArchiveRowGroupSize };
         service.CompactParquetFiles();
         MakeParquet($"20260928_1500_{table}.parquet", 1_500, 1_700, "2026-09-28 15:00:00");
         service.CompactParquetFiles();
@@ -262,7 +263,7 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
 
         /* One archive pass an hour, as in production: the day file takes each new hour in time order, so its row
            groups follow time. (A first pass over a whole day of equal-size files would order them by size.) */
-        var service = new ArchiveService(initializer, _archiveDir);
+        var service = new ArchiveService(initializer, _archiveDir) { SortedRowGroupSizeOverride = ParquetCompaction.ArchiveRowGroupSize };
         for (var hour = 10; hour < 18; hour++)
         {
             MakeParquet($"20260928_{hour}00_{table}.parquet", hour * 10_000L, hour * 10_000L + RowsPerHour, $"2026-09-28 {hour}:00:00");
@@ -452,7 +453,8 @@ public sealed class ArchiveQueryStatsDailyCompactionTests : IDisposable
     {
         Assert.Equal(ParquetCompaction.SortedMergeMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_store_stats", null));
         Assert.Equal("1GB", ParquetCompaction.EffectiveMemoryLimit("query_store_stats", "1GB"));
-        Assert.Equal(ParquetCompaction.DefaultMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_stats", null));
+        Assert.Equal(ParquetCompaction.SortedMergeMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_stats", null));
+        Assert.Equal(ParquetCompaction.DefaultMemoryLimit, ParquetCompaction.EffectiveMemoryLimit("query_snapshots", null));
     }
 
     /// <summary>
