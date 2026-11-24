@@ -182,7 +182,7 @@ public sealed class ViewerPgSnapshotGridTimeTests
         var tab = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.Postgres.cs").ReplaceLineEndings("\n");
         Assert.Contains("PgExtensionsGrid.ItemsSource = rows.Select(PgDisplay.Extension).ToList()", tab, StringComparison.Ordinal);
         Assert.Contains("PgServerConfigGrid.ItemsSource = chosen.Select(PgDisplay.ServerConfig).ToList()", tab, StringComparison.Ordinal);
-        Assert.Contains("PgBufferUsageGrid.ItemsSource = rows.Select(PgDisplay.BufferUsage).ToList()", tab, StringComparison.Ordinal);
+        Assert.Contains("PgBufferUsageGrid.ItemsSource = rows.Where(r => !r.IsTotalsOnly).Select(PgDisplay.BufferUsage).ToList()", tab, StringComparison.Ordinal);
         Assert.Contains("PgPredicateStatsGrid.ItemsSource = rows.Select(PgDisplay.PredicateStat).ToList()", tab, StringComparison.Ordinal);
 
         var menu = ReadRepoFile("Darling/PerformanceMonitor.Darling.Viewer/ViewerServerTab.HypotheticalIndex.cs").ReplaceLineEndings("\n");

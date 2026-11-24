@@ -950,7 +950,21 @@ JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
 WHERE x.extname OPERATOR(pg_catalog.=) 'pg_stat_statements'
 AND p.proname::text OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunction + @"'
 AND p.proname::text OPERATOR(pg_catalog.=) ANY (@functions)
-AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunctionArguments + "'";
+AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + CollectorContext.StatementsExtensionAuroraFunctionArguments + @"'
+UNION ALL
+SELECT 'member'::text, p.proname::text, n.nspname::text, NULL::text
+FROM pg_catalog.pg_extension AS x
+JOIN pg_catalog.pg_depend AS d
+  ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass
+ AND d.refobjid OPERATOR(pg_catalog.=) x.oid
+ AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass
+ AND d.deptype OPERATOR(pg_catalog.=) 'e'
+JOIN pg_catalog.pg_proc AS p
+  ON p.oid OPERATOR(pg_catalog.=) d.objid
+ AND p.pronamespace OPERATOR(pg_catalog.=) x.extnamespace
+JOIN pg_catalog.pg_namespace AS n ON n.oid OPERATOR(pg_catalog.=) p.pronamespace
+WHERE x.extname OPERATOR(pg_catalog.=) 'pg_buffercache'
+AND p.proname::text OPERATOR(pg_catalog.=) '" + PgBufferUsageCollector.SummaryFunction + "'";
 
     /// <summary>#6143: a catalog read of a handful of rows; the other connection-time reads beside it use 5 s too.</summary>
     internal const int PgExtensionSchemasTimeoutSeconds = 5;
@@ -975,6 +989,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
     {
         context.PgExtensionSchemas = null;
         context.PgExtensionVersions = null;
+        context.PgExtensionMemberFunctions = null;
         context.PgFunctionSchemas = null;
         var readsFunctions = definition.ReadsAuroraFunctions && context.Target.IsAurora;
         if (definition.TargetEngine != CollectorTargetEngine.PostgreSql
@@ -986,6 +1001,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
         var schemas = new Dictionary<string, string>(StringComparer.Ordinal);
         var versions = new Dictionary<string, string>(StringComparer.Ordinal);
         var functions = new List<(string Function, string Schema)>();
+        var members = new HashSet<string>(StringComparer.Ordinal);
         try
         {
             using var command = targetConnection.CreateCommand();
@@ -1008,6 +1024,11 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
                             versions[reader.GetString(1)] = reader.GetString(3);
                         }
                     }
+                    else if (string.Equals(reader.GetString(0), "member", StringComparison.Ordinal))
+                    {
+                        /* #9508: a function an extension itself owns, found in pg_proc on this connection. */
+                        members.Add(reader.GetString(1));
+                    }
                     else
                     {
                         functions.Add((reader.GetString(1), reader.GetString(2)));
@@ -1026,6 +1047,7 @@ AND pg_catalog.oidvectortypes(p.proargtypes) OPERATOR(pg_catalog.=) '" + Collect
 
         context.PgExtensionSchemas = schemas;
         context.PgExtensionVersions = versions;
+        context.PgExtensionMemberFunctions = members;
         if (readsFunctions)
         {
             var statementsSchema = schemas.TryGetValue("pg_stat_statements", out var found) ? found : null;
