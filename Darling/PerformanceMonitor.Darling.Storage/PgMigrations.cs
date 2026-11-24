@@ -11975,12 +11975,12 @@ CREATE TABLE IF NOT EXISTS darling_schema_version (
     /// test can show in seconds what a rung's command timeout does. The same code path: the ladder and the default
     /// bound are the only things a test may change, and a rung's entry in
     /// <see cref="DeclaredRungCommandTimeoutSeconds"/> is read exactly as it is for the shipped ladder. The caller
-    /// does not hold the advisory lock, so this is for a store no other migrator can reach.
+    /// does not hold the advisory lock, so this is for a store no other migrator can reach. The optional observer hears each rung as the service's start history does (#9415).
     /// </summary>
     internal static Task<int> ApplyLadderForTestsAsync(
         NpgsqlConnection connection, ILogger? logger, IReadOnlyList<Migration> ladder, int defaultCommandTimeoutSeconds,
-        CancellationToken cancellationToken)
-        => MigrateLockedAsync(connection, logger, ladder, defaultCommandTimeoutSeconds, observer: null, cancellationToken);
+        CancellationToken cancellationToken, IMigrationRungObserver? observer = null)
+        => MigrateLockedAsync(connection, logger, ladder, defaultCommandTimeoutSeconds, observer, cancellationToken);
 
     /// <summary>
     /// Applies every rung of <paramref name="ladder"/> above the store's stamped version, each in its own transaction
