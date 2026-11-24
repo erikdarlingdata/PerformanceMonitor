@@ -401,7 +401,7 @@ public sealed class QueryStoreClutterLivePostgresTests
             using var doc = JsonDocument.Parse(json);
             Assert.Equal(4, doc.RootElement.GetProperty("database_count").GetInt32());
             var included = doc.RootElement.GetProperty("qs_overhead").GetProperty("wait_stats").GetProperty("included").EnumerateArray().ToArray();
-            Assert.Equal("QDS_LOADDB", Assert.Single(included).GetProperty("wait_type").GetString());
+            Assert.Contains(included, w => w.GetProperty("wait_type").GetString() == "QDS_LOADDB" && w.GetProperty("wait_ms_total").GetInt64() == 1900);
         }
         finally
         {
