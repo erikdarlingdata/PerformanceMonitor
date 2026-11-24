@@ -96,7 +96,7 @@ public sealed class DarlingMcpStorePassStepsTools
             }
 
             var windowStart = windowEnd.AddHours(-hours_back);
-            var page = await StorePassSteps.ReadAsync(postgres, windowStart, windowEnd, passFilter, stepFilter, limit, cancellationToken);
+            var page = await StorePassSteps.ReadAsync(postgres, windowStart, windowEnd, passFilter, stepFilter, limit, cancellationToken, McpCommandDeadlines.ReadSeconds);
             if (page.Rows.Count == 0)
             {
                 var filters = (passFilter, stepFilter) switch
