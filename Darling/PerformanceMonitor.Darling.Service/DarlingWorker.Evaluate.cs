@@ -2691,9 +2691,13 @@ public sealed partial class DarlingWorker
         }
     }
 
-    /// <summary>#9501: the first and the latest sample of the capacity-at-ceiling run being held, for the alert's detail.</summary>
+    /// <summary>#9501: the first and the latest sample of the capacity-at-ceiling run being held, for the alert's detail.
+    /// <paramref name="StartedInThisProcess"/> is true only when the run began in this process from a held count of zero, so
+    /// <paramref name="Start"/> is the real start. The run is kept in memory and the saved record holds only a count, so after a
+    /// restart in the middle of a held run <paramref name="Start"/> is the first sample this process saw, and the detail says
+    /// "since at least" for it.</summary>
     internal sealed record PgCapacityRun(
-        DarlingPgCpuUtilizationReader.CpuSample Start, DarlingPgCpuUtilizationReader.CpuSample Latest);
+        DarlingPgCpuUtilizationReader.CpuSample Start, DarlingPgCpuUtilizationReader.CpuSample Latest, bool StartedInThisProcess);
 
     /// <summary>
     /// The "Capacity at ceiling" alert (#9501), for a serverless PostgreSQL target whose capacity sits at or over the bar while instance
@@ -2782,7 +2786,12 @@ public sealed partial class DarlingWorker
                 }
 
                 var held = PgCapacityCeilingBreaches(capacityPercent, sample.CpuPercent, alertSettings.CpuThresholdPercent);
-                run = held ? new PgCapacityRun(run?.Start ?? sample, sample) : null;
+                run = held
+                    ? new PgCapacityRun(
+                        run?.Start ?? sample, sample,
+                        /* A run found in memory keeps its flag. A new one is exact only when the gate held no count before this sample. */
+                        run?.StartedInThisProcess ?? record.State.ConsecutiveBreaches == 0)
+                    : null;
 
                 var evaluation = AlertPersistenceGate.Evaluate(
                     record.State, held, AlertEngine.PgCapacityCeilingSamples, AlertEngine.CpuClearSamples);
@@ -2857,7 +2866,7 @@ public sealed partial class DarlingWorker
 
                 var reading = lastCounted!;
                 var capacity = lastCapacityPercent!.Value;
-                var heldRun = run ?? new PgCapacityRun(reading, reading);
+                var heldRun = run ?? new PgCapacityRun(reading, reading, StartedInThisProcess: false);
                 var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
@@ -2924,7 +2933,7 @@ public sealed partial class DarlingWorker
 
         text.Append(CultureInfo.InvariantCulture, $"  Threshold: {thresholdPercent}% on capacity\n");
         text.Append(CultureInfo.InvariantCulture,
-            $"  Held: {heldSamples} or more consecutive samples, since {run.Start.SampleTimeUtc:HH:mm} UTC");
+            $"  Held: {heldSamples} or more consecutive samples, since {(run.StartedInThisProcess ? "" : "at least ")}{run.Start.SampleTimeUtc:HH:mm} UTC");
         return text.ToString();
     }
 

@@ -227,12 +227,26 @@ public sealed class PgAlertDigest7082Tests
         var end = new DarlingPgCpuUtilizationReader.CpuSample(t0.AddMinutes(6), 1, 100, 8, 8,
             new DarlingPgCpuUtilizationReader.HostMemory(16 * gib, 1 * gib, 2 * gib, null, null, null));
 
-        var text = DarlingWorker.BuildPgCapacityCeilingDetail(new DarlingWorker.PgCapacityRun(start, end), 100, 90, 5);
+        var text = DarlingWorker.BuildPgCapacityCeilingDetail(new DarlingWorker.PgCapacityRun(start, end, true), 100, 90, 5);
 
         Assert.Contains("8 ACU of a 8 ACU maximum", text, StringComparison.Ordinal);
         Assert.Contains("Instance CPU: 1%", text, StringComparison.Ordinal);
         Assert.Contains("8.0 GiB at the start of the run, 3.0 GiB now", text, StringComparison.Ordinal);
         Assert.DoesNotContain("reeable", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheCapacityAlertDetail_SaysSinceForARunThatBeganInThisProcess_AndSinceAtLeastForOneFoundMidRun()
+    {
+        var t0 = new DateTime(2026, 11, 1, 3, 7, 0, DateTimeKind.Utc);
+        var start = new DarlingPgCpuUtilizationReader.CpuSample(t0, 2, 100, 8, 8, Memory: null);
+        var end = new DarlingPgCpuUtilizationReader.CpuSample(t0.AddMinutes(6), 1, 100, 8, 8, Memory: null);
+
+        var exact = DarlingWorker.BuildPgCapacityCeilingDetail(new DarlingWorker.PgCapacityRun(start, end, true), 100, 90, 5);
+        var floor = DarlingWorker.BuildPgCapacityCeilingDetail(new DarlingWorker.PgCapacityRun(start, end, false), 100, 90, 5);
+
+        Assert.EndsWith("since 03:07 UTC", exact, StringComparison.Ordinal);
+        Assert.EndsWith("since at least 03:07 UTC", floor, StringComparison.Ordinal);
     }
 
     [Fact]
