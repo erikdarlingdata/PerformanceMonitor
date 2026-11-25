@@ -1094,8 +1094,8 @@ public partial class RemoteCollectorService
                TARGET rather than a monitoring fault. A 1222 from any collector without the guard flag
                falls through to the ERROR catch below, unchanged. */
             status = "YIELDED";
-            errorMessage = $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.";
-            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} YIELDED - 1s lock-timeout guard fired (target lock contention)");
+            errorMessage = $"Lock-timeout yield (SQL error #{ex.Number}): the short LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.";
+            AppLogger.Info("Collector", $"  [{server.DisplayName}] {collectorName} YIELDED - lock-timeout guard fired (target lock contention)");
         }
         catch (SqlException ex)
         {
