@@ -57,8 +57,16 @@ COPY PerformanceMonitor.PlanAnalysis/PerformanceMonitor.PlanAnalysis.csproj Perf
 RUN dotnet restore Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj
 
 COPY . .
+
+# The commit the image's service is built from (#9591), threaded in by nightly.yml and build.yml. The build context carries no .git
+# (.dockerignore drops it), so the SDK finds no source revision inside the image and the service would stamp no commit: it would
+# answer null on /version and in the service-start history. Passed as -p:SourceRevisionId, which the SDK keeps over its own lookup,
+# and which Directory.Build.props stamps as the SourceCommit assembly metadata. Empty by default ON PURPOSE, like VERSION above:
+# the shell expansion then adds no flag, and a hand-run docker build stamps no commit rather than a wrong one. The ARG sits after the restore layer
+# and before the publish, because a RUN after an ARG misses the layer cache when the value changes: here a new commit misses only the publish layer, which a new COPY . . misses anyway.
+ARG SOURCE_COMMIT=
 RUN dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj \
-    -c Release -o /app/publish ${VERSION:+-p:Version=$VERSION}
+    -c Release -o /app/publish ${VERSION:+-p:Version=$VERSION} ${SOURCE_COMMIT:+-p:SourceRevisionId=$SOURCE_COMMIT}
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 # Microsoft.Data.SqlClient probes the Kerberos GSSAPI library at connect time on Linux — even for SQL
