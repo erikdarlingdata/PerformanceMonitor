@@ -39,7 +39,11 @@ internal static class McpStoreReadyFilter
     /// <summary>The refusal's <c>reason</c>, the word <see cref="DarlingMcpCommandQueue"/> already uses for a store that cannot take the call yet.</summary>
     internal const string Reason = "store_not_ready";
 
-    /// <summary>The tools that never open a store connection.</summary>
+    /// <summary>
+    /// The two discovery tools, which never open a store connection. The list is deliberately limited to them: another tool that
+    /// could run without the store (<c>analyze_plan_xml</c> reads only the caller's XML) waits out the migration like the rest, so a
+    /// tool that later gains a store read cannot pass the hold unnoticed.
+    /// </summary>
     internal static readonly IReadOnlySet<string> StorelessTools = new HashSet<string>(StringComparer.Ordinal) { "find_tools", "get_tool_guide" };
 
     /// <summary>Whether this process's MCP calls may reach the store now. Read on every call, so a start that finishes its migrations opens the gate at once.</summary>
