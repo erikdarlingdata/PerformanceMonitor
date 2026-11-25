@@ -1238,8 +1238,9 @@ public class ScheduleManager
 
     /// <summary>
     /// Applies a preset to a schedule list in place. "Off" clears Enabled on every row and touches nothing
-    /// else (#9569). A named preset sets the intervals, and also sets Enabled on every row when every row
-    /// was off, so a collector turned off on purpose among running ones stays off. Retention is never
+    /// else (#9569). A named preset sets the intervals, and when every row was off also returns each row to its
+    /// collector's shipped default (so the opt-in long_query_completions stays off, and a collector turned off on
+    /// purpose among running ones stays off). A row with no shipped default is left as it is. Retention is never
     /// changed. An unknown preset name is a no-op. Shared with the editor window so the preset table
     /// lives exactly once.
     /// </summary>
@@ -1261,9 +1262,13 @@ public class ScheduleManager
 
         if (AllCollectorsOff(schedules))
         {
+            var shipped = GetDefaultSchedules().ToDictionary(d => d.Name, d => d.Enabled, StringComparer.OrdinalIgnoreCase);
             foreach (var schedule in schedules)
             {
-                schedule.Enabled = true;
+                if (shipped.TryGetValue(schedule.Name, out var shippedEnabled))
+                {
+                    schedule.Enabled = shippedEnabled;
+                }
             }
         }
 

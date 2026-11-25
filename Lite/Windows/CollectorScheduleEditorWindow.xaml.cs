@@ -177,8 +177,8 @@ public partial class CollectorScheduleEditorWindow : Window
         if (presetName == "Custom") return;
 
         var message = presetName == ScheduleManager.PresetOff
-            ? "Apply the \"Off\" preset?\n\nThis turns off every collector in this scope. Frequencies, run times and retention are kept, and a named preset turns them all back on."
-            : $"Apply the \"{presetName}\" preset?\n\nThis will change all collector frequencies. Retention settings are not affected. Enabled/disabled state is not affected either, unless every collector is off, and then this turns every collector back on.";
+            ? "Apply the \"Off\" preset?\n\nThis turns off every collector in this scope. Frequencies, run times and retention are kept, and a named preset then turns the collectors that are on by default back on."
+            : $"Apply the \"{presetName}\" preset?\n\nThis will change all collector frequencies. Retention settings are not affected. Enabled/disabled state is not affected either, unless every collector is off, and then this turns the collectors that are on by default back on.";
         var result = MessageBox.Show(
             message,
             "Apply Collection Preset",

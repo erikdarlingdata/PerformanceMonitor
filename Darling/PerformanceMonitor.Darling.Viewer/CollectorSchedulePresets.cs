@@ -71,9 +71,10 @@ public sealed class CollectorScheduleEditItem
 /// <c>DetectPreset</c>/<c>ApplyPreset</c>) — the SINGLE source of preset logic for the Darling schedule
 /// editor. The three tables (Aggressive / Balanced / Low-Impact) are duplicated byte-for-byte from Lite's
 /// (the projects don't share a schedule library); a Darling.Tests pin asserts they cannot drift from Lite's
-/// intervals. A named preset changes FREQUENCIES, and turns every row back on only when every row in scope is
-/// off (so a collector someone turned off on purpose stays off); retention is untouched. <see cref="Off"/>
-/// clears Enabled on every row and leaves frequencies, run times and retention as they are (#9569). Off is
+/// intervals. A named preset changes FREQUENCIES, and turns the collectors that are on by default back on only when
+/// every row in scope is off (so a collector someone turned off on purpose stays off, and an opt-in collector stays
+/// off); retention is untouched. <see cref="Off"/> clears Enabled on every row, pins it at that scope (clears
+/// <see cref="CollectorScheduleEditItem.EnabledInherited"/>), and leaves frequencies, run times and retention as they are (#9569). Off is
 /// not in <see cref="Presets"/> (it has no frequency table), and Lite's <c>ScheduleManager</c> follows the same rules.
 /// </summary>
 public static class CollectorSchedulePresets
@@ -214,9 +215,12 @@ public static class CollectorSchedulePresets
     }
 
     /// <summary>Applies a preset to a schedule list IN PLACE; an unknown name is a no-op (mirrors Lite's
-    /// <c>ScheduleManager.ApplyPreset</c>). <see cref="Off"/> clears Enabled on every row and touches nothing
-    /// else. A named preset sets frequencies, and also sets Enabled on every row when every row was off, so a
-    /// collector turned off on purpose among running ones stays off. Retention is never changed (#9569).</summary>
+    /// <c>ScheduleManager.ApplyPreset</c>). <see cref="Off"/> clears Enabled on every row, pins it (EnabledInherited false, so a Save writes
+    /// an explicit false and a later fleet-wide enable cannot turn the collector on here), and touches nothing
+    /// else. A named preset sets frequencies, and when every row was off also returns each row to its collector's
+    /// shipped default (<see cref="CollectorScheduleDefaults.Entry.DefaultEnabled"/>), so an opt-in collector stays off
+    /// and a collector turned off on purpose among running ones stays off. A row with no shipped default is left as it is.
+    /// Retention is never changed (#9569).</summary>
     public static void ApplyPreset(IReadOnlyList<CollectorScheduleEditItem> schedules, string presetName)
     {
         ArgumentNullException.ThrowIfNull(schedules);
@@ -226,6 +230,7 @@ public static class CollectorSchedulePresets
             foreach (var schedule in schedules)
             {
                 schedule.Enabled = false;
+                schedule.EnabledInherited = false;
             }
 
             return;
@@ -240,7 +245,10 @@ public static class CollectorSchedulePresets
         {
             foreach (var schedule in schedules)
             {
-                schedule.Enabled = true;
+                if (CollectorScheduleDefaults.All.TryGetValue(schedule.Name, out var shipped))
+                {
+                    schedule.Enabled = shipped.DefaultEnabled;
+                }
             }
         }
 
