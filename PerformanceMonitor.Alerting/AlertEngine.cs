@@ -5113,7 +5113,8 @@ public sealed class AlertEngine
             $"Restarted at {newStart} (was up since {oldStart}), server clock",
             "Start time later than the last collection",
             context, AlertContextBuilders.ContextToDetailText(context),
-            NumericCurrentValue: null, NumericThresholdValue: null,
+            /* #9583: a state, not a measurement. Null here sent "Restarted at 2026-..." to the text scan, which stored 2026. */
+            NumericCurrentValue: 0, NumericThresholdValue: 0,
             Muted: mute.Muted, Severity: AlertSeverityLevel.Warning,
             ShortMessage: $"Instance restarted at {newStart} (server clock), was up since {oldStart}",
             Hold: mute.Hold), ct);

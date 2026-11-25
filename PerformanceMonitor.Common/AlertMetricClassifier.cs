@@ -84,6 +84,12 @@ namespace PerformanceMonitor.Common
             if (string.Equals(metricName, "External Alerts Delivered Again", StringComparison.Ordinal))
                 return true;
 
+            /* #9583 (the alert is #8884): "Instance Restarted" is a Warning fire, an event that says the instance restarted. The word
+               "Restarted" below is there for "Agent Restarted", the recovery that follows "Agent Not Running". Named here, as the
+               exact name above is, so the fire is styled, counted and badged as the warning it fires at. */
+            if (string.Equals(metricName, "Instance Restarted", StringComparison.Ordinal))
+                return false;
+
             return metricName.Contains("Cleared", StringComparison.Ordinal)
                 || metricName.Contains("Resolved", StringComparison.Ordinal)
                 || metricName.Contains("Restored", StringComparison.Ordinal)
@@ -389,7 +395,10 @@ namespace PerformanceMonitor.Common
                     or "Refresh Job Stuck"
                     or "Retention Job Stuck"
                     /* #8302: a daily rollup behind its source fires with the same state-only sentinel. */
-                    or "Daily Rollup Stale" => true,
+                    or "Daily Rollup Stale"
+                    /* #9583: the Instance Restarted fire carries a start-time sentence, not a measurement. It was state-only only
+                       by being read as a resolution, which this fix ends, so it is listed; its fire site passes the 0 sentinel. */
+                    or "Instance Restarted" => true,
                 _ => false,
             };
         }
