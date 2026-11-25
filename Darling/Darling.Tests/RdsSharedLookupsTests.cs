@@ -502,6 +502,45 @@ public sealed class RdsSharedLookupsTests
     }
 
     /// <summary>
+    /// A held portion is dropped when its lifetime ends, with no later request to replace it: the cache waits the
+    /// lifetime out and then removes what has ended on its clock. A wait that ends early removes nothing.
+    /// </summary>
+    [Fact]
+    public async Task AHeldPortion_IsDroppedWhenItsLifetimeEnds_WithoutALaterRequest()
+    {
+        var clock = new Clock();
+        var waits = new List<TaskCompletionSource>();
+
+        /* The wait is the test's to end. Its continuation runs inside SetResult, so the drop has happened when
+           SetResult returns. */
+        var cache = new RdsLookupCache(
+            () => clock.Now,
+            _ =>
+            {
+                var wait = new TaskCompletionSource();
+                waits.Add(wait);
+                return wait.Task;
+            });
+
+        var rds = new CountingRds();
+
+        await ReadAsync(Reader(rds, cache));
+
+        /* The writer, the listing and the portion. */
+        Assert.Equal(3, cache.HeldCount);
+        Assert.Equal(3, waits.Count);
+
+        waits[0].SetResult();
+
+        Assert.Equal(3, cache.HeldCount);
+
+        clock.Advance(RdsLookupCache.PortionLifetime);
+        waits[1].SetResult();
+
+        Assert.Equal(0, cache.HeldCount);
+    }
+
+    /// <summary>
     /// The cache itself: two callers that ask at the same moment wait on one call, and a call that fails is not
     /// kept, so the caller that was waiting on it makes its own.
     /// </summary>

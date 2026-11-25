@@ -89,9 +89,27 @@ public sealed class RdsLookupCache
 
     private readonly Func<DateTime> _clock;
 
-    public RdsLookupCache(Func<DateTime>? clock = null)
+    private readonly Func<TimeSpan, Task> _wait;
+
+    /// <param name="clock">The time an answer's lifetime is measured on. Null is the wall clock.</param>
+    /// <param name="wait">How the cache waits out a lifetime before it drops what has ended. Null is
+    /// <see cref="Task.Delay(TimeSpan)"/>. A test passes its own so the drop happens when the test says.</param>
+    public RdsLookupCache(Func<DateTime>? clock = null, Func<TimeSpan, Task>? wait = null)
     {
         _clock = clock ?? (() => DateTime.UtcNow);
+        _wait = wait ?? Task.Delay;
+    }
+
+    /// <summary>How many answers are held, ended or not.</summary>
+    internal int HeldCount
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _entries.Count;
+            }
+        }
     }
 
     /// <summary>The writer of <paramref name="clusterId"/>, from <paramref name="resolve"/> when none is held.</summary>
@@ -159,6 +177,27 @@ public sealed class RdsLookupCache
         }
     }
 
+    /// <summary>
+    /// Drops the answers whose lifetime has ended, once <paramref name="lifetime"/> has passed. A held portion is up
+    /// to 1 MB of log text, and the next request that would replace it can be a whole collector interval away, so
+    /// an answer is not left to wait for one. Whether an answer has ended is read from the cache's clock, as it is
+    /// on every request, so this removes only what no request would be given.
+    /// </summary>
+    private async Task DropEndedAfterAsync(TimeSpan lifetime)
+    {
+        await _wait(lifetime).ConfigureAwait(false);
+
+        var now = _clock();
+
+        lock (_lock)
+        {
+            foreach (var ended in _entries.Where(e => e.Value.ExpiresUtc <= now).Select(e => e.Key).ToList())
+            {
+                _entries.Remove(ended);
+            }
+        }
+    }
+
     private async Task<T> GetAsync<T>(
         Key key, TimeSpan lifetime, Func<Task<T>> fetch, CancellationToken cancellationToken)
     {
@@ -189,6 +228,11 @@ public sealed class RdsLookupCache
                 mine = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
                 _entries[key] = new Entry(mine.Task, now + lifetime);
             }
+        }
+
+        if (mine is not null)
+        {
+            _ = DropEndedAfterAsync(lifetime);
         }
 
         if (shared is not null)
