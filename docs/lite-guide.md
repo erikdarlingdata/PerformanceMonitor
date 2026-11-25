@@ -243,6 +243,21 @@ type servers-to-add.json | PerformanceMonitorLite.exe --add-server
 
 Each entry has `host` and can have `display_name`, `auth`, `username`, `password` and `database`. The value of `auth` is `windows`, `sql`, `serviceprincipal`, `managedidentity` or `entradefault`. For one server, you can give the fields as flags instead: `--host`, `--name`, `--auth`, `--username` and `--database`.
 
+An entry can also set four connection settings, with the names and values that Darling's `add_servers` uses:
+
+| Field | Flag | Value | If left out |
+|---|---|---|---|
+| `encrypt_mode` | `--encrypt-mode` | `Optional`, `Mandatory` or `Strict` | `Mandatory` |
+| `trust_server_certificate` | `--trust-server-certificate` | `true` or `false` | `false` |
+| `read_only_intent` | `--read-only-intent` | `true` or `false` | `false` |
+| `multi_subnet_failover` | `--multi-subnet-failover` | `true` or `false` | `false` |
+
+In JSON, the three switches take a JSON `true` or `false`, not text. As flags, a switch alone means `true`, and it also takes `true` or `false` as its value. An unknown `encrypt_mode` word, or a value that is not `true` or `false`, exits with code 1 and changes nothing.
+
+`trust_server_certificate` turns off the check of the server certificate. Use it only for a server that serves a self-signed certificate, such as a new install or a container, and only on a network that you trust. Without it, the connection test refuses such a server with `The certificate chain was issued by an authority that is not trusted.`
+
+A setting that you give is recorded as confirmed for the Windows account that runs the command, as the Add Server window does. The next start of Lite does not ask about it. For a server that is already in the list, a setting that you leave out keeps its listed value. A listed `trust_server_certificate` or weaker `encrypt_mode` that this account never confirmed still refuses the update, unless you give that setting. The read-only intent is part of the identity of a server, so a run that leaves it out names the server without it.
+
 A SQL login then needs its password as one line on standard input. There is no password flag, because a flag shows in the process list. There is no password prompt either, because a command prompt does not wait for Lite. Always pipe the input, so that the shell waits for Lite and you can read the exit code.
 
 The command runs the same checks and the same connection test as the Add Server window. It writes `servers.json`, saves the password for the user that runs it, and records the host confirmation for that user. If a server is already in the list, the command replaces its saved password and adds no second entry.
@@ -280,7 +295,7 @@ This procedure sets up a headless Lite that an AI client on another machine reac
       ```
       type "%USERPROFILE%\servers-to-add.json" | "<path>\PerformanceMonitorLite.exe" --add-server
       ```
-      For one server, you can give flags instead of the JSON file: `--host`, `--name`, `--auth`, `--username` and `--database`. Then put only the password, on one line, in a file in the same profile folder, and pipe that file: `type "%USERPROFILE%\password.txt" | "<path>\PerformanceMonitorLite.exe" --add-server --host <sql-host> --auth sql --username <sql-login>`. Do not type the password into the command with `echo`. In a `cmd` window, each side of a pipe runs as a command of its own. So the password shows in the process list and in the command history of the window. Delete the file when the command is done.
+      For one server, you can give flags instead of the JSON file: `--host`, `--name`, `--auth`, `--username`, `--database` and the four settings above. Then put only the password, on one line, in a file in the same profile folder, and pipe that file: `type "%USERPROFILE%\password.txt" | "<path>\PerformanceMonitorLite.exe" --add-server --host <sql-host> --auth sql --username <sql-login>`. Do not type the password into the command with `echo`. In a `cmd` window, each side of a pipe runs as a command of its own. So the password shows in the process list and in the command history of the window. Delete the file when the command is done.
    4. Read the output. It ends with the line `Credentials were stored for the Windows account <account>.` Check that the account is the dedicated user. If it is another account, the password is stored for the wrong user. Run the command again as the dedicated user. If the window shows no output, add `> "%USERPROFILE%\add-server-result.txt" 2>&1` at the end of the command line and read that file. Lite never writes the password to the output.
    5. Delete the file of servers: `del "%USERPROFILE%\servers-to-add.json"`.
 5. Start the scheduled task, for example with `schtasks /run /tn "<task name>"`. Lite collects from the added servers from this start, and it makes the MCP token. See [Start it with a scheduled task](#start-it-with-a-scheduled-task).
