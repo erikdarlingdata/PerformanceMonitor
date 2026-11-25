@@ -65,7 +65,7 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
         Assert.Contains("IF OBJECT_ID(N'msdb.dbo.cdc_jobs') IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("sp_MScdc_capture_job", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("#req", sql, StringComparison.Ordinal);
-        Assert.Contains("der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)", sql, StringComparison.Ordinal);
+        Assert.Contains("AND   r.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)", sql, StringComparison.Ordinal);
         Assert.Contains("OPTION(MAXDOP 1, RECOMPILE);", sql, StringComparison.Ordinal);
     }
 
