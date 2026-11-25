@@ -454,6 +454,14 @@ public sealed partial class DarlingCollectorRunner
        marker's digest, and the row would store the marker until the entry expired. A switch clears the cache. */
     private readonly ConcurrentDictionary<int, ProcedureStatsPlanFetchMode> _procedureStatsPlanCacheModes = new();
 
+    /* #9535: the query_stats plans each server's plan fetch skipped on their own, asked last on every later run until a
+       command answers them. Bounded at the phase's MaxPlansPerRun; empty after a restart. */
+    private readonly ConcurrentDictionary<int, PlanFetchLaterKeys<QueryStatsPlanKey>> _queryStatsPlanFetchLater = new();
+
+    /* #9535: the same for procedure_stats, by plan handle (the plan phase and the deferred fetch share it: a handle is the
+       same plan whichever of the two asks for it). Bounded at the phase's MaxPlansPerRun. */
+    private readonly ConcurrentDictionary<int, PlanFetchLaterKeys<string>> _procedureStatsPlanFetchLater = new();
+
     /* #5158: how many capture cycles each server has run with the knob on or shadow. The cache's age limit counts these,
        so a cycle the cadence gate skips does not age an entry. */
     private readonly ConcurrentDictionary<int, long> _procedureStatsCaptureOrdinals = new();
@@ -571,6 +579,12 @@ public sealed partial class DarlingCollectorRunner
     /// production. Settable so a test can plant slow plans without waiting 30 seconds.
     /// </summary>
     internal TimeSpan QueryStorePlanFetchBudgetSpan { get; set; } = QueryStoreReadBudget.PlanFetchBudget;
+
+    /// <summary>
+    /// The wall clock query_stats' and procedure_stats' deferred plan fetch may spend before it stops asking for more
+    /// plans (#9535), <see cref="BoundedPlanFetch.Budget"/> in production. Settable so a test can spend it at once.
+    /// </summary>
+    internal TimeSpan PlanFetchBudgetSpan { get; set; } = BoundedPlanFetch.Budget;
 
     /// <summary>
     /// Each database's last measured plan-fetch time per plan, in milliseconds (#5813), keyed like
