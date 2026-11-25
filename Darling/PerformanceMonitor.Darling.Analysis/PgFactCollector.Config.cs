@@ -154,7 +154,12 @@ LIMIT 1";
        and a per-database latest-ever read kept counting it (and its auto_shrink, its recovery model) until
        retention aged its old captures out. The drill-down that lists these databases
        (PgDrillDownCollector.ConfigIssuesSql) was already anchored this way. No lookback bound: an on-load
-       capture can be weeks old on a healthy, long-connected server. */
+       capture can be weeks old on a healthy, long-connected server.
+
+       #9587: master, msdb, model, tempdb and rdsadmin are left out of every count. rdsadmin is the platform's own
+       database on Amazon RDS for SQL Server: the customer cannot change its settings, so an RCSI-off count that
+       included it would raise DB_CONFIG on a server whose user databases are all fine. The drill-down
+       (PgDrillDownCollector.ConfigIssuesSql) leaves out the same five. */
     public const string DatabaseConfigSql = @"
 WITH latest AS (
     SELECT database_name, recovery_model, is_auto_shrink_on, is_auto_close_on,
@@ -179,7 +184,7 @@ SELECT
     COUNT(CASE WHEN recovery_model = 'SIMPLE' THEN 1 END) AS simple_recovery_count,
     COUNT(CASE WHEN is_query_store_on THEN 1 END) AS query_store_on_count
 FROM latest WHERE rn = 1
-AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
+AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb', 'rdsadmin')";
 
     /// <summary>
     /// Collects database configuration facts: RCSI status, auto_shrink, auto_close,
