@@ -64,6 +64,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// Collector Cost Regression self-alert whose baseline window is 14 days. The attribution is published
 /// instead of applied: <see cref="Mcp.DarlingDataReader.CollectionLogEntry.SqlStoreMs"/> derives the store
 /// share from the V110 columns, which makes it retroactive to every row that has them.</para>
+///
+/// <para><b>On the four AWS-API runs it is the fetch through AWS (#9523).</b> <c>IngestRdsPlansAsync</c>,
+/// <c>IngestRdsDeadlocksAsync</c>, <c>IngestRdsLogEventsAsync</c> and <c>IngestPgCpuAsync</c> send no collector
+/// query to the target. Their fetch is the AWS calls, the target's two setting reads and the parse, and
+/// <c>DarlingCollectorRunner.RdsRunPhases</c> books it here, with the store's own time in
+/// <see cref="StorageMs"/>.</para>
 /// </param>
 /// <param name="HostNote">
 /// The note the RUNNER authored for a run worth explaining on its collection_log row: the RDS ingest

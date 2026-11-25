@@ -42,6 +42,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// total, so there is no phase split to subtract and no source table to re-derive from. That bound is why
 /// the number is left alone and named instead — <c>get_collector_cost</c> carries the caveat and
 /// <c>get_collection_log</c>'s <c>sql_store_ms</c> carries the per-run attribution.</para>
+///
+/// <para><b>The four AWS-API collectors book their AWS calls as sql_ms (#9523).</b> <c>pg_deadlocks</c>,
+/// <c>pg_log_events</c> and <c>pg_plan_capture</c> on an RDS or Aurora target, and <c>pg_cpu_utilization</c>, fetch
+/// through the RDS log API and Performance Insights. Their sql_ms is that fetch (the AWS calls, the target's two
+/// setting reads and the parse) and their storage_ms is the store's own time, the same two meanings every other
+/// collector's figures have (<c>DarlingCollectorRunner.RdsRunPhases</c>).</para>
 /// </summary>
 public sealed class CollectorCostAccumulator
 {

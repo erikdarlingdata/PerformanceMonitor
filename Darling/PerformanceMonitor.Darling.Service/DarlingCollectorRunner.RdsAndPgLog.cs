@@ -263,7 +263,14 @@ public sealed partial class DarlingCollectorRunner
            find. Stand down with the readiness remedy instead of downloading the log for nothing and reporting
            "no new plans", which reads as healthy and quiet. Checked before the target's log_destination read
            too, so a stand-down run opens neither the target nor the AWS log API. */
-        if (await AutoExplainNotLoadedReasonAsync(server.ServerId, cancellationToken) is { } notLoaded)
+        var started = Stopwatch.GetTimestamp();
+
+        var notLoaded = await AutoExplainNotLoadedReasonAsync(server.ServerId, cancellationToken);
+
+        /* #9523: the readiness read is a store read, so it is storage time like the ingestor's own store calls. */
+        var readinessMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+
+        if (notLoaded is not null)
         {
             throw new PgPlanCapturePreconditionException(notLoaded);
         }
@@ -277,21 +284,42 @@ public sealed partial class DarlingCollectorRunner
            carries no target connection of its own to probe with. */
         var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
 
-        var started = Stopwatch.GetTimestamp();
-
         var outcome = await rdsPlans.IngestAsync(
             server.ServerId, server.StorageName, host, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
-        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        var (sqlMs, storageMs) = RdsRunPhases(
+            (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, readinessMs + outcome.StoreMs);
 
         var measurements = MeasurementsFor(server, foreignZoneLines: 0, outcome.CsvRecordsDiscarded,
             outcome.ForgedCaptures, filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
-        /* Counted as STORAGE time rather than SQL time: no query ran against the monitored server, and
-           filing an HTTPS round trip under sql_duration_ms would make one target's numbers mean something
-           different from every other target's. */
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
+        return new CollectorRunResult(outcome.Rows, sqlMs, storageMs, measurements,
             RdsIngestNote(outcome, RdsPlanLogNotReachedNote, RdsPlanLogEmptyNote));
+    }
+
+    /// <summary>
+    /// How one AWS-API collector run is booked (#9523): <paramref name="storeMs"/>, the time its store calls took
+    /// (<see cref="RdsIngestOutcome.StoreMs"/>, plus the readiness read for plan capture), is
+    /// <c>storage_duration_ms</c>, and the rest of <paramref name="runMs"/> is <c>sql_duration_ms</c>. The two add up
+    /// to the run.
+    ///
+    /// <para><b>The rest is the fetch.</b> It is the target's <c>log_timezone</c> and <c>log_destination</c> reads, the
+    /// endpoint check, the AWS calls (the RDS log listing and download, or Performance Insights) and the parse of
+    /// what came back. That is what <c>sql_duration_ms</c> holds for every other collector: the time to get the
+    /// target's data, on whatever transport reaches it. <c>collect.collector_cost</c> has the same two columns, so
+    /// its <c>total_storage_ms</c> for these four collectors is the store's own time. Booking the whole run as
+    /// storage time made a store read as slow when the time was spent waiting on AWS, and on a cycle with nothing
+    /// to store nearly all of it was.</para>
+    ///
+    /// <para>The store time is the measured term and the fetch is the remainder, so nothing is counted twice and no
+    /// part of the run is left out. It is clamped to the run because the two are read from separate clocks.</para>
+    /// </summary>
+    internal static (long SqlMs, long StorageMs) RdsRunPhases(long runMs, long storeMs)
+    {
+        var run = Math.Max(0, runMs);
+        var storage = Math.Clamp(storeMs, 0, run);
+
+        return (run - storage, storage);
     }
 
     /// <summary>
@@ -384,7 +412,7 @@ LIMIT 1";
     /// dispatch this collector was missing (it dispatched unconditionally to the <c>pg_read_file</c> route
     /// even against a managed target, which has no filesystem to read; a 100% failure across the whole
     /// Aurora fleet, since no grant fixes what does not exist there). Mirrors
-    /// <see cref="IngestRdsPlansAsync"/> exactly, including the STORAGE-time accounting rationale.
+    /// <see cref="IngestRdsPlansAsync"/> exactly, including how the run is booked (<see cref="RdsRunPhases"/>).
     /// </summary>
     public async Task<CollectorRunResult> IngestRdsDeadlocksAsync(
         ServerRuntime server, CancellationToken cancellationToken)
@@ -392,6 +420,9 @@ LIMIT 1";
         var rdsDeadlocks = PublishedRdsDeadlockIngestor();
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
+
+        /* #9523: started before the two target reads below, so their time is in the run and is booked as the fetch. */
+        var started = Stopwatch.GetTimestamp();
 
         /* #4046 part 1b: read on the target's own connection each cycle, since a sighup setting takes
            effect with no reconnect and #3604-style connect-time caching would miss that. */
@@ -402,19 +433,17 @@ LIMIT 1";
            connection of its own to probe with. */
         var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
 
-        var started = Stopwatch.GetTimestamp();
-
         var outcome = await rdsDeadlocks.IngestAsync(
             server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, zoneCheck,
             cancellationToken);
 
-        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        var (sqlMs, storageMs) = RdsRunPhases((long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, outcome.StoreMs);
 
         var measurements = MeasurementsFor(
             server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded, raiseShapedSkipped: outcome.RaiseShapedSkipped,
             filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
+        return new CollectorRunResult(outcome.Rows, sqlMs, storageMs, measurements,
             RdsIngestNote(outcome, RdsDeadlockLogNotReachedNote, RdsDeadlockLogEmptyNote));
     }
 
@@ -611,6 +640,9 @@ LIMIT 1";
 
         var host = new NpgsqlConnectionStringBuilder(server.ConnectionString).Host ?? string.Empty;
 
+        /* #9523: started before the two target reads below, so their time is in the run and is booked as the fetch. */
+        var started = Stopwatch.GetTimestamp();
+
         /* #4046 part 1b: see IngestRdsDeadlocksAsync's TryReadLogTimezoneIsUtcAsync call for why this reads
            the target fresh each cycle rather than caching it at connect. */
         var (logTimezoneIsUtc, zoneCheck) = await TryReadLogTimezoneAsync(server, cancellationToken);
@@ -623,18 +655,16 @@ LIMIT 1";
            this is a cache hit on every cycle but the first and the one after a switch. */
         var pgLogUsesCsvlog = await TryReadPgLogUsesCsvlogAsync(server, cancellationToken);
 
-        var started = Stopwatch.GetTimestamp();
-
         var outcome = await rdsLogEvents.IngestAsync(
             server.ServerId, server.StorageName, host, logTimezoneIsUtc, pgLogUsesCsvlog, server.ConnectionString, server.Config.AwsRoleKey, zoneCheck,
             cancellationToken);
 
-        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        var (sqlMs, storageMs) = RdsRunPhases((long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, outcome.StoreMs);
 
         var measurements = MeasurementsFor(server, outcome.ForeignZoneLines, outcome.CsvRecordsDiscarded,
             filesSkipped: outcome.FilesSkipped, resumeFileMissing: outcome.ResumeFileMissing);
 
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, measurements,
+        return new CollectorRunResult(outcome.Rows, sqlMs, storageMs, measurements,
             RdsIngestNote(outcome, RdsLogEventsNotReachedNote, RdsLogEventsEmptyNote));
     }
 
@@ -714,12 +744,11 @@ LIMIT 1";
         var outcome = await rdsCpu.IngestAsync(
             server.ServerId, server.StorageName, host, server.ConnectionString, server.Config.AwsRoleKey, cancellationToken);
 
-        var elapsedMs = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        /* #9523: booked the way the three log ingests are. The watermark read and the COPY are storage time, and
+           the Describe calls and the Performance Insights call are the fetch. */
+        var (sqlMs, storageMs) = RdsRunPhases((long)Stopwatch.GetElapsedTime(started).TotalMilliseconds, outcome.StoreMs);
 
-        /* Counted as STORAGE time rather than SQL time, matching the other two RDS-API ingestors: no query
-           ran against the monitored server, and filing an HTTPS round trip under sql_duration_ms would make
-           one target's numbers mean something different from every other target's. */
-        return new CollectorRunResult(outcome.Rows, 0, elapsedMs, CollectorContext.NoMeasurements,
+        return new CollectorRunResult(outcome.Rows, sqlMs, storageMs, CollectorContext.NoMeasurements,
             RdsIngestNote(outcome, PiCpuNotReachedNote, PiCpuEmptyNote));
     }
 
