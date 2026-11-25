@@ -173,6 +173,10 @@ public sealed partial class DarlingCollectorRunner
            sample it lost. The cost is that a faulted cycle's remaining batches hold two store connections
            at a time on that server rather than one, for the rest of the cycle. */
         StoreWriteOutcome outcome;
+        /* #9549: a store write that stalls is harm the Store Checkpointer Pressure self-alert looks for inside a checkpoint
+           sync. Two shapes: one that ends in a transport fault (the store did not answer it), whether or not the
+           re-attempt then stores the rows, and one the store answers after longer than a read's deadline. */
+        var writeClock = Stopwatch.StartNew();
         try
         {
             outcome = await StoreWriteReattempt.RunAsync(
@@ -183,11 +187,21 @@ public sealed partial class DarlingCollectorRunner
                         definition, rows, server, collectionTime, context, token),
                 rewrite: token => CopyOnAFreshConnectionAsync(
                     definition, rows, server, collectionTime, context, token),
-                onReattempt: firstAttempt => _logger?.LogWarning(
-                    firstAttempt,
-                    StoreWriteReattemptLogTemplate,
-                    definition.Name, server.Config.DisplayName, rows.Count, firstAttempt.Message),
+                onReattempt: firstAttempt =>
+                {
+                    StoreHarmLog.Shared.NoteCollectorWriteFault(firstAttempt, definition.Name, DateTime.UtcNow, writeClock.ElapsedMilliseconds);
+                    writeClock.Restart();
+                    _logger?.LogWarning(
+                        firstAttempt,
+                        StoreWriteReattemptLogTemplate,
+                        definition.Name, server.Config.DisplayName, rows.Count, firstAttempt.Message);
+                },
                 cancellationToken);
+        }
+        catch (Exception fault) when (StoreHarmLog.Shared.NoteCollectorWriteFault(fault, definition.Name, DateTime.UtcNow, writeClock.ElapsedMilliseconds))
+        {
+            /* Never entered: the filter records the fault and answers false, so the arm below handles it as it always did. */
+            throw;
         }
         catch (Exception fault) when (RollsBackBaselines(fault))
         {
@@ -201,6 +215,8 @@ public sealed partial class DarlingCollectorRunner
             (rows as IBaselineRollback)?.RollBackBaselines();
             throw;
         }
+
+        StoreHarmLog.Shared.NoteCollectorWriteTime(definition.Name, DateTime.UtcNow, writeClock.ElapsedMilliseconds);
 
         if (outcome.Reattempted)
         {

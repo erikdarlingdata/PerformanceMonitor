@@ -347,6 +347,9 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
         Func<TimeSpan, CancellationToken, Task> delay,
         CancellationToken passToken)
     {
+        /* #9549: how long the first attempt ran, kept with the retry so the Store Checkpointer Pressure self-alert can
+           tell whether the read ran inside a checkpoint sync. */
+        var firstAttemptClock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             return await read(passToken);
@@ -369,7 +372,7 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
                after the wait would drop every retry that a shutdown interrupts; recorded only on success
                would understate the bands' cost by exactly the episodes where the band was worst, and the
                surface's own note commits to counting both outcomes here. */
-            readFailures?.RecordRetriedRead(serverKey, readName);
+            readFailures?.RecordRetriedRead(serverKey, readName, firstAttemptClock.ElapsedMilliseconds);
 
             /* The pause, on the PASS's token: a service stopping mid-band must not spend two seconds per
                in-flight read waiting to re-ask a store it is shutting down. A trip here throws

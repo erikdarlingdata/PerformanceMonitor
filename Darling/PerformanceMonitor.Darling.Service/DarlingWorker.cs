@@ -577,8 +577,9 @@ public sealed partial class DarlingWorker : BackgroundService
     private static readonly TimeSpan s_composeStampInterval = QueryStoreComposeStamp.ComposeTickInterval;
 
     /* #4823: the checkpointer's cumulative sync time is read once a minute, so the hourly Store Checkpointer Pressure
-       evaluation can judge the LONGEST single sync as well as the hour's average (a difference of two hourly rows is
-       the hour's total, which an average over the hour's checkpoints spreads thin). One trivial single-row read; the
+       evaluation knows which minutes a sync ran in (#9549: it fires when a store read or write suffered inside one) and
+       can state the LONGEST single sync as well as the hour's average (a difference of two hourly rows is the hour's
+       total, which an average over the hour's checkpoints spreads thin). One trivial single-row read; the
        budget bounds the whole sample, connection wait included, because it is awaited on the main loop. */
     private static readonly TimeSpan s_checkpointSyncSampleInterval = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan s_checkpointSyncSampleBudget = TimeSpan.FromSeconds(10);

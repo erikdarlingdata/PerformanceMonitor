@@ -1411,8 +1411,8 @@ AND   j.hypertable_name = '{relation}'", connection))
 
     /// <summary>
     /// The #4823 once-a-minute checkpointer sample: one read of the store's cumulative checkpoint sync time, handed to
-    /// <see cref="CheckpointSyncSampler"/>, which differences consecutive reads to find the longest single sync in the
-    /// hour. Awaited on the main loop, so the whole sample - connection wait included - runs under one short budget. A
+    /// <see cref="CheckpointSyncSampler"/>, which differences consecutive reads to find each sync in the hour, the
+    /// minute it finished in and the longest of them (#9549). Awaited on the main loop, so the whole sample - connection wait included - runs under one short budget. A
     /// failure (a store that is down, a permission the bring-your-own store lacks, the budget expiring) is a Debug line
     /// and a skipped minute: the sampler keeps its previous baseline, and the next successful read differences against
     /// it, which can only lengthen the difference it reports. Never throws except for the service stopping.
