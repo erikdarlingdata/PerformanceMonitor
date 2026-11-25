@@ -453,6 +453,19 @@ public sealed class AddServerCommandTests : IDisposable
     }
 
     [Fact]
+    public void Grammar_ReadsTheEncryptionSwitches()
+    {
+        Assert.True(AddServerCommand.TryParseArgs(
+            ["--add-server", "--host", "sql01", "--trust-server-certificate", "--read-only-intent=false", "--multi-subnet-failover", "true", "--encrypt-mode", "strict"],
+            out var flags, out var error));
+
+        Assert.Null(error);
+        Assert.Equal(new AddServerFlags("sql01", EncryptMode: "strict", TrustServerCertificate: true, ReadOnlyIntent: false, MultiSubnetFailover: true), flags);
+        Assert.False(AddServerCommand.TryParseArgs(["--add-server", "--host", "sql01", "--trust-server-certificate=maybe"], out _, out var refused));
+        Assert.Contains("--trust-server-certificate", refused);
+    }
+
+    [Fact]
     public async Task AnUpdate_ThatOmitsTheFields_KeepsTheListedValues()
     {
         await RunVerbAsync(["--add-server"], """[{"host":"sql01","encrypt_mode":"Optional","trust_server_certificate":true,"multi_subnet_failover":true}]""");
