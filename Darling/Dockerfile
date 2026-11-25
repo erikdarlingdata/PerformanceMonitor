@@ -38,14 +38,6 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0.404 AS build
 ARG VERSION=
 WORKDIR /src
 
-# The commit the image's service is built from (#9591), threaded in by nightly.yml and build.yml. The build context carries no .git
-# (.dockerignore drops it), so the SDK finds no source revision inside the image and the service would stamp no commit: it would
-# answer null on /version and in the service-start history. Passed as -p:SourceRevisionId, which the SDK keeps over its own lookup,
-# and which Directory.Build.props stamps as the SourceCommit assembly metadata. Empty by default ON PURPOSE, like VERSION above:
-# the shell expansion then adds no flag, and a hand-run docker build stamps no commit rather than a wrong one. The ARG sits after the restore layer
-# and before the publish, so a new commit invalidates the publish layer, which a new COPY . . invalidates anyway.
-ARG SOURCE_COMMIT=
-
 # #7100: restore from only the files that decide WHAT is restored (the build-wide props, the SDK pin, the feed, and the
 # project files of the service's closure), in a layer of its own, so a source-only change reuses the restored packages
 # instead of downloading them again (darling-linux-store.yml carries the layer cache across runs). Nothing here can break
@@ -65,6 +57,14 @@ COPY PerformanceMonitor.PlanAnalysis/PerformanceMonitor.PlanAnalysis.csproj Perf
 RUN dotnet restore Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj
 
 COPY . .
+
+# The commit the image's service is built from (#9591), threaded in by nightly.yml and build.yml. The build context carries no .git
+# (.dockerignore drops it), so the SDK finds no source revision inside the image and the service would stamp no commit: it would
+# answer null on /version and in the service-start history. Passed as -p:SourceRevisionId, which the SDK keeps over its own lookup,
+# and which Directory.Build.props stamps as the SourceCommit assembly metadata. Empty by default ON PURPOSE, like VERSION above:
+# the shell expansion then adds no flag, and a hand-run docker build stamps no commit rather than a wrong one. The ARG sits after the restore layer
+# and before the publish, because a RUN after an ARG misses the layer cache when the value changes: here a new commit misses only the publish layer, which a new COPY . . misses anyway.
+ARG SOURCE_COMMIT=
 RUN dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj \
     -c Release -o /app/publish ${VERSION:+-p:Version=$VERSION} ${SOURCE_COMMIT:+-p:SourceRevisionId=$SOURCE_COMMIT}
 
