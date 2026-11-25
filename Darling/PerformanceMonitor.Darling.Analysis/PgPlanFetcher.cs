@@ -88,13 +88,8 @@ FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1));";
             command.CommandTimeout = 15;
             command.Parameters.AddWithValue("@plan_handle", planHandle);
 
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            if (result == null || result is DBNull)
-            {
-                return null;
-            }
-
-            return result.ToString();
+            // #9195: a batch plan can be ten megabytes, and ExecuteScalarAsync's CPU grows with the square of that.
+            return await LivePlanXmlRead.FirstValueAsync(command, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
