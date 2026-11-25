@@ -286,6 +286,62 @@ public sealed class RdsSharedLookupsTests
     }
 
     /// <summary>
+    /// A rotation between two cycles, for two readers at one position. The rest of the old file is downloaded once
+    /// and the new file's first read is downloaded once, and each reader commits both under its own position.
+    /// </summary>
+    [Fact]
+    public async Task ARotatedFile_IsFinishedOnceForTheReadersAtOnePosition()
+    {
+        const string instanceHost = "solo.abc123.us-east-1.rds.amazonaws.com";
+        const string oldFile = "error/postgresql.log.2026-11-25-00";
+        const string newFile = "error/postgresql.log.2026-11-25-01";
+
+        var rds = new RdsRotationFakeRds(oldFile) { Body = "log body\n" };
+        var clock = new Clock();
+        var lookups = new RdsLookupCache(() => clock.Now);
+
+        var readers = new[]
+        {
+            new RdsLogSource(_ => rds, verifier: RdsEndpointVerifier.ForTests(enforce: false), lookups: lookups),
+            new RdsLogSource(_ => rds, verifier: RdsEndpointVerifier.ForTests(enforce: false), lookups: lookups),
+        };
+
+        /* Cycle 1: both readers reach the same position in the only file. */
+        foreach (var reader in readers)
+        {
+            var chunk = await reader.ReadNewestAsync(instanceHost);
+
+            Assert.NotNull(chunk);
+            reader.CommitResume(chunk.Value.Resume);
+        }
+
+        Assert.Single(rds.Downloads);
+
+        /* The log rotates before cycle 2. */
+        clock.Advance(RdsLookupCache.ListingLifetime);
+        rds.Listed = new[] { oldFile, newFile };
+
+        foreach (var reader in readers)
+        {
+            var rest = await reader.ReadNewestAsync(instanceHost);
+
+            Assert.NotNull(rest);
+            Assert.True(rest.Value.ReadAgain);
+            reader.CommitResume(rest.Value.Resume);
+
+            var first = await reader.ReadNewestAsync(instanceHost);
+
+            Assert.NotNull(first);
+            Assert.True(first.Value.StartsAtFileStart);
+            reader.CommitResume(first.Value.Resume);
+        }
+
+        Assert.Equal(3, rds.Downloads.Count);
+        Assert.Equal((oldFile, "M1"), (rds.Downloads[1].LogFileName, rds.Downloads[1].Marker));
+        Assert.Equal((newFile, RdsLogSource.StartOfFileMarker), (rds.Downloads[2].LogFileName, rds.Downloads[2].Marker));
+    }
+
+    /// <summary>
     /// The failover that removes the old writer. The read after it goes to the held writer and fails, which is the
     /// one failed run. That failure drops the held writer, so the next read asks the cluster again and reads the new
     /// writer, with the lifetime still running.
