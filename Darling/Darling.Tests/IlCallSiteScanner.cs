@@ -48,11 +48,10 @@ namespace Darling.Tests;
 /// GENERIC method is emitted against a <c>MethodSpec</c> token (table <c>0x2B</c>) that points at the
 /// underlying <c>MethodDef</c>/<c>MemberRef</c>, so collecting only those two tables reports a generic callee
 /// as never called. It cost the #2890 pin its first red — <c>ServerWatermarkIsDiscarded</c> is generic in
-/// <c>TRow</c> and was called on every cycle. On the service assembly 4,356 real call sites carry a
-/// MethodSpec token and 51 distinct callee names are reachable ONLY that way. Most are BCL generics (LINQ,
-/// <c>CollectionsMarshal.SetCount</c>, <c>DbDataReader.GetFieldValue</c>), but three of them are ours:
-/// <c>WithGeminiCompatibleTools</c> (50 call sites), <c>CollectAsync</c> (7) and <c>WriteBatchAsync</c> (4) —
-/// the last defined in <c>DarlingCollectorRunner</c>, the same class the phase-stamp pins scan. Resolved back
+/// <c>TRow</c> and was called on every cycle. On the service assembly thousands of real call sites carry a
+/// MethodSpec token and dozens of distinct callee names are reachable ONLY that way. Most are BCL generics (LINQ,
+/// <c>CollectionsMarshal.SetCount</c>, <c>DbDataReader.GetFieldValue</c>), but two of them are ours:
+/// <c>CollectAsync</c> (7) and <c>WriteBatchAsync</c> (4), the second defined in <c>DarlingCollectorRunner</c>, the same class the phase-stamp pins scan. Resolved back
 /// to the underlying member so a caller still asks by plain name.</para>
 /// </summary>
 internal static class IlCallSiteScanner

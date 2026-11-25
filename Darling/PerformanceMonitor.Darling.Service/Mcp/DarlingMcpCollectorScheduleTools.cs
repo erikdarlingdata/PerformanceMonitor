@@ -68,6 +68,7 @@ public sealed class DarlingMcpCollectorScheduleTools
     /// go back to the next level; <see cref="RunAt"/> is the run time as typed.</summary>
     private sealed record Edit(Change Kind, string Tool, string? Collector, string? Server, int? Number, bool Clear, string? RunAt, bool Inherit = false);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "disable_collector"), Description(
         "Stops one collector: sets its enabled flag to false, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes and data already collected stays. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent. inherit=true puts the enabled flag back to inherited (a server then follows the fleet-wide row again). Without it, a call with a server_name stores a fixed value on that server's row and the server stops following the fleet-wide value. Read the current state with get_collector_schedules; collector names are in get_collection_health.")]
     public static Task<string> DisableCollector(
@@ -79,6 +80,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         CancellationToken cancellationToken = default) =>
         ApplyAsync(postgres, new Edit(Change.Disable, "disable_collector", collector_name, server_name, null, false, null, inherit), logger, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "enable_collector"), Description(
         "Starts one collector: sets its enabled flag to true, for every monitored server (no server_name) or for ONE server. Nothing else on its row changes. A collector that ships off (opt-in) is switched on by this. The service picks it up on its next config poll; no restart. The answer gives the previous state and the exact call that undoes it. inherit=true puts the enabled flag back to inherited (a server then follows the fleet-wide row again). Without it, a call with a server_name stores a fixed value on that server's row and the server stops following the fleet-wide value. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> EnableCollector(
@@ -90,6 +92,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         CancellationToken cancellationToken = default) =>
         ApplyAsync(postgres, new Edit(Change.Enable, "enable_collector", collector_name, server_name, null, false, null, inherit), logger, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_collector_frequency"), Description(
         "Sets, or clears, how often one collector runs, in minutes (0 = once when the server loads), fleet-wide (no server_name) or for ONE server. clear=true removes the override so the next level applies (the fleet row for a server, else the code default). Same bounds as the Viewer's schedule editor: not negative, and a delta-family collector accepts at most the delta cap. Only frequency changes; the enabled flag and retention on the row are kept, and a new row never switches a collector on or off. The answer gives the previous value and the exact call that undoes it. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> SetCollectorFrequency(
@@ -102,6 +105,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         CancellationToken cancellationToken = default) =>
         ApplyAsync(postgres, new Edit(Change.Frequency, "set_collector_frequency", collector_name, server_name, frequency_minutes, clear, null), logger, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_collector_run_at"), Description(
         "Sets, stops or clears the time of day a collector that runs once a day or less often starts, fleet-wide (no server_name) or for ONE server. run_at is HH:MM (24-hour, the monitored server's own clock), 'none' (on a server: do not use the fleet's time) or 'default' (clear this row's time so the next level applies). A time on a collector that runs more often than daily is refused. Only the run time changes. The answer gives the previous value and the exact call that undoes it. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> SetCollectorRunAt(
@@ -113,6 +117,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         CancellationToken cancellationToken = default) =>
         ApplyAsync(postgres, new Edit(Change.RunAt, "set_collector_run_at", collector_name, server_name, null, false, run_at), logger, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_collector_retention"), Description(
         "Sets, or clears, how many days one collector's data is kept. Retention is fleet-wide: the purge reads one value per collector for every server, so a number with server_name is refused (frequency and enabled can still be set per server). clear=true removes the fleet-wide override so the code default applies; clear=true with server_name removes a per-server value an older build stored, which the purge never used. Same bound as the Viewer's schedule editor: at least 1 day. Only retention changes; the enabled flag and frequency on the row are kept, and a new row never switches a collector on or off. A shorter retention lets the next purge delete older rows on every server. The answer gives the previous value and the exact call that undoes it, except that a clear with server_name answers undo: null, because the purge never used that per-server value and saving it back would only store an unused row. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> SetCollectorRetention(
@@ -125,6 +130,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         CancellationToken cancellationToken = default) =>
         ApplyAsync(postgres, new Edit(Change.Retention, "set_collector_retention", collector_name, server_name, retention_days, clear, null), logger, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_collector_schedules"), Description(
         "Lists the schedule overrides stored for one collector, or for every collector: enabled, frequency_minutes, retention_days, run_at and the database scope, fleet-wide or per server (the purge applies only the fleet-wide retention_days). A server's own value wins over the fleet-wide one, column by column, for the other columns; a missing value means the next level applies, and the code default applies where there is no row; an enabled flag stored as NULL shows as inherited. With collector_name the answer also gives that collector's code default. Use it before and after disable_collector / enable_collector / set_collector_frequency / set_collector_run_at / set_collector_retention. Read only.")]
     public static async Task<string> GetCollectorSchedules(
@@ -614,6 +620,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         }.ToJsonString();
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_collector_databases"), Description(
         "Sets, or clears, which databases one collector reads (the schedule editor's Databases column), fleet-wide (no server_name) or for ONE server. databases is a comma-separated list of database names (trimmed, blanks dropped, as the Viewer reads the column); clear=true removes the scope so the next level applies (the fleet row for a server, else every database). Only the collectors that fan out per database read the scope; on any other it is stored and has no effect. excluded databases still win. On a server, databases='' (empty, clear false) is the explicit 'no scope' that stops a fleet-wide scope reaching that server; at the fleet level an empty list is the same as clear. Nothing else on the row changes. A new row stores enabled as 'inherited'. The answer names what it was and the call that puts it back. The service picks it up on its next config poll; no restart.")]
     public static Task<string> SetCollectorDatabases(
@@ -626,6 +633,7 @@ public sealed class DarlingMcpCollectorScheduleTools
         CancellationToken cancellationToken = default) =>
         ApplyDatabasesAsync(postgres, collector_name, databases, clear, server_name, logger, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "reset_collector_schedules"), Description(
         "Resets the collector schedules of one scope to the shipped defaults, as the schedule editor's Reset to Defaults does: with no server_name it deletes every FLEET-WIDE override row (enabled, frequency, retention and database scope of every collector) and every fleet-wide run time; with server_name it deletes that server's rows and run times (the editor's 'Use default schedule'), so the server follows the fleet-wide rows again. The other scope is not touched. The answer lists what was removed and how many rows; it cannot be undone in one call, so re-apply any wanted value from that list with the set_ and enable_/disable_ tools. The service picks it up on its next config poll; no restart.")]
     public static Task<string> ResetCollectorSchedules(

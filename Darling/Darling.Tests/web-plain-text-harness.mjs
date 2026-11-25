@@ -1,7 +1,8 @@
 /* Runs the shipped wwwroot/js/plain-text.js on the texts in HARNESS_INPUT (a JSON array of strings) and prints
    {"out": [...]} as one line. WebPlainTextTests starts it as
-       node web-plain-text-harness.mjs <path to wwwroot/js>
-   The module has no imports, so it is loaded straight from the js folder. */
+       node web-plain-text-harness.mjs <folder>
+   The folder holds plain-text.js and the tool names module the service serves beside it (mcp-tool-names.js), the module's
+   one import. */
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
