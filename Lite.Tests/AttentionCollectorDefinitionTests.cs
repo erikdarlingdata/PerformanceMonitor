@@ -88,7 +88,7 @@ public sealed class AttentionCollectorDefinitionTests
     {
         var text = AttentionCollector.BuildText(AttentionCollector.XeSessionName, azure);
 
-        var guard = text.IndexOf("IF NOT EXISTS", StringComparison.Ordinal);
+        var guard = text.IndexOf("IF @xe_address IS NULL", StringComparison.Ordinal);
         var firstTargetRead = text.IndexOf("target_name = N'ring_buffer'", StringComparison.Ordinal);
         Assert.True(guard >= 0 && guard < firstTargetRead, "the missing-session guard comes first");
         Assert.Contains("THROW 50000, N'XE session [PerformanceMonitor_Attention] is not running', 1;", text, StringComparison.Ordinal);

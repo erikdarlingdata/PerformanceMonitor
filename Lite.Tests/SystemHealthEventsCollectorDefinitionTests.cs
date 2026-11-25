@@ -59,7 +59,7 @@ public sealed class SystemHealthEventsCollectorDefinitionTests
         var text = SystemHealthEventsCollector.Instance.BuildQuery(MakeContext()).Text;
 
         Assert.Contains("sys.dm_xe_session_targets", text, StringComparison.Ordinal);
-        Assert.Contains("JOIN sys.dm_xe_sessions AS xes", text, StringComparison.Ordinal);
+        Assert.Contains("FROM sys.dm_xe_sessions AS xes", text, StringComparison.Ordinal);
         Assert.Contains("N'system_health'", text, StringComparison.Ordinal);
         Assert.Contains("RingBufferTarget/event", text, StringComparison.Ordinal);
         Assert.Contains("evt.query('.')", text, StringComparison.Ordinal);

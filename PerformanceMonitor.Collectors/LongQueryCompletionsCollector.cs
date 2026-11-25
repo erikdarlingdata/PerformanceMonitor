@@ -313,13 +313,7 @@ OPTION(RECOMPILE);";
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        string ringBufferSource = context.Target.IsAzureSqlDb
-            ? @"sys.dm_xe_database_session_targets AS xet
-JOIN sys.dm_xe_database_sessions AS xes
-  ON xes.address = xet.event_session_address"
-            : @"sys.dm_xe_session_targets AS xet
-JOIN sys.dm_xe_sessions AS xes
-  ON xes.address = xet.event_session_address";
+        bool databaseScoped = context.Target.IsAzureSqlDb;
 
         /* The session this install made (#4961): the host puts its name on the context. A context with none means the host
            has no install id, and it says so as a fault before it reads. The read never falls back to the legacy session. */
@@ -347,12 +341,14 @@ DECLARE
 
 SET @ring_position_session = N'{sessionName}';
 
+/* #9517: the session is found by name once and the target is read by its address, so the read does not build every other
+   running session's target rows. A session that is not running leaves @xe_address NULL, which matches no target row. */
+{RingBufferXml.ResolveAddressSql(databaseScoped, sessionName)}
+
 SELECT /* PerformanceMonitorLite */
     @ring_text = CONVERT(nvarchar(max), xet.target_data),
-    @ring_session = xes.name
-FROM {ringBufferSource}
-WHERE xes.name = N'{sessionName}'
-AND   xet.target_name = N'ring_buffer'
+    @ring_session = @xe_name
+{RingBufferXml.TargetFromSql(databaseScoped, "ring_buffer")}
 OPTION(RECOMPILE);
 
 {RingBufferXml.ParseSql}
