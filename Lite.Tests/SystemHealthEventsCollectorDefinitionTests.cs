@@ -151,11 +151,22 @@ public sealed class SystemHealthEventsCollectorDefinitionTests
         Assert.Contains("@read_offset = CASE WHEN @attempt < 2 THEN @bookmark_offset END", text, StringComparison.Ordinal);
         Assert.Contains("WHEN @attempt < 2 THEN DATEADD(NANOSECOND, -100, CONVERT(datetime2(7), @cutoff_time))", text, StringComparison.Ordinal);
 
-        /* It answers the pass only with an event to store or a scan position; otherwise the lookup and attempt 1 follow. */
+        /* It answers the pass only with an event to store or a scan position; otherwise the lookup follows. */
         Assert.Contains(
-            "IF @attempt = 0 AND @scan_file IS NULL AND NOT EXISTS ( SELECT 1/0 FROM @file_events AS fe ) BEGIN SET @attempt = 1; END; ELSE BEGIN SET @event_file_ok = 1; END;",
+            "IF @attempt = 0 AND @scan_file IS NULL AND NOT EXISTS ( SELECT 1/0 FROM @file_events AS fe ) BEGIN SET @bookmark_quiet = 1; SET @attempt = 1; END; ELSE BEGIN SET @event_file_ok = 1; END;",
             text,
             StringComparison.Ordinal);
+
+        /* A quiet pass reads the file once: when the lookup names the bookmark's file as the one being written, the read
+           attempt 0 made is the answer, and the check sits after the lookup and in front of the read. */
+        const string QuietAnswer =
+            "IF @attempt = 1 AND @bookmark_quiet = 1 AND @bookmark_file COLLATE Latin1_General_100_CI_AS = @event_file_name COLLATE Latin1_General_100_CI_AS BEGIN SET @attempt = 0; SET @event_file_ok = 1; BREAK; END;";
+        Assert.Contains(QuietAnswer, text, StringComparison.Ordinal);
+        Assert.True(
+            text.IndexOf("SET @lookup_ms = DATEDIFF(MILLISECOND, @lookup_start, SYSUTCDATETIME());", StringComparison.Ordinal)
+                < text.IndexOf(QuietAnswer, StringComparison.Ordinal)
+            && text.IndexOf(QuietAnswer, StringComparison.Ordinal) < text.IndexOf("SET @read_wildcard =", StringComparison.Ordinal),
+            "the quiet-pass answer is not between the lookup and the read");
 
         /* Its refusal is not the pass's error: only an attempt the lookup led to records one. */
         Assert.Contains("IF @attempt > 0 BEGIN SET @event_file_error = ERROR_NUMBER(); END;", text, StringComparison.Ordinal);

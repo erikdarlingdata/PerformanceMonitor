@@ -76,7 +76,9 @@ namespace PerformanceMonitor.Collectors;
 /// buffer full, a pass that skips the lookup takes about 0.6 of the time of one that runs it. A pass with a usable bookmark does not need the answer while the
 /// bookmark's file still has events past the bookmark, so it reads that file by its exact path first and runs the lookup
 /// only when that read stores nothing and does not move the bookmark (a quiet minute, a file that rolled over, a bookmark
-/// the server refuses). The run records which attempt answered (<c>event_file_attempt</c>) and the milliseconds the lookup,
+/// the server refuses). When the lookup then shows the bookmark's file is still the one being written, the read already
+/// made is the answer and is not made a second time, so a quiet pass costs one read and one lookup, as it does without
+/// the first read. The run records which attempt answered (<c>event_file_attempt</c>) and the milliseconds the lookup,
 /// the file read and the XML cast each took (<c>event_file_lookup_ms</c>, <c>event_file_read_ms</c>,
 /// <c>event_file_shred_ms</c>).</para>
 /// </summary>
@@ -125,9 +127,10 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
     /// <summary>
     /// The attempt that answered a file read (#9528): 0 for the bookmark's own file, read by its exact path before any target
     /// lookup; 1 for the read from the bookmark after the lookup (the current file by its exact path, or every rollover file,
-    /// which <see cref="EventFileWildcardMeasurement"/> tells apart); 2 for the current file alone with no bookmark. 0 means the
-    /// pass ran no <c>sys.dm_xe_session_targets</c> lookup. Written on every pass the event_file answered, never on a ring
-    /// buffer fallback.
+    /// which <see cref="EventFileWildcardMeasurement"/> tells apart); 2 for the current file alone with no bookmark. 0 with no
+    /// <see cref="EventFileLookupMsMeasurement"/> means the pass ran no <c>sys.dm_xe_session_targets</c> lookup. 0 with it is a
+    /// quiet pass: the bookmark's file had nothing to store, the lookup showed it is still the file being written, and the
+    /// read was not made a second time. Written on every pass the event_file answered, never on a ring buffer fallback.
     /// </summary>
     internal const string EventFileAttemptMeasurement = "event_file_attempt";
 
@@ -302,7 +305,9 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
        keeps at least one event to store, or the cap stops it (the scan position then moves the bookmark), the pass is
        done and the lookup never runs. When it stores nothing and moves nothing, or the server refuses it, the lookup runs
        and attempt 1 follows exactly as it does without attempt 0, so a file that rolled over is crossed one pass after
-       its last event was read and no event is lost. The test is a stored event, not a raw one: on SQL Server 2016 the
+       its last event was read and no event is lost. When the lookup shows the bookmark's file is still the one being
+       written, attempt 1 would repeat attempt 0's read exactly, so the pass ends there with nothing to store and the
+       file is read once. The test is a stored event, not a raw one: on SQL Server 2016 the
        raw read has no time filter, and a rolled-over file whose remaining events are all older than the cutoff would
        otherwise answer every pass, store nothing, and never reach the next file. Managed Instance has no attempt 0: its
        read is the bare pattern whatever the bookmark (#6897), and that path stays whole.
@@ -365,6 +370,7 @@ DECLARE
     @event_file_ok bit = 0,
     @event_file_error integer,
     @bookmark_refused bit = 0,
+    @bookmark_quiet bit = 0,
     @event_file_name nvarchar(260),
     @event_file_stem nvarchar(260),
     @event_file_left nvarchar(260),
@@ -478,6 +484,20 @@ OPTION(RECOMPILE);
     IF  @attempt > 0
     AND @event_file_path IS NULL
     BEGIN
+        BREAK;
+    END;
+
+    /* #9528: attempt 0 read the bookmark's file and kept nothing. When the lookup shows that file is the one the target
+       is still writing, attempt 1 would make the same read (same path, offset and cutoff), so attempt 0's read is the
+       answer: the pass ends with nothing to store, and a quiet pass reads the file once. A bookmark in a file that
+       rolled over goes on to attempt 1's wildcard read. */
+    IF  @attempt = 1
+    AND @bookmark_quiet = 1
+    AND @bookmark_file COLLATE Latin1_General_100_CI_AS = @event_file_name COLLATE Latin1_General_100_CI_AS
+    BEGIN
+        SET @attempt = 0;
+        SET @event_file_ok = 1;
+
         BREAK;
     END;
 
@@ -631,7 +651,7 @@ OPTION(RECOMPILE);
 
         /* #9528: attempt 0 answers the pass only when it has an event to store or the cap stopped it (the scan position
            then moves the bookmark). Otherwise the bookmark's file may have rolled over, and only the lookup can tell:
-           the pass goes on to attempt 1 with nothing kept. */
+           the pass goes on to the lookup with nothing kept, and @bookmark_quiet says this read completed. */
         IF  @attempt = 0
         AND @scan_file IS NULL
         AND NOT EXISTS
@@ -641,6 +661,7 @@ OPTION(RECOMPILE);
                 FROM @file_events AS fe
             )
         BEGIN
+            SET @bookmark_quiet = 1;
             SET @attempt = 1;
         END;
         ELSE

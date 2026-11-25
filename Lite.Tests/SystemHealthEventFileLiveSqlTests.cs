@@ -55,7 +55,7 @@ public sealed class SystemHealthEventFileLiveSqlTests
     private sealed record Pass(List<SystemHealthEventsCollector.Row> Rows, CollectorContext Context, TimeSpan Elapsed);
 
     /// <summary>One pass of a chain: the watermark it read past, whether it read from a bookmark, where its bookmark ended.</summary>
-    private sealed record ChainPass(DateTime Watermark, bool FromBookmark, string? EndFile, long EndOffset, int Rows, long? Attempt);
+    private sealed record ChainPass(DateTime Watermark, bool FromBookmark, string? EndFile, long EndOffset, int Rows, long? Attempt, bool LookedUp);
 
     /// <summary>One buffer of a file: its offset, how many of the six captured events it holds, and the newest of their times.</summary>
     private sealed record FileBuffer(long Offset, int Events, DateTime Newest);
@@ -518,7 +518,8 @@ ORDER BY fs.size_in_bytes DESC;", connection);
             }
 
             passes.Add(new ChainPass(
-                watermark, fromBookmark, endFile, endOffset, pass.Rows.Count, Measured(pass.Context, "event_file_attempt")));
+                watermark, fromBookmark, endFile, endOffset, pass.Rows.Count, Measured(pass.Context, "event_file_attempt"),
+                Measured(pass.Context, "event_file_lookup_ms") is not null));
             if (!moved)
             {
                 Assert.True(pass.Rows.Count == 0, $"pass {number} returned {pass.Rows.Count} rows and left the bookmark where it was");
@@ -837,7 +838,7 @@ ORDER BY x.file_offset;", server.Connection) { CommandTimeout = 120 };
     }
 
     [Fact]
-    public async Task AQuietBookmarkPass_FindsNothingInTheBookmarksFile_RunsTheLookup_AndStaysQuiet()
+    public async Task AQuietBookmarkPass_FindsNothingInTheBookmarksFile_RunsTheLookup_AndDoesNotReadTheFileAgain()
     {
         var server = await OpenAsync();
         await using var connection = server.Connection;
@@ -847,11 +848,12 @@ ORDER BY x.file_offset;", server.Connection) { CommandTimeout = 120 };
         Assert.SkipWhen(full.Rows.Count == 0, "The current system_health file holds none of the six captured events yet.");
 
         /* Nothing is newer than tomorrow, so the bookmark's file yields nothing: only the lookup can say whether the file
-           rolled over, so it runs, and attempt 1 reads the same file and confirms the quiet pass. */
+           rolled over, so it runs. It names the bookmark's file as the one being written, so the read already made is
+           the answer: attempt 0, beside a lookup time, is the pass that read the file once. */
         var quiet = await RunPassAsync(server, StateFrom(full.Context), watermark: full.Rows.Max(r => r.EventTime!.Value).AddDays(1));
 
         Assert.Empty(quiet.Rows);
-        Assert.Equal(1, Measured(quiet.Context, "event_file_attempt"));
+        Assert.Equal(0, Measured(quiet.Context, "event_file_attempt"));
         Assert.NotNull(Measured(quiet.Context, "event_file_lookup_ms"));
         Assert.Null(Measured(quiet.Context, "event_file_wildcard"));
         Assert.Equal(0, Measured(quiet.Context, "event_file_events"));
@@ -927,10 +929,16 @@ ORDER BY x.file_offset;", server.Connection) { CommandTimeout = 120 };
 
         /* The first pass has no bookmark: the lookup, then the current file. Every pass after it that the cap stopped, or
            that stored the last events, read the bookmark's own file and never looked the target up. The last pass found
-           nothing past the bookmark, so the lookup ran and attempt 1 confirmed it. */
+           nothing past the bookmark, so the lookup ran, named the same file, and the read was not made again. */
         Assert.Equal(2, chain.Passes[0].Attempt);
-        Assert.All(chain.Passes.Skip(1).Take(chain.Passes.Count - 2), pass => Assert.Equal(0, pass.Attempt));
-        Assert.Equal(1, chain.Passes[^1].Attempt);
+        Assert.True(chain.Passes[0].LookedUp);
+        Assert.All(chain.Passes.Skip(1).Take(chain.Passes.Count - 2), pass =>
+        {
+            Assert.Equal(0, pass.Attempt);
+            Assert.False(pass.LookedUp);
+        });
+        Assert.Equal(0, chain.Passes[^1].Attempt);
+        Assert.True(chain.Passes[^1].LookedUp);
     }
 
     [Fact]

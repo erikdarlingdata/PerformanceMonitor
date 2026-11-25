@@ -634,6 +634,23 @@ public sealed class SystemHealthEventFileTests
     }
 
     [Fact]
+    public async Task AQuietPassTheLookupConfirmed_RecordsAttemptZero_BesideTheLookupsTime()
+    {
+        /* #9528: the bookmark's file had nothing to store, the lookup showed it is still the file being written, and the
+           read was not made a second time: attempt 0 answered, and the lookup's time is in the note beside it. */
+        var context = MakeContext(watermark: s_watermark);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { WithSteps(Trailer(false, 0, DBNull.Value, true), attempt: 0, lookupMs: 21, readMs: 9, shredMs: 0) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(
+            "event_file_events=0 event_file_attempt=0 event_file_lookup_ms=21 event_file_read_ms=9 event_file_shred_ms=0",
+            CollectorMeasurementNote.Render(context.Measurements));
+    }
+
+    [Fact]
     public async Task AStepThatTookNoMeasurableTime_IsRecordedAsZero_AndANegativeSpanIsNeverWritten()
     {
         /* #9528: 0 ms is a measurement (the step ran), unlike NULL (it did not). A clock that stepped back mid-pass gives a
