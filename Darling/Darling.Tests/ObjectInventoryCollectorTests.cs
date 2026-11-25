@@ -53,7 +53,9 @@ public sealed class ObjectInventoryCollectorTests
     [Fact]
     public void ThePerItemQuery_QuoteDoublesTheBody_AndEscapesTheDatabaseName()
     {
-        var query = ObjectInventoryCollector.Instance.BuildPerItemQuery("odd]name", null!);
+        var query = ObjectInventoryCollector.Instance.BuildPerItemQuery(
+            "odd]name",
+            new CollectorContext { ServerId = 1, ServerName = "s", CollectionTime = DateTime.UtcNow, Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { SqlMajorVersion = 16 } });
         Assert.Contains("EXECUTE [odd]]name].sys.sp_executesql", query.Text, StringComparison.Ordinal);
         Assert.Contains("o.type IN (N''P''", query.Text, StringComparison.Ordinal);
     }

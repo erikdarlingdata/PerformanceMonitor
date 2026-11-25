@@ -221,11 +221,19 @@ SELECT /* PerformanceMonitorLite */ TOP (60)
         DATEADD(SECOND, -((@ms_ticks - t.timestamp) / 1000), SYSUTCDATETIME()))
 FROM
 (
-    SELECT
+    /* #9530: cut to the newest records BEFORE the xml convert. The ring holds up to 256 one-minute records
+       and the outer TOP (60) keeps only the newest 60, so converting the whole ring parsed about four
+       times the xml it returned. 90 is the 60 the outer TOP returns plus 30 spare: the #989 filter below
+       drops a record with no complete SystemHealth block, and the spare records keep such a drop from
+       shortening the window. A ring of complete records returns the same 60 rows as before. The
+       timestamp order is the outer order, so the cut and the outer TOP agree on which records are newest. */
+    SELECT TOP (90)
         dorb.timestamp,
         record = CONVERT(xml, dorb.record)
     FROM sys.dm_os_ring_buffers AS dorb
     WHERE dorb.ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+    ORDER BY
+        dorb.timestamp DESC
 ) AS t
 CROSS APPLY
 (

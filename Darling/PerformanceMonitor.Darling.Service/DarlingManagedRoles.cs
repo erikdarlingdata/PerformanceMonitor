@@ -2159,6 +2159,14 @@ GRANT SELECT ON {config}.investigation_request_askers TO {admin};
 REVOKE ALL ON {config}.investigation_person_messages FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
 GRANT SELECT ON {config}.investigation_person_messages TO {admin};
 
+-- 10e8. The planned change windows (V318, #9485): when a planned change touches which servers. The service opens requests as the owner and reads the windows to
+--       hold a request that opens inside one, so nothing else needs to write. Every role reads the windows (the web dashboard and the MCP read name them).
+--       REVOKE ALL ... CASCADE takes every privilege the default privileges gave, then SELECT goes back to all four. The declare and clear writes are a later grant.
+--       provision-roles.sql step 3j8 does the same.
+REVOKE ALL ON {config}.investigation_change_windows FROM PUBLIC, {admin}, {viewer}, {web}, {mcp} CASCADE;
+GRANT SELECT ON {config}.investigation_change_windows TO {admin}, {viewer}, {web};
+GRANT SELECT ON {config}.investigation_change_windows TO {mcp};
+
 -- 10f. Phase C tables (V193, #5997): the evidence of a request, the daily deadlock signature counts and the signature
 --     merges. Only the store owner (the service) writes them. The default privileges would give admin INSERT/UPDATE/DELETE
 --     on a table made after them, so REVOKE ALL ... CASCADE (which also takes TRIGGER and REFERENCES) takes every privilege
@@ -4378,7 +4386,9 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
     /// (<see cref="ProposalEvents.OwnerOnly"/>, #7109): otherwise the mcp or admin login could write a false <c>proposal_approved</c> row. So is a proposal's notice mark
     /// (<see cref="InvestigationRequestStore.ProposalNoticeSent"/>, #7109): another login that wrote it first would stop the proposal's notice. So is
     /// <see cref="InvestigationRequestStore.AskerJournalEvent"/> (#7109): the approver check reads askers from it, so a row another login wrote would
-    /// block an approver.</summary>
+    /// block an approver. So is <see cref="InvestigationEvents.ChangeWindowClosed"/> (#9485): the service journals the one summary row of a closed change
+    /// window itself, with no request, so another login could otherwise write a false close summary. It is not in <see cref="InvestigationEvents.Kinds"/>:
+    /// it is audit only and no long poll or signed POST delivers it.</summary>
     internal static string JournalOwnerEventList => string.Join(", ",
         InvestigationEvents.Kinds.Append(InvestigationEvents.Delivered).Append(InvestigationEvents.FallbackSent).Append(ServerActionSwitches.JournalEvent)
             .Concat(AgentActionEvents.OwnerOnly)
@@ -4390,6 +4400,7 @@ CREATE OR REPLACE TRIGGER trg_investigation_request_alerts_owner_rows
             .Append(InvestigationRequestStore.SlackPressed)
             .Append(InvestigationRequestStore.AskerJournalEvent)
             .Append(InvestigationRequestStore.AgentMessage)
+            .Append(InvestigationEvents.ChangeWindowClosed)
             .Select(k => "'" + k + "'"));
 
     /// <summary>

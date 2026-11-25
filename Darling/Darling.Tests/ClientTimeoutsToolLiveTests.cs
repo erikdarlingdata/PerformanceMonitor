@@ -51,8 +51,9 @@ public sealed class ClientTimeoutsToolLiveTests
     private const int MetadataCallsId = -5640114;
     private const int NoCallsId = -5640115;
     private const int TwoCallsId = -5640116;
+    private const int ShortCallsId = -5640117;
 
-    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, NearMissId, MetadataCallsId, NoCallsId, TwoCallsId };
+    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, ShortCallsId, NearMissId, MetadataCallsId, NoCallsId, TwoCallsId };
 
     private static string Name(int id) => "ct-live" + (-id).ToString(CultureInfo.InvariantCulture);
 
@@ -247,6 +248,43 @@ public sealed class ClientTimeoutsToolLiveTests
             var (_, reading) = ClientTimeoutsRead.Classify(window, Now());
             Assert.Equal(8, reading!.MatchedSamples);
             Assert.Equal(0, reading.ShortSamples);
+        });
+    }
+
+    [Fact]
+    public async Task ACallThatRanUnderTheFloor_IsNotACommandTimeout_ButOneThatRanLongerIs()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            var (at, eventTime) = await SeedJudgedSpanAsync(connection, ShortCallsId, ct);
+
+            /* Three 4 ms attentions. Session 1 cancelled a call 50 ms into its run (a data layer cancelling before it closes a reader), session 2 a call
+               that had run 5 s (a command timeout), session 3 a call that ran 0.95 s (a 1 s command timeout recorded a little short, under the 1 s attention floor but over the capture floor). Only the longer two are command timeouts (#9538). */
+            for (var session = 1; session <= 3; session++)
+            {
+                await RowAsync(connection, ShortCallsId, at, "sample", 0, "db1", "etl", null, null, ct, durationUs: 4_000, eventTime: eventTime, sessionId: session);
+            }
+
+            await RowAsync(connection, ShortCallsId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.A: EXEC dbo.A", ct, durationUs: 50_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 1);
+            await RowAsync(connection, ShortCallsId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.B: EXEC dbo.B", ct, durationUs: 5_000_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 2);
+            await RowAsync(connection, ShortCallsId, at, "aborted", 0, "db1", "etl", "fp-call", "dbo.C: EXEC dbo.C", ct, durationUs: 950_000, eventTime: eventTime.AddMilliseconds(10), sessionId: 3);
+
+            using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(ShortCallsId), 1, cancellationToken: ct));
+            var body = doc.RootElement.GetProperty("client_timeouts");
+
+            Assert.Equal(3, body.GetProperty("sampled_events_in_range").GetInt64());
+            var excluded = body.GetProperty("excluded_from_alert");
+            Assert.Equal(1, excluded.GetProperty("below_duration_floor_events").GetInt64());
+            Assert.Equal(2, excluded.GetProperty("matched_calls").GetInt64());
+            Assert.Equal(55 * 2 / 3.0, excluded.GetProperty("count_judged").GetDouble(), 1);
+
+            var calls = body.GetProperty("matched_calls").EnumerateArray().ToList();
+            Assert.Equal(new[] { 2, 3 }, calls.Select(c => c.GetProperty("session_id").GetInt32()).OrderBy(x => x));
+
+            var (window, _) = await DarlingMcpClientTimeoutTools.ReadRangeAsync(postgres, ShortCallsId, Now().AddHours(-1), Now(), 20, ct);
+            var (_, reading) = ClientTimeoutsRead.Classify(window, Now());
+            Assert.Equal(2, reading!.MatchedSamples);
+            Assert.Equal(1, reading.ShortSamples);
         });
     }
 
