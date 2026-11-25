@@ -307,9 +307,9 @@ public sealed partial class DarlingCollectorRunner
     /// endpoint check, the AWS calls (the RDS log listing and download, or Performance Insights) and the parse of
     /// what came back. That is what <c>sql_duration_ms</c> holds for every other collector: the time to get the
     /// target's data, on whatever transport reaches it. <c>collect.collector_cost</c> has the same two columns, so
-    /// its <c>total_storage_ms</c> for these four collectors is the store's own time. Booking the whole run as
-    /// storage time made a store read as slow when the time was spent waiting on AWS, and on a cycle with nothing
-    /// to store nearly all of it was.</para>
+    /// its <c>total_storage_ms</c> for these four collectors is the store's own time. A whole run booked as storage
+    /// time makes a store read as slow when the time is spent waiting on AWS, which on a cycle with nothing to
+    /// store is nearly all of it.</para>
     ///
     /// <para>The store time is the measured term and the fetch is the remainder, so nothing is counted twice and no
     /// part of the run is left out. It is clamped to the run because the two are read from separate clocks.</para>
