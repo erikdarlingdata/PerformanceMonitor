@@ -1043,7 +1043,9 @@ public sealed class DarlingMcpHostService : BackgroundService
                 DarlingAlertSettings.TriageBaseUrlOf(config),
                 tokenSet,
                 frontDoor,
-                config.Mcp.AllowAgentMuteRules);
+                config.Mcp.AllowAgentMuteRules,
+                /* #9577: the hold on tool calls while the worker migrates. */
+                McpStoreReadyFilter.StoreReadyFor(frontDoor is not null, _processServices?.GetService<CollectorRuntimeState>(), StoreHealthWarmGate.Shared));
 
             _app = builder.Build();
 
@@ -1497,7 +1499,7 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null, DarlingFrontDoorRouter? frontDoor = null, bool agentMuteRules = true)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null, SlowReadLog? slowReads = null, DarlingMcpWritePolicy.Effective writes = default, DarlingMcpAddServersPolicy? addServers = null, ReadAdmission? readAdmission = null, string? publicBaseUrl = null, DarlingMcpTokenSet? tokens = null, DarlingFrontDoorRouter? frontDoor = null, bool agentMuteRules = true, Func<bool>? storeReady = null)
     {
         /* #6542: with named tokens served, the policy a tool sees is the one its request's token is served (the bearer gate stored
            the caller on the request), not the start-wide union. Without them it is the start's policy, a singleton, as before. */
@@ -1793,6 +1795,14 @@ public sealed class DarlingMcpHostService : BackgroundService
                    dispatch and the front door's routing see it. */
                 filters.AddCallToolFilter(DarlingLeanToolProfile.CallToolFilter);
                 filters.AddListToolsFilter(DarlingLeanToolProfile.ListFilter);
+
+                /* #9577: right after the /lean rewrite, so a call_tool call is held by its inner tool's name, and outside every filter that
+                   reads the store. A start whose migrations are not done answers store_not_ready and runs no tool. Absent from a front door
+                   and a test-built host, which never wait (McpStoreReadyFilter.StoreReadyFor). */
+                if (storeReady is not null)
+                {
+                    filters.AddCallToolFilter(McpStoreReadyFilter.Over(storeReady));
+                }
 
                 /* #6840: a front door drops the unknown-argument guard (it would refuse the store argument, and the store runs its own guard on
                    what it is sent), the latency record (no store here to record it in), the GCF re-encode, and the database-name filter

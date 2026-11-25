@@ -111,6 +111,9 @@ public class StoreLogClassifierTests
         /* shutdown_in_progress (#8814) - a client that reached the store while it was stopping. */
         "2026-09-05 14:05:30.639 UTC [5300] FATAL:  the database system is shutting down",
 
+        /* startup_in_progress (#9577) - a client that reached the store while it was starting. */
+        "2026-09-05 14:05:32.410 UTC [5301] FATAL:  the database system is starting up",
+
         /* timescale_timestamp_column (#9515) - the hypertable-creation warning for a plain timestamp column, with its HINT. */
         "2026-09-05 14:05:35.100 UTC [5301] WARNING:  column type \"timestamp without time zone\" used for \"collection_time\" does not follow best practices",
         "2026-09-05 14:05:35.100 UTC [5301] HINT:  Use datatype TIMESTAMPTZ instead.",
@@ -1177,7 +1180,7 @@ public class StoreLogClassifierTests
         Assert.True(census.EntriesRead > 0, "the fixture produced no entries at all");
         Assert.True(census.Groups.Count > 0, "the fixture produced no groups at all");
 
-        Assert.Equal(20, StoreLogClassifier.ClassNames.Count);
+        Assert.Equal(21, StoreLogClassifier.ClassNames.Count);
 
         var covered = census.Groups.Select(g => g.EventClass).ToHashSet(StringComparer.Ordinal);
         Assert.Equal(
@@ -1336,6 +1339,25 @@ public class StoreLogClassifierTests
         Assert.Null(group.MessageText);
 
         var error = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  the database system is shutting down\n");
+        Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(error.Groups).EventClass);
+    }
+
+    /// <summary>
+    /// #9577: the startup twin of the shutting-down FATAL. A client that connects while the store is starting reads it on
+    /// every managed store restart. It is counted under its own class and keeps no text, and it is FATAL-scoped, so the same
+    /// words at another severity are still a shape nobody anticipated.
+    /// </summary>
+    [Fact]
+    public void TheStartingUpFatal_IsCountedNotRetained_AndOnlyAtFatal()
+    {
+        var census = StoreLogClassifier.Classify(DefaultPrefix + "FATAL:  the database system is starting up\n");
+
+        var group = Assert.Single(census.Groups);
+        Assert.Equal("startup_in_progress", group.EventClass);
+        Assert.False(StoreLogClassifier.IsRetainedClass(group.EventClass));
+        Assert.Null(group.MessageText);
+
+        var error = StoreLogClassifier.Classify(DefaultPrefix + "ERROR:  the database system is starting up\n");
         Assert.Equal(StoreLogClassifier.UnclassifiedClass, Assert.Single(error.Groups).EventClass);
     }
 
