@@ -368,6 +368,7 @@ Collector queries specifically:
   varies enormously between a first-run catch-up window and a steady-state minute, and a plan
   cached from one is wrong for the other. A statement added to an existing batch needs its own
   hint. One on a neighbouring statement does not cover it.
+
   One narrow exception (#9539): some statements can drop the hint. Such a statement takes no
   parameters, and the server's own setup (its availability groups, databases and files) sets
   how many rows it reads. A lab run on two engine versions must prove the change. Without the
