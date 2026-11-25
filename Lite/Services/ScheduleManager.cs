@@ -880,6 +880,12 @@ public class ScheduleManager
     internal static string DescribePresetMatch(List<CollectorSchedule> schedules)
     {
         var matched = DetectPreset(schedules);
+        if (matched == PresetOff)
+        {
+            /* #9569: Off has no interval table, so "every interval matches the Off preset" would say nothing true. */
+            return "Every collector is off.";
+        }
+
         if (matched != "Custom")
         {
             return $"Every collector interval matches the {matched} preset.";
@@ -1191,13 +1197,27 @@ public class ScheduleManager
         }
     }
 
+    /// <summary>The preset that turns every collector in scope off (#9569). Not a key of <c>s_presets</c>.</summary>
+    internal const string PresetOff = "Off";
+
+    /// <summary>True when the list has at least one row and every row is off (#9569).</summary>
+    private static bool AllCollectorsOff(List<CollectorSchedule> schedules) =>
+        schedules.Count > 0 && schedules.All(s => !s.Enabled);
+
     /// <summary>
     /// Detects which preset matches a list of collector schedules, or "Custom". This is the single
     /// source of preset logic; <see cref="ApplyPreset"/> and the collector-schedule editor window both
     /// call these static methods rather than keeping a second preset table, so the two cannot drift.
+    /// "Off" (every row off, at least one row) is checked first, so the combo can pick a named preset
+    /// again and raise SelectionChanged (#9569). An empty list is never Off.
     /// </summary>
     internal static string DetectPreset(List<CollectorSchedule> schedules)
     {
+        if (AllCollectorsOff(schedules))
+        {
+            return PresetOff;
+        }
+
         foreach (var (presetName, intervals) in s_presets)
         {
             bool matches = true;
@@ -1217,15 +1237,34 @@ public class ScheduleManager
     }
 
     /// <summary>
-    /// Applies a named preset's intervals to a schedule list in place (frequencies only; enabled and
-    /// retention are untouched). An unknown preset name is a no-op. Shared with the editor window so the
-    /// preset table lives exactly once.
+    /// Applies a preset to a schedule list in place. "Off" clears Enabled on every row and touches nothing
+    /// else (#9569). A named preset sets the intervals, and also sets Enabled on every row when every row
+    /// was off, so a collector turned off on purpose among running ones stays off. Retention is never
+    /// changed. An unknown preset name is a no-op. Shared with the editor window so the preset table
+    /// lives exactly once.
     /// </summary>
     internal static void ApplyPreset(List<CollectorSchedule> schedules, string presetName)
     {
+        if (string.Equals(presetName, PresetOff, StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var schedule in schedules)
+            {
+                schedule.Enabled = false;
+            }
+            return;
+        }
+
         if (!s_presets.TryGetValue(presetName, out var intervals))
         {
             return;
+        }
+
+        if (AllCollectorsOff(schedules))
+        {
+            foreach (var schedule in schedules)
+            {
+                schedule.Enabled = true;
+            }
         }
 
         foreach (var (collector, freq) in intervals)
