@@ -71,6 +71,22 @@ public sealed class ExternalAlertDrainTextTests
     }
 
     [Fact]
+    public void AOneLineDetail_ReadsExactlyAsTheOldTextCleanerReadsIt()
+    {
+        /* A tab, leading spaces and a run of spaces: the old cleaner makes each run one space and drops the leading ones. */
+        const string Detail = "  disk\t\tfull   93%";
+        Assert.Equal("disk full 93%", ExternalAlertDrain.CleanDetail(Detail, 200));
+        Assert.Equal(ExternalAlertDrain.CleanText(Detail, 200), ExternalAlertDrain.CleanDetail(Detail, 200));
+
+        /* A store still on the old function body keeps "x  \r\n  y" as five spaces. It is one line here and reads as one space. */
+        Assert.Equal("x y", ExternalAlertDrain.CleanDetail("x     y", 200));
+
+        /* Breaks that leave one line behind, and the cap, read as the old cleaner reads them. */
+        Assert.Equal("abc", ExternalAlertDrain.CleanDetail("\n\n  abc  \r\n", 200));
+        Assert.Equal(ExternalAlertDrain.CleanText("  ab  cd  ", 4), ExternalAlertDrain.CleanDetail("  ab  cd  ", 4));
+    }
+
+    [Fact]
     public void ADetail_StillTurnsOtherControlCharactersToSpaces_AndDropsInvisibleOnes()
     {
         /* The #5654 rules: a tab, NEL, the line and paragraph separators and DEL are spaces and never a break; a zero-width space
