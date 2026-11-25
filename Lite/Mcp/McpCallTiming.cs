@@ -29,16 +29,20 @@ namespace PerformanceMonitorLite.Mcp;
 /// </summary>
 internal sealed record McpCallTimingLive(McpCallTimingRecorder Recorder);
 
-/// <summary>One tool's in-memory figures since the process started (#9423): the shape of Darling's read-latency rows, per tool.</summary>
+/// <summary>
+/// One tool's in-memory figures since the process started (#9423): the shape of Darling's read-latency rows, per tool.
+/// <paramref name="SlowRowsUnwritten"/> is how many of the <paramref name="SlowCalls"/> have no <c>mcp_slow_calls</c> row, because the write failed
+/// after its retries or the row could not be built (#9544).
+/// </summary>
 public sealed record McpToolFigures(
-    string Tool, long Count, long TotalMs, long MaxMs, long P50Ms, long P95Ms, long P99Ms, long SlowCalls, long Errors);
+    string Tool, long Count, long TotalMs, long MaxMs, long P50Ms, long P95Ms, long P99Ms, long SlowCalls, long Errors, long SlowRowsUnwritten);
 
 /// <summary>
 /// Times every MCP <c>tools/call</c> (#9423, #9424), the twin of Darling's <c>McpToolLatencyFilter</c> and its
 /// <c>ReadLatencyAccumulator</c> (#4442). Two things come out of each call. The per-tool figures (count, total, max, the p50, p95 and
 /// p99 bucket upper bounds, slow calls and errors) stay in memory for the life of the process. A call that took at least
 /// <see cref="SlowThreshold"/> also writes one <c>mcp_slow_calls</c> row, after the call has finished and off the call's own path:
-/// a failed write is logged at Debug and never reaches the caller.
+/// a write that fails is retried when the store lock was busy, then logged at Warning and counted in <c>SlowRowsUnwritten</c> (#9544), and never reaches the caller.
 ///
 /// <para>The row never holds an argument value. The one argument kept is the window (<c>hours_back</c> or <c>hours</c>), a number. The server is
 /// read from the reply's own <c>server</c> property (the name the tool resolved), else from a <c>server_name</c> argument the call carried. The rows
@@ -91,6 +95,7 @@ public sealed class McpCallTimingRecorder
         internal long MaxMs;
         internal long SlowCalls;
         internal long Errors;
+        internal long SlowRowsUnwritten;
         internal readonly long[] Buckets = new long[s_bucketBoundsMs.Length + 1];
     }
 
@@ -128,6 +133,15 @@ public sealed class McpCallTimingRecorder
     /// <summary>Test seam: the clock that stamps a row's start time.</summary>
     internal Func<DateTime> UtcNow { get; set; } = () => DateTime.UtcNow;
 
+    /// <summary>How many times a slow call's row write is tried in all, when the write lock stays busy (#9544).</summary>
+    internal const int MaxWriteAttempts = 3;
+
+    /// <summary>The pause between two attempts of one row write. The write runs off the call's own path, so a pause costs the caller nothing.</summary>
+    internal static readonly TimeSpan DefaultWriteRetryPause = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>Test seam: the pause between two attempts of one row write.</summary>
+    internal TimeSpan WriteRetryPause { get; set; } = DefaultWriteRetryPause;
+
     /// <summary>Test seam: the working-set reading, in bytes.</summary>
     internal Func<long> ReadWorkingSet { get; set; } = () => Environment.WorkingSet;
 
@@ -140,7 +154,7 @@ public sealed class McpCallTimingRecorder
                 {
                     var f = kv.Value;
                     return new McpToolFigures(kv.Key, f.Count, f.TotalMs, f.MaxMs,
-                        Percentile(f, 0.50), Percentile(f, 0.95), Percentile(f, 0.99), f.SlowCalls, f.Errors);
+                        Percentile(f, 0.50), Percentile(f, 0.95), Percentile(f, 0.99), f.SlowCalls, f.Errors, f.SlowRowsUnwritten);
                 }
             })
             .OrderByDescending(f => f.P95Ms).ThenByDescending(f => f.Count).ThenBy(f => f.Tool, StringComparer.Ordinal)
@@ -222,6 +236,7 @@ public sealed class McpCallTimingRecorder
         {
             if (_finished) return;
             _finished = true;
+            var slowCounted = false;
             try
             {
                 var elapsed = Stopwatch.GetElapsedTime(_startedAt);
@@ -229,6 +244,7 @@ public sealed class McpCallTimingRecorder
                 var slow = elapsed >= _recorder.SlowThreshold;
                 _recorder.Add(_tool, totalMs, slow, outcome != OutcomeOk);
                 if (!slow) return;
+                slowCounted = true;
 
                 /* Leave the sampler first: what it read since the call began is this call's own peak, and a reading after the end is not. */
                 _recorder._sampler.Detach(_memory);
@@ -250,7 +266,9 @@ public sealed class McpCallTimingRecorder
             }
             catch (Exception ex)
             {
-                AppLogger.Debug("McpCallTiming", $"Could not record the timing of {_tool}: {ex.Message}");
+                /* A slow call that counted in per_tool but whose row could not be built is a lost row (#9544). */
+                if (slowCounted) _recorder.NoteRowUnwritten(_tool);
+                AppLogger.Warn("McpCallTiming", LossText(_tool, "build", 1, ex));
             }
         }
 
@@ -279,27 +297,57 @@ public sealed class McpCallTimingRecorder
 
     /// <summary>
     /// Takes the closing DuckDB reading and writes the row, off the call's own path. The reading is folded into the peak the sampler
-    /// kept, so the row holds the highest total and not the last. A failure is a Debug line.
+    /// kept, so the row holds the highest total and not the last. A write that fails because the store lock stayed busy is tried again,
+    /// <see cref="MaxWriteAttempts"/> times in all with <see cref="WriteRetryPause"/> between them, and any other failure is not (#9544).
+    /// A row still not written is a Warning line and one more in the tool's <c>SlowRowsUnwritten</c>.
     /// </summary>
     private void WriteInBackground(McpSlowCall call)
     {
         var task = Task.Run(async () =>
         {
+            var attempts = 0;
             try
             {
                 var closing = _readDuckDbMemory();
                 var peak = call.DuckDbPeakMemoryBytes is { } sampled ? (closing is { } c ? Math.Max(sampled, c) : sampled) : closing;
                 var withMemory = call with { DuckDbPeakMemoryBytes = peak };
-                await _write(withMemory).ConfigureAwait(false);
+                while (true)
+                {
+                    attempts++;
+                    try
+                    {
+                        await _write(withMemory).ConfigureAwait(false);
+                        return;
+                    }
+                    catch (StoreLockTimeoutException) when (attempts < MaxWriteAttempts)
+                    {
+                        await Task.Delay(WriteRetryPause).ConfigureAwait(false);
+                    }
+                }
             }
             catch (Exception ex)
             {
-                AppLogger.Debug("McpCallTiming", $"Could not write the slow call row for {call.Tool}: {ex.Message}");
+                NoteRowUnwritten(call.Tool);
+                AppLogger.Warn("McpCallTiming", LossText(call.Tool, "write", Math.Max(attempts, 1), ex));
             }
         });
         _pendingWrites.TryAdd(task, 0);
         task.ContinueWith(t => _pendingWrites.TryRemove(t, out _), TaskScheduler.Default);
     }
+
+    /// <summary>One more slow call of <paramref name="tool"/> whose row was lost, on the same lock as its slow-call count.</summary>
+    private void NoteRowUnwritten(string tool)
+    {
+        var f = _figures.GetOrAdd(tool, _ => new Figures());
+        lock (f)
+        {
+            f.SlowRowsUnwritten++;
+        }
+    }
+
+    /// <summary>The Warning line for a lost row: the tool, the step, the attempts and the exception's type and message. Never the reply or an argument.</summary>
+    private static string LossText(string tool, string step, int attempts, Exception ex) =>
+        $"The slow call row for {tool} was not written. Step {step}, {attempts} attempt(s). {ex.GetType().Name}: {ex.Message}";
 
     /// <summary>The window the call asked for, from <c>hours_back</c> or <c>hours</c>. Nothing else in the arguments is read.</summary>
     internal static double? WindowOf(IDictionary<string, JsonElement>? arguments)

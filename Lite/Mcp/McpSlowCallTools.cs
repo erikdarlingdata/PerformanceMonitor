@@ -39,7 +39,8 @@ public sealed class McpSlowCallTools
         "each one's figure includes the others' memory. Sampling starts 250 ms into a call and runs every 75 ms, so a rise shorter than that can be missed " +
         "and the first 250 ms has only the starting working-set reading. memory_source says in words where the two figures came from. No argument value is stored. " +
         "per_tool: for each tool called since Lite started, count, total_ms, mean_ms, max_ms, p50_ms, p95_ms and p99_ms (bucket upper bounds, never interpolated, capped at max_ms), " +
-        "slow_calls and errors. Rows are kept 7 days, at most 1000. Optional tool filter: slow_calls and per_tool then hold only that tool. Empty slow_calls means no call was slow, not a failure. " +
+        "slow_calls, errors and slow_rows_unwritten. slow_rows_unwritten counts the slow calls whose row was not written to the local store after retries, or could not be built, " +
+        "so they are in per_tool and missing from slow_calls. It is kept in memory since Lite started, like the rest of per_tool. Rows are kept 7 days, at most 1000. Optional tool filter: slow_calls and per_tool then hold only that tool. Empty slow_calls means no call was slow, not a failure. " +
         "truncated is true when the window held more slow calls than limit, so slow_calls is the newest limit of them. per_tool is never cut by limit.";
 
     [McpServerTool(Name = "get_slow_mcp_calls"), Description(Description)]
@@ -74,6 +75,7 @@ public sealed class McpSlowCallTools
                     p99_ms = f.P99Ms,
                     slow_calls = f.SlowCalls,
                     errors = f.Errors,
+                    slow_rows_unwritten = f.SlowRowsUnwritten,
                 });
 
             return JsonSerializer.Serialize(new
