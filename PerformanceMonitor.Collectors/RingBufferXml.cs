@@ -21,13 +21,54 @@ namespace PerformanceMonitor.Collectors;
 /// under this pass: that changes the text but not the parse. A buffer that still will not cast raises an error carrying its
 /// character count and SQL Server's own parse message, instead of inserting a NULL.</para>
 ///
-/// <para>Usage in a collector batch: put <see cref="DeclareSql"/> where the read runs, read
-/// <c>@ring_text = CONVERT(nvarchar(max), xet.target_data)</c> and <c>@ring_session = xes.name</c> from the target, emit
-/// <see cref="ParseSql"/>, then insert <c>@ring_xml WHERE @ring_xml IS NOT NULL</c>. Neither constant holds a brace, so both
-/// are safe in an interpolated string and in a <c>string.Format</c>-style template.</para>
+/// <para>Usage in a collector batch: emit <see cref="ResolveAddressSql"/> once, put <see cref="DeclareSql"/> where the read runs,
+/// read <c>@ring_text = CONVERT(nvarchar(max), xet.target_data)</c> and <c>@ring_session = @xe_name</c> through
+/// <see cref="TargetFromSql"/>, emit <see cref="ParseSql"/>, then insert <c>@ring_xml WHERE @ring_xml IS NOT NULL</c>. No
+/// fragment holds a brace, so each is safe in an interpolated string and in a <c>string.Format</c>-style template.</para>
 /// </summary>
 internal static class RingBufferXml
 {
+    /// <summary>
+    /// #9517. Finds the session once per batch: <c>@xe_address</c> (its <c>address</c>) and <c>@xe_name</c> (its name as the
+    /// engine stores it), both NULL when no session by that name runs. Declares both, so a batch emits it once and
+    /// every <see cref="TargetFromSql"/> read in the batch uses the address it found. <paramref name="sessionName"/> is a
+    /// literal already safe inside <c>N'...'</c>.
+    /// </summary>
+    public static string ResolveAddressSql(bool databaseScoped, string sessionName)
+    {
+        var sessions = databaseScoped ? "sys.dm_xe_database_sessions" : "sys.dm_xe_sessions";
+
+        return $@"DECLARE
+    @xe_address varbinary(8),
+    @xe_name sysname;
+
+SELECT
+    @xe_address = xes.address,
+    @xe_name = xes.name
+FROM {sessions} AS xes
+WHERE xes.name = N'{sessionName}'
+OPTION(RECOMPILE);";
+    }
+
+    /// <summary>
+    /// #9517. The <c>FROM ... WHERE</c> of one target read, by the address <see cref="ResolveAddressSql"/> found, with the alias
+    /// <c>xet</c>. The engine builds only that session's target rows when the filter is an equality on
+    /// <c>event_session_address</c> with a variable; a name filter on a joined <c>sys.dm_xe_sessions</c> does not reach the
+    /// targets DMV, so the join form builds every running session's <c>target_data</c> first (measured on SQL Server 2022: 36 ms
+    /// with about 15 MB in other sessions' ring buffers, 3 ms by address). The caller adds any further predicate and
+    /// <c>OPTION(RECOMPILE)</c> after it. A session that was not found (NULL <c>@xe_address</c>), or was recreated after
+    /// <see cref="ResolveAddressSql"/> ran, matches no target row: the read assigns nothing, as the join form does for a session
+    /// that is not running.
+    /// </summary>
+    public static string TargetFromSql(bool databaseScoped, string targetName)
+    {
+        var targets = databaseScoped ? "sys.dm_xe_database_session_targets" : "sys.dm_xe_session_targets";
+
+        return $@"FROM {targets} AS xet
+WHERE xet.event_session_address = @xe_address
+AND   xet.target_name = N'{targetName}'";
+    }
+
     /// <summary>The variables <see cref="ParseSql"/> reads (<c>@ring_text</c>, <c>@ring_session</c>) and the one it fills (<c>@ring_xml</c>).</summary>
     public const string DeclareSql = @"DECLARE
     @ring_text nvarchar(max),

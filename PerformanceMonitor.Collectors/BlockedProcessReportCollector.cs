@@ -171,15 +171,11 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        /* The ring-buffer source DMV is the only engine difference (database-scoped on Azure SQL DB,
+        /* The sessions and targets DMVs are the only engine difference (database-scoped on Azure SQL DB,
            server-scoped elsewhere); event extraction and the wait_resource -> object decode are shared. */
-        string ringBufferSource = context.Target.IsAzureSqlDb
-            ? @"sys.dm_xe_database_session_targets AS xet
-JOIN sys.dm_xe_database_sessions AS xes
-  ON xes.address = xet.event_session_address"
-            : @"sys.dm_xe_session_targets AS xet
-JOIN sys.dm_xe_sessions AS xes
-  ON xes.address = xet.event_session_address";
+        bool databaseScoped = context.Target.IsAzureSqlDb;
+        string resolveAddress = RingBufferXml.ResolveAddressSql(databaseScoped, XeSessionName);
+        string ringBufferFrom = RingBufferXml.TargetFromSql(databaseScoped, "ring_buffer");
 
         /* Resolve contentious_object from wait_resource (KEY hobt -> sys.partitions, OBJECT objid,
            PAGE/RID -> sys.dm_db_page_info), mirroring sp_HumanEventsBlockViewer (DarlingData #812) so
@@ -273,15 +269,18 @@ DECLARE
     error_text nvarchar(4000) NULL
 );
 
-/* #4200: read BEFORE the cast -- no XML materialized, so this costs one integer whether or not
-   anything shreds below. Compared against @last_execution_count (the prior cycle's own read of
+/* #9517: the session is found once and every target read below uses its address. The targets DMV builds every running
+   session's target rows unless the filter is an equality on event_session_address, so a name filter on a joined sessions DMV
+   pays for all of them. A session that is not running leaves @xe_address NULL, which matches no target row. */
+{resolveAddress}
+
+/* #4200: read BEFORE the cast, by the session's address: only this session's target row is built and no XML is cast, so the
+   read returns one integer whether or not anything shreds below. Compared against @last_execution_count (the prior cycle's own read of
    this same counter, passed in as a parameter): an exact match means nothing has arrived since
    then, so the cast+shred is skipped. See XeShredGate for why the match test is this narrow. */
 SELECT
     @execution_count = xet.execution_count
-FROM {ringBufferSource}
-WHERE xes.name = N'{XeSessionName}'
-AND   xet.target_name = N'ring_buffer'
+{ringBufferFrom}
 OPTION(RECOMPILE);
 
 /* #6868: a count of 0 shreds like NULL. A Managed Instance never moves it off 0, so 0 = 0 would skip forever. */
@@ -305,10 +304,8 @@ BEGIN
 
     SELECT /* PerformanceMonitorLite */
         @ring_text = CONVERT(nvarchar(max), xet.target_data),
-        @ring_session = xes.name
-    FROM {ringBufferSource}
-    WHERE xes.name = N'{XeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        @ring_session = @xe_name
+    {ringBufferFrom}
     OPTION(RECOMPILE);
 
     {RingBufferXml.ParseSql}
@@ -573,7 +570,7 @@ OR CONVERT(integer, SERVERPROPERTY('EngineEdition')) = 8
 BEGIN
     /* #1865: deliberately NO server-level permission screen here, though sys.dm_db_page_info is
        gated by one (VIEW SERVER STATE; VIEW SERVER PERFORMANCE STATE on 2022+). So is the
-       sys.dm_xe_session_targets read this batch opens with -- verified on SQL 2022, a login without
+       sys.dm_xe_sessions read this batch opens with -- verified on SQL 2022, a login without
        it fails that first statement with 297 and never reaches this line -- so a screen for it could
        only ever answer yes, and would be machinery that never fires.
        What DOES vary per database, and is what actually fails here, is metadata access to the
