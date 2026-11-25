@@ -271,9 +271,12 @@ public sealed class McpBlockingTools
                 /* #8146: the blocked-process-report collector's ring-buffer loss over the window rides the empty answer's hints. */
                 return RingBufferLossAnswer.AttachToHints(await McpEngineCapability.NotCollectedStatusAsync(dataService, serverManager, resolved.ServerId, resolved.DisplayName, "blocked_process_report")
                     ?? await McpQueryTools.OfflineInsteadOfEmptyAsync(dataService, resolved.ServerId, windowEnd, McpHelpers.Status("empty", $"No blocked process reports found in this window{ForChosenDatabase(database)}.",
-                        (await McpQueryTools.EventWindowNoticeAsync(
+                        /* #9518: a server whose 'blocked process threshold (s)' is 0 raises no report, so the collector reads nothing there.
+                           The answer stays empty when the DMV blocking snapshots covered the window, and a hint names the threshold. */
+                        BlockedProcessThresholdOffNote.WithHint((await McpQueryTools.EventWindowNoticeAsync(
                             () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.BlockedProcessReports, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd),
-                            null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints()), windowEnd.AddHours(-hours_back)),
+                            null, windowEnd.AddHours(-hours_back), windowEnd, "blocked_process_report", emptyAnswer: true)).AsHints(),
+                            await dataService.ReportsOffWithSnapshotCoverAsync(resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd))), windowEnd.AddHours(-hours_back)),
                     await dataService.GetLossRunsInWindowAsync(resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowEnd.AddHours(-hours_back), windowEnd), database != null);
             }
 
