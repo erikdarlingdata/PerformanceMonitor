@@ -605,7 +605,8 @@ public sealed class DarlingWebHostService : BackgroundService
             network?.AllowFrom,
             tokenPresent: network is not null
                 && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token) || oidcOnlySignIn),
-            networkConfigured: network is { IsConfigured: true },
+            /* #9571: the tokens are honored in bring-your-own mode, so only the fields that mode ignores count here. */
+            networkConfigured: network is { ByoIgnoredFields.Count: > 0 },
             managed: managed,
             /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
             inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
@@ -3617,10 +3618,13 @@ if (location.pathname.toLowerCase() !== '/auth/login') { document.getElementById
                 break;
 
             case DarlingHostBinding.BindReason.ManagedModeRequired:
+                /* #9571: name the fields that are ignored. A token alone never lands here. */
+                var ignored = web.Network?.ByoIgnoredFields ?? [];
                 _logger.Log(level.Value,
-                    "web.network.* is set but postgres.managed = false. Web dashboard network exposure is available only with the bundled store " +
-                    "(postgres.managed = true) or the container distribution, so listen and allowFrom are ignored. " +
-                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (web.network.encryptedToken / token) still gates the loopback dashboard.");
+                    "{Fields} set but postgres.managed = false. Web dashboard network exposure is available only with the bundled store " +
+                    "(postgres.managed = true) or the container distribution, so the network fields are ignored. " +
+                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (web.network.encryptedToken / token / tokens) still gates the loopback dashboard.",
+                    string.Join(", ", ignored.Select(f => "web.network." + f)) + (ignored.Count == 1 ? " is" : " are"));
                 break;
 
             default:
