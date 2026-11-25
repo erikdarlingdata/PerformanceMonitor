@@ -115,7 +115,7 @@ public sealed partial class DarlingCollectorRunner
     internal RdsPlanIngestor PublishedRdsPlanIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsPlans,
-            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles, lookups: _rdsLookups));
+            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>#8982: hands this runner the plan ingestor <see cref="PublishedRdsPlanIngestor"/> returns, so a test can see whether a run reached it.</summary>
     internal void UseRdsPlanIngestorForTests(RdsPlanIngestor ingestor) => Volatile.Write(ref _rdsPlans, ingestor);
@@ -124,18 +124,18 @@ public sealed partial class DarlingCollectorRunner
     internal RdsDeadlockIngestor PublishedRdsDeadlockIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsDeadlocks,
-            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles, lookups: _rdsLookups));
+            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>The one log-event ingestor of this runner, built the first time a target needs it with the store's
     /// log-hash key <paramref name="logHashKey"/>.</summary>
     internal RdsLogEventIngestor PublishedRdsLogEventIngestor(PgLogHashKey logHashKey)
         => LazyInitializer.EnsureInitialized(
             ref _rdsLogEvents,
-            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles, lookups: _rdsLookups));
+            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>The one CPU ingestor of this runner, built the first time a target needs it.</summary>
     internal RdsCpuIngestor PublishedRdsCpuIngestor()
-        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier, roles: _awsRoles, lookups: _rdsLookups));
+        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>
     /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
