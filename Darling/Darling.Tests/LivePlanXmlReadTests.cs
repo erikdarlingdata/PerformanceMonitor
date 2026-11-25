@@ -21,11 +21,14 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #9195: the live plan fetch reads its one value in a way whose cost follows the plan's size. A plan handle names a
-/// whole batch, so the value can be ten megabytes, and the provider's asynchronous value reads cost the square of
-/// that. These tests hold the read to its shape by counting the calls a fake command and reader receive: one
-/// execution with <see cref="CommandBehavior.SequentialAccess"/>, one row read, one synchronous value read, and no
-/// scalar or asynchronous value read. They also hold what the caller gets back: the same text, null for no plan,
+/// #9195: the live plan fetch reads its one value in a way whose cost follows the plan's size, and that the fetch
+/// command's timeout does not cut short. A plan handle names a whole batch, so the value can be ten megabytes. The
+/// provider's asynchronous value reads cost far more CPU than the value's size accounts for, and one synchronous
+/// read of the whole value has to finish inside the command's timeout. These tests hold the read to its shape by
+/// counting the calls a fake command and reader receive: one execution with
+/// <see cref="CommandBehavior.SequentialAccess"/>, one row read, then the value in calls of at most
+/// <see cref="LivePlanXmlRead.ChunkChars"/> characters, each starting where the last ended, and no scalar, whole
+/// value or asynchronous value read. They also hold what the caller gets back: the same text, null for no plan,
 /// and a cancellation, never a failed fetch, when the token fires during the read.
 /// </summary>
 public sealed class LivePlanXmlReadTests
@@ -50,8 +53,11 @@ public sealed class LivePlanXmlReadTests
         return plan.Append("</Statements></Batch></BatchSequence></ShowPlanXML>").ToString();
     }
 
+    /// <summary>The calls a value of this length takes: one for each chunk that carries text, and the one that finds no more.</summary>
+    private static int ChunkCalls(int length) => (length + LivePlanXmlRead.ChunkChars - 1) / LivePlanXmlRead.ChunkChars + 1;
+
     [Fact]
-    public async Task ABatchPlanOfTenMillionCharacters_ComesBackWhole_FromOneSequentialRowAndOneValueRead()
+    public async Task ABatchPlanOfTenMillionCharacters_ComesBackWhole_InChunksFromOneSequentialRow()
     {
         var plan = BatchPlan();
         Assert.True(plan.Length > 10_000_000, $"the generated plan is {plan.Length:N0} characters");
@@ -64,10 +70,31 @@ public sealed class LivePlanXmlReadTests
         Assert.Equal(new[] { CommandBehavior.SequentialAccess }, command.ReaderBehaviors);
         Assert.Equal(0, command.ScalarCalls);
         Assert.Equal(1, command.Reader.RowReads);
-        Assert.Equal(1, command.Reader.ValueReads);
+        Assert.Equal(ChunkCalls(plan.Length), command.Reader.ChunkReads);
+        Assert.Equal(LivePlanXmlRead.ChunkChars, command.Reader.LargestRequest);
+        Assert.Equal(0, command.Reader.WholeValueReads);
         Assert.Equal(0, command.Reader.AsyncValueReads);
         Assert.True(command.Reader.IsClosed);
         Assert.Equal(0, command.CancelCalls);
+    }
+
+    /// <summary>
+    /// The timeout case, with the timeout held instead of timed: the reader fails any one call that asks for more
+    /// than a million characters, the way a provider's call fails when it cannot finish inside the command's
+    /// timeout. One read of the whole ten million characters is such a call.
+    /// </summary>
+    [Fact]
+    public async Task AProviderWhoseOneCallCannotCarryTheWholePlan_StillDeliversIt()
+    {
+        var plan = BatchPlan();
+        var command = new FakePlanCommand(new FakePlanReader(plan) { MostCharactersOneCallCanCarry = 1_000_000 });
+
+        var read = await LivePlanXmlRead.FirstValueAsync(command, CancellationToken.None);
+
+        Assert.True(string.Equals(plan, read, StringComparison.Ordinal), "the plan text came back changed");
+        Assert.Equal(0, command.ScalarCalls);
+        Assert.Equal(0, command.Reader.WholeValueReads);
+        Assert.True(command.Reader.LargestRequest <= 1_000_000);
     }
 
     [Fact]
@@ -76,11 +103,28 @@ public sealed class LivePlanXmlReadTests
         var noRow = new FakePlanCommand(new FakePlanReader());
         Assert.Null(await LivePlanXmlRead.FirstValueAsync(noRow, CancellationToken.None));
         Assert.Equal(1, noRow.Reader.RowReads);
-        Assert.Equal(0, noRow.Reader.ValueReads);
+        Assert.Equal(0, noRow.Reader.ChunkReads);
 
-        var nullValue = new FakePlanCommand(new FakePlanReader(DBNull.Value));
+        var nullValue = new FakePlanCommand(new FakePlanReader(null));
         Assert.Null(await LivePlanXmlRead.FirstValueAsync(nullValue, CancellationToken.None));
-        Assert.Equal(1, nullValue.Reader.ValueReads);
+        Assert.Equal(0, nullValue.Reader.ChunkReads);
+        Assert.Equal(0, nullValue.Reader.LengthQuestions);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AValueReadsTheSame_WhetherOrNotTheProviderKnowsItsLength(bool knowsLength)
+    {
+        var text = new string('p', LivePlanXmlRead.ChunkChars * 2 + 17);
+        var command = new FakePlanCommand(new FakePlanReader(text) { KnowsLength = knowsLength });
+
+        Assert.Equal(text, await LivePlanXmlRead.FirstValueAsync(command, CancellationToken.None));
+        Assert.Equal(1, command.Reader.LengthQuestions);
+        Assert.Equal(ChunkCalls(text.Length), command.Reader.ChunkReads);
+
+        var empty = new FakePlanCommand(new FakePlanReader(string.Empty) { KnowsLength = knowsLength });
+        Assert.Equal(string.Empty, await LivePlanXmlRead.FirstValueAsync(empty, CancellationToken.None));
     }
 
     [Fact]
@@ -96,17 +140,20 @@ public sealed class LivePlanXmlReadTests
     }
 
     [Fact]
-    public async Task ATokenThatFiresDuringTheValueRead_CancelsTheCommand_AndIsReportedAsCancellation()
+    public async Task ATokenThatFiresDuringAChunkRead_CancelsTheCommand_AndIsReportedAsCancellation()
     {
         using var source = new CancellationTokenSource();
         var providerFailure = new InvalidOperationException("Operation cancelled by user.");
-        var reader = new FakePlanReader("<ShowPlanXML />");
+        var reader = new FakePlanReader(BatchPlan());
         var command = new FakePlanCommand(reader);
-        // The token fires while the value read is in progress, and the provider then fails the read it was told to stop.
-        reader.DuringValueRead = () =>
+        // The token fires while the third chunk is being read, and the provider then fails the read it was told to stop.
+        reader.DuringChunkRead = call =>
         {
-            source.Cancel();
-            throw providerFailure;
+            if (call == 3)
+            {
+                source.Cancel();
+                throw providerFailure;
+            }
         };
 
         var cancelled = await Assert.ThrowsAsync<OperationCanceledException>(
@@ -115,6 +162,28 @@ public sealed class LivePlanXmlReadTests
         Assert.Equal(source.Token, cancelled.CancellationToken);
         Assert.Same(providerFailure, cancelled.InnerException);
         Assert.Equal(1, command.CancelCalls);
+        Assert.Equal(3, reader.ChunkReads);
+        Assert.True(reader.IsClosed);
+    }
+
+    [Fact]
+    public async Task ATokenThatFiresDuringAChunkRead_StopsTheRead_EvenWhenTheProviderKeepsAnswering()
+    {
+        using var source = new CancellationTokenSource();
+        var reader = new FakePlanReader(BatchPlan());
+        var command = new FakePlanCommand(reader);
+        reader.DuringChunkRead = call =>
+        {
+            if (call == 3)
+                source.Cancel();
+        };
+
+        var cancelled = await Assert.ThrowsAsync<OperationCanceledException>(
+            () => LivePlanXmlRead.FirstValueAsync(command, source.Token));
+
+        Assert.Equal(source.Token, cancelled.CancellationToken);
+        Assert.Equal(1, command.CancelCalls);
+        Assert.Equal(3, reader.ChunkReads);
         Assert.True(reader.IsClosed);
     }
 
@@ -123,7 +192,7 @@ public sealed class LivePlanXmlReadTests
     {
         using var source = new CancellationTokenSource();
         var providerFailure = new InvalidOperationException("Execution Timeout Expired.");
-        var reader = new FakePlanReader("<ShowPlanXML />") { DuringValueRead = () => throw providerFailure };
+        var reader = new FakePlanReader("<ShowPlanXML />") { DuringChunkRead = _ => throw providerFailure };
         var command = new FakePlanCommand(reader);
 
         var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
@@ -131,6 +200,7 @@ public sealed class LivePlanXmlReadTests
 
         Assert.Same(providerFailure, thrown);
         Assert.Equal(0, command.CancelCalls);
+        Assert.True(reader.IsClosed);
     }
 
     [Fact]
@@ -173,7 +243,7 @@ public sealed class LivePlanXmlReadTests
         public override object? ExecuteScalar()
         {
             ScalarCalls++;
-            return Reader.FirstValueForScalar;
+            return Reader.ScalarValue;
         }
 
         protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
@@ -189,27 +259,42 @@ public sealed class LivePlanXmlReadTests
         }
     }
 
-    /// <summary>A reader of at most one row with one column, which counts each way its value can be read.</summary>
+    /// <summary>
+    /// A reader of at most one row with one text column, read the way a sequential reader allows: each chunk
+    /// starts where the last ended. It counts each way its value can be read.
+    /// </summary>
     private sealed class FakePlanReader : DbDataReader
     {
-        private readonly object? _value;
+        private readonly string? _text;
         private readonly bool _hasRow;
+        private int _handedOut;
         private bool _closed;
 
         public FakePlanReader() { }
 
-        public FakePlanReader(object value)
+        public FakePlanReader(string? text)
         {
-            _value = value;
+            _text = text;
             _hasRow = true;
         }
 
-        public Action? DuringValueRead { get; set; }
+        /// <summary>Runs inside each chunk read, with that read's number, before any text is handed out.</summary>
+        public Action<int>? DuringChunkRead { get; set; }
+
+        /// <summary>When set, a call that asks for more characters than this fails as a command timeout does.</summary>
+        public int? MostCharactersOneCallCanCarry { get; set; }
+
+        /// <summary>Whether the reader answers a length question with the length, or with -1 as SqlClient does for xml.</summary>
+        public bool KnowsLength { get; set; }
+
         public int RowReads { get; private set; }
-        public int ValueReads { get; private set; }
+        public int ChunkReads { get; private set; }
+        public int LargestRequest { get; private set; }
+        public int LengthQuestions { get; private set; }
+        public int WholeValueReads { get; private set; }
         public int AsyncValueReads { get; private set; }
         public CancellationToken RowReadToken { get; private set; }
-        public object? FirstValueForScalar => _hasRow ? _value : null;
+        public object? ScalarValue => _hasRow ? (object?)_text ?? DBNull.Value : null;
 
         public override bool Read()
         {
@@ -223,18 +308,52 @@ public sealed class LivePlanXmlReadTests
             return Task.FromResult(Read());
         }
 
+        public override bool IsDBNull(int ordinal)
+        {
+            Assert.Equal(0, ordinal);
+            return _text is null;
+        }
+
+        public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length)
+        {
+            Assert.Equal(0, ordinal);
+            if (buffer is null)
+            {
+                LengthQuestions++;
+                return KnowsLength ? _text!.Length : -1;
+            }
+
+            ChunkReads++;
+            LargestRequest = Math.Max(LargestRequest, length);
+            DuringChunkRead?.Invoke(ChunkReads);
+            FailIfOneCallCannotCarry(length);
+            if (dataOffset != _handedOut)
+                throw new InvalidOperationException($"Invalid attempt to read at {dataOffset}: a sequential read continues at {_handedOut}.");
+
+            var count = Math.Min(length, _text!.Length - _handedOut);
+            _text.CopyTo(_handedOut, buffer, bufferOffset, count);
+            _handedOut += count;
+            return count;
+        }
+
         public override object GetValue(int ordinal)
         {
             Assert.Equal(0, ordinal);
-            ValueReads++;
-            DuringValueRead?.Invoke();
-            return _value!;
+            WholeValueReads++;
+            FailIfOneCallCannotCarry(_text?.Length ?? 0);
+            return (object?)_text ?? DBNull.Value;
         }
 
         public override Task<T> GetFieldValueAsync<T>(int ordinal, CancellationToken cancellationToken)
         {
             AsyncValueReads++;
-            return Task.FromResult((T)_value!);
+            return Task.FromResult((T)(object)_text!);
+        }
+
+        private void FailIfOneCallCannotCarry(int characters)
+        {
+            if (MostCharactersOneCallCanCarry is { } most && characters > most)
+                throw new TimeoutException("Execution Timeout Expired. The timeout period elapsed prior to completion of the operation.");
         }
 
         public override void Close() => _closed = true;
@@ -250,7 +369,6 @@ public sealed class LivePlanXmlReadTests
         public override byte GetByte(int ordinal) => throw new NotSupportedException();
         public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length) => throw new NotSupportedException();
         public override char GetChar(int ordinal) => throw new NotSupportedException();
-        public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length) => throw new NotSupportedException();
         public override string GetDataTypeName(int ordinal) => throw new NotSupportedException();
         public override DateTime GetDateTime(int ordinal) => throw new NotSupportedException();
         public override decimal GetDecimal(int ordinal) => throw new NotSupportedException();
@@ -266,6 +384,5 @@ public sealed class LivePlanXmlReadTests
         public override int GetOrdinal(string name) => throw new NotSupportedException();
         public override string GetString(int ordinal) => throw new NotSupportedException();
         public override int GetValues(object[] values) => throw new NotSupportedException();
-        public override bool IsDBNull(int ordinal) => throw new NotSupportedException();
     }
 }

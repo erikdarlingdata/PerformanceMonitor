@@ -78,7 +78,7 @@ FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1))", connectio
             cmd.CommandTimeout = 15;
             cmd.Parameters.AddWithValue("@plan_handle", planHandle);
 
-            // #9195: a batch plan can be ten megabytes, and ExecuteScalarAsync's CPU grows with the square of that.
+            // #9195: a batch plan can be ten megabytes, and ExecuteScalarAsync's CPU grows faster than the plan does.
             return await LivePlanXmlRead.FirstValueAsync(cmd, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
