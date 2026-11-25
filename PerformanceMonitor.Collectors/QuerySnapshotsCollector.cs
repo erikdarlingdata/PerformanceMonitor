@@ -240,7 +240,7 @@ FROM
        the host already holds (plan_state 1) is not rendered again: its plan handle reaches
        sys.dm_exec_text_query_plan as NULL, which returns no row. The rest (plan_state 0) are ranked by CPU
        and only the first {3} are rendered, and the live plan is rendered for the first {3} requests by CPU.
-       Unbounded, every request had both plans rendered and shipped every minute. A request with no plan
+       Without the bound, every request has both plans rendered and shipped every minute. A request with no plan
        handle (plan_state 3: a background task, or a statement still compiling) has no plan to render and is
        not counted by either rank, and the session and database filters sit in this set, so none of those
        ever takes a plan from a request that is stored. Both ranks are running counts over one order, which
@@ -437,7 +437,7 @@ SELECT
        query_plan_hash) does not change while it stays cached, so plan_key names it, and a request whose key
        the host already holds (plan_state 1) is not rendered again: its plan handle reaches
        sys.dm_exec_text_query_plan as NULL, which returns no row. The rest (plan_state 0) are ranked by CPU
-       and only the first {3} are rendered. Unbounded, every request had its plan rendered and shipped
+       and only the first {3} are rendered. Without the bound, every request has its plan rendered and shipped
        every minute. A request with no plan handle (plan_state 3) has no plan to render and is not counted
        by either rank, so it never takes a plan from a request that is stored. */
     pk.plan_key,
