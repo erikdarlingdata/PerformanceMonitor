@@ -876,7 +876,7 @@ public sealed partial class DarlingWorker : BackgroundService
     /// </list>
     /// Pure so a unit test asserts the returned strings without driving the loop or a live logger.
     /// </summary>
-    internal static IReadOnlyList<string> GetNetworkStartupWarnings(DarlingConfig config)
+    internal static IReadOnlyList<string> GetNetworkStartupWarnings(DarlingConfig config, bool? inContainer = null)
     {
         var warnings = new List<string>();
 
@@ -896,7 +896,7 @@ public sealed partial class DarlingWorker : BackgroundService
             /* #9571: only the fields this mode ignores count. A token alone is honored (loopback MCP and the
                write tools use it), so it must not trip a warning that says the setup does not work. */
             var ignoredMcpFields = config.Mcp.Network?.ByoIgnoredFields ?? [];
-            if (ignoredMcpFields.Count > 0 && !Hosting.DarlingHostBinding.IsRunningInContainer)
+            if (ignoredMcpFields.Count > 0 && !(inContainer ?? Hosting.DarlingHostBinding.IsRunningInContainer))
             {
                 var named = string.Join(", ", ignoredMcpFields.Select(f => "mcp.network." + f));
                 warnings.Add(

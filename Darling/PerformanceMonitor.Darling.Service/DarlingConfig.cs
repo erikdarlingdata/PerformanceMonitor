@@ -2684,7 +2684,8 @@ public sealed class WebNetworkConfig
     /// <summary>
     /// #9571: the fields bring-your-own mode (<c>postgres.managed</c> false, outside a container) really ignores, for
     /// the start-up warning. The bind ladder never exposes the dashboard there, so the host reads <c>tls</c>, <c>oidc</c>
-    /// and <c>trustedProxies</c> only on an exposed start. The shared token, <c>encryptedToken</c> and <c>tokens</c> are
+    /// and <c>trustedProxies</c> only on an exposed start. The <c>oidc</c> entry is worded "oidc (the sign-in provider)" because
+    /// <c>oidc.tokenSignIn</c> is still read in this mode and <c>off</c> stops the loopback dashboard. The shared token, <c>encryptedToken</c> and <c>tokens</c> are
     /// NOT here: they gate the loopback dashboard. Names are the JSON keys, in a fixed order.
     /// </summary>
     [JsonIgnore]
@@ -2696,7 +2697,7 @@ public sealed class WebNetworkConfig
             if (!string.IsNullOrWhiteSpace(Listen)) { fields.Add("listen"); }
             if (!string.IsNullOrWhiteSpace(AllowFrom)) { fields.Add("allowFrom"); }
             if (Tls?.IsConfigured ?? false) { fields.Add("tls"); }
-            if (Oidc?.IsConfigured ?? false) { fields.Add("oidc"); }
+            if (Oidc?.IsConfigured ?? false) { fields.Add("oidc (the sign-in provider)"); }
             if ((TrustedProxies?.Length ?? 0) > 0) { fields.Add("trustedProxies"); }
             return fields;
         }

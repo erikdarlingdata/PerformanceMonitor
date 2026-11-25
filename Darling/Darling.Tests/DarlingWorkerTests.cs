@@ -183,7 +183,7 @@ public sealed class DarlingWorkerTests
             Mcp = new McpConfig { Network = new McpNetworkConfig { Listen = "192.168.1.205" } },
         };
 
-        var warnings = DarlingWorker.GetNetworkStartupWarnings(config);
+        var warnings = DarlingWorker.GetNetworkStartupWarnings(config, inContainer: false);
         Assert.Contains(warnings, w => w.Contains("postgres.network", StringComparison.Ordinal) && w.Contains("bring-your-own", StringComparison.Ordinal));
         /* #1804: the mcp notice names the container path now — in a container the block is HONORED, so
            the notice is suppressed there (see the bind ladder's container gate); outside one (this test
@@ -210,7 +210,8 @@ public sealed class DarlingWorkerTests
     public void GetNetworkStartupWarnings_ByoWithOnlyAToken_HasNoMcpNetworkWarning(string? token, string? encryptedToken)
     {
         var warnings = DarlingWorker.GetNetworkStartupWarnings(
-            ByoWithMcpNetwork(new McpNetworkConfig { Token = token, EncryptedToken = encryptedToken }));
+            ByoWithMcpNetwork(new McpNetworkConfig { Token = token, EncryptedToken = encryptedToken }),
+            inContainer: false);
 
         Assert.DoesNotContain(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
     }
@@ -220,7 +221,8 @@ public sealed class DarlingWorkerTests
     public void GetNetworkStartupWarnings_ByoWithListenAndAToken_NamesListenOnly()
     {
         var warnings = DarlingWorker.GetNetworkStartupWarnings(
-            ByoWithMcpNetwork(new McpNetworkConfig { Listen = "192.168.1.205", Token = "a-long-token-value-0123456789" }));
+            ByoWithMcpNetwork(new McpNetworkConfig { Listen = "192.168.1.205", Token = "a-long-token-value-0123456789" }),
+            inContainer: false);
 
         var warning = Assert.Single(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
         Assert.Contains("mcp.network.listen", warning, StringComparison.Ordinal);
@@ -237,7 +239,7 @@ public sealed class DarlingWorkerTests
             AllowFrom = "192.168.1.0/24",
             HostName = "mcp.corp.example",
             Tls = new WebTlsConfig { PfxPath = "/certs/mcp.pfx" },
-        }));
+        }), inContainer: false);
 
         var warning = Assert.Single(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
         foreach (var field in new[] { "listen", "allowFrom", "hostName", "tls" })
@@ -250,19 +252,11 @@ public sealed class DarlingWorkerTests
     [Fact]
     public void GetNetworkStartupWarnings_ByoInAContainer_HasNoMcpNetworkWarning()
     {
-        var previous = Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER");
-        try
-        {
-            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", "true");
-            var warnings = DarlingWorker.GetNetworkStartupWarnings(
-                ByoWithMcpNetwork(new McpNetworkConfig { Listen = "0.0.0.0", AllowFrom = "10.0.0.0/8" }));
+        var warnings = DarlingWorker.GetNetworkStartupWarnings(
+            ByoWithMcpNetwork(new McpNetworkConfig { Listen = "0.0.0.0", AllowFrom = "10.0.0.0/8" }),
+            inContainer: true);
 
-            Assert.DoesNotContain(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER", previous);
-        }
+        Assert.DoesNotContain(warnings, w => w.Contains("mcp.network", StringComparison.Ordinal));
     }
 
     /// <summary>

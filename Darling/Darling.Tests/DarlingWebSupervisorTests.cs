@@ -55,7 +55,7 @@ public sealed class DarlingWebSupervisorTests
     [Fact]
     public void ResolveWebBind_Byo_IsLoopbackOnly_ManagedModeRequired()
     {
-        var decision = DarlingWebHostService.ResolveWebBind(Web("192.168.1.205", "192.168.1.0/24", encryptedToken: "BLOB"), managed: false);
+        var decision = DarlingWebHostService.ResolveWebBind(Web("192.168.1.205", "192.168.1.0/24", encryptedToken: "BLOB"), managed: false, inContainer: false);
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
     }
@@ -70,7 +70,7 @@ public sealed class DarlingWebSupervisorTests
     {
         var web = JsonSerializer.Deserialize<WebConfig>(json)!;
 
-        var decision = DarlingWebHostService.ResolveWebBind(web, managed: false);
+        var decision = DarlingWebHostService.ResolveWebBind(web, managed: false, inContainer: false);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.LoopbackByDefault, decision.Reason);
@@ -82,14 +82,14 @@ public sealed class DarlingWebSupervisorTests
     [Theory]
     [InlineData("""{ "network": { "listen": "127.0.0.1", "token": "s3cr3t-token-value-1234567890" } }""", "listen")]
     [InlineData("""{ "network": { "trustedProxies": [ "10.0.0.5" ], "token": "s3cr3t-token-value-1234567890" } }""", "trustedProxies")]
-    [InlineData("""{ "network": { "oidc": { "authority": "https://login.example.com", "clientId": "client-1" }, "token": "s3cr3t-token-value-1234567890" } }""", "oidc")]
+    [InlineData("""{ "network": { "oidc": { "authority": "https://login.example.com", "clientId": "client-1" }, "token": "s3cr3t-token-value-1234567890" } }""", "oidc (the sign-in provider)")]
     [InlineData("""{ "network": { "tls": { "certPath": "/certs/web.pfx" }, "token": "s3cr3t-token-value-1234567890" } }""", "tls")]
     [InlineData("""{ "network": { "allowFrom": "10.0.0.0/8", "listen": "10.0.0.5" } }""", "listen,allowFrom")]
     public void ResolveWebBind_Byo_IgnoredField_IsManagedModeRequired_AndNamed(string json, string expectedFields)
     {
         var web = JsonSerializer.Deserialize<WebConfig>(json)!;
 
-        var decision = DarlingWebHostService.ResolveWebBind(web, managed: false);
+        var decision = DarlingWebHostService.ResolveWebBind(web, managed: false, inContainer: false);
 
         Assert.Equal(DarlingHostBinding.BindMode.LoopbackOnly, decision.Mode);
         Assert.Equal(DarlingHostBinding.BindReason.ManagedModeRequired, decision.Reason);
