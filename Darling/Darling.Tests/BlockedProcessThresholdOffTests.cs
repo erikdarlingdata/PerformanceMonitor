@@ -145,9 +145,17 @@ public sealed class BlockedProcessThresholdOffTests
         Assert.True(firstSessionRead > jump, "the branch must come before the first read of the session");
         Assert.True(label > firstSessionRead && gateColumn > label, "the gate row must sit at the label and carry the threshold");
 
-        /* The empty payload a threshold of 0 returns has the payload's own column count, with and without the plan columns. */
+        /* The empty payload a threshold of 0 returns has the payload's own column count, with and without the plan
+           columns: its select list, its row of typed NULLs and its column list each carry that count. */
         var offPayload = text[branch..jump];
-        Assert.Equal(capturePlanXml, offPayload.Contains("blocking_query_plan_xml = CONVERT(nvarchar(max), NULL)", StringComparison.Ordinal));
+        var offSelect = offPayload[offPayload.IndexOf("SELECT", StringComparison.Ordinal)..offPayload.IndexOf("OPTION(RECOMPILE);", StringComparison.Ordinal)];
+        var columns = capturePlanXml
+            ? "event_time, blocked_process_report_xml, object_id, database_id, contentious_object, blocked_query_plan_xml, blocking_query_plan_xml"
+            : "event_time, blocked_process_report_xml, object_id, database_id, contentious_object";
+        var count = columns.Split(", ").Length;
+        Assert.Contains(") AS x (" + columns + ")", offSelect, StringComparison.Ordinal);
+        Assert.Equal(count, offSelect.Split("x.").Length - 1);
+        Assert.Equal(count, offSelect.Split(", NULL)").Length - 1);
     }
 
     [Theory]
