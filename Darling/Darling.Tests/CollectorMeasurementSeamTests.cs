@@ -632,6 +632,12 @@ public class CollectorMeasurementSeamTests
                 PgBufferUsageCollector.PoolBuffersMeasurement,
                 PgBufferUsageCollector.CapBuffersMeasurement,
                 PgBufferUsageCollector.SummaryMissingMeasurement,
+                /* #9529: query_snapshots' plan bound, measured by its own ReadAsync from consts in QuerySnapshotsCollector.cs. Written only when the run reused,
+                   shared or capped a plan. */
+                QuerySnapshotsCollector.PlansReusedMeasurement,
+                QuerySnapshotsCollector.PlansSharedMeasurement,
+                QuerySnapshotsCollector.PlansOverCapMeasurement,
+                QuerySnapshotsCollector.LivePlansOverCapMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }

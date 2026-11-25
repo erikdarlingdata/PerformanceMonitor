@@ -634,6 +634,9 @@ public sealed partial class DarlingCollectorRunner
             DatabaseScope = databaseScope,
             PerfmonCounterOverride = null,
             LongQuerySessionName = LongQuerySessionName(),
+            /* #9529: only query_snapshots reads it. Only this path holds plans: FetchRowsAsync, the on-demand live
+               read, passes none, so it reuses nothing and fetches under the cap. */
+            SnapshotPlanCache = _snapshotPlanCache,
             PgBufferUsagePoolCapBuffers = PgBufferUsagePoolCapBuffersForTests,
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
                ShouldCapturePlanForCollector. Every other collector reads exactly CapturePlansFor(server.CapturePlans) (#6771).

@@ -359,6 +359,10 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     public QueryTagSightingBuffer QueryTagSightings { get; }
     private readonly CollectorDeltaCalculator _deltas;
+
+    /* #9529: the estimated plans query_snapshots fetched recently, kept between runs so a statement that is still
+       running is not asked for the same plan every minute. One per runner, like the delta calculator. */
+    private readonly QuerySnapshotPlanCache _snapshotPlanCache = new();
     private readonly ILogger? _logger;
 
     /* Feeds CollectorContext.CapturePlanXml on every cycle — the query_stats / query_store

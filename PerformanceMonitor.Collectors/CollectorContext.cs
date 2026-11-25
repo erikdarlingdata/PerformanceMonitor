@@ -906,6 +906,22 @@ public sealed class CollectorContext
     public DatabaseProtectionErrorLogState.ErrorLogPlan? DatabaseProtectionErrorLogPlan { get; set; }
 
     /// <summary>
+    /// #9529: the host's store of the estimated plans <c>query_snapshots</c> fetched recently, so a statement that
+    /// is still running is not asked for the same plan every minute. Only that definition reads it. Null (the
+    /// default, and what the on-demand live reads leave it at) means nothing is reused: every plan is fetched,
+    /// under the per-run cap, and the SQL binds no plan-key parameters.
+    /// </summary>
+    public QuerySnapshotPlanCache? SnapshotPlanCache { get; init; }
+
+    /// <summary>
+    /// #9529: the plans <c>query_snapshots</c> named as already held when it built this run's query, keyed by plan
+    /// key. Set by its <c>BuildQuery</c> from <see cref="SnapshotPlanCache"/> and read by its <c>ReadAsync</c>,
+    /// so a row the target was told to skip is filled from exactly the set the query named, whatever another run
+    /// does to the cache in between. Null when no cache was supplied.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? SnapshotKnownPlans { get; set; }
+
+    /// <summary>
     /// Milliseconds spent waiting for <c>ExecuteReaderAsync</c> to return for the item just read (#2164),
     /// set by the host around the open. Splits a batch's server time into the part the client cannot
     /// influence and the part it can:
