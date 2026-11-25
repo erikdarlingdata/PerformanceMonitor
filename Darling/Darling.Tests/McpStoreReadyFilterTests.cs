@@ -126,7 +126,7 @@ public sealed class McpStoreReadyFilterTests
         Assert.Equal("store_not_ready", refusal.RootElement.GetProperty("reason").GetString());
         Assert.Equal("store_ready_probe", refusal.RootElement.GetProperty("tool").GetString());
         Assert.False(refusal.RootElement.GetProperty("changed").GetBoolean());
-        Assert.Contains("still upgrading the store", refusal.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("this call was not run", refusal.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Contains("Retry in a few seconds", refusal.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 

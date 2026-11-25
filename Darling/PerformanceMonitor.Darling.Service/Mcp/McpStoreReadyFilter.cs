@@ -83,7 +83,7 @@ internal static class McpStoreReadyFilter
             ["status"] = "refused",
             ["tool"] = tool,
             ["reason"] = Reason,
-            ["message"] = "The service is still upgrading the store, so this call was not run. Nothing was changed. Retry in a few seconds.",
+            ["message"] = "The service has not finished starting its store (reaching it and applying any schema upgrade), so this call was not run. Nothing was changed. Retry in a few seconds. If this answer persists, the service log says what the start is waiting on.",
             ["changed"] = false,
         }.ToJsonString();
 }
