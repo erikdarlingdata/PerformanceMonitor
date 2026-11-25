@@ -204,7 +204,7 @@ calls AS MATERIALIZED (
     WHERE server_id = $1
     AND   {range}
     AND   event_kind = '{KindAborted}'
-    AND   interrupt_duration_us >= {MinInterruptDurationUs}
+    AND   interrupt_duration_us >= {CapturedCallMinDurationUs}
     AND   session_id IS NOT NULL
     AND   event_time IS NOT NULL
 )
