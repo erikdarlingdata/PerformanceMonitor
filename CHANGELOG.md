@@ -27,17 +27,17 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 
 ### Important
 
+- **Upgrading runs Darling store migrations V267, V269 through V271 and V273 through V282 on the service's first start** ([#8838], [#8886], [#8887], [#8885], [#8895], [#8975], [#8948], [#9005], [#8996], [#8959], [#9025], [#9034], [#9046], [#9097], [#9125])
 - **Upgrading runs Darling store migration V268 on the service's first start** ([#8784])
 - **Upgrading runs Darling store migration V272 on the service's first start** ([#8798])
+- **After the upgrade, the Client Timeouts history of a TimescaleDB store fills in from a background copy** ([#8996], [#9026])
+- **Upgrading runs Darling store migrations V283 through V296 and V299 through V303 on the service's first start** ([#9145], [#9158], [#9160], [#9166], [#9165], [#9174], [#9175], [#9201], [#9222], [#9281], [#9293], [#9295], [#9297], [#9350], [#9361], [#9380], [#9387])
 - **Upgrading runs Darling store migration V297 on the service's first start** ([#8784])
 - **Upgrading runs Darling store migration V298 on the service's first start, and collection pauses while it runs** ([#9306], [#9304])
-- **Upgrading runs Darling store migrations V283 through V296 and V299 through V303 on the service's first start** ([#9145], [#9158], [#9160], [#9166], [#9165], [#9174], [#9175], [#9201], [#9222], [#9281], [#9293], [#9295], [#9297], [#9350], [#9361], [#9380], [#9387])
-- **Upgrading builds three more Darling store indexes at the next service start** ([#9229], [#9288], [#9385])
-- **Lite's DuckDB schema moves to version 85 on its first start, and an older Lite build then refuses the file** ([#8784], [#8886], [#8887], [#9243], [#9241])
-- **Upgrading runs Darling store migrations V267, V269 through V271 and V273 through V282 on the service's first start** ([#8838], [#8886], [#8887], [#8885], [#8895], [#8975], [#8948], [#9005], [#8996], [#8959], [#9025], [#9034], [#9046], [#9097], [#9125])
-- **After the upgrade, the Client Timeouts history of a TimescaleDB store fills in from a background copy** ([#8996], [#9026])
 - **Upgrading runs Darling store migrations V304 through V314 and V316 through V318 on the service's first start** ([#9410], [#9419], [#9411], [#9415], [#9413], [#9414], [#9452], [#9438], [#9432], [#9427], [#9437], [#9439], [#9433], [#9485])
 - **Upgrading runs Darling store migration V315 on the service's first start, and rolling back past it needs one statement** ([#9434], [#9504])
+- **Upgrading builds three more Darling store indexes at the next service start** ([#9229], [#9288], [#9385])
+- **Lite's DuckDB schema moves to version 85 on its first start, and an older Lite build then refuses the file** ([#8784], [#8886], [#8887], [#9243], [#9241])
 
 ### Added
 
