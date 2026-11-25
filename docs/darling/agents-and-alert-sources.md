@@ -90,6 +90,14 @@ PerformanceMonitor.Darling.Service.exe --remove-alert-source orders
 
 The source then sends an alert with one statement, for example `SELECT config.submit_external_alert('fire', 'disk-full', 'warning', 'Disk almost full', '93 percent used', 'web01', 93.5);`. The first argument is `fire` or `clear`, the second is a key of your choosing that pairs a clear with its fire, and the third is `warning` or `critical`.
 
+The detail, the fifth argument, can hold several lines, such as a report with one section per line. Darling keeps the line breaks, and Slack, Teams and email show them as lines. It keeps at most 50 lines and 2,000 characters. When it cuts lines, the last line is `...`. It turns a run of blank lines into one blank line, and it turns a tab or any other control character into a space. The title and the server name always stay on one line.
+
+A store whose roles script is older than this change turns the breaks in a detail into spaces. A managed store takes the new script at its next service start. For a bring-your-own store, run `tools/provision-roles.sql` again.
+
+A second alert on the same key is not always sent. The delivery cooldown (`email_cooldown_minutes` in `config_notification`) also applies to a source's alert that fires again after a clear on the same key. The cooldown stays in force after a clear. If the second alert comes inside the cooldown, Darling holds it back and it never reaches a channel. This is by design.
+
+On Windows, a source that gives its text to `psql` through environment variables cannot send text with non-ASCII characters. `psql` reads that text in the ANSI code page and fails with `invalid multibyte character`. The problem is in the client and not in Darling. Send ASCII text from such a source, or use a client that reads UTF-8.
+
 The host in the printed string is the address this service uses for its store. If the store's owner cannot create logins (a bring-your-own store whose owner lacks CREATEROLE), the verb changes the registry and prints the statements a database administrator runs to make, re-key or drop the login. Those statements end with the login's membership in `darling_alert_sources` (below); `tools/provision-roles.sql` makes that group.
 
 ### Alert sources on another machine

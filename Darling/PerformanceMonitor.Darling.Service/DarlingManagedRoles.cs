@@ -2318,8 +2318,10 @@ END $do$;
     /// locked <c>FOR NO KEY UPDATE</c>, so the count and the insert are atomic for one source while the service's writes to
     /// the state table, whose foreign key takes only a key share on that row, are not held up by an open transaction.
     /// The rate window, <c>submitted_at</c> and <c>expires_at</c> read <c>clock_timestamp()</c>, the time of the call. A clear without a severity is stored as 'warning'; a fire needs one;</item>
-    /// <item>carriage returns and line feeds in the title, detail and server name become spaces, so a text cannot forge
-    /// lines in the mute pre-fill that quotes it.</item>
+    /// <item>carriage returns and line feeds in the title and server name become spaces, so a text cannot forge
+    /// lines in the mute pre-fill that quotes it; the detail keeps its line breaks, a carriage return or a carriage return
+    /// and line feed stored as one line feed (#9576). A store still holding the older body turns the detail's breaks into
+    /// spaces, and the drain copes with both.</item>
     /// </list>
     /// The caller never supplies the context JSON, the source, the expiry or the status: Darling builds those.
     /// </summary>
@@ -2400,7 +2402,7 @@ BEGIN
    VALUES
       (v_source_id, p_kind, p_alert_key, v_severity,
        regexp_replace(p_title, '[\r\n]+', ' ', 'g'),
-       regexp_replace(p_detail, '[\r\n]+', ' ', 'g'),
+       regexp_replace(p_detail, '\r\n?', E'\n', 'g'),
        regexp_replace(p_server_name, '[\r\n]+', ' ', 'g'),
        p_value, clock_timestamp(), clock_timestamp() + interval '15 minutes')
    RETURNING pending_id INTO v_pending_id;
