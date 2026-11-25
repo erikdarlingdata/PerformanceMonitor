@@ -750,7 +750,9 @@ VALUES ($1, 1, $2, $3, 'real', $4, $5::jsonb, 7)", connection, tx);
                 /* The read on the Phase C tables (V193, #5997) is pinned by PhaseCStoreGrantLiveTests. */
                 && !statement.Contains("investigation_evidence", StringComparison.Ordinal)
                 /* The signature merges are the Phase C tables' own write (#6400), pinned with them. */
-                && !statement.Contains("investigation_signature_merges", StringComparison.Ordinal))
+                && !statement.Contains("investigation_signature_merges", StringComparison.Ordinal)
+                /* The read on the change windows (V318, #9485) is the window table's own grant, not an agent's. */
+                && !statement.Contains("investigation_change_windows", StringComparison.Ordinal))
             .Select(statement => statement[..^" TO mcp".Length] + " TO " + roleName)
             .ToList();
 

@@ -131,6 +131,8 @@ public static class McpDataDetailKeys
             "owner_login_name", "session_login_name", "remediation_username",
             // The command queue and the agent-change log: who asked for a command, who undid a change, who acted.
             "requested_by", "undone_by", "actor", "paused_by",
+            // Who declared a change window (#9485), the same identity as the journal's actor.
+            "declared_by",
             // Who made a change: a threshold override's and a server action's set_by, and the investigation writes'
             // closed_by, decided_by, opened_by, saved_by and modified_by echoes, plus a note's author (the brief
             // composer already masks author and decided_by as logins by field name).

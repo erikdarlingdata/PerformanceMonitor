@@ -196,6 +196,9 @@ public static partial class DarlingWebEndpoints
         "restore_alert_history",
         "set_quiet_window",
         "clear_quiet_window",
+        /* #9485: a change window is declared and cleared over MCP; the web serves the held requests through the investigation reads. */
+        "declare_change_window",
+        "clear_change_window",
         /* #6397: the Database State expectations are edited in the Viewer's override editor; the web has no route for them. */
         "get_database_state_expectations",
         "set_database_state_expected",

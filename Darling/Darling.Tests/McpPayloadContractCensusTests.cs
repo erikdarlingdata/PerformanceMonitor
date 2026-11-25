@@ -1438,6 +1438,8 @@ public sealed class McpPayloadContractCensusTests
         "DarlingMcpQuietWindowTools.cs TryParseUtc",
         /* #7414: the claim-free agent create parses expires_at itself, under the same invariant UTC styles, to judge the 7 day bound. */
         "DarlingMcpAgentMuteDirect.cs CreateAsync",
+        /* #9485: declare_change_window parses starts_at and ends_at under the same invariant UTC styles. */
+        "DarlingMcpChangeWindowWriteTools.cs TryParseInstant",
     ];
 
     private static readonly Regex GeneralTimestampParse = new(

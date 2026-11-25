@@ -624,6 +624,19 @@ internal static class InvestigationToolCore
            measure moved) rides the answer under the key an alert's brief row uses; the mcp.dataDetail filter masks detail_text by key. */
         if (r.DetailText is { } detailText)
             payload["detail_text"] = detailText;
+        /* #9485: the planned change window that held the request at open. Absent for a request never held (and for every Lite row);
+           list_investigation_requests adds the key as null so a reader can tell "never held" from "not asked". */
+        if (r.HeldBy is { } held)
+        {
+            payload["held_by"] = new JsonObject
+            {
+                ["window_id"] = held.WindowId,
+                ["reason"] = held.Reason,
+                ["ends_at"] = held.EndsAtUtc,
+                ["released_at"] = held.ReleasedAtUtc,
+            };
+        }
+
         return payload;
     }
 

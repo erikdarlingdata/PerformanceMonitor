@@ -1027,6 +1027,11 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'collect
         new(317, "hasReadReplyBytes", @"ALTER TABLE collect.slow_reads DROP COLUMN IF EXISTS reply_bytes;
 ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS reply_bytes_total;
 ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS reply_bytes_count;"),
+        // V318 (#9485): the planned change windows table. It is the probe's newest sentinel. The rewind drops it, the partial index on the request link and the two
+        // request columns, so a re-run of V318 makes them again. Safe on a store that never had them.
+        new(318, "hasInvestigationChangeWindows", @"DROP TABLE IF EXISTS config.investigation_change_windows;
+DROP INDEX IF EXISTS config.ix_investigation_requests_held_window;
+ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS held_window_id, DROP COLUMN IF EXISTS hold_released_at;"),
     ];
 
     /// <summary>

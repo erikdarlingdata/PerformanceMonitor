@@ -3828,12 +3828,12 @@ LIMIT 1";
                catch below, unchanged. This filter and the permissions filter match disjoint
                conditions, so their relative order is not load-bearing; both only need to precede the
                general Exception catch. */
-            _logger.LogInformation("  [{Server}] {Collector} => YIELDED - 1s lock-timeout guard fired (target lock contention)",
+            _logger.LogInformation("  [{Server}] {Collector} => YIELDED - lock-timeout guard fired (target lock contention)",
                 server.Config.DisplayName, collectorName);
 
             await LogRunAsync(
                 server, runtime, collectorName, "YIELDED", 0, runClock.ElapsedMilliseconds, 0,
-                $"Lock-timeout yield (SQL error #{ex.Number}): the 1-second LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
+                $"Lock-timeout yield (SQL error #{ex.Number}): the short LOCK_TIMEOUT guard fired rather than waiting in a blocking chain. One snapshot sweep skipped; evidence of lock contention on the monitored server, not a monitoring failure.",
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
