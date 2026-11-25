@@ -669,7 +669,7 @@ public sealed partial class DarlingCollectorRunner
         {
             if (lockTimeoutSet)
             {
-                await RestorePlanFetchLockTimeoutAsync(provider, targetConnection);
+                await RestorePlanFetchLockTimeoutAsync(provider, targetConnection, cancellationToken);
             }
 
             fetchWatch.Stop();
@@ -926,17 +926,23 @@ public sealed partial class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// #9535: puts the connection's lock timeout back after the plan fetch, so nothing that runs on it later inherits
-    /// the short one. It runs on every exit from the phase, a cancelled one included, so it takes no token and never
-    /// throws: a connection that cannot run it is closed by its owner and takes the setting with it.
+    /// #9535: puts the connection's lock timeout back after the plan fetch, so nothing that runs on it later in the run
+    /// inherits the short one. A cancelled run does not send it: that run is over, and its connection is closed or
+    /// reset by its owner, which clears the setting. It never throws, because it runs on the way out of the phase.
     /// </summary>
-    private async Task RestorePlanFetchLockTimeoutAsync(ITargetProvider provider, DbConnection targetConnection)
+    private async Task RestorePlanFetchLockTimeoutAsync(
+        ITargetProvider provider, DbConnection targetConnection, CancellationToken cancellationToken)
     {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
         try
         {
             using var command = CreateCollectorCommand(
                 provider, BoundedPlanFetch.RestoreLockTimeout, targetConnection, BoundedPlanFetch.CommandTimeoutSeconds);
-            await command.ExecuteNonQueryAsync(CancellationToken.None);
+            await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
@@ -1042,7 +1048,7 @@ public sealed partial class DarlingCollectorRunner
                 }
                 finally
                 {
-                    await RestorePlanFetchLockTimeoutAsync(provider, targetConnection);
+                    await RestorePlanFetchLockTimeoutAsync(provider, targetConnection, cancellationToken);
                 }
 
                 results = answers;
@@ -1311,7 +1317,7 @@ public sealed partial class DarlingCollectorRunner
                     }
                     finally
                     {
-                        await RestorePlanFetchLockTimeoutAsync(provider, targetConnection);
+                        await RestorePlanFetchLockTimeoutAsync(provider, targetConnection, token);
                     }
 
                     return answers;
