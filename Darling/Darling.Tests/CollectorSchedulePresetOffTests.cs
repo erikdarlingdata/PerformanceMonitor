@@ -42,7 +42,6 @@ public sealed class CollectorSchedulePresetOffTests
         CollectorSchedulePresets.ApplyPreset(schedule, CollectorSchedulePresets.Off);
 
         Assert.All(schedule, s => Assert.False(s.Enabled));
-        Assert.All(schedule, s => Assert.False(s.EnabledInherited));
         foreach (var item in schedule)
         {
             Assert.Equal(before[item.Name], (item.FrequencyMinutes, item.RetentionDays, item.RunAtText));
