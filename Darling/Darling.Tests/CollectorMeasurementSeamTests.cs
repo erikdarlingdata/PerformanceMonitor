@@ -619,6 +619,12 @@ public class CollectorMeasurementSeamTests
                 SystemHealthEventsCollector.EventFileErrorMeasurement,
                 SystemHealthEventsCollector.EventFileBufferCutMeasurement,
                 SystemHealthEventsCollector.EventFileWildcardMeasurement,
+                /* #9528: the attempt that answered a system_health_events file read (0 when the bookmark's own file answered
+                   and the target lookup never ran) and the milliseconds the lookup, the raw reads and the XML cast took. */
+                SystemHealthEventsCollector.EventFileAttemptMeasurement,
+                SystemHealthEventsCollector.EventFileLookupMsMeasurement,
+                SystemHealthEventsCollector.EventFileReadMsMeasurement,
+                SystemHealthEventsCollector.EventFileShredMsMeasurement,
                 /* #9107: the default trace is switched off on the server. Measured by default_trace_events' own ReadAsync from a const in
                    DefaultTraceEventsCollector.cs; the expectation names the label the readers parse (DefaultTraceOffNote.Label), so the
                    collector's const drifting from it fails here. */

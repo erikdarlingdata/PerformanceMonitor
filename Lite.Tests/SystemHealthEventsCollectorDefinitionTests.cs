@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Lite.Tests.Helpers;
@@ -110,6 +111,60 @@ public sealed class SystemHealthEventsCollectorDefinitionTests
         var collectionTime = new DateTime(2026, 7, 5, 12, 0, 0, DateTimeKind.Utc);
         var fallback = SystemHealthEventsCollector.Instance.BuildQuery(MakeContext(collectionTime: collectionTime));
         Assert.Equal(collectionTime.AddMinutes(-10), Assert.Single(fallback.Parameters, p => p.Name == "@cutoff_time").Value);
+    }
+
+    [Theory]
+    [InlineData(13)]
+    [InlineData(16)]
+    public void BuildQuery_ReadsTheBookmarksOwnFileBeforeTheTargetLookup_AndReturnsTheStepTimes(int major)
+    {
+        /* #9528, in both batch texts (2016 and 2017+). Whitespace is folded so the pins read as the statements they are. */
+        var text = Regex.Replace(
+            SystemHealthEventsCollector.Instance.BuildQuery(new CollectorContext
+            {
+                ServerId = 42,
+                ServerName = "test-server",
+                CollectionTime = new DateTime(2026, 7, 5, 12, 0, 0, DateTimeKind.Utc),
+                Deltas = s_deltas,
+                Target = new CollectorTargetInfo { SqlMajorVersion = major },
+            }).Text,
+            @"\s+",
+            " ");
+
+        /* Attempt 0 needs a bookmark and no read path override: Managed Instance (#6897) starts at attempt 1, after the lookup. */
+        Assert.Contains(
+            "SET @attempt = CASE WHEN @bookmark_file IS NULL OR @bookmark_offset IS NULL THEN 2 WHEN @read_path_override IS NULL THEN 0 ELSE 1 END;",
+            text,
+            StringComparison.Ordinal);
+
+        /* The lookup runs once, in front of the first attempt past 0, and the loop leaves for the ring buffer when it finds no file. */
+        Assert.Contains("IF @attempt > 0 AND @lookup_ms IS NULL BEGIN SET @lookup_start = SYSUTCDATETIME();", text, StringComparison.Ordinal);
+        Assert.Contains("IF @attempt > 0 AND @event_file_path IS NULL BEGIN BREAK; END;", text, StringComparison.Ordinal);
+        Assert.True(
+            text.IndexOf("WHILE @event_file_ok = 0 AND @attempt <= 2 BEGIN", StringComparison.Ordinal)
+                < text.IndexOf("FROM sys.dm_xe_session_targets AS xet", StringComparison.Ordinal),
+            "the target lookup is not inside the attempt loop");
+
+        /* Attempt 0 reads the bookmark's file by its exact path, from the bookmark, with the bookmark read's inclusive cutoff. */
+        Assert.Contains("WHEN @attempt = 0 THEN @bookmark_file WHEN @read_wildcard = 1 THEN @event_file_path ELSE @event_file_name END", text, StringComparison.Ordinal);
+        Assert.Contains("@read_file = CASE WHEN @attempt < 2 THEN @bookmark_file END", text, StringComparison.Ordinal);
+        Assert.Contains("@read_offset = CASE WHEN @attempt < 2 THEN @bookmark_offset END", text, StringComparison.Ordinal);
+        Assert.Contains("WHEN @attempt < 2 THEN DATEADD(NANOSECOND, -100, CONVERT(datetime2(7), @cutoff_time))", text, StringComparison.Ordinal);
+
+        /* It answers the pass only with an event to store or a scan position; otherwise the lookup and attempt 1 follow. */
+        Assert.Contains(
+            "IF @attempt = 0 AND @scan_file IS NULL AND NOT EXISTS ( SELECT 1/0 FROM @file_events AS fe ) BEGIN SET @attempt = 1; END; ELSE BEGIN SET @event_file_ok = 1; END;",
+            text,
+            StringComparison.Ordinal);
+
+        /* Its refusal is not the pass's error: only an attempt the lookup led to records one. */
+        Assert.Contains("IF @attempt > 0 BEGIN SET @event_file_error = ERROR_NUMBER(); END;", text, StringComparison.Ordinal);
+
+        /* The trailing row: the attempt that answered, then the three step times. */
+        Assert.Contains(
+            "event_file_attempt = CASE WHEN @event_file_ok = 1 THEN @attempt END, event_file_lookup_ms = @lookup_ms, event_file_read_ms = @read_ms, event_file_shred_ms = @shred_ms;",
+            text,
+            StringComparison.Ordinal);
     }
 
     [Fact]
