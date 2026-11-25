@@ -172,6 +172,8 @@ VALUES ($1, $2, $3, $4, $5, 12, $6, 0, $7)",
         /* Both collectors ran before the 24-hour window began. */
         await SeedRunAsync(ReportCollector, Anchor.AddHours(-30), "SUCCESS", OffNote);
         await SeedRunAsync(SnapshotCollector, Anchor.AddHours(-30), "SUCCESS", null);
+        /* Another collector's recent run keeps the server reading as online, so the answer is the empty one and not the offline one. */
+        await SeedRunAsync(DeadlocksCollector.Instance.Name, Anchor.AddMinutes(-2), "SUCCESS", null);
 
         var root = await GetReportsAsync();
 
