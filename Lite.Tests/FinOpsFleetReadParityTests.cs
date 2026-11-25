@@ -188,6 +188,10 @@ public class FinOpsFleetReadParityTests : IDisposable
         const int gapServerId = 50;
         const int busyServerId = 60;
         const int youngServerId = 70;
+        // #9543: the YOUNG seed below sits at 23:59:30 of the 7th day back, so it turns 7 days old at 23:59:30 UTC. Wait out the last minute of the day.
+        var timeOfDay = DateTime.UtcNow.TimeOfDay;
+        if (timeOfDay >= TimeSpan.FromDays(1) - TimeSpan.FromMinutes(1))
+            await Task.Delay(TimeSpan.FromDays(1) - timeOfDay + TimeSpan.FromSeconds(1));
         var now = DateTime.UtcNow;
         long nextId = -1;
 
