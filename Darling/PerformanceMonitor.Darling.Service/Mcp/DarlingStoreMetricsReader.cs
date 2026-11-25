@@ -2636,6 +2636,31 @@ ORDER BY object_kind, object_name, metric_time DESC";
     }
 
     /// <summary>
+    /// The rows without the objects the inventory names as retired (#9588). Pure. <see cref="InventoryReconciliation.DroppedObjects"/>
+    /// is the one verdict on what no longer exists, so the summary's three ranked lists leave out exactly the objects the same answer's
+    /// <c>dropped_objects</c> lists and its note says are excluded from the sums. A retired object's last row is append-only history,
+    /// not a live measurement: a job's run telemetry on it is frozen and its crash counters read null, and a retired object's bytes are
+    /// the size it had when it was dropped. The match is on kind AND name, the key the inventory uses. A null inventory (no exact sweep
+    /// to reconcile against) has no verdict to apply and leaves every row in. A filter or an exact name does not call this, so a retired
+    /// object stays reachable by name.
+    /// </summary>
+    public static IEnumerable<StoreMetricRow> WithoutDropped(IEnumerable<StoreMetricRow> rows, InventoryReconciliation? inventory)
+    {
+        if (rows is null)
+        {
+            throw new ArgumentNullException(nameof(rows));
+        }
+
+        if (inventory is null || inventory.DroppedObjects.Count == 0)
+        {
+            return rows;
+        }
+
+        var dropped = inventory.DroppedObjects.Select(d => (d.ObjectKind, d.ObjectName)).ToHashSet();
+        return rows.Where(r => !dropped.Contains((r.ObjectKind, r.ObjectName)));
+    }
+
+    /// <summary>
     /// The one order every object list uses (#3903): byte-bearing objects largest first, then background
     /// jobs, those whose failure count grew in the window first and then the closest to their own cadence.
     /// A failing job leads because a failure is the more urgent signal, and one the Store Job Over Cadence
