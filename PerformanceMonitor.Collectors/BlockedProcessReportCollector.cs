@@ -211,9 +211,15 @@ JOIN sys.dm_xe_sessions AS xes
         /* #9518: the same two columns for the empty payload a threshold of 0 returns, so its shape matches the payload's. */
         var planOffSelect = context.CapturePlanXml
             ? @",
-        blocked_query_plan_xml = CONVERT(nvarchar(max), NULL),
-        blocking_query_plan_xml = CONVERT(nvarchar(max), NULL)"
+        x.blocked_query_plan_xml,
+        x.blocking_query_plan_xml"
             : "";
+        var planOffValues = context.CapturePlanXml
+            ? @",
+            CONVERT(nvarchar(max), NULL),
+            CONVERT(nvarchar(max), NULL)"
+            : "";
+        var planOffColumns = context.CapturePlanXml ? ", blocked_query_plan_xml, blocking_query_plan_xml" : "";
 
         var sessionPositionSql = context.Target.IsAzureSqlDb
             ? RingBufferXml.SessionPositionDatabaseSql
@@ -300,13 +306,25 @@ END;
 
 IF @blocked_process_threshold = 0
 BEGIN
-    /* The payload's own shape with no row, so the reader and the host see the result sets they always see. */
+    /* The payload's own shape with no row, so the reader and the host see the result sets they always see. The derived
+       table's column list names the columns, so no time column is assigned here: this result set reads no clock. */
     SELECT
-        event_time = CONVERT(datetime2, NULL),
-        blocked_process_report_xml = CONVERT(nvarchar(max), NULL),
-        object_id = CONVERT(integer, NULL),
-        database_id = CONVERT(integer, NULL),
-        contentious_object = CONVERT(nvarchar(4000), NULL){planOffSelect}
+        x.event_time,
+        x.blocked_process_report_xml,
+        x.object_id,
+        x.database_id,
+        x.contentious_object{planOffSelect}
+    FROM
+    (
+        VALUES
+        (
+            CONVERT(datetime2, NULL),
+            CONVERT(nvarchar(max), NULL),
+            CONVERT(integer, NULL),
+            CONVERT(integer, NULL),
+            CONVERT(nvarchar(4000), NULL){planOffValues}
+        )
+    ) AS x (event_time, blocked_process_report_xml, object_id, database_id, contentious_object{planOffColumns})
     WHERE 1 = 0
     OPTION(RECOMPILE);
 
