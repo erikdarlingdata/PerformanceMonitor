@@ -307,7 +307,7 @@ public sealed class ExternalAlertDrain
             ? value.ToString("0.###", CultureInfo.InvariantCulture)
             : row.Severity;
         /* #9576: a detail that carries line breaks starts on its own line, under the title, so a report's first line is not run
-           on to the title. A one-line detail reads as it always has. */
+           on to the title. A one-line detail is cleaned by CleanText inside CleanDetail, so it reads as it always has. */
         var detailText = detail.Length == 0
             ? title
             : detail.Contains('\n', StringComparison.Ordinal) ? $"{title}\n{detail}" : $"{title} - {detail}";
@@ -579,7 +579,8 @@ public sealed class ExternalAlertDrain
     /// The detail's own sanitizer (#9576). Line feeds survive, and only they: <c>\r\n</c> and a lone <c>\r</c> become one, every
     /// other control character (a tab too), U+0085, U+2028 and U+2029 become a space, and invisible and reordering characters
     /// are dropped, as <see cref="CleanText"/> does (#5654). Spaces inside a line are kept, so an indented report keeps its
-    /// shape, and trailing spaces are cut. A run of blank lines becomes one blank line, blank lines at either end go, and a
+    /// shape, and trailing spaces are cut. A detail that is left with one line or none is cleaned by <see cref="CleanText"/>
+    /// instead, so it reads as it did before this sanitizer existed. A run of blank lines becomes one blank line, blank lines at either end go, and a
     /// detail past <see cref="MaxDetailLines"/> lines keeps the first ones and ends in a line of "...". The code point cap
     /// then applies as it does to every text here. The title and the server name never come through here: a card's header
     /// stays on one line.
@@ -647,6 +648,14 @@ public sealed class ExternalAlertDrain
             }
 
             kept.Add(text);
+        }
+
+        /* One line is cleaned exactly as every other text here is, so a one-line detail, and every detail a store still on the
+           old function body has flattened to one line, reads as it always has: each run of spaces, tabs and breaks is one space
+           and leading space goes. Only a detail that keeps two or more lines gets the line-keeping rules above. */
+        if (kept.Count <= 1)
+        {
+            return CleanText(value, maxLength);
         }
 
         if (kept.Count > MaxDetailLines)
