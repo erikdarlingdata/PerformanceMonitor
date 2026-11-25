@@ -127,7 +127,8 @@ public sealed class SystemHealthEventsCollector : CollectorDefinitionBase<System
     /// <summary>
     /// The attempt that answered a file read (#9528): 0 for the bookmark's own file, read by its exact path before any target
     /// lookup; 1 for the read from the bookmark after the lookup (the current file by its exact path, or every rollover file,
-    /// which <see cref="EventFileWildcardMeasurement"/> tells apart); 2 for the current file alone with no bookmark. 0 with no
+    /// which <see cref="EventFileWildcardMeasurement"/> tells apart); 2 for the current file alone from its start, on a pass with
+    /// no bookmark or one whose bookmark the server refused. 0 with no
     /// <see cref="EventFileLookupMsMeasurement"/> means the pass ran no <c>sys.dm_xe_session_targets</c> lookup. 0 with it is a
     /// quiet pass: the bookmark's file had nothing to store, the lookup showed it is still the file being written, and the
     /// read was not made a second time. Written on every pass the event_file answered, never on a ring buffer fallback.
@@ -674,7 +675,9 @@ OPTION(RECOMPILE);
            25717 and 25722 are the two refusals of a bookmark the server cannot use (its file is gone, its offset is not
            a buffer start); the host drops such a bookmark when nothing replaces it. A refusal of attempt 0 goes on to
            the lookup and attempt 1, which meets the same refusal and is the one that records it: attempt 0's error is
-           not kept, so a pass that ends in the ring buffer reports the error of the read the lookup led to. */
+           not kept, so a pass that ends in the ring buffer reports the error of the read the lookup led to. When the
+           lookup then finds no file path, no read follows and the fallback reports no error, the same as a
+           pass that never reached a read. */
         DELETE @raw_events;
         DELETE @file_events;
 
