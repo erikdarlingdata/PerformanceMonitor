@@ -55,7 +55,7 @@ public sealed class DarlingMcpCollectorReadinessTools
         + "Reads the collection log since the service's own start instant (the started_at get_collection_health carries) and the collector schedules. "
         + "verdict says either that every due collector has a good cycle since the start, or how many have not and the longest wait. "
         + "waiting lists each (server, collector) due with no good cycle since the start: waiting_since is when it came due (the start, or later for a collector that ran just before the restart and waits out its interval), plus errors_since_start, skips_since_start and the newest error. "
-        + "not_yet_due counts collectors that ran just before the restart and are not due again yet, and collectors that run at a fixed time of day: neither is waiting. "
+        + "not_yet_due_count (collectors_not_yet_due per server in the fleet answer) counts collectors that ran just before the restart and are not due again yet, and fixed_time_count (collectors_fixed_time) counts collectors that run at a set time of day and have not run since the start, and neither is waiting. "
         + "done lists the collectors with a good cycle since the start: first_good_at, errors_since_start and skips_since_start for one server, one summary row per server (counts of collectors, no error counts) for the fleet. "
         + "first_full_cycle is the first moment every collector that was due at the start had a good cycle on every enrolled server: status reached with at, or not yet with at null. "
         + "A good cycle is a SUCCESS run. An error is ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING or ABANDONED. A skip is any other status, such as SKIPPED or YIELDED. "
@@ -428,7 +428,7 @@ CROSS JOIN LATERAL (
                     break;
                 default:
                     fixedTime++;
-                    tally.NotYetDue++;
+                    tally.FixedTime++;
                     break;
             }
         }
@@ -515,6 +515,7 @@ CROSS JOIN LATERAL (
                         collectors_done = t.Done,
                         collectors_waiting = t.Waiting,
                         collectors_not_yet_due = t.NotYetDue,
+                        collectors_fixed_time = t.FixedTime,
                         first_full_cycle_at = t.DueAtStart > 0 && t.DueAtStartDone == t.DueAtStart && t.LastDueAtStartGood is DateTime g ? Stamp(g) : null,
                     };
                 }).ToList();
@@ -552,6 +553,7 @@ CROSS JOIN LATERAL (
         public int Done;
         public int Waiting;
         public int NotYetDue;
+        public int FixedTime;
         public int DueAtStart;
         public int DueAtStartDone;
         public DateTime? LastDueAtStartGood;

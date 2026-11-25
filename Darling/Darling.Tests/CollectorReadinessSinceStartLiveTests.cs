@@ -332,6 +332,64 @@ public sealed class CollectorReadinessSinceStartLiveTests
         }
     }
 
+    /// <summary>
+    /// #9585: in the fleet answer (no server_name) the per-server row counts set-time collectors apart from not-yet-due ones, as the top-level
+    /// fields do: collectors_not_yet_due is 2 and collectors_fixed_time is 3, so a sum or a swap cannot pass.
+    /// </summary>
+    [Fact]
+    public async Task FleetPerServerRow_CountsSetTimeCollectorsApartFromNotYetDueOnes()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live get_collector_readiness test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var now = DateTime.UtcNow;
+            var start = now.AddMinutes(-10);
+            await RegisterServerAsync(connection, 9585021, "readiness-fleetrow", ct);
+
+            /* Three daily collectors run at a fixed time of day and have no run. Two collectors given an hourly interval last ran five minutes before the start, so they wait out the rest of the hour. */
+            var setTime = DailyCollectors(3);
+            Assert.Equal(3, setTime.Count);
+            foreach (var name in setTime)
+            {
+                await SetRunTimeAsync(connection, 9585021, name, 120, ct);
+            }
+
+            var notYetDue = IntervalCollectors(2);
+            Assert.Equal(2, notYetDue.Count);
+            foreach (var name in notYetDue)
+            {
+                await SetIntervalAsync(connection, 9585021, name, 60, ct);
+                await InsertAsync(connection, 9585021, "readiness-fleetrow", name, start.AddMinutes(-5), "SUCCESS", null, ct);
+            }
+
+            foreach (var name in CollectorCatalog.All.Select(d => d.Name).Except(setTime).Except(notYetDue))
+            {
+                await InsertAsync(connection, 9585021, "readiness-fleetrow", name, start.AddMinutes(3), "SUCCESS", null, ct);
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpCollectorReadinessTools.GetCollectorReadiness(postgres, null, start, now, ct));
+            var row = doc.RootElement.GetProperty("done").EnumerateArray().Single(d => d.GetProperty("server").GetString() == "readiness-fleetrow");
+            Assert.Equal(2, row.GetProperty("collectors_not_yet_due").GetInt32());
+            Assert.Equal(3, row.GetProperty("collectors_fixed_time").GetInt32());
+            Assert.Equal(0, row.GetProperty("collectors_waiting").GetInt32());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
     /// <summary>The first <paramref name="count"/> catalog collectors on this engine that run once a day by default: a fixed run time applies only to a whole number of days.</summary>
     private static List<string> DailyCollectors(int count) =>
         CollectorCatalog.All
