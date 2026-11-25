@@ -22,7 +22,7 @@ namespace PerformanceMonitorLite.Tests;
 /// #9362: the main connection reads local Parquet files with <c>prefetch_all_parquet_files</c> on. DuckDB's default fetches one
 /// column chunk at a time, which over the archive's 2,048-row row groups (#5381) is tens of thousands of small serial reads for one
 /// wide scan, and that is where the 168 hour regressions and top queries reads spent their time. The first test proves DuckDB.NET
-/// passes the connection string key through. The second keeps the #5381 memory budget honest with the setting on: it reads an
+/// reads true through the main connection, which sets it right after the open (#9553: the win-arm64 library rejects it in the connection string). The second keeps the #5381 memory budget honest with the setting on: it reads an
 /// archive whose plan XML column is as wide as real plans, through the main connection at its own memory limit.
 /// </summary>
 [Collection(QueryStoreMemoryPinCollection.Name)]
@@ -57,12 +57,62 @@ public sealed class PrefetchParquetFilesTests : IDisposable
         cmd.CommandText = "SELECT current_setting('prefetch_all_parquet_files')";
         Assert.True(Convert.ToBoolean(await cmd.ExecuteScalarAsync()));
 
-        /* DuckDB's own default is off, so the assertion above reads the connection string and not a changed default. */
+        /* DuckDB's own default is off, so the assertion above reads the SET the main connection ran and not a changed default. */
         using var plain = new DuckDBConnection("DataSource=:memory:");
         await plain.OpenAsync();
         using var plainCmd = plain.CreateCommand();
         plainCmd.CommandText = "SELECT current_setting('prefetch_all_parquet_files')";
         Assert.False(Convert.ToBoolean(await plainCmd.ExecuteScalarAsync()));
+    }
+
+    /// <summary>The connection InitializeAsync itself holds (the sentinel) takes the setting, not only the ones CreateConnection hands out.</summary>
+    [Fact]
+    public async Task InitializeAsync_SentinelConnection_PrefetchesParquetFiles()
+    {
+        Directory.CreateDirectory(_dir);
+        _duckDb = new DuckDbInitializer(Path.Combine(_dir, "test.duckdb"));
+        await _duckDb.InitializeAsync();
+
+        Assert.Equal("true", _duckDb.ReadSentinelSettingForTests("prefetch_all_parquet_files"), ignoreCase: true);
+    }
+
+    /// <summary>The sentinel a test adopts from a copied file (the reopen path) takes the setting too.</summary>
+    [Fact]
+    public async Task AdoptedSentinelConnection_PrefetchesParquetFiles()
+    {
+        Directory.CreateDirectory(_dir);
+        _duckDb = new DuckDbInitializer(Path.Combine(_dir, "test.duckdb"));
+        await _duckDb.InitializeFromTemplateAsync();
+
+        Assert.Equal("true", _duckDb.ReadSentinelSettingForTests("prefetch_all_parquet_files"), ignoreCase: true);
+    }
+
+    /// <summary>
+    /// #9553: the SET is a speed-up only. When DuckDB refuses it, the open still succeeds and one Warning line is logged, however
+    /// many connections hit it.
+    /// </summary>
+    [Fact]
+    public async Task SetFailure_DoesNotFailTheOpen_AndWarnsOnce()
+    {
+        Directory.CreateDirectory(_dir);
+        _duckDb = new DuckDbInitializer(Path.Combine(_dir, "test.duckdb"));
+        await _duckDb.InitializeAsync();
+
+        using var connection = new DuckDBConnection("DataSource=:memory:");
+        await connection.OpenAsync();
+        AppLogger.DrainBufferedLines();
+
+        _duckDb.ApplyPrefetchSetting(connection, "SET prefetch_all_parquet_files_no_such_option = true");
+        _duckDb.ApplyPrefetchSetting(connection, "SET prefetch_all_parquet_files_no_such_option = true");
+
+        var lines = AppLogger.DrainBufferedLines().FindAll(l => l.Contains("[DuckDbInitializer]") && l.Contains("prefetch_all_parquet_files"));
+        var line = Assert.Single(lines);
+        Assert.Contains("[WARN ]", line);
+        Assert.Contains("DuckDBException", line);
+
+        using var check = connection.CreateCommand();
+        check.CommandText = "SELECT 1";
+        Assert.Equal(1, Convert.ToInt32(await check.ExecuteScalarAsync()));
     }
 
     private const int ArchiveDays = 3;

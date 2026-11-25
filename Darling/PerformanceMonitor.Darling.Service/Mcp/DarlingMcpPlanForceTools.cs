@@ -54,6 +54,7 @@ public sealed partial class DarlingMcpPlanForceTools
     internal const string BadLoginTime = "bad_login_time";
     internal const string ServerClockUnknown = "server_clock_unknown";
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "force_query_store_plan"), Description(
         "Agent arm, SQL Server only: forces one Query Store plan for a query on the monitored server (replaces another plan of the query that is forced now). Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
@@ -74,6 +75,7 @@ public sealed partial class DarlingMcpPlanForceTools
         CancellationToken cancellationToken = default) =>
         RunAsync(postgres, ownerSource?.Read(), logger, force: true, server_name, database_name, query_id, plan_id, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, namedAgentNames: served?.NamedAgentNames);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "unforce_query_store_plan"), Description(
         "Agent arm, SQL Server only: removes the forced plan of one Query Store plan on the monitored server. Dry run by default: returns the exact statement and the before state, writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's force_plan switch and remediation login; ships off. " +
         "<<GUIDE>>" +
@@ -93,6 +95,7 @@ public sealed partial class DarlingMcpPlanForceTools
         CancellationToken cancellationToken = default) =>
         RunAsync(postgres, ownerSource?.Read(), logger, force: false, server_name, database_name, query_id, plan_id, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, namedAgentNames: served?.NamedAgentNames);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "evict_cached_plan"), Description(
         "Agent arm, SQL Server only: evicts ONE plan handle from the monitored server's plan cache, so the next run compiles a new plan. Dry run by default: returns the exact statement, what Darling collected for that handle and any warnings, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's evict_plan switch and remediation login (with ALTER SERVER STATE); ships off. " +
         "<<GUIDE>>" +
@@ -112,6 +115,7 @@ public sealed partial class DarlingMcpPlanForceTools
         CancellationToken cancellationToken = default) =>
         RunEvictAsync(postgres, ownerSource?.Read(), logger, server_name, plan_handle, agent_action, dry_run, cancellationToken, served?.Policy.AgentTokenName, namedAgentNames: served?.NamedAgentNames);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "kill_session"), Description(
         "Agent arm: kills ONE session on the monitored SQL Server or PostgreSQL server, after checking in the same batch or statement that it is still the session you named. Dry run by default: returns what the server says about the session and kills nothing; a write needs dry_run=false. Needs agent_action at Level 3, that server's kill_session switch (ships off) and a remediation login with kill rights (grants in the guide). Refuses Darling's own sessions, session_gone and session_reused. " +
         "<<GUIDE>>" +

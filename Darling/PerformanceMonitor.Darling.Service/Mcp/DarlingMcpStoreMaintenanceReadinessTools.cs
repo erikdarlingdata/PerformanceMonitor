@@ -17,6 +17,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -39,6 +40,8 @@ public sealed class DarlingMcpStoreMaintenanceReadinessTools
                 Array.Empty<DarlingWebEndpoints.CatalogParam>()));
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_maintenance_readiness"), Description(
         "Says whether the monitoring STORE (not a monitored server) is safe for maintenance right now: an install, an upgrade or a table "
         + "rewrite. One verdict line, 'Safe for maintenance now.' or the reasons it is not, plus the detail. Run it before every install. "

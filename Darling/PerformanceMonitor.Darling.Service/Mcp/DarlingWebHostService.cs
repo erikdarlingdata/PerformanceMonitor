@@ -2188,6 +2188,14 @@ public sealed class DarlingWebHostService : BackgroundService
             DarlingWebEndpoints.MapAll(app, postgres ?? throw new ArgumentNullException(nameof(postgres)), _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig, _registryState, _slowReads, _readAdmission, _ownerSource, dataDetail, _pseudonymKeys, adminArm: adminArm, allowWindowsAuthOverUnverifiedTls: allowWindowsAuthOverUnverifiedTls, composeReadPostgres: composeReadPostgres, oidcRoleMapping: OidcRoleMapping(oidcClient), personalTokenSnapshot: _personalSnapshot, personalTokens: personalTokens);
         }
 
+        /* The registered MCP tool names the page's plain-text rules read (wwwroot/js/plain-text.js imports this module), written from
+           the tool registry, so the page's scripts keep no list of names. A front door serves its own, from the same registry. */
+        app.MapGet(DarlingMcpToolTypes.ToolNamesModulePath, (HttpContext context) =>
+        {
+            context.Response.Headers.CacheControl = "no-cache";
+            return Results.Text(DarlingMcpToolTypes.ToolNamesModule, "text/javascript; charset=utf-8");
+        });
+
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes

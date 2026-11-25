@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -112,6 +113,13 @@ public sealed class WebDatabaseFilterReadsTests
                 continue;
             }
 
+            /* The tool names module is no file in wwwroot: the service writes it (DarlingMcpToolTypes.ToolNamesModule), and it names
+               tools, not reads. */
+            if ("/js/" + module == DarlingMcpToolTypes.ToolNamesModulePath)
+            {
+                continue;
+            }
+
             /* One file at a time (#7027): ReadJs would join pages/server-tabs.js with its tab files, whose imports are relative to
                their own folder, so the walk below would resolve them against the wrong one. The closure reaches the tab files by import. */
             var text = System.IO.File.ReadAllText(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", module))
@@ -157,9 +165,6 @@ public sealed class WebDatabaseFilterReadsTests
             Assert.True(closure.ContainsKey(expected), $"{expected} is not in the import closure of pages/server.js, so this census would not read it. Found: {string.Join(", ", closure.Keys)}");
         }
 
-        /* The name list is cut out of plain-text.js, so it must still be there to cut (see WithoutToolNameList). */
-        Assert.NotEqual(closure["plain-text.js"], WithoutToolNameList(closure["plain-text.js"]));
-
         var classes = Classes();
         var catalog = new HashSet<string>(CatalogNames(ReadEndpoints()), StringComparer.Ordinal);
         Assert.True(catalog.Count > 100, "The read catalog's entries were not found.");
@@ -172,7 +177,7 @@ public sealed class WebDatabaseFilterReadsTests
                 continue;
             }
 
-            foreach (Match m in Regex.Matches(WithoutToolNameList(text), @"[""'`]([A-Za-z_][A-Za-z0-9_]*)[""'`]"))
+            foreach (Match m in Regex.Matches(text, @"[""'`]([A-Za-z_][A-Za-z0-9_]*)[""'`]"))
             {
                 var name = m.Groups[1].Value;
                 if (name.StartsWith("get_pg_", StringComparison.Ordinal) || !(catalog.Contains(name) || name.StartsWith("get_", StringComparison.Ordinal)))
@@ -199,18 +204,6 @@ public sealed class WebDatabaseFilterReadsTests
             unclassified.Length == 0,
             "These reads are named by a module of the server page and sit in no class of database-filter-reads.js. A database-scoped read goes in UNFILTERED"
             + " (or FILTERED once its route takes the list), a row-identity read in IDENTITY, anything with no database in SERVER_WIDE:\n" + string.Join("\n", unclassified));
-    }
-
-    /// <summary>
-    /// plain-text.js lists every MCP tool name in <c>MCP_TOOL_NAMES</c> and <c>MCP_ACTION_TOOL_NAMES</c> so the plain-text rule knows which tool words to rewrite.
-    /// That is a list of names the page never calls, not a read, so it is cut out of the text before the scan. Only those two
-    /// declarations are cut: a module that really names a read keeps being scanned, and the declaration must be there to cut, so
-    /// renaming it fails this census instead of quietly scanning the list again.
-    /// </summary>
-    private static string WithoutToolNameList(string text)
-    {
-        var declaration = new Regex(@"export\s+const\s+MCP_(?:ACTION_)?TOOL_NAMES\s*=\s*\[[^\]]*\]\s*;", RegexOptions.None, TimeSpan.FromSeconds(5));
-        return declaration.Replace(text, "");
     }
 
     /// <summary>The classes are disjoint, and no class names a read twice.</summary>

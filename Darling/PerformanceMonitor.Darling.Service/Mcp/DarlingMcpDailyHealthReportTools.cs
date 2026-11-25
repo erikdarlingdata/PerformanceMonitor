@@ -56,6 +56,7 @@ public sealed record DailyHealthReportSendResult(
 [McpServerToolType]
 public sealed class DarlingMcpDailyHealthReportTools
 {
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "send_daily_health_report_now"), Description(
         "Builds the Daily Health Report for the 24 hours that ended at the most recent send time (daily_report.send_at in daily_report.time_zone, see get_alert_settings) " +
         "and sends it through the normal alert pipeline now: the notification routes for the metric 'Daily Health Report' choose the channels and recipients, " +

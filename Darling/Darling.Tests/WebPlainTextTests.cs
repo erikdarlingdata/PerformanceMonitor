@@ -28,13 +28,26 @@ namespace Darling.Tests;
 [Trait("Stage", "Guard")]
 public sealed class WebPlainTextTests
 {
+    /// <summary>A folder holding the shipped plain-text.js and the tool names module the service serves beside it
+    /// (<see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.ToolNamesModule"/>), so the harness runs the script with the
+    /// names the page gets.</summary>
+    private static readonly Lazy<string> ScriptsWithToolNames = new(() =>
+    {
+        var dir = System.IO.Directory.CreateTempSubdirectory("pm-plain-text-").FullName;
+        System.IO.File.Copy(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "plain-text.js"), System.IO.Path.Combine(dir, "plain-text.js"));
+        System.IO.File.WriteAllText(
+            System.IO.Path.Combine(dir, System.IO.Path.GetFileName(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.ToolNamesModulePath)),
+            PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.ToolNamesModule);
+        return dir;
+    }, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+
     private static string[] Run(string[] inputs, out string notCollectedLine) => RunDoc(inputs, out notCollectedLine).Out;
 
     private static (string[] Out, string[] Named, string[] Tools, string[] Labels, string[] Actions, string[] Counts) RunDoc(string[] inputs, out string notCollectedLine)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-plain-text-harness.mjs"));
-        psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+        psi.ArgumentList.Add(ScriptsWithToolNames.Value);
         psi.Environment["HARNESS_INPUT"] = JsonSerializer.Serialize(inputs);
 
         Process proc;
@@ -573,10 +586,8 @@ public sealed class WebPlainTextTests
     {
         /* The get_ rule rewrites only these names, so the list must be the MCP tool registry's get_ tools, both ways. */
         var (_, _, tools, _, actions, _) = RunDoc([], out _);
-        if (tools.Length == 0)
-        {
-            return;
-        }
+        /* Node missing skips in RunDoc, so an empty list here means the names module did not load. */
+        Assert.NotEmpty(tools);
 
         var all = typeof(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpAlertTools).Assembly.GetTypes()
             .Where(t => t.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolTypeAttribute>() is not null)
@@ -602,10 +613,8 @@ public sealed class WebPlainTextTests
     public void TheMeasurementLabelList_CoversEveryLabelTheCollectorsWrite()
     {
         var (_, _, tools, labels, _, _) = RunDoc([], out _);
-        if (tools.Length == 0)
-        {
-            return;
-        }
+        /* Node missing skips in RunDoc, so an empty list here means the names module did not load. */
+        Assert.NotEmpty(tools);
 
         var found = new System.Collections.Generic.SortedSet<string>(StringComparer.Ordinal);
         var dir = PathTo("PerformanceMonitor.Collectors");

@@ -45,6 +45,7 @@ public sealed class DarlingMcpIdentityCapacityTools
     private static string? Format(DateTime? t) =>
         t is { } v ? DateTime.SpecifyKind(v, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture) : null;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_identity_capacity"), Description(
         "How full each identity column is, and how long until it runs out. <<GUIDE>> " +
         "An identity column that reaches the end of its type stops every insert into its table. The identity_capacity collector (every 6 hours, per user database) keeps the 20 fullest columns above 10 percent used per database, plus one marker per database it scanned. " +

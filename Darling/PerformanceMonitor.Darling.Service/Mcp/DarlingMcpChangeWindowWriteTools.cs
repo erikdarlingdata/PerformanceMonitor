@@ -81,6 +81,7 @@ public sealed class DarlingMcpChangeWindowWriteTools
     private static readonly string RateMessage =
         $"This service allows each agent {DarlingMcpAgentMuteDirect.MaxWritesPerHour} direct writes an hour (mute rules and change windows together), and this agent made that many in the last hour. Wait, or ask an operator. Nothing was written.";
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "declare_change_window"), Description(
         "Declares a CHANGE WINDOW: investigation requests that open for the named servers between starts_at and ends_at plus 30 minutes are created held, not handed to the request runner. Pages and alert history do not change. Changes shared investigation configuration. " +
         "<<GUIDE>>" +
@@ -104,6 +105,7 @@ public sealed class DarlingMcpChangeWindowWriteTools
         CancellationToken cancellationToken = default) =>
         DeclareAsync(postgres, agentSeat, server_names, starts_at, ends_at, reason, DateTime.UtcNow, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "clear_change_window"), Description(
         "Clears a CHANGE WINDOW now: it holds nothing that opens after this moment. Every request the window still holds is released at once and reaches the request runner and wait_for_investigation_requests as a hold_released event. Changes shared investigation configuration. " +
         "<<GUIDE>>" +

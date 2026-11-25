@@ -36,7 +36,7 @@ public sealed class DarlingMcpServerTrendToolsTests
         var names = method.GetParameters().Select(p => p.Name).ToArray();
 
         Assert.Equal(["postgres", "metric", "server_name", "hours_back", "as_of", "bucket_minutes", "clerk_types", "names", "cancellationToken"], names);
-        Assert.Contains("DarlingMcpServerTrendTools", RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs"), StringComparison.Ordinal);
+        Assert.Contains(typeof(DarlingMcpServerTrendTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
     }
 
     /// <summary>#7586: every figure was rounded to 2 places, so a file moving 0.0042 MB/s read 0.00 and a steady small rate jumped between 0.01 and

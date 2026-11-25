@@ -327,6 +327,7 @@ public sealed class DarlingMcpQueryStoreHistoryTools
             .OrderBy(f => f.State == ForcedPlanState.Removed ? 1 : 0).ThenBy(f => f.PlanId)
             .Take(MaxPlans).ToList();
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_store_query_history"), Description(
         "One Query Store query's history, plan by plan: per-plan executions, duration and CPU, plus a per-interval series. window_truncated marks a history floor. <<GUIDE>>" +
         "Per-plan averages are execution-weighted (total over executions), so they can differ from get_query_store_top, which averages the interval averages. " +
