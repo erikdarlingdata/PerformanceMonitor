@@ -17,6 +17,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -45,6 +46,8 @@ public sealed class DarlingMcpReadLatencyTools
         + ": the true duration could be anywhere at or below the reported bound, and no percentile is reported above max_ms (a bound past the slowest read seen is capped to max_ms). A value flagged with \"≥\" means "
         + "the true duration is only proven to exceed the last finite bucket bound, with no bound above it to report.";
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_read_latency"), Description(
         "Gets the monitoring tool's OWN read-latency history (web and MCP reads); no server_name. "
         + "Sums hourly histograms into p50/p95/p99 bucket upper bounds, count, mean, max and timeouts per "

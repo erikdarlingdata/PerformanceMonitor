@@ -22,6 +22,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Investigations;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -79,6 +80,7 @@ public sealed partial class DarlingMcpInvestigationTools
         return node;
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +
         "nothing. status ok or empty. Claim one with claim_investigation_request. <<GUIDE>> " +
@@ -141,6 +143,8 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.StoreRequired)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "wait_for_investigation_requests"), Description(
         "Waits up to 25 seconds for an investigation request event on your agent routes (opened, joined, resolved, expired, " +
         "claims_exhausted, evidence_ready, follow_up, deadlock_digest) and answers each with its request's id, server and " +
@@ -375,6 +379,7 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Investigation)]
     [McpServerTool(Name = "claim_investigation_request"), Description(
         "Claims an investigation request and returns its brief, claim_id and lease_until. Writes only investigation state. " +
         "Pass your claim_id again to renew. status claimed, renewed, already_claimed, not_open, not_found or " +
@@ -598,6 +603,8 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_investigation_evidence"), Description(
         "Reads the frozen evidence sections of one investigation request, reported ones too. Writes nothing. status ok, empty, invalid (a " +
         "sections name no section carries, the known names listed), not_found or already_claimed. <<GUIDE>> " +
@@ -680,6 +687,7 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Investigation)]
     [McpServerTool(Name = "submit_investigation_report"), Description(
         "Returns your report on a request you claimed. Writes only investigation state. status reported, invalid, " +
         "unsupported_format, lease_lost, already_reported or not_found. <<GUIDE>> " +
@@ -852,6 +860,7 @@ public sealed partial class DarlingMcpInvestigationTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_investigation_reports"), Description(
         "Reads investigation requests with their reports and journal, by request_id or over the last hours_back hours. " +
         "status ok or empty. <<GUIDE>> " +

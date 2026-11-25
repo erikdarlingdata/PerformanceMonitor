@@ -47,6 +47,7 @@ public sealed class DarlingMcpCollectorReadinessTools
     /// <summary>The waiting rows one answer lists. The counts at the top cover every waiting pair, listed or not.</summary>
     internal const int MaxWaitingRows = 200;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_collector_readiness"), Description(
         "Install check: since THIS service process started, which due collectors have not had a good cycle yet. One-line verdict first, then the waiting list, then done. "
         + "Omit server_name for every enabled server (waiting rows plus one done summary per server); give one server for every collector's first good cycle, errors and skips since the start. "

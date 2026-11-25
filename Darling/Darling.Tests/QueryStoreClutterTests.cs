@@ -694,8 +694,7 @@ public sealed class QueryStoreClutterTests
     [Fact]
     public void TheTool_IsRegisteredOnTheHost_AndServedOnTheWebSurface()
     {
-        var host = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
-        Assert.Contains(".WithGeminiCompatibleTools<DarlingMcpQueryStoreClutterTools>()", host, StringComparison.Ordinal);
+        Assert.Contains(typeof(DarlingMcpQueryStoreClutterTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
 
         Assert.True(DarlingWebEndpoints.BuildReadDispatch().ContainsKey(ToolName));
         var descriptor = DarlingWebEndpoints.CatalogDescriptors[ToolName];

@@ -229,6 +229,7 @@ public sealed class DarlingMcpPlanForcePrecheckTools
 
     private static string Unbracket(string? name) => (name ?? "").Trim().TrimStart('[').TrimEnd(']');
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_plan_force_precheck"), Description(
         "Reads one Query Store plan before anyone forces it. This read blocks only a force that cannot work: verdict blocked when the plan is not among the query's Query Store rows (plan_not_found) or is already the query's forced plan (plan_already_forced), else not_blocked, which never means the force is safe or will help. " +
         "Everything else that fired is a warning, never a block: the agent's own instructions decide what to do with it. Each warning carries a stable code, one sentence and the evidence. <<GUIDE>> " +

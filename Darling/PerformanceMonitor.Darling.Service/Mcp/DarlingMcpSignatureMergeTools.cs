@@ -35,6 +35,7 @@ public sealed class DarlingMcpSignatureMergeTools
         "The service's mcp store role may not add rows to config.investigation_signature_merges. A bring-your-own store needs " +
         DarlingManagedRoles.ProvisionRolesScriptPath + " re-run (it is idempotent) as a superuser. Managed and compose stores grant it themselves on start.";
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "merge_deadlock_signatures"), Description(
         "Agent arm: needs agent_action, request's server only. Merges one deadlock signature into another, so the rollup, the agent gate and the digest count them as one. Changes the monitoring store only. " +
         "<<GUIDE>>" +

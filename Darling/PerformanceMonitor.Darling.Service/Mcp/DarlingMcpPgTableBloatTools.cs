@@ -225,6 +225,7 @@ public sealed class DarlingMcpPgTableBloatTools
         return Math.Round(bytes / 1024.0, 0).ToString("0", CultureInfo.InvariantCulture) + " KB";
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_pg_table_bloat")]
     [Description(
         "PostgreSQL per-table bloat. ESTIMATE, NOT MEASUREMENT: about 2 points off with current "

@@ -273,7 +273,6 @@ public sealed class DarlingMcpQueryStoreHistoryToolsTests
     [Fact]
     public void TheHostRegistersTheClass_AndTheWebCatalogListsTheTool()
     {
-        var host = ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
-        Assert.Contains("WithGeminiCompatibleTools<DarlingMcpQueryStoreHistoryTools>()", host, StringComparison.Ordinal);
+        Assert.Contains(typeof(DarlingMcpQueryStoreHistoryTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
     }
 }
