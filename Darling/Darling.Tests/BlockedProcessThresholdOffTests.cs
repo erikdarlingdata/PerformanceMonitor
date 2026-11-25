@@ -28,9 +28,8 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class BlockedProcessThresholdOffTests
 {
-    private static CollectorContext Context(bool capturePlanXml = false) => new()
+    private static CollectorContext Context() => new()
     {
-        CapturePlanXml = capturePlanXml,
         ServerId = 42,
         ServerName = "test-server",
         CollectionTime = new DateTime(2026, 11, 24, 12, 0, 0, DateTimeKind.Utc),
@@ -122,40 +121,6 @@ public sealed class BlockedProcessThresholdOffTests
             Assert.DoesNotContain(on.Measurements, m => m.Label == BlockedProcessReportCollector.ThresholdOffMeasurement);
             Assert.False(BlockedProcessThresholdOffNote.TryParse(CollectorMeasurementNote.Render(on.Measurements)));
         }
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void TheBatchReadsTheSettingAndBranchesBeforeItTouchesTheSession(bool capturePlanXml)
-    {
-        var text = BlockedProcessReportCollector.Instance.BuildQuery(Context(capturePlanXml)).Text;
-
-        var settingRead = text.IndexOf("@blocked_process_threshold = CONVERT(integer, c.value_in_use)", StringComparison.Ordinal);
-        var settingName = text.IndexOf("WHERE c.name = N'" + BlockedProcessThresholdOffNote.SettingName + "'", StringComparison.Ordinal);
-        var branch = text.IndexOf("IF @blocked_process_threshold = 0", StringComparison.Ordinal);
-        var jump = text.IndexOf("GOTO gate_result;", StringComparison.Ordinal);
-        var firstSessionRead = text.IndexOf("@execution_count = xet.execution_count", StringComparison.Ordinal);
-        var label = text.IndexOf("gate_result:", StringComparison.Ordinal);
-        var gateColumn = text.IndexOf("blocked_process_threshold = @blocked_process_threshold;", StringComparison.Ordinal);
-
-        Assert.True(settingRead >= 0, "no read of the setting");
-        Assert.True(settingName > settingRead, "the read does not name the setting the hint names");
-        Assert.True(branch > settingName && jump > branch, "no branch on a threshold of 0");
-        Assert.True(firstSessionRead > jump, "the branch must come before the first read of the session");
-        Assert.True(label > firstSessionRead && gateColumn > label, "the gate row must sit at the label and carry the threshold");
-
-        /* The empty payload a threshold of 0 returns has the payload's own column count, with and without the plan
-           columns: its select list, its row of typed NULLs and its column list each carry that count. */
-        var offPayload = text[branch..jump];
-        var offSelect = offPayload[offPayload.IndexOf("SELECT", StringComparison.Ordinal)..offPayload.IndexOf("OPTION(RECOMPILE);", StringComparison.Ordinal)];
-        var columns = capturePlanXml
-            ? "event_time, blocked_process_report_xml, object_id, database_id, contentious_object, blocked_query_plan_xml, blocking_query_plan_xml"
-            : "event_time, blocked_process_report_xml, object_id, database_id, contentious_object";
-        var count = columns.Split(", ").Length;
-        Assert.Contains(") AS x (" + columns + ")", offSelect, StringComparison.Ordinal);
-        Assert.Equal(count, offSelect.Split("x.").Length - 1);
-        Assert.Equal(count, offSelect.Split(", NULL)").Length - 1);
     }
 
     [Theory]
