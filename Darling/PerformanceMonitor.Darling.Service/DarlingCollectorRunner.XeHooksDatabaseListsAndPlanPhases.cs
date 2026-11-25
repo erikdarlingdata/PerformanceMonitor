@@ -655,7 +655,8 @@ public sealed partial class DarlingCollectorRunner
                 ex => IsBoundedPlanFetchFault(provider, ex),
                 PlanFetchBudgetSpan,
                 () => fetchWatch.Elapsed,
-                cancellationToken);
+                cancellationToken,
+                PlanFetchStallWatchFor(QueryStatsCollector.Instance.Name, server, cancellationToken));
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
                                    && !cancellationToken.IsCancellationRequested)
@@ -973,6 +974,22 @@ public sealed partial class DarlingCollectorRunner
         }
     }
 
+    /// <summary>
+    /// #9535: the stall watch of one plan fetch phase run (<see cref="PlanFetchStallWatch"/>), or null where no
+    /// probe can be taken: a target that is not SQL Server, or a runner with no store. The probe runs on
+    /// <paramref name="cancellationToken"/>, the phase's token, so the service stopping cancels it.
+    /// </summary>
+    private PlanFetchStallWatch? PlanFetchStallWatchFor(string collector, ServerRuntime server, CancellationToken cancellationToken)
+    {
+        if (_postgres is null || server.Target.Engine != CollectorTargetEngine.SqlServer)
+        {
+            return null;
+        }
+
+        return new PlanFetchStallWatch(observation => StallWaitProbeRunner.RunAsync(
+            _postgres, server, collector, PlanFetchBudgetSpan, observation, _logger, cancellationToken));
+    }
+
     private void LogPlanFetchBounds(string collector, ServerRuntime server, BoundedPlanFetch.Outcome? bounds)
     {
         if (bounds is null || (bounds.Skipped == 0 && bounds.NotAttempted == 0))
@@ -1044,7 +1061,8 @@ public sealed partial class DarlingCollectorRunner
                         ex => IsBoundedPlanFetchFault(provider, ex),
                         PlanFetchBudgetSpan,
                         () => watch.Elapsed,
-                        cancellationToken);
+                        cancellationToken,
+                        PlanFetchStallWatchFor(ProcedureStatsCollector.Instance.Name, server, cancellationToken));
                 }
                 finally
                 {
@@ -1313,7 +1331,8 @@ public sealed partial class DarlingCollectorRunner
                             ex => IsBoundedPlanFetchFault(provider, ex),
                             PlanFetchBudgetSpan,
                             () => fetchWatch.Elapsed,
-                            token);
+                            token,
+                            PlanFetchStallWatchFor(ProcedureStatsCollector.Instance.Name, server, token));
                     }
                     finally
                     {

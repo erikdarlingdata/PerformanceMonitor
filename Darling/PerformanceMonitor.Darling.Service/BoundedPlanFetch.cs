@@ -71,7 +71,8 @@ internal static class BoundedPlanFetch
     /// position in <paramref name="keys"/>. <paramref name="fetch"/> answers by position in the list it is given.
     /// <paramref name="isBoundedFault"/> says which exceptions are a lock timeout or a command timeout; any other
     /// exception, and any exception once <paramref name="cancellationToken"/> is cancelled, propagates with the
-    /// answers applied so far kept. <paramref name="elapsed"/> is the phase's clock.
+    /// answers applied so far kept. <paramref name="elapsed"/> is the phase's clock. With a
+    /// <paramref name="stallWatch"/>, every fetch command runs under it, so a command that stalls is sampled once.
     /// </summary>
     internal static async Task<Outcome> RunAsync<TKey, TResult>(
         IReadOnlyList<TKey> keys,
@@ -80,7 +81,8 @@ internal static class BoundedPlanFetch
         Func<Exception, bool> isBoundedFault,
         TimeSpan budget,
         Func<TimeSpan> elapsed,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        PlanFetchStallWatch? stallWatch = null)
     {
         ArgumentNullException.ThrowIfNull(keys);
         ArgumentNullException.ThrowIfNull(fetch);
@@ -89,6 +91,15 @@ internal static class BoundedPlanFetch
         ArgumentNullException.ThrowIfNull(elapsed);
 
         var outcome = new Outcome();
+
+        Task<Dictionary<int, TResult>> Ask(List<TKey> slice) =>
+            stallWatch is null
+                ? fetch(slice, cancellationToken)
+                : stallWatch.WatchAsync(
+                    () => fetch(slice, cancellationToken),
+                    () => new StallProbeObservation((long)elapsed().TotalMilliseconds, outcome.Answered, -1, -1),
+                    cancellationToken);
+
         for (var offset = 0; offset < keys.Count; offset += ChunkKeys)
         {
             if (elapsed() >= budget)
@@ -101,7 +112,7 @@ internal static class BoundedPlanFetch
             Dictionary<int, TResult>? answers = null;
             try
             {
-                answers = await fetch(Slice(keys, offset, count), cancellationToken);
+                answers = await Ask(Slice(keys, offset, count));
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested && isBoundedFault(ex))
             {
@@ -132,7 +143,7 @@ internal static class BoundedPlanFetch
 
                 try
                 {
-                    var single = await fetch(Slice(keys, index, 1), cancellationToken);
+                    var single = await Ask(Slice(keys, index, 1));
                     Apply(single, index, apply, outcome);
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested && isBoundedFault(ex))
