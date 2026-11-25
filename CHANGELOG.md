@@ -46,6 +46,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Changed
 
+- **The exporter retries a store connect timeout once** ([#9578]) - A new connection to the local store sometimes stalled for the 30 s connect timeout and failed the run, and the next run was fine. The open is now retried once on that error only, with one warning line on stderr.
 - **The exporter can send `pg_log_events` and `pg_buffer_usage`** ([#9519]) - `pg_log_events` was gated on a schema version no store could reach, so no export ever read it. The gate is now schema 239, the rung of the newest change to how the collector parses a log line, and the keep-only column list is unchanged. `pg_buffer_usage` joins the optional registry as a candidate event table. It holds buffer counts and catalog names only. Neither table is read unless a run names it.
 - **A failed export prints the whole exception** ([#9351]) - The exporter printed only the exception message, and a bare "The operation has timed out" can come from a connection open, a read or an upload. The whole exception now goes to stdout, and the one stderr line gains the exception types.
 - **The threshold override store parses the global threshold row with `JsonElement.Parse`** ([#9076]) - The old form built a `JsonDocument` and never disposed it, and analyzer rule CA2026 failed a downstream Linux build of the exporter tests on that line. Behaviour does not change.
@@ -7742,4 +7743,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9069]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9069
 [#9076]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9076
 [#9351]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9351
+[#9578]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9578
 [#9519]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9519
