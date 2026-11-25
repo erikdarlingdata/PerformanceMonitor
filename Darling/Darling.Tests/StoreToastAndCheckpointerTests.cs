@@ -655,8 +655,11 @@ public sealed class StoreToastAndCheckpointerTests
             source, StringComparison.Ordinal);
 
         /* The checkpointer block, and its keys. */
-        Assert.Contains("var checkpointer = await DarlingStoreMetricsReader.GetCheckpointerAsync(postgres, cancellationToken);", source, StringComparison.Ordinal);
-        foreach (var key in new[] { "status = checkpointer.Status.ToString()", "observed_at = ", "previous_at = ", "interval_seconds = checkpointer.IntervalSeconds", "write_ms = checkpointer.WriteMs", "sync_ms = checkpointer.SyncMs", "requested = checkpointer.Requested", "cumulative_write_ms = ", "cumulative_sync_ms = ", "cumulative_requested = ", "longest_sync_ms = checkpointer.LongestSyncMs", "longest_sync_at = checkpointer.LongestSyncAtUtc", "pressure = checkpointer.IsPressure", "sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs", "note = CheckpointerNote(checkpointer)" })
+        Assert.Contains(
+            "            var checkpointer = (await DarlingStoreMetricsReader.GetCheckpointerAsync(postgres, cancellationToken))\n" +
+            "                .WithHarm(StoreHarmLog.Shared.LatestVerdict);",
+            source, StringComparison.Ordinal);
+        foreach (var key in new[] { "status = checkpointer.Status.ToString()", "observed_at = ", "previous_at = ", "interval_seconds = checkpointer.IntervalSeconds", "write_ms = checkpointer.WriteMs", "sync_ms = checkpointer.SyncMs", "requested = checkpointer.Requested", "cumulative_write_ms = ", "cumulative_sync_ms = ", "cumulative_requested = ", "longest_sync_ms = checkpointer.LongestSyncMs", "longest_sync_at = checkpointer.LongestSyncAtUtc", "pressure = checkpointer.IsPressure", "harm_inside_sync = checkpointer.HarmInsideSync", "sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs", "note = CheckpointerNote(checkpointer)" })
         {
             Assert.Contains(key, source, StringComparison.Ordinal);
         }
@@ -698,7 +701,8 @@ public sealed class StoreToastAndCheckpointerTests
             "CHECKPOINTER:",
             "interval_seconds (MEASURED between the two sweeps that bound it, not the assumed cadence)",
             "Reset (a counter went backwards",
-            "WAL sizing and refresh slicing",
+            "Store Checkpointer Pressure self-alert fires when harm_inside_sync or requested exceeds 0",
+            "How long a sync took is attribution",
             "The checkpointer row is never an object row",
         })
         {
