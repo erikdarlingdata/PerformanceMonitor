@@ -203,6 +203,27 @@ public sealed class McpSlowCallRowLossTests : IDisposable
     }
 
     [Fact]
+    public async Task AFailureBeforeTheCallCountsAsSlow_LogsNoLossWarning_AndCountsNoUnwrittenRow()
+    {
+        var wrote = 0;
+        var recorder = new McpCallTimingRecorder(_ => { Interlocked.Increment(ref wrote); return Task.CompletedTask; }, () => null)
+        { SlowThreshold = TimeSpan.Zero };
+
+        AppLogger.DrainBufferedLines();
+        /* A null tool name makes the in-memory figures throw before the call is counted as slow, so no row was ever due. */
+        using (var scope = recorder.Begin(null!, Args(("hours_back", 24))))
+        {
+            scope.Finish(McpCallTimingRecorder.OutcomeOk, new CallToolResult { Content = new List<ContentBlock> { new TextContentBlock { Text = "x" } } });
+        }
+
+        await recorder.WhenWritesDoneAsync();
+
+        Assert.Equal(0, wrote);
+        Assert.All(recorder.Snapshot(), f => Assert.Equal(0, f.SlowRowsUnwritten));
+        Assert.Empty(LossLines());
+    }
+
+    [Fact]
     public async Task AFastCall_CountsNoUnwrittenRow()
     {
         var recorder = new McpCallTimingRecorder(_ => throw new IOException("never reached"), () => null)

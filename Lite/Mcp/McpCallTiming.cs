@@ -266,9 +266,17 @@ public sealed class McpCallTimingRecorder
             }
             catch (Exception ex)
             {
-                /* A slow call that counted in per_tool but whose row could not be built is a lost row (#9544). */
-                if (slowCounted) _recorder.NoteRowUnwritten(_tool);
-                AppLogger.Warn("McpCallTiming", LossText(_tool, "build", 1, ex));
+                if (slowCounted)
+                {
+                    /* A slow call that counted in per_tool but whose row could not be built is a lost row (#9544). */
+                    _recorder.NoteRowUnwritten(_tool);
+                    AppLogger.Warn("McpCallTiming", LossText(_tool, "build", 1, ex));
+                }
+                else
+                {
+                    /* A failure before the call counted as slow: no row was due, so there is no loss to report. */
+                    AppLogger.Debug("McpCallTiming", $"Could not record the timing of {_tool}: {ex.Message}");
+                }
             }
         }
 
