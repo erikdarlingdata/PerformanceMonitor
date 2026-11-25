@@ -3353,6 +3353,8 @@ namespace PerformanceMonitor.Common
             ("shred_gated", "1") => " (no new events since the last run, so the XML was not read)",
             ("shred_gated", "0") => " (the XML was read)",
             ("relation_scan_skipped", "1") => " (the pool is over the cap, so the per-relation scan was not run)",
+            /* #9518: the run read the setting and not the session. It states the setting and asks for nothing: a threshold of 0 can be deliberate. */
+            (BlockedProcessThresholdOffNote.Label, "1") => " (" + BlockedProcessThresholdOffNote.CountMeaning + ")",
             _ => string.Empty,
         };
 

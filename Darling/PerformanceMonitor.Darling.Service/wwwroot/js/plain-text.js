@@ -71,7 +71,7 @@ const PAGE_FOR_TOOL = new Map(PAGE_FOR_TOOLS.flatMap(([page, tools]) => tools.ma
 /** The label=value measurement labels the collectors write (the CollectorMeasurement labels). A lone label=value pair is
     rewritten only when its label is one of these; WebPlainTextTests checks the list against the collectors' source. */
 export const MEASUREMENT_LABELS = [
-  "cap_buffers", "csv_records_discarded", "default_trace_off", "event_file_buffer_cut", "event_file_error", "event_file_events", "event_file_fallback", "event_file_wildcard",
+  "blocked_process_threshold_off", "cap_buffers", "csv_records_discarded", "default_trace_off", "event_file_buffer_cut", "event_file_error", "event_file_events", "event_file_fallback", "event_file_wildcard",
   "events_read", "events_stored", "foreign_zone_lines_skipped", "forged_captures_skipped",
   "identity_epoch_changes", "job_history_identity_regressions", "job_history_identity_store_watermark",
   "job_history_identity_target_row", "json_records_discarded", "log_bytes_skipped", "log_files_skipped_by_rotation",
@@ -96,6 +96,8 @@ function toolWords(name) {
 /* #7670: what a count means, for the few a reader cannot work out from the label. The gate skips the XML read when the extended-events counter has not moved since the last run. */
 const COUNT_MEANINGS = {
   shred_gated: { 1: "no new events since the last run, so the XML was not read", 0: "the XML was read" },
+  /* #9518: SQL Server raises no blocked process report while the threshold is 0, so the run reads the setting and not the session. A setting somebody may have left at 0 on purpose, so this states it and asks for nothing. */
+  blocked_process_threshold_off: { 1: "blocked process reports are off because 'blocked process threshold (s)' is 0, so the session was not read" },
   relation_scan_skipped: { 1: "the pool is over the cap, so the per-relation scan was not run" },
 };
 
