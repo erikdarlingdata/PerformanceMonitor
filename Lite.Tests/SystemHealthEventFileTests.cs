@@ -64,6 +64,16 @@ public sealed class SystemHealthEventFileTests
             (object?)scanFile ?? DBNull.Value, (object?)scanOffset ?? DBNull.Value, bufferCut, wildcard,
         };
 
+    /// <summary>#9528: the trailing row with its four step columns (the attempt that answered, then the lookup, read and cast milliseconds), NULL where the batch leaves one unset.</summary>
+    private static object[] WithSteps(object[] trailer, int? attempt, int? lookupMs, int? readMs, int? shredMs) =>
+        trailer
+            .Concat(new[]
+            {
+                (object?)attempt ?? DBNull.Value, (object?)lookupMs ?? DBNull.Value,
+                (object?)readMs ?? DBNull.Value, (object?)shredMs ?? DBNull.Value,
+            })
+            .ToArray();
+
     [Fact]
     public async Task AFileRead_LeavesTheBookmarkOfTheNewestEvent_AndCountsTheEvents()
     {
@@ -541,5 +551,119 @@ public sealed class SystemHealthEventFileTests
         await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
 
         Assert.Equal(wildcard ? 1 : null, Measured(context, "event_file_wildcard"));
+    }
+
+    [Fact]
+    public async Task APassTheBookmarksOwnFileAnswered_RecordsAttemptZero_TheReadAndTheCast_AndNoLookup()
+    {
+        /* #9528: attempt 0 read the bookmark's file before any target lookup and kept an event, so the lookup never ran:
+           the trailing row leaves its time NULL and the note carries no event_file_lookup_ms. */
+        var context = MakeContext(watermark: s_watermark);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { FileRow(s_watermark.AddMinutes(2), "wait_info", FileA, 4_096) },
+            new[] { WithSteps(Trailer(false, 0, DBNull.Value, true), attempt: 0, lookupMs: null, readMs: 3, shredMs: 2) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(0, Measured(context, "event_file_attempt"));
+        Assert.Null(Measured(context, "event_file_lookup_ms"));
+        Assert.Equal(3, Measured(context, "event_file_read_ms"));
+        Assert.Equal(2, Measured(context, "event_file_shred_ms"));
+
+        /* The count stays first, and the health-parser reads still take the note for a file read. */
+        var note = CollectorMeasurementNote.Render(context.Measurements);
+        Assert.StartsWith("event_file_events=1 event_file_attempt=0 event_file_read_ms=3 event_file_shred_ms=2", note, StringComparison.Ordinal);
+        Assert.True(SystemHealthSourceNote.ReadThroughEventFile(note), note);
+    }
+
+    [Theory]
+    [InlineData(1, false, "event_file_events=1 event_file_attempt=1 event_file_lookup_ms=31 event_file_read_ms=5 event_file_shred_ms=2")]
+    [InlineData(1, true, "event_file_events=1 event_file_wildcard=1 event_file_attempt=1 event_file_lookup_ms=31 event_file_read_ms=5 event_file_shred_ms=2")]
+    [InlineData(2, false, "event_file_events=1 event_file_attempt=2 event_file_lookup_ms=31 event_file_read_ms=5 event_file_shred_ms=2")]
+    public async Task APassTheLookupLedTo_RecordsTheAttemptThatAnswered_AndTheLookupsTime(int attempt, bool wildcard, string expectedNote)
+    {
+        /* #9528: attempt 0 found nothing (or there was no bookmark), so the lookup ran and attempt 1 or 2 answered. The read
+           time is the sum of every raw read the pass ran. */
+        var context = MakeContext(watermark: s_watermark);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { FileRow(s_watermark.AddMinutes(2), "wait_info", FileA, 4_096) },
+            new[] { WithSteps(Trailer(false, 0, DBNull.Value, true, wildcard: wildcard), attempt, lookupMs: 31, readMs: 5, shredMs: 2) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(attempt, Measured(context, "event_file_attempt"));
+        Assert.Equal(31, Measured(context, "event_file_lookup_ms"));
+        Assert.StartsWith(expectedNote, CollectorMeasurementNote.Render(context.Measurements), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ARingBufferFallback_RecordsTheLookupAndTheRefusedReadsTime_AndNoAttempt()
+    {
+        /* #9528: both file reads were refused, so no attempt answered: the note says what the lookup and the refused reads
+           cost, after the fallback and its error, and is still not a file read to the health-parser reads. */
+        var context = MakeContext(watermark: s_watermark);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { RingRow(s_watermark.AddMinutes(1), "error_reported") },
+            new[] { WithSteps(Trailer(false, 0, DBNull.Value, false, error: 297), attempt: null, lookupMs: 29, readMs: 4, shredMs: null) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Null(Measured(context, "event_file_attempt"));
+        Assert.Null(Measured(context, "event_file_shred_ms"));
+        var note = CollectorMeasurementNote.Render(context.Measurements);
+        Assert.StartsWith("event_file_fallback=1 event_file_error=297 event_file_lookup_ms=29 event_file_read_ms=4", note, StringComparison.Ordinal);
+        Assert.False(SystemHealthSourceNote.ReadThroughEventFile(note), note);
+    }
+
+    [Fact]
+    public async Task AFallbackWithNoEventFileTarget_RecordsTheLookupAlone()
+    {
+        /* #9528: the lookup found no event_file target, so no file read started and only the lookup has a time. */
+        var context = MakeContext();
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            new[] { RingRow(s_watermark.AddMinutes(1), "error_reported") },
+            new[] { WithSteps(Trailer(false, 0, DBNull.Value, false), attempt: null, lookupMs: 28, readMs: null, shredMs: null) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        var note = CollectorMeasurementNote.Render(context.Measurements);
+        Assert.StartsWith("event_file_fallback=1 event_file_lookup_ms=28", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_file_read_ms", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_file_shred_ms", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_file_attempt", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AQuietPassTheLookupConfirmed_RecordsAttemptZero_BesideTheLookupsTime()
+    {
+        /* #9528: the bookmark's file had nothing to store, the lookup showed it is still the file being written, and the
+           read was not made a second time: attempt 0 answered, and the lookup's time is in the note beside it. */
+        var context = MakeContext(watermark: s_watermark);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { WithSteps(Trailer(false, 0, DBNull.Value, true), attempt: 0, lookupMs: 21, readMs: 9, shredMs: 0) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(
+            "event_file_events=0 event_file_attempt=0 event_file_lookup_ms=21 event_file_read_ms=9 event_file_shred_ms=0",
+            CollectorMeasurementNote.Render(context.Measurements));
+    }
+
+    [Fact]
+    public async Task AStepThatTookNoMeasurableTime_IsRecordedAsZero_AndANegativeSpanIsNeverWritten()
+    {
+        /* #9528: 0 ms is a measurement (the step ran), unlike NULL (it did not). A clock that stepped back mid-pass gives a
+           negative span, which is recorded as 0: the run note's readers accept no leading minus. */
+        var context = MakeContext(watermark: s_watermark);
+        using var reader = FakeCollectorDataReader.WithResultSets(
+            Array.Empty<object[]>(),
+            new[] { WithSteps(Trailer(false, 0, DBNull.Value, true), attempt: 1, lookupMs: -7, readMs: 0, shredMs: 0) });
+
+        await SystemHealthEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(
+            "event_file_events=0 event_file_attempt=1 event_file_lookup_ms=0 event_file_read_ms=0 event_file_shred_ms=0",
+            CollectorMeasurementNote.Render(context.Measurements));
     }
 }

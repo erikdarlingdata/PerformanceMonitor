@@ -32,6 +32,11 @@ namespace Lite.Tests;
 /// <c>DARLING_TEST_SQL_PASSWORD</c> for SQL auth), so it skips where the runner has no SQL Server. It only reads: SELECTs
 /// and the event file read, nothing that alters the server. Written against sql2019; the batch it builds follows the
 /// connected server's major version, so it also runs against 2017+ and 2016.</para>
+///
+/// <para>#9528: a pass with a bookmark reads the bookmark's own file before it looks the target up. The tests that name
+/// <c>event_file_attempt</c> prove which read answered each kind of pass (0 with no lookup, 1 or 2 after it) on the real
+/// batch: events past the bookmark, a quiet pass, a refused bookmark, the cap and the one-buffer re-read, a file that
+/// rolled over with events left at its end, and one whose remaining events are all older than the watermark.</para>
 /// </summary>
 [Collection("timing")]
 public sealed class SystemHealthEventFileLiveSqlTests
@@ -50,7 +55,10 @@ public sealed class SystemHealthEventFileLiveSqlTests
     private sealed record Pass(List<SystemHealthEventsCollector.Row> Rows, CollectorContext Context, TimeSpan Elapsed);
 
     /// <summary>One pass of a chain: the watermark it read past, whether it read from a bookmark, where its bookmark ended.</summary>
-    private sealed record ChainPass(DateTime Watermark, bool FromBookmark, string? EndFile, long EndOffset, int Rows);
+    private sealed record ChainPass(DateTime Watermark, bool FromBookmark, string? EndFile, long EndOffset, int Rows, long? Attempt, bool LookedUp);
+
+    /// <summary>One buffer of a file: its offset, how many of the six captured events it holds, and the newest of their times.</summary>
+    private sealed record FileBuffer(long Offset, int Events, DateTime Newest);
 
     private sealed record Chain(List<SystemHealthEventsCollector.Row> Seen, List<ChainPass> Passes);
 
@@ -509,7 +517,9 @@ ORDER BY fs.size_in_bytes DESC;", connection);
                 endFile = parts[2];
             }
 
-            passes.Add(new ChainPass(watermark, fromBookmark, endFile, endOffset, pass.Rows.Count));
+            passes.Add(new ChainPass(
+                watermark, fromBookmark, endFile, endOffset, pass.Rows.Count, Measured(pass.Context, "event_file_attempt"),
+                Measured(pass.Context, "event_file_lookup_ms") is not null));
             if (!moved)
             {
                 Assert.True(pass.Rows.Count == 0, $"pass {number} returned {pass.Rows.Count} rows and left the bookmark where it was");
@@ -627,6 +637,9 @@ ORDER BY fs.size_in_bytes DESC;", connection);
         var whole = await RunPassAsync(server, state, s_longAgo, maxEvents: fullest!.Count() - 1);
         Assert.Equal(Keys(fullest!), Keys(whole.Rows));
         Assert.Null(Measured(whole.Context, "event_file_buffer_cut"));
+        /* #9528: the re-read is of the bookmark's own file, so the pass never looked the target up. */
+        Assert.Equal(0, Measured(whole.Context, "event_file_attempt"));
+        Assert.Null(Measured(whole.Context, "event_file_lookup_ms"));
         var moved = SystemHealthEventsCollector.TryUseBookmark(whole.Context.PendingState, DateTime.MaxValue);
         Assert.NotNull(moved);
         Assert.Equal(fullest.Key.File, moved.Value.File, ignoreCase: true);
@@ -640,6 +653,8 @@ ORDER BY fs.size_in_bytes DESC;", connection);
         Assert.Equal(cutCap * SystemHealthEventsCollector.BufferReReadFactor, cut.Rows.Count);
         Assert.All(cut.Rows, row => Assert.Equal(fullest.Key.Offset, row.SourceOffset));
         Assert.Equal(1, Measured(cut.Context, "event_file_buffer_cut"));
+        Assert.Equal(0, Measured(cut.Context, "event_file_attempt"));
+        Assert.Null(Measured(cut.Context, "event_file_lookup_ms"));
     }
 
     [Fact]
@@ -717,5 +732,305 @@ ORDER BY fs.size_in_bytes DESC;", connection);
             Assert.All(newer.Rows, row => Assert.True(row.EventTime > cut));
             Assert.Equal(Keys(newer.Rows.Where(r => r.EventTime <= bound)), Keys(newerOld.Rows.Where(r => r.EventTime <= bound)));
         }
+    }
+
+    /* ── #9528: the bookmark's own file first, the target lookup only when that yields nothing ── */
+
+    /// <summary>The system_health file written just before the current one, by its full path, or null when there is none (or the server is 2016, which has no directory listing).</summary>
+    private static async Task<string?> NewestRolledOverFileAsync(Server server)
+    {
+        if (server.Major < 14)
+        {
+            return null;
+        }
+
+        /* The path separator is the server's: a backslash on Windows, a slash on Linux. */
+        var cut = Math.Max(server.FilePattern.LastIndexOf('\\'), server.FilePattern.LastIndexOf('/'));
+        await using var list = new SqlCommand(
+            @"SELECT TOP (1) fs.full_filesystem_path
+FROM sys.dm_os_enumerate_filesystem(@directory, N'system_health_0_*.xel') AS fs
+WHERE fs.full_filesystem_path < @current
+ORDER BY fs.full_filesystem_path DESC;", server.Connection);
+        list.Parameters.Add(new SqlParameter("@directory", SqlDbType.NVarChar, 260) { Value = server.FilePattern[..(cut + 1)] });
+        list.Parameters.Add(new SqlParameter("@current", SqlDbType.NVarChar, 260) { Value = server.CurrentFile });
+        return await list.ExecuteScalarAsync(TestContext.Current.CancellationToken) as string;
+    }
+
+    /// <summary>The buffers of one file that hold any of the six captured events, in file order, read without the XML cast (2017+).</summary>
+    private static async Task<List<FileBuffer>> CapturedBuffersAsync(Server server, string file)
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var buffers = new List<FileBuffer>();
+        await using var command = new SqlCommand(
+            @"SELECT
+    x.file_offset,
+    events = COUNT(*),
+    newest = MAX(CONVERT(datetime2(7), x.timestamp_utc))
+FROM sys.fn_xe_file_target_read_file(@file, NULL, NULL, NULL) AS x
+WHERE x.object_name IN
+      (
+          N'sp_server_diagnostics_component_result',
+          N'error_reported',
+          N'memory_broker_ring_buffer_recorded',
+          N'memory_node_oom_ring_buffer_recorded',
+          N'scheduler_monitor_system_health_ring_buffer_recorded',
+          N'wait_info'
+      )
+GROUP BY x.file_offset
+ORDER BY x.file_offset;", server.Connection) { CommandTimeout = 120 };
+        command.Parameters.Add(new SqlParameter("@file", SqlDbType.NVarChar, 260) { Value = file });
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            buffers.Add(new FileBuffer(reader.GetInt64(0), reader.GetInt32(1), reader.GetDateTime(2)));
+        }
+
+        return buffers;
+    }
+
+    private static Dictionary<string, string> BookmarkState(DateTime time, long offset, string file) =>
+        new(StringComparer.Ordinal)
+        {
+            [SystemHealthEventsCollector.BookmarkStateKey] = SystemHealthEventsCollector.FormatBookmark(time, offset, file),
+        };
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(13)]
+    public async Task ABookmarkWithEventsPastIt_IsAnsweredFromItsOwnFile_WithNoTargetLookup(int? asMajor)
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+        Assert.SkipWhen(
+            asMajor is null && server.Major < SystemHealthEventsCollector.TimestampUtcMajorVersion,
+            "The server's own batch is the 2016 batch, which the asMajor: 13 case runs.");
+
+        /* No bookmark: the lookup has to run to find the file, and attempt 2 answers. Every step it ran has a time. */
+        var full = await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped, asMajor: asMajor);
+        Assert.SkipWhen(full.Rows.Count < 20, "The current system_health file holds too few events to bookmark in.");
+        Assert.Equal(2, Measured(full.Context, "event_file_attempt"));
+        Assert.NotNull(Measured(full.Context, "event_file_lookup_ms"));
+        Assert.NotNull(Measured(full.Context, "event_file_read_ms"));
+        Assert.NotNull(Measured(full.Context, "event_file_shred_ms"));
+
+        /* A bookmark in the middle of the file: its own file has events past it, so that read answers the pass and no
+           lookup runs. The rows are the ones the full read holds past the bookmark (the file keeps growing, so compare up
+           to the full read's end). */
+        var middle = full.Rows[full.Rows.Count / 2];
+        var end = full.Rows.Max(r => r.SourceOffset!.Value);
+        var resumed = await RunPassAsync(
+            server,
+            BookmarkState(middle.EventTime!.Value, middle.SourceOffset!.Value, middle.SourceFile!),
+            watermark: middle.EventTime!.Value,
+            maxEvents: Uncapped,
+            asMajor: asMajor);
+
+        Assert.Equal(0, Measured(resumed.Context, "event_file_attempt"));
+        Assert.Null(Measured(resumed.Context, "event_file_lookup_ms"));
+        Assert.NotNull(Measured(resumed.Context, "event_file_read_ms"));
+        Assert.NotNull(Measured(resumed.Context, "event_file_shred_ms"));
+        Assert.Null(Measured(resumed.Context, "event_file_fallback"));
+        Assert.Null(Measured(resumed.Context, "event_file_wildcard"));
+        Assert.Equal(resumed.Rows.Count, Measured(resumed.Context, "event_file_events"));
+        Assert.Equal(
+            Keys(full.Rows.Where(r => r.SourceOffset > middle.SourceOffset && r.EventTime >= middle.EventTime)),
+            Keys(resumed.Rows.Where(r => r.SourceOffset <= end)));
+    }
+
+    [Fact]
+    public async Task AQuietBookmarkPass_FindsNothingInTheBookmarksFile_RunsTheLookup_AndDoesNotReadTheFileAgain()
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+
+        /* Read to the end of the file, so the bookmark the pass leaves is its last buffer. */
+        var full = await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped);
+        Assert.SkipWhen(full.Rows.Count == 0, "The current system_health file holds none of the six captured events yet.");
+
+        /* Nothing is newer than tomorrow, so the bookmark's file yields nothing: only the lookup can say whether the file
+           rolled over, so it runs. It names the bookmark's file as the one being written, so the read already made is
+           the answer: attempt 0, beside a lookup time, is the pass that read the file once. */
+        var quiet = await RunPassAsync(server, StateFrom(full.Context), watermark: full.Rows.Max(r => r.EventTime!.Value).AddDays(1));
+
+        Assert.Empty(quiet.Rows);
+        Assert.Equal(0, Measured(quiet.Context, "event_file_attempt"));
+        Assert.NotNull(Measured(quiet.Context, "event_file_lookup_ms"));
+        Assert.Null(Measured(quiet.Context, "event_file_wildcard"));
+        Assert.Equal(0, Measured(quiet.Context, "event_file_events"));
+        Assert.DoesNotContain(SystemHealthEventsCollector.BookmarkStateKey, quiet.Context.PendingState.Keys);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ABookmarkTheServerRefuses_IsRefusedAgainAfterTheLookup_AndTheCurrentFileAnswers(bool missingFile)
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+
+        /* A file that is gone (25717) or an offset that is not a buffer start (25722): the read of the bookmark's own file
+           is refused, the lookup runs, attempt 1 meets the same refusal, and attempt 2 reads the current file. The pass
+           records no error: it did not end in the ring buffer. */
+        var stale = missingFile
+            ? SystemHealthEventsCollector.FormatBookmark(s_longAgo, 98304, MissingFileInDirectoryOf(server.CurrentFile))
+            : SystemHealthEventsCollector.FormatBookmark(s_longAgo, 1, server.CurrentFile);
+        var state = new Dictionary<string, string>(StringComparer.Ordinal) { [SystemHealthEventsCollector.BookmarkStateKey] = stale };
+
+        var pass = await RunPassAsync(server, state, watermark: s_longAgo);
+
+        Assert.SkipWhen(pass.Rows.Count == 0, "The current system_health file holds none of the six captured events yet.");
+        Assert.Equal(2, Measured(pass.Context, "event_file_attempt"));
+        Assert.NotNull(Measured(pass.Context, "event_file_lookup_ms"));
+        Assert.Null(Measured(pass.Context, "event_file_fallback"));
+        Assert.Null(Measured(pass.Context, "event_file_error"));
+        Assert.All(pass.Rows, row => Assert.Equal(server.CurrentFile, row.SourceFile, ignoreCase: true));
+        Assert.NotEqual(stale, pass.Context.PendingState[SystemHealthEventsCollector.BookmarkStateKey]);
+    }
+
+    [Fact]
+    public async Task ABookmarkAheadOfTheWatermark_IsNotRead_SoTheLookupRunsAndTheCurrentFileAnswers()
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+
+        var full = await RunPassAsync(server, state: null, watermark: s_longAgo);
+        Assert.SkipWhen(full.Rows.Count == 0, "The current system_health file holds none of the six captured events yet.");
+
+        /* The store lost what the bookmark had skipped (its watermark is back at the start), so TryUseBookmark drops the
+           bookmark, the batch gets none, and the pass is the first read again: the lookup, then the current file. */
+        var again = await RunPassAsync(server, StateFrom(full.Context), watermark: s_longAgo);
+
+        Assert.Equal(2, Measured(again.Context, "event_file_attempt"));
+        Assert.NotNull(Measured(again.Context, "event_file_lookup_ms"));
+        Assert.NotEmpty(again.Rows);
+        Assert.All(again.Rows, row => Assert.Equal(server.CurrentFile, row.SourceFile, ignoreCase: true));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(13)]
+    public async Task CappedPassesFromABookmark_AreAnsweredFromTheBookmarksOwnFile_AndStoreExactlyTheEventsTheFileHolds(int? asMajor)
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+        Assert.SkipWhen(
+            asMajor is null && server.Major < SystemHealthEventsCollector.TimestampUtcMajorVersion,
+            "The server's own batch is the 2016 batch, which the asMajor: 13 case runs.");
+
+        var reference = (await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: Uncapped, asMajor: asMajor)).Rows;
+        Assert.SkipWhen(reference.Count < 40, "The current system_health file holds too few events to chain capped passes over.");
+
+        var fullest = reference.GroupBy(PositionOf).Max(g => g.Count());
+        var cap = Math.Clamp(fullest - 1, 50, 200);
+        var chain = await ChainAsync(server, s_longAgo, cap, asMajor);
+
+        Assert.True(chain.Passes.Count > 3, "the cap never bound a pass that started from a bookmark, so the chain proved nothing");
+        AssertChainStoredExactly(reference, chain);
+
+        /* The first pass has no bookmark: the lookup, then the current file. Every pass after it that the cap stopped, or
+           that stored the last events, read the bookmark's own file and never looked the target up. The last pass found
+           nothing past the bookmark, so the lookup ran, named the same file, and the read was not made again. */
+        Assert.Equal(2, chain.Passes[0].Attempt);
+        Assert.True(chain.Passes[0].LookedUp);
+        Assert.All(chain.Passes.Skip(1).Take(chain.Passes.Count - 2), pass =>
+        {
+            Assert.Equal(0, pass.Attempt);
+            Assert.False(pass.LookedUp);
+        });
+        Assert.Equal(0, chain.Passes[^1].Attempt);
+        Assert.True(chain.Passes[^1].LookedUp);
+    }
+
+    [Fact]
+    public async Task ARolledOverFile_WithEventsLeftAtItsEnd_AnswersFirstWithNoLookup_AndTheNextPassCrossesToTheLaterFiles()
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+
+        var older = await NewestRolledOverFileAsync(server);
+        Assert.SkipWhen(older is null, "No rolled-over system_health file next to the current one.");
+        var buffers = await CapturedBuffersAsync(server, older!);
+        Assert.SkipWhen(buffers.Count < 2, "The rolled-over system_health file holds fewer than two buffers of captured events.");
+
+        /* The bookmark is the buffer before the last one of the rolled-over file, so that file still holds one unread
+           buffer. Its own file answers: exactly that buffer's events, no lookup, no read of every rollover file. */
+        var bookmark = buffers[^2];
+        var tail = buffers[^1];
+        var first = await RunPassAsync(server, BookmarkState(s_longAgo, bookmark.Offset, older!), watermark: s_longAgo);
+
+        Assert.Equal(0, Measured(first.Context, "event_file_attempt"));
+        Assert.Null(Measured(first.Context, "event_file_lookup_ms"));
+        Assert.Null(Measured(first.Context, "event_file_wildcard"));
+        Assert.Equal(tail.Events, first.Rows.Count);
+        Assert.All(first.Rows, row =>
+        {
+            Assert.Equal(older, row.SourceFile, ignoreCase: true);
+            Assert.Equal(tail.Offset, row.SourceOffset);
+        });
+
+        /* The next pass starts at the end of that file. Nothing is left there, so the lookup runs, finds the file is not
+           the one being written, and the read crosses into the later files: no event of the rolled-over file comes twice. */
+        var second = await RunPassAsync(server, StateFrom(first.Context), first.Rows.Max(r => r.EventTime!.Value));
+
+        Assert.Equal(1, Measured(second.Context, "event_file_attempt"));
+        Assert.NotNull(Measured(second.Context, "event_file_lookup_ms"));
+        Assert.Equal(1, Measured(second.Context, "event_file_wildcard"));
+        Assert.Null(Measured(second.Context, "event_file_fallback"));
+        Assert.All(second.Rows, row => Assert.True(
+            string.Compare(row.SourceFile, older, StringComparison.OrdinalIgnoreCase) > 0,
+            "the pass after the rolled-over file's last events returned an event from that file again"));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(13)]
+    public async Task ARolledOverFile_WhoseRemainingEventsAreAllOlderThanTheWatermark_DoesNotAnswer_SoTheReadStillCrosses(int? asMajor)
+    {
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+
+        var older = await NewestRolledOverFileAsync(server);
+        Assert.SkipWhen(older is null, "No rolled-over system_health file next to the current one.");
+        var buffers = await CapturedBuffersAsync(server, older!);
+        Assert.SkipWhen(buffers.Count < 2, "The rolled-over system_health file holds fewer than two buffers of captured events.");
+
+        /* The rolled-over file has one buffer past the bookmark, and the watermark is past every event in it. The 2016
+           batch has no time filter on the raw read, so it reads those events and stores none: were that enough to answer
+           the pass, every pass would stop here and the later files would never be read. Neither batch lets it answer: the
+           lookup runs and the read crosses over. */
+        var bookmark = buffers[^2];
+        var watermark = buffers[^1].Newest.AddMilliseconds(1);
+        var pass = await RunPassAsync(server, BookmarkState(s_longAgo, bookmark.Offset, older!), watermark, asMajor: asMajor);
+
+        Assert.Equal(1, Measured(pass.Context, "event_file_attempt"));
+        Assert.NotNull(Measured(pass.Context, "event_file_lookup_ms"));
+        Assert.Equal(1, Measured(pass.Context, "event_file_wildcard"));
+        Assert.Null(Measured(pass.Context, "event_file_fallback"));
+        Assert.All(pass.Rows, row => Assert.True(
+            string.Compare(row.SourceFile, older, StringComparison.OrdinalIgnoreCase) > 0,
+            "an event of the rolled-over file older than the watermark was stored"));
+    }
+
+    [Fact]
+    public async Task ManagedInstanceMode_WithABookmark_RunsTheLookupFirst_AndNeverReadsTheBookmarksFileAlone()
+    {
+        /* #6897 with #9528: on Managed Instance the read is the bare pattern whatever the bookmark, so there is no read of
+           the bookmark's own file in front of the lookup. A box resolves the bare pattern in its default log folder. */
+        var server = await OpenAsync();
+        await using var connection = server.Connection;
+
+        var fresh = await RunPassAsync(server, state: null, watermark: s_longAgo, maxEvents: 50, managedInstance: true);
+        Assert.SkipWhen(
+            Measured(fresh.Context, "event_file_fallback") is not null,
+            "This server's system_health files are not in its default log folder, where the bare pattern looks.");
+        Assert.SkipWhen(fresh.Rows.Count == 0, "The system_health files hold none of the six captured events yet.");
+        Assert.Equal(2, Measured(fresh.Context, "event_file_attempt"));
+
+        var resumed = await RunPassAsync(
+            server, StateFrom(fresh.Context), fresh.Rows.Max(r => r.EventTime!.Value), managedInstance: true);
+        Assert.Equal(1, Measured(resumed.Context, "event_file_attempt"));
+        Assert.NotNull(Measured(resumed.Context, "event_file_lookup_ms"));
+        Assert.Null(Measured(resumed.Context, "event_file_fallback"));
+        Assert.Null(Measured(resumed.Context, "event_file_error"));
     }
 }
