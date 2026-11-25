@@ -167,7 +167,12 @@ LIMIT 1";
                model) until its old captures aged out. The drill-down that lists these databases
                (DrillDownCollector.CollectConfigIssues) was already anchored this way. No lookback bound: an
                on-load capture is as old as the app's last start. The newest capture is the newest at or before $2,
-               the analysis window's end, so a pass as of a past instant reads the capture that existed then. */
+               the analysis window's end, so a pass as of a past instant reads the capture that existed then.
+
+               #9587: master, msdb, model, tempdb and rdsadmin are left out of every count. rdsadmin is the platform's
+               own database on Amazon RDS for SQL Server: the customer cannot change its settings, so an RCSI-off
+               count that included it would raise DB_CONFIG on a server whose user databases are all fine. The
+               drill-down (DrillDownCollector.ConfigIssuesSql) leaves out the same five. */
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 WITH latest AS (
@@ -193,7 +198,7 @@ SELECT
     COUNT(CASE WHEN recovery_model = 'SIMPLE' THEN 1 END) AS simple_recovery_count,
     COUNT(CASE WHEN is_query_store_on THEN 1 END) AS query_store_on_count
 FROM latest WHERE rn = 1
-AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb')";
+AND database_name NOT IN ('master', 'msdb', 'model', 'tempdb', 'rdsadmin')";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
