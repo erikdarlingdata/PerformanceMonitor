@@ -951,6 +951,10 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', $8, $9, $10, $11, $12, $13, $14, 
         public Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken) =>
             Task.FromResult<string?>(null);
 
+        public Task<string?> FetchStatementPlanXmlAsync(
+            int serverId, string planHandle, int statementStartOffset, int statementEndOffset, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
+
         public Task<string?> FetchQueryStorePlanXmlAsync(int serverId, string databaseName, long planId, CancellationToken cancellationToken) =>
             source.FetchQueryStorePlanXmlAsync(serverId, databaseName, planId, cancellationToken);
     }
