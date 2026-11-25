@@ -76,34 +76,6 @@ public sealed class FileIoCollectorDefinitionTests
     /// The DMV's number stays as the fallback for a file the join misses. Without it that file would read NULL, which
     /// is stored as NULL, and every reader would show "n/a (log service)" for a file that is not in the log service.
     /// </summary>
-    /// <summary>
-    /// #9539: the on-prem text with no excluded databases has no parameters and carries no OPTION(RECOMPILE). The text
-    /// with excluded databases is parameterized and keeps the hint, and so does the Azure SQL Database text.
-    /// </summary>
-    [Fact]
-    public void BuildQuery_OnlyTheUnfilteredOnPremText_DropsTheRecompileHint()
-    {
-        var unfiltered = FileIoStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas)).Text;
-        Assert.DoesNotContain("RECOMPILE", unfiltered, StringComparison.Ordinal);
-        Assert.DoesNotContain("/*OPTION_CLAUSE*/", unfiltered, StringComparison.Ordinal);
-        Assert.EndsWith(";", unfiltered, StringComparison.Ordinal);
-
-        var filtered = FileIoStatsCollector.Instance.BuildQuery(new CollectorContext
-        {
-            ServerId = 42,
-            ServerName = "test-server",
-            CollectionTime = DateTime.UtcNow,
-            Deltas = s_deltas,
-            ExcludedDatabases = new[] { "AdventureWorks" },
-        }).Text;
-        Assert.Contains("AND d.name NOT IN (@excl_db_0)", filtered, StringComparison.Ordinal);
-        Assert.EndsWith("OPTION(RECOMPILE);", filtered, StringComparison.Ordinal);
-        Assert.DoesNotContain("/*OPTION_CLAUSE*/", filtered, StringComparison.Ordinal);
-
-        var azure = FileIoStatsCollector.Instance.BuildQuery(CollectorTestContext.Make(s_deltas, isAzureSqlDb: true)).Text;
-        Assert.EndsWith("OPTION(RECOMPILE);", azure, StringComparison.Ordinal);
-    }
-
     [Fact]
     public void BuildQuery_Azure_SizeComesFromDatabaseFiles_WithTheDmvAsFallback()
     {

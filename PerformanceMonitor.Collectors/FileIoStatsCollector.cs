@@ -171,9 +171,10 @@ AND   vfs.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
            exception the rule in CONTRIBUTING.md allows. Its row count follows the server's file layout, which does
            not swing between runs the way a catch-up window does. Measured on SQL Server 2022 and 2025 against the
            hinted text: 73 to 82% less CPU per run with 11 files and with 55 databases. A fresh compile with 55
-           databases adds a Row Count Spool, and the plan compiled with 11 files, forced with USE PLAN, ran within
-           6% of it. The text with excluded databases is parameterized and keeps the hint, as does the Azure SQL
-           Database text, which was not measured. */
+           databases adds a Row Count Spool. The plan compiled with 11 files, forced with USE PLAN at 55 databases,
+           used 9.3 ms CPU per run on 2022 and 9.5 ms on 2025, against 46.9 and 42.4 ms for the hinted text there,
+           about 80% less. The text with excluded databases is parameterized and keeps the hint, as does the Azure
+           SQL Database text, which was not measured. */
         var optionClause = exclusionParameters.Count > 0 ? "OPTION(RECOMPILE)" : "";
         return new CollectorQuery(
             OnPremQueryText
