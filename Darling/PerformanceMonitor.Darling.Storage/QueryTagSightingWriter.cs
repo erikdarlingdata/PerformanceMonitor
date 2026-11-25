@@ -26,9 +26,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>One statement per flush, and no connection for an empty one.</b> The same identity sighted twice is
 /// collapsed first (a single <c>INSERT ... ON CONFLICT DO UPDATE</c> cannot touch one row twice), with the occurrences
 /// added to <c>seen_count</c>. The conflict target is the table's own unique index (V194), so a key seen under the same
-/// caller in the same database again moves <c>last_seen</c> at most once an hour (#8716), to a stamp behind the
-/// map's extend window (<see cref="ReSightingBackdate"/>), and keeps its first text sample. A re-sighting that fills nothing
-/// and is not due for the hourly move writes no row at all (#8979), so <c>seen_count</c> is a lower bound (see
+/// caller in the same database again moves <c>last_seen</c> at most once every <see cref="ReSightingRefreshWidth"/> (#8716, widened
+/// from an hour in #9456), to a stamp behind the map's extend window (<see cref="ReSightingBackdate"/>), and keeps its first
+/// text sample. A re-sighting that fills nothing and is not due for that move writes no row at all (#8979), so <c>seen_count</c> is a lower bound (see
 /// <see cref="UpsertSql"/>).</para>
 ///
 /// <para><b>The database is part of the identity (V194).</b> One hash seen in two databases is two rows, so the map
@@ -59,7 +59,7 @@ public static class QueryTagSightingWriter
     public const int RowsPerStatement = 10_000;
 
     /// <summary>
-    /// How far behind its statement's <c>now()</c> a plain hourly re-sighting stamps <c>last_seen</c>. A plain re-sighting
+    /// How far behind its statement's <c>now()</c> a plain re-sighting stamps <c>last_seen</c>. A plain re-sighting
     /// changes nothing the map resolver reads, so the map's extend never needs to read it, and the extend reads every
     /// sighting row of each key it finds (<see cref="QueryTagMapStore.SightingsOfKeysSql"/>). The extend finds keys from
     /// the previous pass's clock less <see cref="QueryTagMapBuilder.ExtendOverlap"/>, and a flush runs at a pass's start or
@@ -71,19 +71,38 @@ public static class QueryTagSightingWriter
     public static readonly TimeSpan ReSightingBackdate = QueryTagMapBuilder.ExtendOverlap + TimeSpan.FromMinutes(3);
 
     /// <summary>
-    /// Statement parameters: $1..$10, the ten columns of the flush as arrays (server id first, the count last), and $11
-    /// <see cref="ReSightingBackdate"/>.
-    /// <para><b>A re-sighting moves <c>last_seen</c> at most once an hour (#8716).</b> <c>last_seen</c> is indexed, so bumping it on
+    /// The least time between two moves of a re-sighted row's <c>last_seen</c> (#9456). Every move is a full new heap version that
+    /// can never be HOT, because <c>last_seen</c> has its own index, so it writes all four indexes of the table and copies a text
+    /// sample of up to <see cref="TextSampleChars"/> characters. At an hour, every key the collectors keep seeing was rewritten
+    /// once an hour only to move a stamp that nothing reads that finely: the map's changed-keys read needs the stamp to move on an
+    /// insert or a fill, which still take <c>now()</c>, and retention purges on a cutoff at least a day back. Six hours is the
+    /// width the plan and text dimension tables already use for the same reason (#4503), and it leaves a live key's stamp at most
+    /// this width plus <see cref="ReSightingBackdate"/> behind. The one reader that sees the difference is the rule test read, whose
+    /// window never goes under <see cref="MinTestWindowHours"/>. The value is threaded into the SQL as a parameter (#3684).
+    /// </summary>
+    public static readonly TimeSpan ReSightingRefreshWidth = TimeSpan.FromHours(6);
+
+    /// <summary>
+    /// The shortest window, in whole hours, the rule test read honours: the refresh width plus the backdate, rounded up. A key still
+    /// being seen can have a stamp that old, so a shorter window would drop it while an older one still counts it.
+    /// </summary>
+    public static readonly int MinTestWindowHours = (int)Math.Ceiling((ReSightingRefreshWidth + ReSightingBackdate).TotalHours);
+
+    /// <summary>
+    /// Statement parameters: $1..$10, the ten columns of the flush as arrays (server id first, the count last), $11
+    /// <see cref="ReSightingBackdate"/> and $12 <see cref="ReSightingRefreshWidth"/>.
+    /// <para><b>A re-sighting moves <c>last_seen</c> at most once every six hours (#8716, #9456).</b> <c>last_seen</c> is indexed, so bumping it on
     /// every conflict made every update non-HOT: each one wrote all four indexes, and a busy store's table and its
     /// <c>last_seen</c> index grew by hundreds of thousands of pages a day with autovacuum removing nothing. <c>last_seen</c> moves to <c>now()</c> when the conflict fills an object
     /// name or text sample the row lacked, because those are what the map resolver reads and the map's changed-keys read
     /// (<see cref="QueryTagMapStore.ChangedKeysSql"/>) finds a key by this column. Otherwise it moves when the stored value
-    /// is over an hour older than the backdated stamp, to <c>now()</c> less <see cref="ReSightingBackdate"/>, so an active
-    /// row moves once an hour and never inside the extend window.
+    /// is over six hours older than the backdated stamp, to <c>now()</c> less <see cref="ReSightingBackdate"/>, so an active
+    /// row moves once every six hours and never inside the extend window. The move was hourly until #9456: each one is a non-HOT
+    /// rewrite of the whole row, and nothing reads the stamp to a finer width than six hours (see <see cref="ReSightingRefreshWidth"/>).
     /// <para><b>A conflict writes only when one of those happens (#8979).</b> The count was the one thing every conflict
     /// changed, and a changed count alone made PostgreSQL write a new heap version of every re-sighted row (HOT, but still a
     /// full row copy, tens of millions a day on a busy store). A row is now written only when it fills an object name or text
-    /// sample or its hourly <c>last_seen</c> move is due. The same test sits twice: as a <c>NOT EXISTS</c> filter in the select
+    /// sample or its six-hourly <c>last_seen</c> move is due. The same test sits twice: as a <c>NOT EXISTS</c> filter in the select
     /// list, so an unchanged row never reaches the insert and takes no row lock, and in the conflict arm's <c>WHERE</c>, which
     /// decides when a concurrent writer got there first. <c>ORDER BY</c> the ordinal keeps the rows in the caller's identity order
     /// (<see cref="SortByIdentity"/>), which the filter's join could otherwise change.</para>
@@ -116,7 +135,7 @@ FROM (
           AND COALESCE(s.database_name, '') = COALESCE(u.database_name, '')
           AND NOT ((s.object_name IS NULL AND u.object_name IS NOT NULL)
                 OR (s.text_sample IS NULL AND u.has_text)
-                OR s.last_seen < now() - $11::interval - interval '1 hour'))
+                OR s.last_seen < now() - $11::interval - $12::interval))
     ORDER BY u.ord
 ) AS k
 ORDER BY k.ord
@@ -126,7 +145,7 @@ DO UPDATE SET
         WHEN (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
           OR (t.text_sample IS NULL AND EXCLUDED.text_sample IS NOT NULL)
         THEN EXCLUDED.last_seen
-        WHEN t.last_seen < EXCLUDED.last_seen - $11::interval - interval '1 hour'
+        WHEN t.last_seen < EXCLUDED.last_seen - $11::interval - $12::interval
         THEN EXCLUDED.last_seen - $11::interval
         ELSE t.last_seen END,
     seen_count = t.seen_count + EXCLUDED.seen_count,
@@ -134,7 +153,7 @@ DO UPDATE SET
     text_sample = COALESCE(t.text_sample, EXCLUDED.text_sample)
 WHERE (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
    OR (t.text_sample IS NULL AND EXCLUDED.text_sample IS NOT NULL)
-   OR t.last_seen < EXCLUDED.last_seen - $11::interval - interval '1 hour'
+   OR t.last_seen < EXCLUDED.last_seen - $11::interval - $12::interval
 """;
 
     /// <summary>The store's name for a key kind: the same text the table's CHECK allows.</summary>
@@ -257,6 +276,7 @@ WHERE (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
                 AddText(command, rows, start, length, c => c.TextSample);
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = counts });
                 command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = ReSightingBackdate });
+                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Interval, Value = ReSightingRefreshWidth });
                 await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
                 written += length;
                 if (progress is not null)

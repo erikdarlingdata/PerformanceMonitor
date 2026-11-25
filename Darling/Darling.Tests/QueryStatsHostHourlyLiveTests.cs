@@ -278,6 +278,128 @@ WHERE (SELECT count(DISTINCT q.query_text_digest) FILTER (WHERE {Honest}) FROM c
             ("id", ServerId), ("bucket", Hour9)));
     }
 
+    /// <summary>The second tick's clock: past the settle time of an hour that the first tick built at <see cref="TickNow"/>.</summary>
+    private static readonly DateTime LaterNow = TickNow.AddHours(1);
+
+    /// <summary>
+    /// An hour whose first build matched the ledger is final (#9457): a second tick past the settle time leaves its rollup rows (their
+    /// <c>xmin</c>) and its built row (<c>built_at</c> and <c>xmin</c>) untouched. The old settle rule deleted and rebuilt it.
+    /// </summary>
+    [Fact]
+    public async Task AMatchedBuild_IsNotRebuilt_PastTheSettleTime()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9164 host hourly live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await EnableServersAsync(connection, ct);
+        await new RawSeeder(connection, ct).SeedHourAsync(ServerId, Hour10);
+        await QueryStatsLedgerSeed.SeedAsync(connection, Hour10, Hour10.AddHours(1), ct);
+
+        Assert.Equal(0, (await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct)).Failed);
+        var before = await HourStateAsync(connection, Hour10, ct);
+        Assert.NotEqual(0L, before.RollupRows);
+        Assert.Equal(before.RawRows, before.LedgerRows);
+        Assert.Equal(TickNow, before.BuiltAt);
+
+        Assert.Equal(0, (await QueryStatsHostHourly.RunTickAsync(postgres, LaterNow, RetentionDays, NullLogger.Instance, ct)).Failed);
+
+        Assert.Equal(before, await HourStateAsync(connection, Hour10, ct));
+        await AssertRollupEqualsRawAsync(connection, ct);
+    }
+
+    /// <summary>An hour whose build counted a different number of raw rows than the ledger held (rows no ledger saw) is still built once more after the settle time.</summary>
+    [Fact]
+    public async Task AMismatchedBuild_IsRebuilt_PastTheSettleTime()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9164 host hourly live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await EnableServersAsync(connection, ct);
+        await new RawSeeder(connection, ct).SeedHourAsync(ServerId, Hour10);
+        await QueryStatsLedgerSeed.SeedAsync(connection, Hour10, Hour10.AddHours(1), ct);
+
+        // A raw row the ledger never counted, as an older writer leaves it: the hour's ledger is one below raw.
+        await ExecuteAsync(connection, "UPDATE collect.query_stats_hour_ledger SET n = n - 1 WHERE server_id = @id AND bucket = @bucket", ct,
+            ("id", ServerId), ("bucket", Hour10));
+
+        Assert.Equal(0, (await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct)).Failed);
+        var before = await HourStateAsync(connection, Hour10, ct);
+        Assert.NotEqual(before.RawRows, before.LedgerRows);
+        Assert.Equal(TickNow, before.BuiltAt);
+
+        Assert.Equal(0, (await QueryStatsHostHourly.RunTickAsync(postgres, LaterNow, RetentionDays, NullLogger.Instance, ct)).Failed);
+
+        var after = await HourStateAsync(connection, Hour10, ct);
+        Assert.Equal(LaterNow, after.BuiltAt);
+        Assert.NotEqual(before.RollupXmin, after.RollupXmin);
+        await AssertRollupEqualsRawAsync(connection, ct);
+    }
+
+    /// <summary>A row added after the first build moves the ledger, so the hour is rebuilt on a tick past the settle time and is complete again.</summary>
+    [Fact]
+    public async Task ARowAfterTheFirstBuild_StillRebuildsTheHour_PastTheSettleTime()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9164 host hourly live test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await EnableServersAsync(connection, ct);
+        var seeder = new RawSeeder(connection, ct);
+        await seeder.SeedHourAsync(ServerId, Hour10);
+        await QueryStatsLedgerSeed.SeedAsync(connection, Hour10, Hour10.AddHours(1), ct);
+
+        Assert.Equal(0, (await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct)).Failed);
+        var before = await HourStateAsync(connection, Hour10, ct);
+
+        await seeder.InsertAsync(ServerId, Hour10.AddMinutes(50), "DbA", "0xLATE", null, digest: 7);
+        await QueryStatsLedgerSeed.RecountAsync(connection, Hour10, Hour10.AddHours(1), ct);
+
+        Assert.Equal(0, (await QueryStatsHostHourly.RunTickAsync(postgres, LaterNow, RetentionDays, NullLogger.Instance, ct)).Failed);
+
+        var after = await HourStateAsync(connection, Hour10, ct);
+        Assert.Equal(LaterNow, after.BuiltAt);
+        Assert.NotEqual(before.RollupXmin, after.RollupXmin);
+        Assert.Equal(before.RawRows + 1, after.RawRows);
+        Assert.Equal(after.RawRows, after.LedgerRows);
+        Assert.True(await QueryStatsHostHourly.IsCompleteAsync(connection, null, ServerId, Hour10, Hour10.AddHours(1), 30, ct));
+        await AssertRollupEqualsRawAsync(connection, ct);
+    }
+
+    /// <summary>What one hour of the rollup holds for the test server: its row count and the <c>xmin</c> of those rows, and its built row's counts, <c>built_at</c> and <c>xmin</c>.</summary>
+    private readonly record struct HourState(long RollupRows, string RollupXmin, long RawRows, long LedgerRows, DateTime BuiltAt, string BuiltXmin);
+
+    private static async Task<HourState> HourStateAsync(NpgsqlConnection connection, DateTime hour, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            @"SELECT (SELECT count(*) FROM collect.query_stats_host_hourly AS h WHERE h.server_id = @id AND h.bucket = @bucket),
+                     COALESCE((SELECT string_agg(DISTINCT h.xmin::text, ',') FROM collect.query_stats_host_hourly AS h WHERE h.server_id = @id AND h.bucket = @bucket), ''),
+                     b.raw_rows, b.ledger_rows, b.built_at, b.xmin::text
+              FROM collect.query_stats_host_hourly_built AS b
+              WHERE b.server_id = @id AND b.bucket = @bucket", connection);
+        command.Parameters.AddWithValue("id", ServerId);
+        command.Parameters.AddWithValue("bucket", hour);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), "The hour has no built row.");
+        return new HourState(reader.GetInt64(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt64(3), DateTime.SpecifyKind(reader.GetDateTime(4), DateTimeKind.Unspecified), reader.GetString(5));
+    }
+
     /// <summary>
     /// A tick removes the rollup and built rows of the hours before the first whole hour inside raw's retention, one of them the hour
     /// that straddles the cutoff, and keeps the first whole hour inside it and the hour the same tick built.

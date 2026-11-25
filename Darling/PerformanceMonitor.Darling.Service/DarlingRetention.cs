@@ -971,7 +971,9 @@ public static class DarlingRetention
             /* collect.query_tag_sightings (#5977): a sighting is the record of a query key (or caller) seen in the fact tables
                that carry query statistics, so it is kept as long as the longest raw retention of those tables
                (widestFactRetentionDays, resolved above through the same resolver the fact purge uses) and no longer. last_seen is
-               NOT NULL and defaulted, so no row can slip past the horizon by never being stamped. Only this table is aged: the
+               NOT NULL and defaulted, so no row can slip past the horizon by never being stamped. A re-sighted key's stamp trails by at
+               most QueryTagSightingWriter.ReSightingRefreshWidth (6 hours, #9456) plus its backdate, against a cutoff at least a day
+               back, so a live key is never purged. Only this table is aged: the
                tags, assignments and rules are configuration and the map is rebuilt from them, so retention never touches
                them. The cutoff is bound like the external alert purge below (the store's sessions are pinned to UTC).
                Failure-isolated like every sibling. */

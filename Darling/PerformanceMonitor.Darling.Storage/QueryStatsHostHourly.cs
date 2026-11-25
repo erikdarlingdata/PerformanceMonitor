@@ -35,10 +35,11 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>The job.</b> An hour is closed once it has ended and <see cref="Grace"/> has passed. A closed hour is built in one transaction
 /// at repeatable-read isolation: its <c>query_stats_host_hourly_built</c> row records <c>raw_rows</c> (the interval-honest raw rows the
-/// build counted) and <c>ledger_rows</c> (what <c>query_stats_hour_ledger</c> held for the hour), the hour is cleared and filled again,
-/// and the next tick builds it once more (<see cref="SettleAfter"/>). After that an hour is built again only when the ledger no longer
-/// equals the <c>ledger_rows</c> of its last build, which is what a late row does, since the collector adds its batch to the ledger in
-/// the same transaction as the row. One transaction builds one hour for every server that is due in it, so the scan of the hour is shared
+/// build counted) and <c>ledger_rows</c> (what <c>query_stats_hour_ledger</c> held for the hour), the hour is cleared and filled again.
+/// An hour is built again only when the ledger no longer equals the <c>ledger_rows</c> of its last build, which is what a late row does,
+/// since the collector adds its batch to the ledger in the same transaction as the row. A build whose <c>raw_rows</c> equals its
+/// <c>ledger_rows</c> is final until the ledger moves (#9457). Only a build that counted a different number of raw rows than the ledger
+/// held, which is rows an older writer stored without counting them, is built once more (<see cref="SettleAfter"/>). One transaction builds one hour for every server that is due in it, so the scan of the hour is shared
 /// instead of repeated for each server. A tick builds the newest hours first, at most <see cref="MaxHoursPerTick"/> of them and not past
 /// <see cref="MaxTickDuration"/>, and the next tick takes the rest.</para>
 ///
@@ -63,7 +64,11 @@ public static class QueryStatsHostHourly
     /// <summary>An hour is closed once it has ended and this has passed: a batch that was collected inside the hour has committed by then.</summary>
     public static readonly TimeSpan Grace = TimeSpan.FromMinutes(10);
 
-    /// <summary>An hour built before its end plus <see cref="Grace"/> plus one tick (an hour) is built once more, whatever the ledger says.</summary>
+    /// <summary>
+    /// An hour built before its end plus <see cref="Grace"/> plus one tick (an hour) is built once more when that build's <c>raw_rows</c>
+    /// differs from its <c>ledger_rows</c>, whatever the ledger says now. A build whose two counts match is final until the ledger moves
+    /// (#9457): the ledger already makes a late row due, so the second build only rewrote identical rows.
+    /// </summary>
     public static readonly TimeSpan SettleAfter = Grace + TimeSpan.FromHours(1);
 
     /// <summary>The most hours one tick plans: a server-hour is cheap, so <see cref="MaxTickDuration"/> is the bound that usually holds.</summary>
@@ -220,7 +225,8 @@ SET built_at = EXCLUDED.built_at,
     /// The hours due now, newest first, each with the servers that are due in it. $1 now, $2 raw retention in days, $3 <see cref="Grace"/>,
     /// $4 <see cref="SettleAfter"/>, $5 the cap on hours. An hour runs from the first whole hour inside raw's retention (or the ledger's
     /// <c>counted_since</c>, when that is later) to the newest closed hour. A (server, hour) is due when it has no built row, when the ledger
-    /// is no longer what its last build held, or when it was built before <see cref="SettleAfter"/> had passed.
+    /// is no longer what its last build held, or when it was built before <see cref="SettleAfter"/> had passed and counted a different number of
+    /// raw rows than the ledger held (#9457: a build that matched its ledger is not built again for settling).
     /// </summary>
     public const string PlanSql = @"
 WITH span AS
@@ -238,7 +244,7 @@ LEFT JOIN collect.query_stats_host_hourly_built AS b
   ON b.server_id = s.server_id AND b.bucket = d.bucket
 WHERE s.is_enabled
   AND (b.server_id IS NULL
-       OR b.built_at < d.bucket + interval '1 hour' + $4::interval
+       OR (b.built_at < d.bucket + interval '1 hour' + $4::interval AND b.raw_rows <> b.ledger_rows)
        OR b.ledger_rows <> COALESCE((SELECT SUM(l.n) FROM collect.query_stats_hour_ledger AS l WHERE l.server_id = s.server_id AND l.bucket = d.bucket), 0))
 GROUP BY d.bucket
 ORDER BY d.bucket DESC
