@@ -114,14 +114,18 @@ public sealed class ProductBuildCommitMetadataTests
     }
 
     /// <summary>
-    /// The service assembly this test loads. A build with no source revision carries no <c>SourceCommit</c>, so there is nothing to
-    /// assert there and the fact skips. A build that has it must answer the same value from <see cref="DarlingCliCommands.CommitText"/>,
+    /// The service assembly this test loads. CI builds from an <c>actions/checkout</c> tree, which always has a source revision, so there
+    /// (<c>GITHUB_ACTIONS</c> is set) a build with no <c>SourceCommit</c> fails: that is the #9591 defect, the target in <c>Directory.Build.props</c>
+    /// stamping nothing. Elsewhere a build with no source revision carries no <c>SourceCommit</c>, so there is nothing to assert and the
+    /// fact skips. A build that has it must answer the same value from <see cref="DarlingCliCommands.CommitText"/>,
     /// as a full 40-character commit, because that is what the front door's <c>/version</c> and the start history serve.
     /// </summary>
     [Fact]
     public void TheServiceAssembly_WhenBuiltWithASourceRevision_AnswersItsCommitFromTheMetadata()
     {
         var stamped = ProductBuildText.MetadataCommit(typeof(DarlingCliCommands).Assembly);
+        Assert.False(Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true" && string.IsNullOrWhiteSpace(stamped),
+            "This CI build carries no SourceCommit metadata, though it was built from a git checkout: the AddSourceCommitAssemblyMetadata target stamped nothing.");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(stamped), "This build carries no SourceCommit metadata (no source revision when it was built), so there is no commit to read.");
 
         Assert.Matches(new Regex("^[0-9a-f]{40}$", RegexOptions.CultureInvariant), stamped!);
