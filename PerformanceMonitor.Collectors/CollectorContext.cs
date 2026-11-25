@@ -638,6 +638,12 @@ public sealed class CollectorContext
     public bool DeferTextFetch { get; init; }
 
     /// <summary>
+    /// #9533: the read watermark <c>QueryStatsCollector.BuildQuery</c> took for this run (null when it took none), left for the same
+    /// run's read to judge against the server's own clock and to refresh. Set by the definition, once per query it builds.
+    /// </summary>
+    internal ReadWatermark? ReadWatermarkTaken { get; set; }
+
+    /// <summary>
     /// #5158: when true, <c>procedure_stats</c> appends the three plan-identity columns (<c>plan_statement_count</c>,
     /// <c>plan_last_statement_compile</c>, <c>plan_generation_sum</c>) to its SELECT, so a host can recognize the
     /// plans it holds. With <see cref="CapturePlanXml"/> on and <see cref="DeferPlanXmlFetch"/> off they follow the
@@ -898,6 +904,22 @@ public sealed class CollectorContext
     /// never set it, so no supplemental runs there and the rows keep the state the read gave them.</para>
     /// </summary>
     public DatabaseProtectionErrorLogState.ErrorLogPlan? DatabaseProtectionErrorLogPlan { get; set; }
+
+    /// <summary>
+    /// #9529: the host's store of the estimated plans <c>query_snapshots</c> fetched recently, so a statement that
+    /// is still running is not asked for the same plan every minute. Only that definition reads it. Null (the
+    /// default, and what the on-demand live reads leave it at) means nothing is reused: every plan is fetched,
+    /// under the per-run cap, and the SQL binds no plan-key parameters.
+    /// </summary>
+    public QuerySnapshotPlanCache? SnapshotPlanCache { get; init; }
+
+    /// <summary>
+    /// #9529: the plans <c>query_snapshots</c> named as already held when it built this run's query, keyed by plan
+    /// key. Set by its <c>BuildQuery</c> from <see cref="SnapshotPlanCache"/> and read by its <c>ReadAsync</c>,
+    /// so a row the target was told to skip is filled from exactly the set the query named, whatever another run
+    /// does to the cache in between. Null when no cache was supplied.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? SnapshotKnownPlans { get; set; }
 
     /// <summary>
     /// Milliseconds spent waiting for <c>ExecuteReaderAsync</c> to return for the item just read (#2164),

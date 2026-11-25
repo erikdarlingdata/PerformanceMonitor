@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -49,6 +50,7 @@ public sealed class DarlingMcpIncidentActionTools
     /// <summary>The longest retention a purge may be given, in days (the same bound the store function holds).</summary>
     internal const int MaxPurgeRetentionDays = 3650;
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "test_connection"), Description(
         "Tests the connection to ONE registered server now: the service connects with the server's stored settings and password and reports the engine, version and what it can see. Read only on the monitored server; it changes nothing. It is queued as a command and runs on the service's next command poll (a few seconds); the answer gives the command_id, and get_command_result shows connected or the connection error. A second test of the same server within 15 seconds is refused. Takes only a server name: it cannot test an address or a password you give it. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> TestConnection(
@@ -58,6 +60,7 @@ public sealed class DarlingMcpIncidentActionTools
         QueueServerCommandAsync(postgres, "test_connection", "test_connect", server_name,
             "A connection test is queued. The service runs it on its next command poll.", cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "analyze_now"), Description(
         "Runs one analysis pass for ONE registered server now, instead of waiting for the analysis schedule. The service derives findings from data already collected and stores them; it does not query the monitored server. It is queued as a command and runs on the service's next command poll; the answer gives the command_id, and get_command_result shows the outcome. A second request for the same server within 15 seconds is refused. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> AnalyzeNow(
@@ -67,6 +70,7 @@ public sealed class DarlingMcpIncidentActionTools
         QueueServerCommandAsync(postgres, "analyze_now", "analyze_now", server_name,
             "An analysis pass is queued. The service runs it on its next command poll.", cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "purge_now"), Description(
         "Starts the retention purge across the WHOLE store now, for example when the store disk fills. With no retention_days it purges to each collector's configured retention; with retention_days it purges every collector to that many days. PURGED DATA CANNOT COME BACK: there is no undo, and a short retention_days deletes every row older than it. Two steps: the first call queues nothing and answers what would be deleted (each collector's retention and the oldest time kept) with a confirm value that works once and expires after 5 minutes; only a second call that passes it back queues the purge. Fleet-wide, not per server. It is queued as a command and the service starts it on its next command poll; the answer gives the command_id, and get_command_result shows that it started or that an earlier purge still holds the slot. Needs mcp.allowWrites or a named operator token; never offered to an investigation agent.")]
     public static Task<string> PurgeNow(
@@ -204,6 +208,8 @@ public sealed class DarlingMcpIncidentActionTools
     /// <summary>The groups shown to the caller, and the plan as text, which a confirm value is issued and redeemed against.</summary>
     internal sealed record PurgePreview(JsonArray Groups, string Plan);
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_command_result"), Description(
         "Reads one queued command's state and result: status (pending, in_progress, succeeded or failed), result_status and the result the service wrote. Use it after test_connection, analyze_now, purge_now, pause_collection or resume_collection with the command_id they answered. Command rows older than the store's retention are gone and answer not_found. Read only; the command's arguments are never returned.")]
     public static async Task<string> GetCommandResult(
@@ -272,6 +278,8 @@ public sealed class DarlingMcpIncidentActionTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_agent_changes"), Description(
         "Lists the changes an agent made to a monitored server (a Query Store plan force or unforce, a mute, a threshold override, an evicted plan, a killed session), newest first, with the called_id undo_plan_change takes, the result (done, failed or unknown), who undid it and when, and can_undo. Use it before undo_plan_change to find the change and after it to confirm the change reads undone. Read only.")]
     public static async Task<string> GetAgentChanges(

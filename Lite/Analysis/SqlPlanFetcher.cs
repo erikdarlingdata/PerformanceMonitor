@@ -1,4 +1,5 @@
 using System;
+using System.Data;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,7 +46,55 @@ public class SqlPlanFetcher : IPlanFetcher, IQueryStorePlanSource
             builder.ConnectionString, databaseName, planId, cancellationToken));
     }
 
-    public async Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken)
+    /// <summary>The plan of the whole batch a plan_handle names. <c>@plan_handle</c> is the '0x...' hex string the store keeps.</summary>
+    internal const string BatchPlanSql = @"
+SET NOCOUNT ON;
+SELECT query_plan
+FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1))";
+
+    /// <summary>
+    /// The plan of one statement of the batch (#9195): the same plan_handle, narrowed by the statement's byte offsets
+    /// into the batch text. <c>@statement_end_offset</c> of -1 runs to the end of the batch. The text DMV returns the
+    /// plan as <c>nvarchar(max)</c>, which the live plan read takes in chunks like the batch plan's <c>xml</c>.
+    /// </summary>
+    internal const string StatementPlanSql = @"
+SET NOCOUNT ON;
+SELECT query_plan
+FROM sys.dm_exec_text_query_plan(CONVERT(varbinary(64), @plan_handle, 1), @statement_start_offset, @statement_end_offset)";
+
+    /// <summary>
+    /// The command that fetches a live plan: the one statement's plan when <paramref name="statement"/> carries its
+    /// byte offsets (the end offset is passed as it is, -1 included), otherwise the whole batch's plan.
+    /// </summary>
+    internal static SqlCommand CreatePlanCommand(SqlConnection connection, string planHandle, (int Start, int End)? statement)
+    {
+        SqlCommand cmd;
+        if (statement is { } offsets)
+        {
+            cmd = new SqlCommand(StatementPlanSql, connection);
+            cmd.Parameters.AddWithValue("@plan_handle", planHandle);
+            cmd.Parameters.Add(new SqlParameter("@statement_start_offset", SqlDbType.Int) { Value = offsets.Start });
+            cmd.Parameters.Add(new SqlParameter("@statement_end_offset", SqlDbType.Int) { Value = offsets.End });
+        }
+        else
+        {
+            cmd = new SqlCommand(BatchPlanSql, connection);
+            cmd.Parameters.AddWithValue("@plan_handle", planHandle);
+        }
+
+        cmd.CommandTimeout = 15;
+        return cmd;
+    }
+
+    public Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken) =>
+        FetchAsync(serverId, planHandle, null, cancellationToken);
+
+    public Task<string?> FetchStatementPlanXmlAsync(
+        int serverId, string planHandle, int statementStartOffset, int statementEndOffset, CancellationToken cancellationToken) =>
+        FetchAsync(serverId, planHandle, (statementStartOffset, statementEndOffset), cancellationToken);
+
+    private async Task<string?> FetchAsync(
+        int serverId, string planHandle, (int Start, int End)? statement, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(planHandle)) return null;
 
@@ -70,18 +119,10 @@ public class SqlPlanFetcher : IPlanFetcher, IQueryStorePlanSource
             await using var connection = new SqlConnection(builder.ConnectionString);
             await connection.OpenAsync(cancellationToken);
 
-            await using var cmd = new SqlCommand(@"
-SET NOCOUNT ON;
-SELECT query_plan
-FROM sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1))", connection);
+            await using var cmd = CreatePlanCommand(connection, planHandle, statement);
 
-            cmd.CommandTimeout = 15;
-            cmd.Parameters.AddWithValue("@plan_handle", planHandle);
-
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
-            if (result == null || result is DBNull) return null;
-
-            return result.ToString();
+            // #9195: a batch plan can be ten megabytes, and ExecuteScalarAsync's CPU grows faster than the plan does.
+            return await LivePlanXmlRead.FirstValueAsync(cmd, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

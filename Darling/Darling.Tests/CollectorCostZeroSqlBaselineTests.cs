@@ -35,6 +35,7 @@ namespace Darling.Tests;
 /// <b>Booking day 4</b> is three full days later, where the percentile conjunct holds it on its own and the
 /// digest's baseline has to be the four measured days, not thirteen. <b>Real rise</b> is the control: a
 /// collector measured at 100 ms a run on every prior day that rises to 680, reported by both reads.</para></summary>
+[Collection("live-postgres")]
 public sealed class CollectorCostZeroSqlBaselineTests
 {
     private const string ServerName = "darling-costzerosql-9523-e2e";

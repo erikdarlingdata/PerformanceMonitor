@@ -18,6 +18,7 @@ using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -47,6 +48,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpPlanTools
 {
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "analyze_query_plan"), Description(
         "Analyzes query_hash's latest plan. No plan: not_collected on Lite or if engine lacks query_stats, else unavailable. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement, the optimizer's suggested CREATE INDEX for this statement: " +
@@ -88,6 +90,7 @@ public sealed class DarlingMcpPlanTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "analyze_procedure_plan"), Description(
         "Analyzes a procedure's stored plan by sql_handle (Darling) or plan_handle (Lite). No plan: not_collected on Lite or if engine lacks procedure_stats, else unavailable. " +
         "Per statement: warnings; missing_indexes labelled impact_basis, with create_statement, the optimizer's suggested CREATE INDEX for this statement: " +
@@ -128,6 +131,7 @@ public sealed class DarlingMcpPlanTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "analyze_query_store_plan"), Description(
         "Analyzes a stored Query Store execution plan by database name and query ID. " +
         "Use after get_query_store_top to understand why a query is expensive. " +
@@ -182,6 +186,8 @@ public sealed class DarlingMcpPlanTools
         return reason is null ? null : McpHelpers.Status("not_collected", reason);
     }
 
+    [FrontDoorClass(FrontDoorToolClass.AnyOneStore)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "analyze_plan_xml"), Description(
         "Analyzes raw showplan XML you provide (not a stored plan). Per statement: warnings; missing_indexes " +
         "labelled impact_basis, with create_statement, the optimizer's suggested CREATE INDEX for this statement: " +
@@ -219,6 +225,7 @@ public sealed class DarlingMcpPlanTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_plan_xml"), Description(
         "Returns the raw stored showplan XML for a query identified by query_hash. " +
         "Use when you need to inspect plan details not captured in the structured analysis. " +
@@ -249,6 +256,7 @@ public sealed class DarlingMcpPlanTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_store_plan_xml"), Description(
         "Returns the raw stored Query Store showplan XML for database_name + query_id (optional plan_id). Use after get_query_store_top. Truncated at 500KB.")]
     public static async Task<string> GetQueryStorePlanXml(
@@ -281,6 +289,7 @@ public sealed class DarlingMcpPlanTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_procedure_plan_xml"), Description(
         "Returns the raw stored showplan XML for a procedure identified by sql_handle. Use after get_top_procedures_by_cpu. Truncated at 500KB.")]
     public static async Task<string> GetProcedurePlanXml(
@@ -330,6 +339,7 @@ public sealed class DarlingMcpPlanTools
         DateTime.TryParseExact(text, CollectionTimeFormats, CultureInfo.InvariantCulture,
             DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out utc);
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_active_query_plan_xml"), Description(
         "Returns the raw showplan XML captured for one get_active_queries row (collection_time + session_id); live=true gives the live plan. Truncated at 500KB.")]
     public static async Task<string> GetActiveQueryPlanXml(
@@ -405,6 +415,7 @@ public sealed class DarlingMcpPlanTools
 
     private static readonly JsonSerializerOptions ReproJson = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_repro_script"), Description(
         "Builds a paste-ready T-SQL repro script from a stored query's text and plan. kind: query_hash, query_store or active_snapshot, with that kind's key. Store-only.")]
     public static async Task<string> GetQueryReproScript(
@@ -523,6 +534,7 @@ public sealed class DarlingMcpPlanTools
     private const string BlockedSide = "blocked";
     private const string BlockingSide = "blocking";
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_blocking_plan_xml"), Description(
         "Returns the raw showplan XML stored with one get_blocking row (event_time + both spids); side=blocking gives the blocker's plan. Truncated at 500KB.")]
     public static async Task<string> GetBlockingPlanXml(
@@ -570,6 +582,7 @@ public sealed class DarlingMcpPlanTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_deadlock_plan_xml"), Description(
         "Returns the raw showplan XML stored for the victim of one get_deadlocks row (collection_time + deadlock_time). Truncated at 500KB.")]
     public static async Task<string> GetDeadlockPlanXml(

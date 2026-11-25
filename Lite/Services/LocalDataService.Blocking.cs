@@ -76,6 +76,56 @@ GROUP BY collection_time";
             reader.IsDBNull(2) ? 0 : reader.GetInt32(2));
     }
 
+    /// <summary>
+    /// #9518: whether one blocked-process read's empty answer should say the server's <c>blocked process threshold (s)</c> is 0.
+    /// True only when, inside the window (<paramref name="startUtc"/>, <paramref name="endUtc"/>], the newest SUCCESS run of the
+    /// blocked process report collector left a note <see cref="PerformanceMonitor.Common.BlockedProcessThresholdOffNote.TryParse"/>
+    /// accepts AND the DMV blocking snapshot collector had at least one SUCCESS run. Both halves are needed: the hint says the
+    /// reports are off and that the snapshots still answer, and the second is only true of a window the snapshot collector
+    /// covered. The newest run decides, so a threshold set during the window reads as on. Run only on the empty path.
+    /// Darling twin: <c>DarlingBlockingReader.ReportsOffWithSnapshotCoverAsync</c>.
+    /// </summary>
+    public async Task<bool> ReportsOffWithSnapshotCoverAsync(int serverId, DateTime startUtc, DateTime endUtc)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        command.CommandText = @"
+SELECT
+    (
+        SELECT r.error_message
+        FROM v_collection_log AS r
+        WHERE r.server_id = $1
+        AND   r.collector_name = $2
+        AND   r.collection_time > $4
+        AND   r.collection_time <= $5
+        AND   r.status = 'SUCCESS'
+        ORDER BY r.collection_time DESC
+        LIMIT 1
+    ) AS newest_report_run_note,
+    EXISTS
+    (
+        SELECT 1
+        FROM v_collection_log AS s
+        WHERE s.server_id = $1
+        AND   s.collector_name = $3
+        AND   s.collection_time > $4
+        AND   s.collection_time <= $5
+        AND   s.status = 'SUCCESS'
+    ) AS snapshot_ran";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = PerformanceMonitor.Collectors.BlockedProcessReportCollector.Instance.Name });
+        command.Parameters.Add(new DuckDBParameter { Value = PerformanceMonitor.Collectors.DmvBlockingSnapshotCollector.Instance.Name });
+        command.Parameters.Add(new DuckDBParameter { Value = startUtc });
+        command.Parameters.Add(new DuckDBParameter { Value = endUtc });
+        using var reader = await command.ExecuteReaderAsync();
+        return await reader.ReadAsync()
+            && !reader.IsDBNull(0)
+            && PerformanceMonitor.Common.BlockedProcessThresholdOffNote.TryParse(reader.GetString(0))
+            && reader.GetBoolean(1);
+    }
+
     /// <summary>The Deadlocks grid's row cap — the default <paramref name="limit"/> of
     /// <see cref="GetRecentDeadlocksAsync"/>, so every grid caller reads exactly what it always read.</summary>
     public const int DeadlockGridCap = 50;

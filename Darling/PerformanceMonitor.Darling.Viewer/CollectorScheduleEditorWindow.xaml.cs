@@ -25,7 +25,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// single server's override, overlays the store's sparse <c>config.config_collector_schedules</c> rows on the
 /// shared <see cref="CollectorSchedulePresets.BuildDefaultSchedule"/> baseline, and writes the result back through
 /// <see cref="ViewerDataService.SaveCollectorScheduleAsync"/>.
-/// Presets change frequencies only (enabled + retention untouched), exactly as Lite. A read-only seat shows a
+/// Aggressive, Balanced and Low-Impact change frequencies, and turn the collectors that are on by default back on only when every collector is off. Off turns
+/// every collector off and keeps frequencies, run times and retention (#9569), exactly as Lite. A read-only seat shows a
 /// banner and disables the writes.
 ///
 /// <para>The Run at column (#4938) is read from, and written to, <c>config.config_collector_run_times</c>, a table of its
@@ -435,8 +436,11 @@ public partial class CollectorScheduleEditorWindow : Window
             return;
         }
 
+        var message = presetName == CollectorSchedulePresets.Off
+            ? "Apply the \"Off\" preset?\n\nThis turns off every collector in this scope. Frequencies, run times and retention are kept, and a named preset then turns the collectors that are on by default back on."
+            : $"Apply the \"{presetName}\" preset?\n\nThis changes all collection frequencies. Retention is not affected. Enabled/disabled state is not affected either, unless every collector is off, and then this turns the collectors that are on by default back on.";
         var result = MessageBox.Show(
-            $"Apply the \"{presetName}\" preset?\n\nThis changes all collection frequencies. Enabled/disabled state and retention are not affected.",
+            message,
             "Apply Collection Preset", MessageBoxButton.YesNo, MessageBoxImage.Question);
 
         if (result != MessageBoxResult.Yes)

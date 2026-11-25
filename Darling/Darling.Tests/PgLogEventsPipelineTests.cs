@@ -2374,8 +2374,7 @@ public sealed class PgLogEventsPipelineTests
         Assert.Contains("log_lock_waits", description, StringComparison.Ordinal);
         Assert.Contains("truncated", method.GetParameters().Single(p => p.Name == "limit").GetCustomAttribute<System.ComponentModel.DescriptionAttribute>()!.Description, StringComparison.Ordinal);
 
-        var host = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
-        Assert.Contains(".WithGeminiCompatibleTools<DarlingMcpPgLogEventTools>()", host, StringComparison.Ordinal);
+        Assert.Contains(typeof(DarlingMcpPgLogEventTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
 
         var dispatch = DarlingWebEndpoints.BuildReadDispatch();
         Assert.True(dispatch.ContainsKey("get_pg_log_events"));

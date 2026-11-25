@@ -34,9 +34,12 @@ public partial class DrillDownCollector
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        // Look up plan_handle from DuckDB for this query_hash in the finding's database (#8317). Byte-identical
-        // to Darling's PlanHandleLookupSql.
+        // Look up plan_handle and the statement's offsets from DuckDB for this query_hash in the finding's database
+        // (#8317). The offsets come from the same newest row as the handle, so the pair names one statement of one
+        // plan (#9195). Byte-identical to Darling's PlanHandleLookupSql.
         string? planHandle = null;
+        int? statementStartOffset = null;
+        int? statementEndOffset = null;
         try
         {
             using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
@@ -45,7 +48,7 @@ public partial class DrillDownCollector
 
             using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
-SELECT plan_handle
+SELECT plan_handle, statement_start_offset, statement_end_offset
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
@@ -60,7 +63,15 @@ LIMIT 1";
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
+            {
                 planHandle = reader.GetString(0);
+                /* A row collected before the offsets were stored has neither: the whole batch's plan is fetched. */
+                if (!reader.IsDBNull(1) && !reader.IsDBNull(2))
+                {
+                    statementStartOffset = reader.GetInt32(1);
+                    statementEndOffset = reader.GetInt32(2);
+                }
+            }
         }
         catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
@@ -71,8 +82,11 @@ LIMIT 1";
 
         if (string.IsNullOrEmpty(planHandle)) return;
 
-        // Fetch plan XML live from SQL Server
-        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
+        // Fetch plan XML live from SQL Server: the bad actor's own statement when its offsets are known, because a batch
+        // plan can carry many statements and megabytes of XML (#9195).
+        var planXml = statementStartOffset is { } start && statementEndOffset is { } end
+            ? await _planFetcher.FetchStatementPlanXmlAsync(context.ServerId, planHandle, start, end, context.CancellationToken)
+            : await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
         if (string.IsNullOrEmpty(planXml)) return;
         // #4348: the plan is judged BEFORE it is analyzed. A warning quotes up to 300 characters of a predicate or
         // a statement from the plan, so a statement the filter withholds must reach the analyzer already withheld,

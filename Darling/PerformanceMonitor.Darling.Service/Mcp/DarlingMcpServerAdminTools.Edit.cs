@@ -153,6 +153,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
     /* ─────────────────────────────── the tool ─────────────────────────────── */
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "edit_server"), Description(
         "Edits one monitored server's settings in place, no confirm step: name, address, database, authentication, " +
         "TLS posture or monthly cost. The server keeps its id, tags and history. A change to how it is reached is " +

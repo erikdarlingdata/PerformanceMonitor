@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
@@ -171,15 +172,11 @@ public sealed class BlockedProcessReportCollector : CollectorDefinitionBase<Bloc
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        /* The ring-buffer source DMV is the only engine difference (database-scoped on Azure SQL DB,
+        /* The sessions and targets DMVs are the only engine difference (database-scoped on Azure SQL DB,
            server-scoped elsewhere); event extraction and the wait_resource -> object decode are shared. */
-        string ringBufferSource = context.Target.IsAzureSqlDb
-            ? @"sys.dm_xe_database_session_targets AS xet
-JOIN sys.dm_xe_database_sessions AS xes
-  ON xes.address = xet.event_session_address"
-            : @"sys.dm_xe_session_targets AS xet
-JOIN sys.dm_xe_sessions AS xes
-  ON xes.address = xet.event_session_address";
+        bool databaseScoped = context.Target.IsAzureSqlDb;
+        string resolveAddress = RingBufferXml.ResolveAddressSql(databaseScoped, XeSessionName);
+        string ringBufferFrom = RingBufferXml.TargetFromSql(databaseScoped, "ring_buffer");
 
         /* Resolve contentious_object from wait_resource (KEY hobt -> sys.partitions, OBJECT objid,
            PAGE/RID -> sys.dm_db_page_info), mirroring sp_HumanEventsBlockViewer (DarlingData #812) so
@@ -207,6 +204,18 @@ JOIN sys.dm_xe_sessions AS xes
         var planApply = context.CapturePlanXml
             ? BuildPlanResolutionApply("blocked-process", "bqp") + BuildPlanResolutionApply("blocking-process", "kqp")
             : "";
+        /* #9518: the same two columns for the empty payload a threshold of 0 returns, so its shape matches the payload's. */
+        var planOffSelect = context.CapturePlanXml
+            ? @",
+        x.blocked_query_plan_xml,
+        x.blocking_query_plan_xml"
+            : "";
+        var planOffValues = context.CapturePlanXml
+            ? @",
+            CONVERT(nvarchar(max), NULL),
+            CONVERT(nvarchar(max), NULL)"
+            : "";
+        var planOffColumns = context.CapturePlanXml ? ", blocked_query_plan_xml, blocking_query_plan_xml" : "";
 
         var sessionPositionSql = context.Target.IsAzureSqlDb
             ? RingBufferXml.SessionPositionDatabaseSql
@@ -273,15 +282,65 @@ DECLARE
     error_text nvarchar(4000) NULL
 );
 
-/* #4200: read BEFORE the cast -- no XML materialized, so this costs one integer whether or not
-   anything shreds below. Compared against @last_execution_count (the prior cycle's own read of
+/* #9518: the server setting, read BEFORE the session. With 'blocked process threshold (s)' at 0 in use SQL Server never
+   raises blocked_process_report, so the session's ring buffer can hold no event and every read below it answers a
+   question the engine cannot: the batch returns its three result sets empty and reads nothing else. The catalog read
+   runs on every run, so a threshold set later is seen by the next run with no restart. NULL (no such row) is unknown
+   and never reads as off. Not read on Azure SQL Database, where the setting is not sp_configure's to set and the
+   hosts' threshold bootstrap does not run either. */
+DECLARE
+    @blocked_process_threshold integer;
+
+IF @azure = 0
+BEGIN
+    SELECT
+        @blocked_process_threshold = CONVERT(integer, c.value_in_use)
+    FROM sys.configurations AS c
+    WHERE c.name = N'{PerformanceMonitor.Common.BlockedProcessThresholdOffNote.SettingName}'
+    OPTION(RECOMPILE);
+END;
+
+IF @blocked_process_threshold = 0
+BEGIN
+    /* The payload's own shape with no row, so the reader and the host see the result sets they always see. The derived
+       table's column list names the columns, so no time column is assigned here: this result set reads no clock. */
+    SELECT
+        x.event_time,
+        x.blocked_process_report_xml,
+        x.object_id,
+        x.database_id,
+        x.contentious_object{planOffSelect}
+    FROM
+    (
+        VALUES
+        (
+            CONVERT(datetime2, NULL),
+            CONVERT(nvarchar(max), NULL),
+            CONVERT(integer, NULL),
+            CONVERT(integer, NULL),
+            CONVERT(nvarchar(4000), NULL){planOffValues}
+        )
+    ) AS x (event_time, blocked_process_report_xml, object_id, database_id, contentious_object{planOffColumns})
+    WHERE 1 = 0
+    OPTION(RECOMPILE);
+
+    /* The gate row and the probe-failure set are one statement each for both paths, so their shapes cannot drift:
+       every variable the gate row reads is still NULL here, and its last column carries the threshold. */
+    GOTO gate_result;
+END;
+
+/* #9517: the session is found once and every target read below uses its address. The targets DMV builds every running
+   session's target rows unless the filter is an equality on event_session_address, so a name filter on a joined sessions DMV
+   pays for all of them. A session that is not running leaves @xe_address NULL, which matches no target row. */
+{resolveAddress}
+
+/* #4200: read BEFORE the cast, by the session's address: only this session's target row is built and no XML is cast, so the
+   read returns one integer whether or not anything shreds below. Compared against @last_execution_count (the prior cycle's own read of
    this same counter, passed in as a parameter): an exact match means nothing has arrived since
    then, so the cast+shred is skipped. See XeShredGate for why the match test is this narrow. */
 SELECT
     @execution_count = xet.execution_count
-FROM {ringBufferSource}
-WHERE xes.name = N'{XeSessionName}'
-AND   xet.target_name = N'ring_buffer'
+{ringBufferFrom}
 OPTION(RECOMPILE);
 
 /* #6868: a count of 0 shreds like NULL. A Managed Instance never moves it off 0, so 0 = 0 would skip forever. */
@@ -305,10 +364,8 @@ BEGIN
 
     SELECT /* PerformanceMonitorLite */
         @ring_text = CONVERT(nvarchar(max), xet.target_data),
-        @ring_session = xes.name
-    FROM {ringBufferSource}
-    WHERE xes.name = N'{XeSessionName}'
-    AND   xet.target_name = N'ring_buffer'
+        @ring_session = @xe_name
+    {ringBufferFrom}
     OPTION(RECOMPILE);
 
     {RingBufferXml.ParseSql}
@@ -573,7 +630,7 @@ OR CONVERT(integer, SERVERPROPERTY('EngineEdition')) = 8
 BEGIN
     /* #1865: deliberately NO server-level permission screen here, though sys.dm_db_page_info is
        gated by one (VIEW SERVER STATE; VIEW SERVER PERFORMANCE STATE on 2022+). So is the
-       sys.dm_xe_session_targets read this batch opens with -- verified on SQL 2022, a login without
+       sys.dm_xe_sessions read this batch opens with -- verified on SQL 2022, a login without
        it fails that first statement with 297 and never reaches this line -- so a screen for it could
        only ever answer yes, and would be machinery that never fires.
        What DOES vary per database, and is what actually fails here, is metadata access to the
@@ -780,14 +837,19 @@ OPTION(RECOMPILE);
 
 /* #4200: the gate's own result, between the payload and the probe-failure set. Always one row,
    whichever branch ran above -- ReadAsync consumes this one itself (NextResultAsync), so the
-   reader is correctly positioned on the probe-failure set below by the time the host reads it. */
+   reader is correctly positioned on the probe-failure set below by the time the host reads it.
+   #9518: a threshold of 0 jumps here from the top of the batch, past every read of the session. */
+gate_result:
+
 SELECT
     execution_count = @execution_count,
     gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
     /* #6441: whether SQL Server truncated the ring buffer's XML (all NULL when the gate skipped the read). */
     {RingBufferXml.TruncationColumnsSql},
     /* #8146: the target header, the session row and the limit, for ReadAsync's loss accounting. */
-    {RingBufferXml.PositionColumnsSql};
+    {RingBufferXml.PositionColumnsSql},
+    /* #9518: the threshold in use (NULL where it is not read or has no row). 0 means nothing above ran. */
+    blocked_process_threshold = @blocked_process_threshold;
 
 /* Trailing result set = the payload path's probe-failure contract (#1851/#1865,
    EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, and empty on both of
@@ -943,6 +1005,16 @@ OUTER APPLY
     /// <summary>1 when this cycle's gate (#4200) skipped the cast+shred, else 0.</summary>
     public const string ShredGatedMeasurement = "shred_gated";
 
+    /* #9518: the measurement label for a run that found 'blocked process threshold (s)' at 0 and read nothing else. A literal on
+       purpose (the measurement-label scan reads a const string declared in this file); it must equal
+       PerformanceMonitor.Common.BlockedProcessThresholdOffNote.Label, which the readers parse, and the threshold-off test runs a
+       note rendered from this label through BlockedProcessThresholdOffNote.TryParse so a drift fails. */
+    public const string ThresholdOffMeasurement = "blocked_process_threshold_off";
+
+    /* #9518: where the gate row carries the threshold in use: after execution_count, gated, the three truncation columns and
+       the six position columns. */
+    private const int ThresholdOrdinal = 11;
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
@@ -1015,20 +1087,33 @@ OUTER APPLY
            never reaches here at all. */
         if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
         {
-            if (!reader.IsDBNull(0))
+            /* #9518: the batch found the threshold at 0 and read nothing of the session, so the row's other columns describe
+               no read: no counter to carry forward, no gate verdict, no ring buffer to account for. A COUNT, not a verdict
+               (the readers derive what to say from the newest run), on a run that stays a SUCCESS: a threshold somebody
+               left at 0 is not a fault. A row without the column (a test fake) or with a NULL is unknown and says nothing. */
+            if (reader.FieldCount > ThresholdOrdinal
+                && !reader.IsDBNull(ThresholdOrdinal)
+                && Convert.ToInt32(reader.GetValue(ThresholdOrdinal), CultureInfo.InvariantCulture) == 0)
             {
-                context.StagedItemState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
-                    XeShredGate.ToStateValue(reader.GetInt64(0));
+                context.Measure(ThresholdOffMeasurement, 1);
             }
+            else
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    context.StagedItemState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
+                        XeShredGate.ToStateValue(reader.GetInt64(0));
+                }
 
-            context.Measure(ShredGatedMeasurement, !reader.IsDBNull(1) && reader.GetBoolean(1) ? 1 : 0);
+                context.Measure(ShredGatedMeasurement, !reader.IsDBNull(1) && reader.GetBoolean(1) ? 1 : 0);
 
-            /* #6441: SQL Server cuts a ring buffer's XML at about 4 MB and keeps the OLDEST events. */
-            RingBufferXml.MeasureTruncation(reader, 2, context);
+                /* #6441: SQL Server cuts a ring buffer's XML at about 4 MB and keeps the OLDEST events. */
+                RingBufferXml.MeasureTruncation(reader, 2, context);
 
-            /* #8146: what the ring buffer evicted and the session dropped since the last run, gated run included. */
-            var truncated = reader.FieldCount > 2 && !reader.IsDBNull(2) && reader.GetBoolean(2);
-            RingBufferLossAccounting.Apply(context, RingBufferObservation.Read(reader, 5), truncated);
+                /* #8146: what the ring buffer evicted and the session dropped since the last run, gated run included. */
+                var truncated = reader.FieldCount > 2 && !reader.IsDBNull(2) && reader.GetBoolean(2);
+                RingBufferLossAccounting.Apply(context, RingBufferObservation.Read(reader, 5), truncated);
+            }
         }
 
         /* Measure() ACCUMULATES a repeated label, which is what makes this correct on the per-database

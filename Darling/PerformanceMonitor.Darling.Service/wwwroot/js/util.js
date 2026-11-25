@@ -8,8 +8,8 @@
 
 /*
  * Shared leaf utilities for Darling Web (#1562): DOM builders, UTC->local time, value formatters, and the API
- * fetch helper. This module imports only database-filter-reads.js (pure data) and plain-text.js (pure text rules), neither of which imports
- * anything (so it is
+ * fetch helper. This module imports only database-filter-reads.js (pure data) and plain-text.js (pure text rules), and neither imports a
+ * page module: plain-text.js imports only the tool names module the service serves beside it (so it is
  * still the base of the module DAG: app/panels/charts/pages all import it, so there is no import cycle). Two rules are
  * enforced HERE so every caller inherits them:
  *   R4 (XSS): the el() builder assigns untrusted text ONLY through textContent / text nodes; it throws if a

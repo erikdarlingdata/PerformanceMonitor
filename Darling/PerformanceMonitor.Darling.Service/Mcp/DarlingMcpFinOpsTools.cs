@@ -132,6 +132,7 @@ public sealed partial class DarlingMcpFinOpsTools
             start, now, label, emptyAnswer: emptyAnswer, cancellationToken: ct);
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_finops"), Description(
         "FinOps views for one server, picked by view. Windowed over hours_back, UTC; no as_of." + SetAViewLines + SetBViewLines + " An unknown view is refused with the valid list. <<GUIDE>>" + SetAGuides + SetBGuides)]
     public static async Task<string> GetFinOps(

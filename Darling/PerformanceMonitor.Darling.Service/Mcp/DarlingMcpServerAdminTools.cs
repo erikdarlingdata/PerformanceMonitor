@@ -121,6 +121,7 @@ public sealed partial class DarlingMcpServerAdminTools
     private static Task<ConnectionProbeResult> DefaultProbeAsync(MonitoredServer server, CancellationToken cancellationToken) =>
         DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "add_servers"), Description(
         "Adds servers (a JSON ARRAY) to the monitored fleet: each entry is validated, probed live, and written to " +
         "the shared central store immediately if new and reachable, no confirm step; the running service picks it " +
@@ -411,6 +412,7 @@ public sealed partial class DarlingMcpServerAdminTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "remove_server"), Description(
         "Deletes a monitored server's definition from the shared central store (config_monitored_servers) " +
         "immediately, no confirm step; the service drops it from collection within one sweep. Already-collected " +

@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -368,6 +369,62 @@ internal static class DarlingBlockingReader
         ORDER BY event_time DESC
         LIMIT $4
         """;
+
+    /// <summary>
+    /// #9518: what the run log says about the two blocking collectors over one read's window ($2, $3]: the note of the report
+    /// collector's newest successful run, and whether the DMV blocking snapshot collector had a successful run. The newest run
+    /// decides, as it does for every count a collector leaves (<see cref="BlockedProcessThresholdOffNote"/>): a threshold set
+    /// during the window is on by its end, and the read says so by itself. Two index walks on the run log, made only for an
+    /// answer that found no event.
+    /// <para>$1 server_id, $2 window start, $3 window end, $4 the report collector's name, $5 the snapshot collector's name.</para>
+    /// </summary>
+    public const string ReportsOffInWindowSql = """
+        SELECT
+            (
+                SELECT r.error_message
+                FROM v_collection_log AS r
+                WHERE r.server_id = $1
+                AND   r.collector_name = $4
+                AND   r.collection_time > $2
+                AND   r.collection_time <= $3
+                AND   r.status = 'SUCCESS'
+                ORDER BY r.collection_time DESC
+                LIMIT 1
+            ) AS newest_report_run_note,
+            EXISTS
+            (
+                SELECT 1
+                FROM v_collection_log AS s
+                WHERE s.server_id = $1
+                AND   s.collector_name = $5
+                AND   s.collection_time > $2
+                AND   s.collection_time <= $3
+                AND   s.status = 'SUCCESS'
+            ) AS snapshot_ran
+        """;
+
+    /// <summary>
+    /// Runs <see cref="ReportsOffInWindowSql"/>: true when the report collector's newest successful run in the window found
+    /// <c>blocked process threshold (s)</c> at 0 (so it read no session) AND the DMV blocking snapshot collector ran in the
+    /// window. Both halves are needed for the sentence an empty answer adds: it says reports are off and that the snapshots
+    /// still answer, and the second is only true of a window the snapshot collector covered. False leaves the answer as it is.
+    /// </summary>
+    public static async Task<bool> ReportsOffWithSnapshotCoverAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
+    {
+        await using var command = postgres.CreateCommand(ReportsOffInWindowSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, endUtc);
+        DarlingMcpReadParameters.AddText(command, BlockedProcessReportCollector.Instance.Name);
+        DarlingMcpReadParameters.AddText(command, DmvBlockingSnapshotCollector.Instance.Name);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            && !reader.IsDBNull(0)
+            && BlockedProcessThresholdOffNote.TryParse(reader.GetString(0))
+            && reader.GetBoolean(1);
+    }
 
     /// <summary>
     /// The recent blocked-process reports over the window — the XE rows plus the DMV-fallback rows for any

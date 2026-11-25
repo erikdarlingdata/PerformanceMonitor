@@ -68,9 +68,9 @@ internal static class DarlingMcpWritePolicy
     /// Every registered tool that writes to the monitoring store's CONFIGURATION (the server registry, alert
     /// settings and routes, mute rules, custom alert rules, Custom Views, the analysis mute registry).
     /// <c>analyze_server</c> persists the findings it derives, but it changes no configuration and is a read
-    /// here. <c>DarlingMcpWritePolicyTests</c> lists every registered tool and fails unless each one is either
-    /// in this set or on that test's explicit read-only list, so a new tool fails the build's tests until someone
-    /// classifies it, instead of shipping unswitched.
+    /// here. Every tool method declares its access with <see cref="DarlingToolAccessAttribute"/>, and
+    /// <c>DarlingToolAccessTests</c> fails unless the tools marked <see cref="ToolAccess.Write"/> are exactly this
+    /// set, so a new tool fails the build's tests until someone classifies it, instead of shipping unswitched.
     /// </summary>
     internal static readonly IReadOnlySet<string> WriteTools = new HashSet<string>(StringComparer.Ordinal)
     {

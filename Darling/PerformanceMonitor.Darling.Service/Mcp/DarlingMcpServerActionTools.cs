@@ -19,6 +19,7 @@ using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -42,6 +43,7 @@ public sealed class DarlingMcpServerActionTools
     /// <summary>The journal actor of an MCP switch change: <c>mcp:</c> plus the caller the request filter worked out. Never <c>agent:</c> and never <c>person:</c>.</summary>
     internal static string ActorOf() => "mcp:" + ReadCaller.StoreIdentity();
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_server_action"), Description(
         "Turns ONE server's switch for ONE agent server action on or off: force_plan, evict_plan, recompile_module, create_plan_guide and drop_plan_guide (SQL Server only) and kill_session (SQL Server and PostgreSQL). All switches start off; an agent can act on a server only while its switch for that action is on (and the other conditions hold: Level 3, the service's agent actions on, a remediation login given as an env: or file: reference). Served only with mcp.allowServerAdmin, and never offered to an agent that investigates an alert. The change is journaled with who made it, from MCP, and the state before and after. Reversed by calling it again with the other value. The answer gives the state before and after and the call that puts it back.")]
     public static Task<string> SetServerAction(
@@ -111,6 +113,8 @@ public sealed class DarlingMcpServerActionTools
         }
     }
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_server_actions"), Description(
         "Lists every monitored server's switch for each agent server action (force_plan, evict_plan, kill_session, recompile_module, create_plan_guide, drop_plan_guide): on or off (a server with no row is off), who last set it and when, and whether the server's engine can run the action at all (valid false: the switch cannot be turned on). A read. set_server_action changes a switch where mcp.allowServerAdmin is on.")]
     public static async Task<string> GetServerActions(NpgsqlDataSource postgres, CancellationToken cancellationToken = default)

@@ -185,6 +185,10 @@ public partial class RemoteCollectorService
     private readonly DeltaCalculator _deltaCalculator;
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
+    /* #9529: the estimated plans query_snapshots fetched recently, kept between runs so a statement that is still
+       running is not asked for the same plan every minute. One per service, like the delta calculator. */
+    private readonly QuerySnapshotPlanCache _snapshotPlanCache = new();
+
     /// <summary>
     /// Limits how many SQL connections are <em>opened</em> at once, smoothing the login storm when many
     /// servers are polled together. A slot is held for one connect attempt - from the top of the attempt,

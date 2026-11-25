@@ -465,6 +465,13 @@ OUTER APPLY
     public static bool PlanPhaseApplies(CollectorContext context) =>
         InlinePlanCapture(context) || DeferredPlanIdentity(context);
 
+    /// <summary>
+    /// True when this run's plan phase renders plan XML, and false when it reads only the plan identities. Rendering a
+    /// plan waits on the schema locks of the objects the plan references, so a host bounds the phase's commands when
+    /// this is true (#9535). The identity read is aggregates over <c>sys.dm_exec_query_stats</c> and takes no such lock.
+    /// </summary>
+    public static bool PlanPhaseRendersPlans(CollectorContext context) => InlinePlanCapture(context);
+
     /// <summary>The ordinal of the first identity column in the plan phase result: after <c>ord</c>, and after the plan columns when present.</summary>
     private static int IdentityOrdinal(CollectorContext context) => InlinePlanCapture(context) ? 3 : 1;
 

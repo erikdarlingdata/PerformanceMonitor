@@ -623,11 +623,21 @@ public class CollectorMeasurementSeamTests
                    DefaultTraceEventsCollector.cs; the expectation names the label the readers parse (DefaultTraceOffNote.Label), so the
                    collector's const drifting from it fails here. */
                 PerformanceMonitor.Common.DefaultTraceOffNote.Label,
+                /* #9518: the server's blocked process threshold is 0, so no report can be raised and the run read nothing of its session. Measured by
+                   blocked_process_report's own ReadAsync from a const in BlockedProcessReportCollector.cs; the expectation names the label the readers
+                   parse (BlockedProcessThresholdOffNote.Label), so the collector's const drifting from it fails here. */
+                PerformanceMonitor.Common.BlockedProcessThresholdOffNote.Label,
                 /* #9508: a skipped per-relation pg_buffercache scan. Measured by pg_buffer_usage's own ReadAsync from consts in PgBufferUsageCollector.cs. */
                 PgBufferUsageCollector.ScanSkippedMeasurement,
                 PgBufferUsageCollector.PoolBuffersMeasurement,
                 PgBufferUsageCollector.CapBuffersMeasurement,
                 PgBufferUsageCollector.SummaryMissingMeasurement,
+                /* #9529: query_snapshots' plan bound, measured by its own ReadAsync from consts in QuerySnapshotsCollector.cs. Written only when the run reused,
+                   shared or capped a plan. */
+                QuerySnapshotsCollector.PlansReusedMeasurement,
+                QuerySnapshotsCollector.PlansSharedMeasurement,
+                QuerySnapshotsCollector.PlansOverCapMeasurement,
+                QuerySnapshotsCollector.LivePlansOverCapMeasurement,
             }.OrderBy(l => l, StringComparer.Ordinal).ToList(),
             resolved.Distinct(StringComparer.Ordinal).OrderBy(l => l, StringComparer.Ordinal).ToList());
     }
