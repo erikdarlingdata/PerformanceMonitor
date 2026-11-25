@@ -548,10 +548,12 @@ public sealed partial class DarlingCollectorRunner
     /// <para>A row whose identity (<see cref="QueryStatsPlanKey"/>) is in the host's cache carries the cached digest and
     /// measured size, so the writer stores the digest and no plan text crosses the wire. A plan over the capture cap
     /// is cached with a null digest: its rows carry the size and a NULL plan, and it is not rendered again. The
-    /// rest go to <see cref="QueryStatsCollector.BuildPlanFetchQuery"/>, one call (split above
-    /// <see cref="QueryStatsCollector.MaxPlanFetchKeys"/> keys), on the same connection as the main read. A plan
+    /// rest go to <see cref="QueryStatsCollector.BuildPlanFetchQuery"/> on the same connection as the main read, in
+    /// the chunks and under the lock timeout and budget of <see cref="BoundedPlanFetch"/> (#9535). A plan
     /// whose handle aged out between the two queries comes back with no plan and no size, the pairing the inline form
-    /// gives for the same case, and is not cached.</para>
+    /// gives for the same case, and is not cached. A plan that waits on a schema lock past the lock timeout, or that
+    /// the budget did not reach, ships as a row without a plan, is not cached, and is counted in
+    /// <c>plan_fetch_skipped</c> or <c>plan_fetch_not_attempted</c>.</para>
     ///
     /// <para>A fetch that fails ships the rows without plans and does not fail the run: the plans not yet fetched
     /// are fetched again next cycle. A chunk that fails keeps what the chunks before it already rendered (those
@@ -1169,8 +1171,9 @@ public sealed partial class DarlingCollectorRunner
     /// #5158: procedure_stats' plan reuse, after the main read. In shadow the rows already carry their inline plans (from the #5449 plan phase), and
     /// this only measures whether each module plan's identity (<see cref="ProcedureStatsPlanKey"/>) would have been
     /// recognized and right; nothing written changes. In on the rows carry no plan: recognized identities get their stored
-    /// digest, and on a cycle the cadence gate lets render, the others are rendered in one second query on this same
-    /// connection, inside the same wall-clock budget, at most <see cref="ProcedureStatsPlanReuse.MaxMissesPerRun"/>.
+    /// digest, and on a cycle the cadence gate lets render, the others are rendered on this same
+    /// connection, inside the same wall-clock budget, at most <see cref="ProcedureStatsPlanReuse.MaxMissesPerRun"/>,
+    /// in the chunks and under the lock timeout and budget of <see cref="BoundedPlanFetch"/> (#9535).
     ///
     /// <para>What this pass counts goes into the run's collection-log note beside <c>plans_rendered</c>:
     /// <c>deferred_would_hit</c>, <c>deferred_false_hit</c> (the plan's shape changed, or could not be compared; split into <c>deferred_false_hit_shape</c>,
