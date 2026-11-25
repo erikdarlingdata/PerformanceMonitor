@@ -457,11 +457,13 @@ CROSS JOIN LATERAL (
         }
 
         var dueTotal = doneRows.Count + ordered.Count;
+        /* The all-done verdict names each count as the reply's own fields do: not_yet_due_count as "not due yet" and fixed_time_count as the set-time collectors that have not run since the start (#9585). The waiting verdict names neither, and the two fields and the note carry them. */
         string verdict;
         if (ordered.Count == 0)
         {
             verdict = $"Every due collector has a good cycle since the service started at {Stamp(startUtc)}: {doneRows.Count} done on {servers.Count} server(s)"
-                + (notYetDue + fixedTime > 0 ? $", {notYetDue + fixedTime} not due yet" : "")
+                + (notYetDue > 0 ? $", {notYetDue} not due yet" : "")
+                + (fixedTime > 0 ? $", {fixedTime} run at a set time and have not run since the start" : "")
                 + (reached ? $". First full cycle at {Stamp(lastFirstGood!.Value)}." : ".");
         }
         else

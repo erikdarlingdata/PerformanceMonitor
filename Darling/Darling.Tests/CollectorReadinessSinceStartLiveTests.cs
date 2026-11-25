@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -212,6 +213,152 @@ public sealed class CollectorReadinessSinceStartLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
         }
+    }
+
+    /// <summary>
+    /// #9585: with no collector waiting, three collectors that run at a set time and have not run since the start are named as such in the
+    /// verdict, not counted as "not due yet". The reply's own fields say the same: not_yet_due_count 0 and fixed_time_count 3.
+    /// </summary>
+    [Fact]
+    public async Task AllDoneVerdict_NamesSetTimeCollectorsApart_WhenNoneIsNotYetDue()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live get_collector_readiness test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var now = DateTime.UtcNow;
+            var start = now.AddMinutes(-10);
+            await RegisterServerAsync(connection, 9585001, "readiness-settime", ct);
+
+            /* Three daily collectors run at a fixed time of day and have no run at all. Every other collector the catalog runs has a good cycle since the start. */
+            var setTime = DailyCollectors(3);
+            Assert.Equal(3, setTime.Count);
+            foreach (var name in setTime)
+            {
+                await SetRunTimeAsync(connection, 9585001, name, 120, ct);
+            }
+
+            foreach (var name in CollectorCatalog.All.Select(d => d.Name).Except(setTime))
+            {
+                await InsertAsync(connection, 9585001, "readiness-settime", name, start.AddMinutes(3), "SUCCESS", null, ct);
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpCollectorReadinessTools.GetCollectorReadiness(postgres, null, start, now, ct));
+            var root = doc.RootElement;
+            var verdict = root.GetProperty("verdict").GetString()!;
+            Assert.Equal(0, root.GetProperty("waiting_count").GetInt32());
+            Assert.Equal(0, root.GetProperty("not_yet_due_count").GetInt32());
+            Assert.Equal(3, root.GetProperty("fixed_time_count").GetInt32());
+            Assert.StartsWith("Every due collector has a good cycle", verdict, StringComparison.Ordinal);
+            Assert.Contains(", 3 run at a set time and have not run since the start", verdict, StringComparison.Ordinal);
+            Assert.DoesNotContain("not due yet", verdict, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>
+    /// #9585: with both kinds present, the verdict carries each phrase with its own count, and each count is the reply's field of the same
+    /// meaning. The counts differ (two and three) so a sum or a swap cannot read as right.
+    /// </summary>
+    [Fact]
+    public async Task AllDoneVerdict_NamesBothKinds_EachWithItsOwnCount()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live get_collector_readiness test.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var now = DateTime.UtcNow;
+            var start = now.AddMinutes(-10);
+            await RegisterServerAsync(connection, 9585011, "readiness-both", ct);
+
+            /* Three daily collectors run at a fixed time of day and have no run. Two collectors given an hourly interval last ran five minutes before the start, so they wait out the rest of the hour. */
+            var setTime = DailyCollectors(3);
+            Assert.Equal(3, setTime.Count);
+            foreach (var name in setTime)
+            {
+                await SetRunTimeAsync(connection, 9585011, name, 120, ct);
+            }
+
+            var notYetDue = IntervalCollectors(2);
+            Assert.Equal(2, notYetDue.Count);
+            foreach (var name in notYetDue)
+            {
+                await SetIntervalAsync(connection, 9585011, name, 60, ct);
+                await InsertAsync(connection, 9585011, "readiness-both", name, start.AddMinutes(-5), "SUCCESS", null, ct);
+            }
+
+            foreach (var name in CollectorCatalog.All.Select(d => d.Name).Except(setTime).Except(notYetDue))
+            {
+                await InsertAsync(connection, 9585011, "readiness-both", name, start.AddMinutes(3), "SUCCESS", null, ct);
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpCollectorReadinessTools.GetCollectorReadiness(postgres, null, start, now, ct));
+            var root = doc.RootElement;
+            var verdict = root.GetProperty("verdict").GetString()!;
+            var notYetDueCount = root.GetProperty("not_yet_due_count").GetInt32();
+            var fixedTimeCount = root.GetProperty("fixed_time_count").GetInt32();
+            Assert.Equal(0, root.GetProperty("waiting_count").GetInt32());
+            Assert.Equal(2, notYetDueCount);
+            Assert.Equal(3, fixedTimeCount);
+            Assert.Contains($", {notYetDueCount} not due yet", verdict, StringComparison.Ordinal);
+            Assert.Contains($", {fixedTimeCount} run at a set time and have not run since the start", verdict, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    /// <summary>The first <paramref name="count"/> catalog collectors on this engine that run once a day by default: a fixed run time applies only to a whole number of days.</summary>
+    private static List<string> DailyCollectors(int count) =>
+        CollectorCatalog.All
+            .Select(d => d.Name)
+            .Where(n => !n.StartsWith("pg_", StringComparison.Ordinal)
+                && CollectorScheduleDefaults.All.TryGetValue(n, out var e) && e.DefaultEnabled && e.FrequencyMinutes >= 1440 && e.FrequencyMinutes % 1440 == 0)
+            .Take(count)
+            .ToList();
+
+    /// <summary>The first <paramref name="count"/> catalog collectors on this engine that run every few minutes by default and keep a stretched interval: a delta-family collector refuses an interval past its gap cap.</summary>
+    private static List<string> IntervalCollectors(int count) =>
+        CollectorCatalog.All
+            .Select(d => d.Name)
+            .Where(n => !n.StartsWith("pg_", StringComparison.Ordinal) && !CollectorDeltaCalculator.IsDeltaFamily(n)
+                && CollectorScheduleDefaults.All.TryGetValue(n, out var e) && e.DefaultEnabled && e.FrequencyMinutes is > 0 and < 1440)
+            .Take(count)
+            .ToList();
+
+    /// <summary>One per-server run time (<c>config.config_collector_run_times</c>), in minutes after midnight.</summary>
+    private static async Task SetRunTimeAsync(NpgsqlConnection connection, int serverId, string collector, int minute, CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "INSERT INTO config.config_collector_run_times (server_id, collector_name, run_at_minute) VALUES ($1, $2, $3)", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(collector);
+        command.Parameters.Add(new NpgsqlParameter { Value = (short)minute, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Smallint });
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task SetIntervalAsync(NpgsqlConnection connection, int serverId, string collector, int minutes, CancellationToken ct)
