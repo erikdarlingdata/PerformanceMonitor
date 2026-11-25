@@ -76,13 +76,57 @@ public static class StoreConnectionFactory
         return builder;
     }
 
-    /// <summary>Opens a new connection to the store using the given connection string, then applies the session guards.</summary>
+    /// <summary>
+    /// Opens a new connection to the store using the given connection string, then applies the session guards.
+    /// A connect timeout on a new connection (NpgsqlException wrapping TimeoutException) is retried once, because a
+    /// one-off stall of the local TCP connect has failed a run on a store whose next run was fine. A stall longer
+    /// than two timeouts still fails the run, and the next run recovers. Nothing else is retried.
+    /// </summary>
     public static async Task<NpgsqlConnection> OpenAsync(NpgsqlConnectionStringBuilder builder, CancellationToken ct)
     {
-        var connection = new NpgsqlConnection(builder.ConnectionString);
-        await connection.OpenAsync(ct).ConfigureAwait(false);
+        var connection = await OpenWithConnectRetryAsync(builder, (c, t) => c.OpenAsync(t), ct).ConfigureAwait(false);
         await ApplySessionGuardsAsync(connection, ct).ConfigureAwait(false);
         return connection;
+    }
+
+    /// <summary>
+    /// The connect step of <see cref="OpenAsync"/>, with the open call as a seam so a test can fail it without a
+    /// server. Retries once, with the same builder, only when the open throws an NpgsqlException whose inner
+    /// exception is a TimeoutException and <paramref name="ct"/> is not cancelled. The second failure propagates.
+    /// </summary>
+    internal static async Task<NpgsqlConnection> OpenWithConnectRetryAsync(
+        NpgsqlConnectionStringBuilder builder,
+        Func<NpgsqlConnection, CancellationToken, Task> open,
+        CancellationToken ct)
+    {
+        var connection = new NpgsqlConnection(builder.ConnectionString);
+        try
+        {
+            await open(connection, ct).ConfigureAwait(false);
+            return connection;
+        }
+        catch (NpgsqlException ex) when (ex.InnerException is TimeoutException && !ct.IsCancellationRequested)
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            Console.Error.WriteLine($"Warning: store connect timed out after {builder.Timeout} s; retrying once");
+        }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        var retry = new NpgsqlConnection(builder.ConnectionString);
+        try
+        {
+            await open(retry, ct).ConfigureAwait(false);
+            return retry;
+        }
+        catch
+        {
+            await retry.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>
