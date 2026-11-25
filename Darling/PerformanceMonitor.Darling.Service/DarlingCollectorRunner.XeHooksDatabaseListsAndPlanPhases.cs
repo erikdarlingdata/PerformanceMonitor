@@ -614,34 +614,40 @@ public sealed partial class DarlingCollectorRunner
             return (pending, pendingShapes);
         }
 
+        BoundedPlanFetch.Outcome? bounds = null;
+        var lockTimeoutSet = false;
         try
         {
-            for (var offset = 0; offset < misses.Count; offset += QueryStatsCollector.MaxPlanFetchKeys)
-            {
-                var chunk = misses.GetRange(offset, Math.Min(QueryStatsCollector.MaxPlanFetchKeys, misses.Count - offset));
-                var query = QueryStatsCollector.BuildPlanFetchQuery(context, chunk.ConvertAll(m => m.Key.ToFetchKey()));
-
-                Dictionary<int, (string? PlanXml, long? Bytes)> fetched;
-                var unjudged = new HashSet<int>();
-                using (var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds))
-                using (var planReader = await command.ExecuteReaderAsync(cancellationToken))
+            /* #9535: every fetch command of this phase waits at most the bounded lock timeout. */
+            await SetPlanFetchLockTimeoutAsync(provider, targetConnection, cancellationToken);
+            lockTimeoutSet = true;
+            bounds = await BoundedPlanFetch.RunAsync(
+                misses,
+                async (chunk, token) =>
                 {
+                    var query = QueryStatsCollector.BuildPlanFetchQuery(context, chunk.Select(m => m.Key.ToFetchKey()).ToList());
+                    var unjudged = new HashSet<int>();
+                    using var command = CreateCollectorCommand(provider, query, targetConnection, BoundedPlanFetch.CommandTimeoutSeconds);
+                    using var planReader = await command.ExecuteReaderAsync(token);
                     /* #4348: one filter session per fetch call; the digest below is taken from the FILTERED plan. */
-                    fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), cancellationToken, unjudged);
-                }
-
-                foreach (var (ord, result) in fetched)
+                    var fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), token, unjudged);
+                    return fetched.ToDictionary(f => f.Key, f => (Plan: f.Value, Unjudged: unjudged.Contains(f.Key)));
+                },
+                (ord, fetched) =>
                 {
-                    var (key, row) = chunk[ord];
+                    var (key, row) = misses[ord];
                     if (ApplyFetchedDeferredPlan(
-                            server.ServerId, key, row, result, unjudged.Contains(ord),
+                            server.ServerId, key, row, fetched.Plan, fetched.Unjudged,
                             cache, shapes, pending, pendingShapes, fetchedByShape, now))
                     {
                         renderedRows++;
-                        renderedBytes += result.Bytes ?? 0;
+                        renderedBytes += fetched.Plan.Bytes ?? 0;
                     }
-                }
-            }
+                },
+                ex => IsBoundedPlanFetchFault(provider, ex),
+                PlanFetchBudgetSpan,
+                () => fetchWatch.Elapsed,
+                cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
                                    && !cancellationToken.IsCancellationRequested)
@@ -653,8 +659,15 @@ public sealed partial class DarlingCollectorRunner
         }
         finally
         {
+            if (lockTimeoutSet)
+            {
+                await RestorePlanFetchLockTimeoutAsync(provider, targetConnection);
+            }
+
             fetchWatch.Stop();
             StampPlanFetch(context, renderedRows, renderedBytes, fetchWatch.ElapsedMilliseconds);
+            StampPlanFetchBounds(context, bounds);
+            LogPlanFetchBounds(QueryStatsCollector.Instance.Name, server, bounds);
         }
 
         ShareFetchedPlansByShape(server.ServerId, rows, fetchedByShape);
@@ -870,6 +883,77 @@ public sealed partial class DarlingCollectorRunner
         }
 
         return chosen;
+    }
+
+    /// <summary>
+    /// #9535: whether a plan fetch command ended in a way the bounded fetch retries or skips: the lock timeout it set
+    /// (error 1222) or its own command timeout. Anything else is a failure of the phase.
+    /// </summary>
+    internal static bool IsBoundedPlanFetchFault(ITargetProvider provider, Exception exception)
+        => provider.Classify(exception, yieldsOnLockTimeout: true)
+            is CollectorTargetFault.LockTimeoutYield or CollectorTargetFault.CommandTimeout;
+
+    /// <summary>#9535: sets the bounded lock timeout on the connection the plan fetch commands run on.</summary>
+    private static async Task SetPlanFetchLockTimeoutAsync(
+        ITargetProvider provider, DbConnection targetConnection, CancellationToken cancellationToken)
+    {
+        using var command = CreateCollectorCommand(
+            provider, BoundedPlanFetch.SetLockTimeout, targetConnection, BoundedPlanFetch.CommandTimeoutSeconds);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// #9535: puts the connection's lock timeout back after the plan fetch, so nothing that runs on it later inherits
+    /// the short one. It runs on every exit from the phase, a cancelled one included, so it takes no token and never
+    /// throws: a connection that cannot run it is closed by its owner and takes the setting with it.
+    /// </summary>
+    private async Task RestorePlanFetchLockTimeoutAsync(ITargetProvider provider, DbConnection targetConnection)
+    {
+        try
+        {
+            using var command = CreateCollectorCommand(
+                provider, BoundedPlanFetch.RestoreLockTimeout, targetConnection, BoundedPlanFetch.CommandTimeoutSeconds);
+            await command.ExecuteNonQueryAsync(CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger?.LogDebug(ex, "The plan fetch could not put the lock timeout back on its connection (#9535).");
+        }
+    }
+
+    /// <summary>
+    /// #9535: the bounded fetch's skips in the run's note. <c>plan_fetch_skipped</c> counts the plans whose own command
+    /// ended in a lock timeout or a command timeout, and <c>plan_fetch_not_attempted</c> the plans the phase did not
+    /// ask for because its budget was spent. Neither is written for a run that skipped nothing.
+    /// </summary>
+    internal static void StampPlanFetchBounds(CollectorContext context, BoundedPlanFetch.Outcome? bounds)
+    {
+        if (bounds is null)
+        {
+            return;
+        }
+
+        if (bounds.Skipped > 0)
+        {
+            context.Measure("plan_fetch_skipped", bounds.Skipped);
+        }
+
+        if (bounds.NotAttempted > 0)
+        {
+            context.Measure("plan_fetch_not_attempted", bounds.NotAttempted);
+        }
+    }
+
+    private void LogPlanFetchBounds(string collector, ServerRuntime server, BoundedPlanFetch.Outcome? bounds)
+    {
+        if (bounds is null || (bounds.Skipped == 0 && bounds.NotAttempted == 0))
+        {
+            return;
+        }
+
+        _logger?.LogWarning(
+            "{Collector} on '{Server}': the plan fetch skipped {Skipped} plan(s) that waited on a lock or timed out, and left {NotAttempted} plan(s) unasked when its {Budget} budget was spent. Their rows ship without plans and the plans are fetched again next cycle (#9535).",
+            collector, server.Config.DisplayName, bounds.Skipped, bounds.NotAttempted, EnumeratedCollectorDriver.DescribeBudget(PlanFetchBudgetSpan));
     }
 
     /// <summary>
@@ -1136,19 +1220,54 @@ public sealed partial class DarlingCollectorRunner
 
             var fetchWatch = Stopwatch.StartNew();
             var unjudgedOrdinals = new HashSet<int>();
+            BoundedPlanFetch.Outcome? bounds = null;
             outcome = await ProcedureStatsPlanReuse.ApplyOnAsync(
                 server.ServerId, cache, rows, context.CapturePlanXml, captureOrdinal, now,
                 async (handles, token) =>
                 {
-                    var query = ProcedureStatsCollector.BuildPlanFetchQuery(context, handles);
-                    using var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds);
-                    using var planReader = await command.ExecuteReaderAsync(token);
-                    return await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), token, unjudgedOrdinals);
+                    /* #9535: the same bounds as query_stats' fetch. An answer is kept under the handle's position in
+                       the whole list, so a skipped handle is simply absent and its row ships without a plan. */
+                    var answers = new Dictionary<int, (string? PlanXml, long? Bytes)>();
+                    await SetPlanFetchLockTimeoutAsync(provider, targetConnection, token);
+                    try
+                    {
+                        bounds = await BoundedPlanFetch.RunAsync(
+                            handles,
+                            async (chunk, chunkToken) =>
+                            {
+                                var query = ProcedureStatsCollector.BuildPlanFetchQuery(context, chunk);
+                                var unjudged = new HashSet<int>();
+                                using var command = CreateCollectorCommand(provider, query, targetConnection, BoundedPlanFetch.CommandTimeoutSeconds);
+                                using var planReader = await command.ExecuteReaderAsync(chunkToken);
+                                var fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), chunkToken, unjudged);
+                                return fetched.ToDictionary(f => f.Key, f => (Plan: f.Value, Unjudged: unjudged.Contains(f.Key)));
+                            },
+                            (ord, fetched) =>
+                            {
+                                answers[ord] = fetched.Plan;
+                                if (fetched.Unjudged)
+                                {
+                                    unjudgedOrdinals.Add(ord);
+                                }
+                            },
+                            ex => IsBoundedPlanFetchFault(provider, ex),
+                            PlanFetchBudgetSpan,
+                            () => fetchWatch.Elapsed,
+                            token);
+                    }
+                    finally
+                    {
+                        await RestorePlanFetchLockTimeoutAsync(provider, targetConnection);
+                    }
+
+                    return answers;
                 },
                 cancellationToken,
                 unjudgedOrdinals);
             fetchWatch.Stop();
             fetchMs += fetchWatch.ElapsedMilliseconds;
+            StampPlanFetchBounds(context, bounds);
+            LogPlanFetchBounds(ProcedureStatsCollector.Instance.Name, server, bounds);
 
             if (outcome.FetchFailure is { } failure)
             {

@@ -563,6 +563,12 @@ public sealed partial class DarlingCollectorRunner
     internal TimeSpan QueryStorePlanFetchBudgetSpan { get; set; } = QueryStoreReadBudget.PlanFetchBudget;
 
     /// <summary>
+    /// The wall clock query_stats' and procedure_stats' deferred plan fetch may spend before it stops asking for more
+    /// plans (#9535), <see cref="BoundedPlanFetch.Budget"/> in production. Settable so a test can spend it at once.
+    /// </summary>
+    internal TimeSpan PlanFetchBudgetSpan { get; set; } = BoundedPlanFetch.Budget;
+
+    /// <summary>
     /// Each database's last measured plan-fetch time per plan, in milliseconds (#5813), keyed like
     /// <see cref="_planFetchCarryover"/>. <see cref="QueryStoreReadBudget.PlanFetchWidth"/> sizes the next pass's chunks
     /// from it, so a database at 2 s a plan asks for about 15 plans a pass instead of being cut at the budget. In memory
