@@ -205,7 +205,7 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         /* #9533: the watermark this run's query was built with, judged below against the server's own clock. */
         var taken = context.ReadWatermarkTaken;
         context.ReadWatermarkTaken = null;
-        var scope = WatermarkScope(context);
+        var scope = WatermarkScope;
 
         /* #7419: the loop below advances every candidate's baselines, stored or not. Capture them first, so a host that ends
            the run before the rows are stored (the item budget fires in the text or plan fetch, the store cannot be reached,
@@ -274,6 +274,12 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     private static void KeepWatermarkState(
         List<Row> fetched, CollectorContext context, string scope, ReadWatermark? taken, DateTime? serverNow)
     {
+        if (context.Target.IsAzureSqlDb)
+        {
+            /* #9533: an Azure SQL Database target takes no watermark and arms none, so there is nothing to advance or arm. */
+            return;
+        }
+
         var returned = new Dictionary<string, DateTime>(fetched.Count);
         foreach (var row in fetched)
         {
@@ -296,6 +302,14 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         }
         else if (fetched.Count == 0 && taken is { } prior)
         {
+            /* #9533: a narrow read that returned no rows has no server_now, but it still proves the keys it did not return idle.
+               If the server accepted the watermark, nothing completed since it. If it fell back to the whole ten-minute window
+               and still returned nothing, no key ran in the last ten minutes. Either way every key's values are unchanged, the
+               same as when an idle row came back, so advance them against the server clock estimated from the prior arm. */
+            var estimatedNow = prior.ChangedSince.AddSeconds(WatermarkMarginSeconds)
+                + (context.CollectionTime - prior.ArmedAt);
+            context.Deltas.AdvanceUnreturnedBaselines(
+                context.ServerId, scope, BaselineGroups, returned, estimatedNow.AddMinutes(-10), true, context.CollectionTime);
             context.Deltas.ArmReadWatermark(context.ServerId, scope, prior.ChangedSince, prior.ArmedAt);
         }
     }
@@ -570,11 +584,11 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     private static int ServerNowOrdinal(bool inlinePlan) => inlinePlan ? 46 : 44;
 
     /// <summary>
-    /// #9533: the key a run's read watermark and activity record are kept under: the delta family's own name, and for an Azure SQL
-    /// database also the database the read is scoped to, because each database is read, and succeeds or fails, on its own.
+    /// #9533: the key a run's read watermark and activity record are kept under: the delta family's own name. An Azure SQL Database
+    /// target keeps no watermark, because both hosts build query_stats' statement once before the per-database loop, when no
+    /// database is current, so a per-database scope would be armed under one name and taken under another.
     /// </summary>
-    internal static string WatermarkScope(CollectorContext context) =>
-        context.Target.IsAzureSqlDb ? ExecGroup + "|" + context.CurrentDatabaseName : ExecGroup;
+    private const string WatermarkScope = ExecGroup;
 
     /// <summary>
     /// #9533: a read that returned at least this many rows may have filled <see cref="MaxCandidateRows"/> before the self-filter
@@ -1068,7 +1082,9 @@ OPTION(RECOMPILE);";
 
         /* #9533: the previous successful read's watermark, taken (and so forgotten) here, so a run that fails before its read
            arms a new one finds none next time. The parameters are always present, NULL when there is no watermark. */
-        var taken = context.Deltas.TakeReadWatermark(context.ServerId, WatermarkScope(context), context.CollectionTime);
+        var taken = context.Target.IsAzureSqlDb
+            ? null
+            : context.Deltas.TakeReadWatermark(context.ServerId, WatermarkScope, context.CollectionTime);
         context.ReadWatermarkTaken = taken;
         var watermarkParameters = new[]
         {

@@ -27,13 +27,13 @@ public sealed class QueryStatsReadWatermarkTests
 
     private sealed record Run(CollectorQuery Query, List<QueryStatsCollector.Row> Rows);
 
-    private static CollectorContext Context(CollectorDeltaCalculator deltas, DateTime at) => new()
+    private static CollectorContext Context(CollectorDeltaCalculator deltas, DateTime at, bool azureSqlDb = false) => new()
     {
         ServerId = 7,
         ServerName = "test-server",
         CollectionTime = at,
         Deltas = deltas,
-        Target = new CollectorTargetInfo(),
+        Target = new CollectorTargetInfo { IsAzureSqlDb = azureSqlDb },
         DeferTextFetch = true,
     };
 
@@ -42,10 +42,14 @@ public sealed class QueryStatsReadWatermarkTests
     /// is the collection time, so a statement's <c>last_execution_time</c> and the clock share a frame. A null
     /// <paramref name="withServerClock"/> is a read that carries no clock column.
     /// </summary>
-    private static async Task<Run> RunAsync(
-        CollectorDeltaCalculator deltas, DateTime at, bool withServerClock, params (int Handle, long Work)[] statements)
+    private static Task<Run> RunAsync(
+        CollectorDeltaCalculator deltas, DateTime at, bool withServerClock, params (int Handle, long Work)[] statements) =>
+        RunOnAsync(deltas, at, false, withServerClock, statements);
+
+    private static async Task<Run> RunOnAsync(
+        CollectorDeltaCalculator deltas, DateTime at, bool azureSqlDb, bool withServerClock, params (int Handle, long Work)[] statements)
     {
-        var context = Context(deltas, at);
+        var context = Context(deltas, at, azureSqlDb);
         var query = QueryStatsCollector.Instance.BuildQuery(context);
         using var table = QueryStatsAbandonedRunBaselineTests.Table(at, statements);
         if (withServerClock)
@@ -177,6 +181,45 @@ public sealed class QueryStatsReadWatermarkTests
         var key2 = fourth.Rows.Single().Precomputed!;
         Assert.Equal(30, key2.Exec);
         Assert.Equal(60, key2.ExecInterval);
+    }
+
+    /// <summary>
+    /// A narrow read that returns no rows has no server clock, but it still proves key 2 idle. Run two returns nothing, so
+    /// key 2's baseline moves to it anyway, and when it runs in run three its interval is the 60 s since run two, as an idle row
+    /// coming back every run would have left it, not the 120 s since run one.
+    /// </summary>
+    [Fact]
+    public async Task ARunThatReturnedNoRows_StillAdvancesTheKeysItDidNotReturn()
+    {
+        var deltas = new CollectorDeltaCalculator();
+        await RunAsync(deltas, T0, true, (1, 100), (2, 50));
+        await RunAsync(deltas, T0.AddSeconds(60), true);
+
+        var third = await RunAsync(deltas, T0.AddSeconds(120), true, (2, 80));
+        var key2 = third.Rows.Single().Precomputed!;
+        Assert.Equal(30, key2.Exec);
+        Assert.Equal(60, key2.ExecInterval);
+    }
+
+    /// <summary>
+    /// An Azure SQL Database target takes no watermark and arms none: every statement sends NULL for both parameters, and
+    /// no key's baseline is advanced, so key 2's interval is measured from its own last baseline.
+    /// </summary>
+    [Fact]
+    public async Task AnAzureSqlDatabaseTarget_TakesNoWatermark_ArmsNone_AndAdvancesNothing()
+    {
+        var deltas = new CollectorDeltaCalculator();
+        await RunOnAsync(deltas, T0, true, true, (1, 100), (2, 50));
+        var second = await RunOnAsync(deltas, T0.AddSeconds(60), true, true, (1, 130));
+        var third = await RunOnAsync(deltas, T0.AddSeconds(120), true, true, (2, 80));
+
+        foreach (var run in new[] { second, third })
+        {
+            Assert.Null(Parameter(run.Query, "@changed_since"));
+            Assert.Null(Parameter(run.Query, "@max_age_seconds"));
+        }
+
+        Assert.Equal(120, third.Rows.Single().Precomputed!.ExecInterval);
     }
 
     /// <summary>Without a watermark nothing is advanced, so the same key's interval is measured from its own last baseline.</summary>
