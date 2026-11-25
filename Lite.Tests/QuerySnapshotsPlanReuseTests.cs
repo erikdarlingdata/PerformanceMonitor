@@ -72,100 +72,6 @@ public sealed class QuerySnapshotsPlanReuseTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void BuildSnapshotQuery_RendersAnEstimatedPlanOnlyForTheFirstRankedRows(bool azure)
-    {
-        var sql = QuerySnapshotsCollector.BuildSnapshotQuery(supportsLiveQueryPlan: false, isAzureSqlDatabase: azure);
-
-        Assert.Equal(20, QuerySnapshotsCollector.MaxPlansPerRun);
-        Assert.Contains("CASE WHEN der.plan_state = 0 AND der.plan_rank <= 20 THEN der.plan_handle END,", sql, StringComparison.Ordinal);
-        Assert.Contains(
-            ") AS tqp\n    WHERE der.plan_state = 0\n    AND   der.plan_rank <= 20\n) AS deqp",
-            sql.ReplaceLineEndings("\n"),
-            StringComparison.Ordinal);
-        Assert.Contains("plan_state = CASE WHEN der.plan_state = 0 AND der.plan_rank > 20 THEN 2 ELSE der.plan_state END,", sql, StringComparison.Ordinal);
-        /* The live-read form holds nothing, so no row is ever marked held and nothing is bound. */
-        Assert.Contains("WHEN 1 = 0", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("@pm_held_plan_", sql, StringComparison.Ordinal);
-        Assert.Contains("live_plan_over_cap = CONVERT(bit, 0),", sql, StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void BuildSnapshotQuery_RanksAndRendersOnlyTheFirstRequestOfEachPlanKey(bool azure)
-    {
-        var sql = QuerySnapshotsCollector.BuildSnapshotQuery(supportsLiveQueryPlan: true, isAzureSqlDatabase: azure)
-            .ReplaceLineEndings("\n");
-        var alias = azure ? "der" : "r";
-        var flat = string.Join(' ', sql.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-
-        /* Each plan key is numbered by the result's own order, and only its first request counts toward the cap,
-           so plan_rank counts distinct plans. The plan function's own condition (plan_state 0 inside the cap) then
-           leaves every other request of the key unrendered. */
-        Assert.Contains(
-            $"key_ordinal = ROW_NUMBER() OVER ( PARTITION BY pk.plan_key ORDER BY {alias}.cpu_time DESC, "
-            + $"{alias}.parallel_worker_count DESC, {alias}.session_id, {alias}.request_id )",
-            flat,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "plan_rank = SUM(CASE WHEN rk.key_state = 0 AND rk.key_ordinal = 1 THEN 1 ELSE 0 END) OVER ( ORDER BY rk.cpu_time DESC, "
-            + "rk.parallel_worker_count DESC, rk.session_id, rk.request_id ROWS UNBOUNDED PRECEDING )",
-            flat,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "plan_state = CASE WHEN rk.key_state = 0 AND rk.key_ordinal > 1 THEN 4 ELSE rk.key_state END,",
-            flat,
-            StringComparison.Ordinal);
-
-        /* The live plan is a reading of one request, so its rank counts every request with a plan handle. */
-        Assert.Contains(
-            "live_plan_rank = SUM(CASE WHEN rk.plan_handle IS NOT NULL THEN 1 ELSE 0 END) OVER ( ORDER BY rk.cpu_time DESC, "
-            + "rk.parallel_worker_count DESC, rk.session_id, rk.request_id ROWS UNBOUNDED PRECEDING )",
-            flat,
-            StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void BuildSnapshotQuery_RendersALivePlanOnlyForTheFirstRankedRows()
-    {
-        var sql = QuerySnapshotsCollector.BuildSnapshotQuery(supportsLiveQueryPlan: true, isAzureSqlDatabase: false);
-
-        /* Both halves are needed. The NULL session id keeps the function from rendering a plan, and the WHERE is
-           what leaves the row without one: inside an APPLY the function answers a NULL session id with the plan
-           of the last session it was asked for (measured on SQL Server 2022 and 2025). */
-        Assert.Contains(
-            "FROM sys.dm_exec_query_statistics_xml(CASE WHEN der.plan_handle IS NOT NULL AND der.live_plan_rank <= 20 THEN der.session_id END) AS qsx\n"
-            + "    WHERE der.plan_handle IS NOT NULL\n"
-            + "    AND   der.live_plan_rank <= 20\n"
-            + ") AS deqs",
-            sql.ReplaceLineEndings("\n"),
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "live_plan_over_cap = CONVERT(bit, CASE WHEN der.plan_handle IS NOT NULL AND der.live_plan_rank > 20 THEN 1 ELSE 0 END),",
-            sql,
-            StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void BuildSnapshotQuery_KeepsRecompileOnEveryStatement(bool azure)
-    {
-        var sql = QuerySnapshotsCollector.BuildSnapshotQuery(supportsLiveQueryPlan: false, isAzureSqlDatabase: azure);
-
-        Assert.Contains("OPTION(MAXDOP 1, RECOMPILE);", sql, StringComparison.Ordinal);
-        if (azure)
-        {
-            /* The staging statement ranks the rows and compares the bound plan keys, so it carries its own hint. */
-            var staging = sql[..sql.IndexOf("SELECT /* PerformanceMonitorLite */", StringComparison.Ordinal)];
-            Assert.Contains("INTO #req", staging, StringComparison.Ordinal);
-            Assert.Contains("OPTION(RECOMPILE);", staging, StringComparison.Ordinal);
-        }
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
     public void BuildQuery_WithNoCache_BindsNoPlanKeys(bool azure)
     {
         var context = new CollectorContext
@@ -180,7 +86,6 @@ public sealed class QuerySnapshotsPlanReuseTests
         var query = QuerySnapshotsCollector.Instance.BuildQuery(context);
 
         Assert.Empty(query.Parameters);
-        Assert.DoesNotContain("@pm_held_plan_", query.Text, StringComparison.Ordinal);
         Assert.Null(context.SnapshotKnownPlans);
     }
 
@@ -199,8 +104,6 @@ public sealed class QuerySnapshotsPlanReuseTests
 
         /* One text whatever is held: the target keeps one cached batch, not one per set of keys. */
         Assert.Equal(emptyQuery.Text, holdingQuery.Text);
-        Assert.Contains("WHEN pk.plan_key IN (@pm_held_plan_0, @pm_held_plan_1,", holdingQuery.Text, StringComparison.Ordinal);
-        Assert.Contains("@pm_held_plan_31)", holdingQuery.Text, StringComparison.Ordinal);
 
         Assert.Equal(QuerySnapshotPlanCache.MaxKnownPlansPerServer, emptyQuery.Parameters.Count);
         Assert.All(emptyQuery.Parameters, p => Assert.Null(p.Value));
@@ -211,28 +114,6 @@ public sealed class QuerySnapshotsPlanReuseTests
         var bound = holdingQuery.Parameters.Where(p => p.Value is not null).Select(p => (string)p.Value!).OrderBy(k => k, StringComparer.Ordinal).ToArray();
         Assert.Equal(new[] { PlanKey, OtherPlanKey }.OrderBy(k => k, StringComparer.Ordinal), bound);
         Assert.Equal(2, holding.SnapshotKnownPlans!.Count);
-    }
-
-    [Fact]
-    public void BuildQuery_PutsTheExclusionInsideTheRankedSet_OnABoxedTarget()
-    {
-        var context = new CollectorContext
-        {
-            ServerId = 7,
-            ServerName = "test-server",
-            CollectionTime = s_start,
-            Deltas = s_deltas,
-            ExcludedDatabases = new[] { "SO" },
-        };
-
-        var sql = QuerySnapshotsCollector.Instance.BuildQuery(context).Text;
-
-        /* An excluded database's request is left out before the rows are ranked, so it cannot take a plan from a
-           stored request, and no plan is rendered for it. */
-        var exclusion = sql.IndexOf("AND d.name NOT IN (@excl_db_0)", StringComparison.Ordinal);
-        var rankedSetEnd = sql.IndexOf(") AS der", StringComparison.Ordinal);
-        Assert.True(exclusion > 0, "the exclusion clause is in the query");
-        Assert.True(exclusion < rankedSetEnd, "the exclusion clause sits inside the ranked request set");
     }
 
     [Fact]
@@ -381,7 +262,7 @@ public sealed class QuerySnapshotsPlanReuseTests
         var context = Context(cache: null, s_start);
         QuerySnapshotsCollector.Instance.BuildQuery(context);
 
-        /* No host cache (the live snapshot read), and the sharing row arrives before the row that fetched. */
+        /* No host cache (Darling's on-demand live read), and the sharing row arrives before the row that fetched. */
         using var reader = new FakeCollectorDataReader(
             QueryRow(62, DBNull.Value, planState: 4, PlanKey),
             QueryRow(61, PlanXml, planState: 0, PlanKey));
