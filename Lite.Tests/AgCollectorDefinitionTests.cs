@@ -48,15 +48,13 @@ SELECT /* PerformanceMonitorLite */
     ars.synchronization_health_desc,
     is_local = CONVERT(bit, ars.is_local)
 INTO #pm_ag_replica_states
-FROM sys.dm_hadr_availability_replica_states AS ars
-OPTION(RECOMPILE);
+FROM sys.dm_hadr_availability_replica_states AS ars;
 
 SELECT /* PerformanceMonitorLite */
     group_id = CONVERT(uniqueidentifier, ags.group_id),
     ags.primary_replica
 INTO #pm_ag_group_states
-FROM sys.dm_hadr_availability_group_states AS ags
-OPTION(RECOMPILE);
+FROM sys.dm_hadr_availability_group_states AS ags;
 
 SELECT /* PerformanceMonitorLite */
     replica_id = CONVERT(uniqueidentifier, ar.replica_id),
@@ -66,16 +64,14 @@ SELECT /* PerformanceMonitorLite */
     ar.failover_mode_desc,
     ar.endpoint_url
 INTO #pm_ag_replicas
-FROM sys.availability_replicas AS ar
-OPTION(RECOMPILE);
+FROM sys.availability_replicas AS ar;
 
 SELECT /* PerformanceMonitorLite */
     group_id = CONVERT(uniqueidentifier, ag.group_id),
     ag.name,
     ag.is_distributed
 INTO #pm_ag_groups
-FROM sys.availability_groups AS ag
-OPTION(RECOMPILE);
+FROM sys.availability_groups AS ag;
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
@@ -128,8 +124,7 @@ SELECT /* PerformanceMonitorLite */
     hdrs.last_redone_time,
     hdrs.last_received_time
 INTO #pm_ag_database_replica_states
-FROM sys.dm_hadr_database_replica_states AS hdrs
-OPTION(RECOMPILE);
+FROM sys.dm_hadr_database_replica_states AS hdrs;
 
 SELECT /* PerformanceMonitorLite */
     replica_id = CONVERT(uniqueidentifier, ar.replica_id),
@@ -137,16 +132,14 @@ SELECT /* PerformanceMonitorLite */
     ar.replica_server_name,
     ar.availability_mode_desc
 INTO #pm_ag_replicas
-FROM sys.availability_replicas AS ar
-OPTION(RECOMPILE);
+FROM sys.availability_replicas AS ar;
 
 SELECT /* PerformanceMonitorLite */
     group_id = CONVERT(uniqueidentifier, ag.group_id),
     ag.name,
     ag.is_distributed
 INTO #pm_ag_groups
-FROM sys.availability_groups AS ag
-OPTION(RECOMPILE);
+FROM sys.availability_groups AS ag;
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
