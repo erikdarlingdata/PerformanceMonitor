@@ -1922,9 +1922,11 @@ public sealed class DarlingStoreMetricsJobLoggingLivePostgresTests
     /// is pinned is the null-versus-zero contract: <c>RowsObserved</c> is a COUNT and never null once the
     /// read completes (a zero is a zero), while <c>NewestRowAt</c> is null exactly when the view showed this
     /// connection no row at all — the two are different facts, and the whole issue is one being read as the
-    /// other. The all-time total is read DIRECTLY first, then the shipped read; rows are only ever added
-    /// between two reads (the history retention job runs monthly), so a direct total above zero must be
-    /// matched by a non-null newest row, and a direct total of zero by a null one and a zero count.</para>
+    /// other. The all-time total is read DIRECTLY before and after the shipped read; rows are only ever added
+    /// between two reads (the history retention job runs monthly), so a direct total above zero before it must
+    /// be matched by a non-null newest row, and a direct total of zero both before and after it by a null one
+    /// and a zero count. A job that runs between the two direct reads (a fresh cluster's background jobs do)
+    /// leaves the zero half undecided for that reading, so it is not judged.</para>
     ///
     /// <para><b>The predicate is cross-checked, not trusted.</b> The database-owner test is re-evaluated
     /// directly on the same connection and must agree with the record; when it holds and jobs exist, the
@@ -1961,6 +1963,12 @@ public sealed class DarlingStoreMetricsJobLoggingLivePostgresTests
 
         var evidence = await DarlingStoreMetricsReader.GetJobHistoryEvidenceAsync(postgres, logging, ct);
 
+        long directTotalAfter;
+        await using (var after = postgres.CreateCommand("SELECT count(*) FROM timescaledb_information.job_history"))
+        {
+            directTotalAfter = Convert.ToInt64(await after.ExecuteScalarAsync(ct));
+        }
+
         Assert.Equal(DarlingStoreMetricsReader.JobHistoryEvidenceStatus.Observed, evidence.Status);
         Assert.Equal(directRole, evidence.ReaderRole);
         Assert.Equal(directDbOwnerMember, evidence.ReaderIsDatabaseOwnerMember);
@@ -1973,13 +1981,13 @@ public sealed class DarlingStoreMetricsJobLoggingLivePostgresTests
         Assert.InRange(evidence.OwnerMemberJobCount!.Value, 0, evidence.JobCount!.Value);
         Assert.InRange(evidence.HistoryVisibleJobCount!.Value, 0, evidence.JobCount.Value);
 
-        /* The null-versus-zero contract. */
-        if (directTotal == 0)
+        /* The null-versus-zero contract. A row that landed between the two direct reads decides neither half. */
+        if (directTotal == 0 && directTotalAfter == 0)
         {
             Assert.Null(evidence.NewestRowAt);
             Assert.Equal(0L, evidence.RowsObserved);
         }
-        else
+        else if (directTotal > 0)
         {
             Assert.NotNull(evidence.NewestRowAt);
             Assert.Equal(DateTimeKind.Utc, evidence.NewestRowAt!.Value.Kind);
