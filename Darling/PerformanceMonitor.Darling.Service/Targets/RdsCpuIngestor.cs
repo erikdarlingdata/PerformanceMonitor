@@ -495,12 +495,6 @@ public sealed class RdsCpuIngestor
         return byMetric;
     }
 
-    /// <summary>Identical resolution to <see cref="RdsLogSource"/>'s own — kept as a separate copy rather
-    /// than shared, matching this codebase's existing precedent of each RDS-API ingestor owning its own
-    /// AWS calls end to end (see <see cref="RdsDeadlockIngestor"/>'s doc comment on why it holds its own
-    /// <see cref="RdsLogSource"/> rather than sharing one). That includes the null tests: a response
-    /// collection the service omitted arrives as null, and LINQ over one raises an ArgumentNullException
-    /// naming only "source", so each null goes into the message describing its own branch.</summary>
     /// <summary>
     /// The Performance Insights read of one instance: its resource id, the watermark, then the samples newer than
     /// it. The caller drops what is held for the instance when this throws (#9522).
@@ -551,6 +545,12 @@ public sealed class RdsCpuIngestor
         return BuildSamples(response.MetricList, watermark);
     }
 
+    /// <summary>Identical resolution to <see cref="RdsLogSource"/>'s own — kept as a separate copy rather
+    /// than shared, matching this codebase's existing precedent of each RDS-API ingestor owning its own
+    /// AWS calls end to end (see <see cref="RdsDeadlockIngestor"/>'s doc comment on why it holds its own
+    /// <see cref="RdsLogSource"/> rather than sharing one). That includes the null tests: a response
+    /// collection the service omitted arrives as null, and LINQ over one raises an ArgumentNullException
+    /// naming only "source", so each null goes into the message describing its own branch.</summary>
     private static async Task<string> ResolveWriterAsync(
         IAmazonRDS client, string clusterId, CancellationToken cancellationToken)
     {
