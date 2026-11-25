@@ -177,6 +177,8 @@ public sealed class PlanFetchStallWatchTests
             ex => ex is LockTimeout,
             TimeSpan.FromSeconds(5),
             () => clock,
+            new PlanFetchLaterKeys<int>(150),
+            key => key,
             CancellationToken.None,
             watch);
 

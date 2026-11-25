@@ -561,6 +561,11 @@ public sealed partial class DarlingCollectorRunner
     /// failed chunk or any after it. A stop or the item budget expiring is not a fetch failure and propagates.
     /// What this run rendered is returned as pending keys: they are confirmed after the batch commits, or discarded.</para>
     ///
+    /// <para>A plan whose own ask ended in a lock timeout or a command timeout is remembered for this server
+    /// (<c>_queryStatsPlanFetchLater</c>): the next run asks for it after every other plan, on its own, while budget
+    /// remains, and forgets it once a command answers it. The lock timeout is put back on the connection in a
+    /// <c>finally</c> whatever ends the phase, a stop included.</para>
+    ///
     /// <para><b>Timing.</b> The fetch loop runs after the main read, inside the same <c>sql:</c> slice but outside
     /// the drain, so it has its own stopwatch: <see cref="CollectorContext.PerItemPlanFetchMs"/> and the
     /// <c>plan_fetch_ms</c> measurement carry it, beside <c>plans_rendered</c> and <c>plans_rendered_bytes</c>, which are
@@ -580,7 +585,7 @@ public sealed partial class DarlingCollectorRunner
     /// So the literal-only variants of an ad hoc statement store one plan between them. The shapes this run stored are
     /// returned as pending beside the identities and settle with them.</para>
     /// </summary>
-    private async Task<(List<QueryStatsPlanKey> Plans, List<QueryStatsPlanShapeKey> Shapes)> FetchDeferredQueryStatsPlansAsync(
+    internal async Task<(List<QueryStatsPlanKey> Plans, List<QueryStatsPlanShapeKey> Shapes)> FetchDeferredQueryStatsPlansAsync(
         ITargetProvider provider,
         DbConnection targetConnection,
         ServerRuntime server,
@@ -617,12 +622,13 @@ public sealed partial class DarlingCollectorRunner
         }
 
         BoundedPlanFetch.Outcome? bounds = null;
-        var lockTimeoutSet = false;
+        var later = _queryStatsPlanFetchLater.GetOrAdd(
+            server.ServerId, static _ => new PlanFetchLaterKeys<QueryStatsPlanKey>(QueryStatsCollector.MaxPlansPerRun));
         try
         {
-            /* #9535: every fetch command of this phase waits at most the bounded lock timeout. */
+            /* #9535: every fetch command of this phase waits at most the bounded lock timeout, and the finally below puts
+               the default back whatever ends the phase, a statement that may have reached the server included. */
             await SetPlanFetchLockTimeoutAsync(provider, targetConnection, cancellationToken);
-            lockTimeoutSet = true;
             bounds = await BoundedPlanFetch.RunAsync(
                 misses,
                 async (chunk, token) =>
@@ -655,6 +661,8 @@ public sealed partial class DarlingCollectorRunner
                 ex => IsBoundedPlanFetchFault(provider, ex),
                 PlanFetchBudgetSpan,
                 () => fetchWatch.Elapsed,
+                later,
+                miss => miss.Key,
                 cancellationToken,
                 PlanFetchStallWatchFor(QueryStatsCollector.Instance.Name, server, cancellationToken));
         }
@@ -668,10 +676,7 @@ public sealed partial class DarlingCollectorRunner
         }
         finally
         {
-            if (lockTimeoutSet)
-            {
-                await RestorePlanFetchLockTimeoutAsync(provider, targetConnection, cancellationToken);
-            }
+            await RestorePlanFetchLockTimeoutAsync(provider, targetConnection);
 
             fetchWatch.Stop();
             StampPlanFetch(context, renderedRows, renderedBytes, fetchWatch.ElapsedMilliseconds);
@@ -927,23 +932,19 @@ public sealed partial class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// #9535: puts the connection's lock timeout back after the plan fetch, so nothing that runs on it later in the run
-    /// inherits the short one. A cancelled run does not send it: that run is over, and its connection is closed or
-    /// reset by its owner, which clears the setting. It never throws, because it runs on the way out of the phase.
+    /// #9535: puts the connection's lock timeout back after the plan fetch, so nothing that runs on it later, in the run
+    /// or on the pooled connection after it, inherits the short one. It is sent from a <c>finally</c> after a phase that
+    /// finished, failed or was cancelled alike, so it takes no token: a cancelled run's token is already cancelled, and
+    /// the command's own timeout (<see cref="BoundedPlanFetch.CommandTimeoutSeconds"/>) bounds it. It never throws,
+    /// because it runs on the way out of the phase; a connection that cannot answer is the owner's to discard.
     /// </summary>
-    private async Task RestorePlanFetchLockTimeoutAsync(
-        ITargetProvider provider, DbConnection targetConnection, CancellationToken cancellationToken)
+    private async Task RestorePlanFetchLockTimeoutAsync(ITargetProvider provider, DbConnection targetConnection)
     {
-        if (cancellationToken.IsCancellationRequested)
-        {
-            return;
-        }
-
         try
         {
             using var command = CreateCollectorCommand(
                 provider, BoundedPlanFetch.RestoreLockTimeout, targetConnection, BoundedPlanFetch.CommandTimeoutSeconds);
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            await command.ExecuteNonQueryAsync(CancellationToken.None);
         }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
@@ -1008,10 +1009,13 @@ public sealed partial class DarlingCollectorRunner
     /// connection and inside its budget, and merges each row's plan and identity onto it. A phase that renders plans
     /// asks in the chunks and under the lock timeout and budget of <see cref="BoundedPlanFetch"/> (#9535); a phase
     /// that reads only identities is one query. Closes the main reader first (one
-    /// command at a time on the connection), as the deferred fetch does. A failed query ships every row without plans and
-    /// marks them all skipped, so the reuse pass counts no miss and caches nothing; the plans are fetched again next
-    /// cycle. A stop or the item budget expiring is not a phase failure and propagates. Returns the phase's milliseconds,
-    /// 0 when no query ran. A null <paramref name="mainReader"/> is a caller whose main reader is already disposed (the
+    /// command at a time on the connection), as the deferred fetch does. A plan that is skipped on a lock timeout or a
+    /// command timeout, or that the budget did not reach, has no result: its row ships without a plan and is marked
+    /// skipped, and a skipped plan is asked last on the next run (<c>_procedureStatsPlanFetchLater</c>). A query that
+    /// fails for any other reason ends the phase and drops every answer, those of the chunks that already succeeded
+    /// included: every row ships without a plan and is marked skipped, so the reuse pass counts no miss and caches
+    /// nothing, and the plans are fetched again next cycle. A stop or the item budget expiring is not a phase failure and
+    /// propagates, with the lock timeout put back first. Returns the phase's milliseconds, 0 when no query ran. A null <paramref name="mainReader"/> is a caller whose main reader is already disposed (the
     /// Azure SQL Database per-database loop, see <see cref="RunProcedureStatsDatabasePlanPhaseAsync"/>).
     /// </summary>
     internal async Task<long> RunProcedureStatsPlanPhaseAsync(
@@ -1045,9 +1049,11 @@ public sealed partial class DarlingCollectorRunner
                 /* #9535: a phase that renders plans waits on schema locks, so it takes the bounds of the deferred fetch.
                    A handle that is skipped or not reached has no result, and ApplyPlanPhase marks its row skipped. */
                 var answers = new Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>();
-                await SetPlanFetchLockTimeoutAsync(provider, targetConnection, cancellationToken);
+                var later = _procedureStatsPlanFetchLater.GetOrAdd(
+                    server.ServerId, static _ => new PlanFetchLaterKeys<string>(ProcedureStatsCollector.MaxPlansPerRun));
                 try
                 {
+                    await SetPlanFetchLockTimeoutAsync(provider, targetConnection, cancellationToken);
                     bounds = await BoundedPlanFetch.RunAsync(
                         handles,
                         async (chunk, token) =>
@@ -1061,12 +1067,14 @@ public sealed partial class DarlingCollectorRunner
                         ex => IsBoundedPlanFetchFault(provider, ex),
                         PlanFetchBudgetSpan,
                         () => watch.Elapsed,
+                        later,
+                        Convert.ToHexString,
                         cancellationToken,
                         PlanFetchStallWatchFor(ProcedureStatsCollector.Instance.Name, server, cancellationToken));
                 }
                 finally
                 {
-                    await RestorePlanFetchLockTimeoutAsync(provider, targetConnection, cancellationToken);
+                    await RestorePlanFetchLockTimeoutAsync(provider, targetConnection);
                 }
 
                 results = answers;
@@ -1236,14 +1244,18 @@ public sealed partial class DarlingCollectorRunner
     /// recognized and right; nothing written changes. In on the rows carry no plan: recognized identities get their stored
     /// digest, and on a cycle the cadence gate lets render, the others are rendered on this same
     /// connection, inside the same wall-clock budget, at most <see cref="ProcedureStatsPlanReuse.MaxMissesPerRun"/>,
-    /// in the chunks and under the lock timeout and budget of <see cref="BoundedPlanFetch"/> (#9535).
+    /// in the chunks and under the lock timeout and budget of <see cref="BoundedPlanFetch"/> (#9535). A plan skipped on
+    /// a lock timeout or a command timeout ships without a plan and is asked last on the next run
+    /// (<c>_procedureStatsPlanFetchLater</c>).
     ///
     /// <para>What this pass counts goes into the run's collection-log note beside <c>plans_rendered</c>:
     /// <c>deferred_would_hit</c>, <c>deferred_false_hit</c> (the plan's shape changed, or could not be compared; split into <c>deferred_false_hit_shape</c>,
     /// <c>_no_shape</c>, <c>_over_cap</c> and <c>_unparsed</c>, which sum to it), <c>deferred_same_shape</c> (the shape held; in the field
     /// only the memory grant moved) and <c>deferred_miss</c> in shadow, <c>deferred_hit</c> and
-    /// <c>deferred_miss</c> in on. A failed second query ships the rows it covered without plans, caches nothing, and does
-    /// not fail the run. Returns the keys to confirm after the batch commits, or discard.</para>
+    /// <c>deferred_miss</c> in on. A second query that fails for any other reason than a lock timeout or a command timeout
+    /// ends the fetch and drops every answer, those of the chunks that already succeeded included: the rows ship without
+    /// plans, nothing is cached, and the run does not fail. Returns the keys to confirm after the batch commits, or
+    /// discard.</para>
     /// </summary>
     internal async Task<List<ProcedureStatsPlanKey>> ApplyProcedureStatsPlanReuseAsync(
         ITargetProvider provider,
@@ -1300,9 +1312,11 @@ public sealed partial class DarlingCollectorRunner
                     /* #9535: the same bounds as query_stats' fetch. An answer is kept under the handle's position in
                        the whole list, so a skipped handle is simply absent and its row ships without a plan. */
                     var answers = new Dictionary<int, (string? PlanXml, long? Bytes)>();
-                    await SetPlanFetchLockTimeoutAsync(provider, targetConnection, token);
+                    var later = _procedureStatsPlanFetchLater.GetOrAdd(
+                        server.ServerId, static _ => new PlanFetchLaterKeys<string>(ProcedureStatsCollector.MaxPlansPerRun));
                     try
                     {
+                        await SetPlanFetchLockTimeoutAsync(provider, targetConnection, token);
                         bounds = await BoundedPlanFetch.RunAsync(
                             handles,
                             async (chunk, chunkToken) =>
@@ -1331,12 +1345,14 @@ public sealed partial class DarlingCollectorRunner
                             ex => IsBoundedPlanFetchFault(provider, ex),
                             PlanFetchBudgetSpan,
                             () => fetchWatch.Elapsed,
+                            later,
+                            Convert.ToHexString,
                             token,
                             PlanFetchStallWatchFor(ProcedureStatsCollector.Instance.Name, server, token));
                     }
                     finally
                     {
-                        await RestorePlanFetchLockTimeoutAsync(provider, targetConnection, token);
+                        await RestorePlanFetchLockTimeoutAsync(provider, targetConnection);
                     }
 
                     return answers;

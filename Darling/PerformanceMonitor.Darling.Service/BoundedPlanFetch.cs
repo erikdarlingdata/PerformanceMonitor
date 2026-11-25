@@ -24,6 +24,11 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="LockTimeoutMilliseconds"/>. A chunk that ends in a lock timeout or a command timeout is asked again one
 /// key at a time, and a key that fails alone is skipped. The phase stops asking once its wall-clock budget is spent.
 /// A skipped key and a key the budget did not reach are not cached, so the next run asks for them again.</para>
+///
+/// <para>A skipped key goes to the back of every later run (<see cref="PlanFetchLaterKeys{TId}"/>): it is asked after
+/// every other key, one key at a time, and only while budget remains, until a command answers it. A plan whose render
+/// outlasts <see cref="CommandTimeoutSeconds"/> therefore costs one single-key ask at the end of a run and never
+/// holds up the keys in front of it.</para>
 /// </summary>
 internal static class BoundedPlanFetch
 {
@@ -37,8 +42,12 @@ internal static class BoundedPlanFetch
     /// <summary>How long one fetch command waits on a lock before the engine raises error 1222.</summary>
     internal const int LockTimeoutMilliseconds = 1000;
 
-    /// <summary>The command timeout of one fetch command, a chunk or a single key.</summary>
-    internal const int CommandTimeoutSeconds = 5;
+    /// <summary>
+    /// The command timeout of one fetch command, a chunk or a single key. It is above the lock timeout, so a lock wait
+    /// ends in error 1222 first, and well under <see cref="Budget"/>: a chunk that ends in a command timeout leaves
+    /// room in the budget for its single-key asks, where a timeout equal to the budget would leave none.
+    /// </summary>
+    internal const int CommandTimeoutSeconds = 2;
 
     /// <summary>The wall clock the fetch phase may spend before it stops asking for more keys.</summary>
     internal static readonly TimeSpan Budget = TimeSpan.FromSeconds(5);
@@ -56,13 +65,13 @@ internal static class BoundedPlanFetch
         /// <summary>Keys a fetch command answered for (with a plan or without one).</summary>
         internal int Answered { get; set; }
 
-        /// <summary>Keys whose single-key command ended in a lock timeout or a command timeout.</summary>
+        /// <summary>Keys whose single-key command ended in a lock timeout or a command timeout. They go last next run.</summary>
         internal int Skipped { get; set; }
 
         /// <summary>Keys the phase did not ask for because the budget was spent.</summary>
         internal int NotAttempted { get; set; }
 
-        /// <summary>Chunks that were asked again one key at a time.</summary>
+        /// <summary>Chunks of which at least one key was asked again on its own (a single-key command was sent).</summary>
         internal int ChunkRetries { get; set; }
     }
 
@@ -71,24 +80,34 @@ internal static class BoundedPlanFetch
     /// position in <paramref name="keys"/>. <paramref name="fetch"/> answers by position in the list it is given.
     /// <paramref name="isBoundedFault"/> says which exceptions are a lock timeout or a command timeout; any other
     /// exception, and any exception once <paramref name="cancellationToken"/> is cancelled, propagates with the
-    /// answers applied so far kept. <paramref name="elapsed"/> is the phase's clock. With a
-    /// <paramref name="stallWatch"/>, every fetch command runs under it, so a command that stalls is sampled once.
+    /// answers applied so far kept (what the caller does with them is the caller's rule). <paramref name="elapsed"/>
+    /// is the phase's clock. With a <paramref name="stallWatch"/>, every fetch command runs under it, so a command
+    /// that stalls is sampled once.
+    ///
+    /// <para>The keys <paramref name="later"/> holds (identified by <paramref name="identify"/>) are not part of the
+    /// chunks: each is asked on its own after every other key, while budget remains. A key that fails on its own is
+    /// added to <paramref name="later"/>, and a key a command answers is dropped from it.</para>
     /// </summary>
-    internal static async Task<Outcome> RunAsync<TKey, TResult>(
+    internal static async Task<Outcome> RunAsync<TKey, TResult, TId>(
         IReadOnlyList<TKey> keys,
         Func<IReadOnlyList<TKey>, CancellationToken, Task<Dictionary<int, TResult>>> fetch,
         Action<int, TResult> apply,
         Func<Exception, bool> isBoundedFault,
         TimeSpan budget,
         Func<TimeSpan> elapsed,
+        PlanFetchLaterKeys<TId> later,
+        Func<TKey, TId> identify,
         CancellationToken cancellationToken,
         PlanFetchStallWatch? stallWatch = null)
+        where TId : notnull
     {
         ArgumentNullException.ThrowIfNull(keys);
         ArgumentNullException.ThrowIfNull(fetch);
         ArgumentNullException.ThrowIfNull(apply);
         ArgumentNullException.ThrowIfNull(isBoundedFault);
         ArgumentNullException.ThrowIfNull(elapsed);
+        ArgumentNullException.ThrowIfNull(later);
+        ArgumentNullException.ThrowIfNull(identify);
 
         var outcome = new Outcome();
 
@@ -100,7 +119,30 @@ internal static class BoundedPlanFetch
                     () => new StallProbeObservation((long)elapsed().TotalMilliseconds, outcome.Answered, -1, -1),
                     cancellationToken);
 
-        for (var offset = 0; offset < keys.Count; offset += ChunkKeys)
+        /* The asking order: the keys no run has skipped first, in list order, then the skipped ones. A position in this
+           order maps back to the key's position in keys, which is what the caller's apply is given. */
+        var order = new List<int>(keys.Count);
+        var back = new List<int>();
+        for (var index = 0; index < keys.Count; index++)
+        {
+            (later.Contains(identify(keys[index])) ? back : order).Add(index);
+        }
+
+        var front = order.Count;
+        order.AddRange(back);
+
+        void Apply(Dictionary<int, TResult> answers, int offset)
+        {
+            foreach (var (ord, answer) in answers)
+            {
+                var position = order[offset + ord];
+                apply(position, answer);
+                later.Forget(identify(keys[position]));
+                outcome.Answered++;
+            }
+        }
+
+        for (var offset = 0; offset < front; offset += ChunkKeys)
         {
             if (elapsed() >= budget)
             {
@@ -108,11 +150,11 @@ internal static class BoundedPlanFetch
                 return outcome;
             }
 
-            var count = Math.Min(ChunkKeys, keys.Count - offset);
+            var count = Math.Min(ChunkKeys, front - offset);
             Dictionary<int, TResult>? answers = null;
             try
             {
-                answers = await Ask(Slice(keys, offset, count));
+                answers = await Ask(Slice(keys, order, offset, count));
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested && isBoundedFault(ex))
             {
@@ -121,7 +163,7 @@ internal static class BoundedPlanFetch
 
             if (answers is not null)
             {
-                Apply(answers, offset, apply, outcome);
+                Apply(answers, offset);
                 continue;
             }
 
@@ -129,10 +171,11 @@ internal static class BoundedPlanFetch
             {
                 /* A chunk of one key is already the single-key command. */
                 outcome.Skipped++;
+                later.Remember(identify(keys[order[offset]]));
                 continue;
             }
 
-            outcome.ChunkRetries++;
+            var retried = false;
             for (var index = offset; index < offset + count; index++)
             {
                 if (elapsed() >= budget)
@@ -141,38 +184,56 @@ internal static class BoundedPlanFetch
                     return outcome;
                 }
 
+                if (!retried)
+                {
+                    retried = true;
+                    outcome.ChunkRetries++;
+                }
+
                 try
                 {
-                    var single = await Ask(Slice(keys, index, 1));
-                    Apply(single, index, apply, outcome);
+                    Apply(await Ask(Slice(keys, order, index, 1)), index);
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested && isBoundedFault(ex))
                 {
                     outcome.Skipped++;
+                    later.Remember(identify(keys[order[index]]));
                 }
+            }
+        }
+
+        /* The keys an earlier run skipped, last and alone: one that waits again costs one lock timeout or command
+           timeout, and only out of the budget the other keys left. */
+        for (var index = front; index < order.Count; index++)
+        {
+            if (elapsed() >= budget)
+            {
+                outcome.NotAttempted += order.Count - index;
+                return outcome;
+            }
+
+            try
+            {
+                Apply(await Ask(Slice(keys, order, index, 1)), index);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested && isBoundedFault(ex))
+            {
+                outcome.Skipped++;
+                later.Remember(identify(keys[order[index]]));
             }
         }
 
         return outcome;
     }
 
-    private static List<TKey> Slice<TKey>(IReadOnlyList<TKey> keys, int offset, int count)
+    private static List<TKey> Slice<TKey>(IReadOnlyList<TKey> keys, List<int> order, int offset, int count)
     {
         var slice = new List<TKey>(count);
         for (var index = offset; index < offset + count; index++)
         {
-            slice.Add(keys[index]);
+            slice.Add(keys[order[index]]);
         }
 
         return slice;
-    }
-
-    private static void Apply<TResult>(Dictionary<int, TResult> answers, int offset, Action<int, TResult> apply, Outcome outcome)
-    {
-        foreach (var (ord, answer) in answers)
-        {
-            apply(offset + ord, answer);
-            outcome.Answered++;
-        }
     }
 }
