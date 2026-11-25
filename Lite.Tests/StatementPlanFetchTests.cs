@@ -24,8 +24,8 @@ using Xunit;
 namespace Lite.Tests;
 
 /// <summary>
-/// #9195: a bad actor's live plan is fetched for its own statement. A plan handle names a whole batch, and one bad
-/// actor's batch held 136 statements and ten million characters, so the fetch asks the text DMV for the statement the
+/// #9195: a bad actor's live plan is fetched for its own statement. A plan handle names a whole batch, and a batch can
+/// hold many statements and megabytes of plan XML, so the fetch asks the text DMV for the statement the
 /// stored byte offsets locate and falls back to the batch DMV when the offsets are not known. These tests hold the
 /// command the fetcher sends: no connection is opened, and the command is read as it would be executed.
 /// </summary>

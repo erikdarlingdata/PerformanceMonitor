@@ -83,7 +83,7 @@ LIMIT 1";
         if (string.IsNullOrEmpty(planHandle)) return;
 
         // Fetch plan XML live from SQL Server: the bad actor's own statement when its offsets are known, because a batch
-        // plan can carry over a hundred statements and ten million characters (#9195).
+        // plan can carry many statements and megabytes of XML (#9195).
         var planXml = statementStartOffset is { } start && statementEndOffset is { } end
             ? await _planFetcher.FetchStatementPlanXmlAsync(context.ServerId, planHandle, start, end, context.CancellationToken)
             : await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
