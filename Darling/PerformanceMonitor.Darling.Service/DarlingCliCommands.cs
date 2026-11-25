@@ -3000,9 +3000,10 @@ public static partial class DarlingCliCommands
             output.WriteLine("This darling.json uses bring-your-own PostgreSQL (postgres.connectionString), so your own");
             output.WriteLine("PostgreSQL / reverse proxy governs network exposure — the wizard cannot open the endpoints here.");
 
+            /* #9571: a token alone is honored here, so only the fields this mode ignores make a block worth offering to remove. */
             var hasBlocks = (postgres.Network?.IsConfigured ?? false)
-                || (config.Mcp.Network?.IsConfigured ?? false)
-                || (config.Web.Network?.IsConfigured ?? false);
+                || (config.Mcp.Network?.ByoIgnoredFields.Count > 0)
+                || (config.Web.Network?.ByoIgnoredFields.Count > 0);
             if (hasBlocks && AskYesNo(input, output, "A network block is present but IGNORED in this mode. Remove it from darling.json?", defaultYes: false))
             {
                 return await DisableExposureAsync(resolvedPath, originalText, input, output, error, cancellationToken);

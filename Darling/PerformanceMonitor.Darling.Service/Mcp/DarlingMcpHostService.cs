@@ -2428,7 +2428,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             network?.AllowFrom,
             tokenPresent: mcp.HasNamedTokens || (network is not null
                 && (!string.IsNullOrWhiteSpace(network.EncryptedToken) || !string.IsNullOrWhiteSpace(network.Token))),
-            networkConfigured: network is { IsConfigured: true },
+            /* #9571: a token alone is honored in bring-your-own mode, so only the fields that mode ignores count here. */
+            networkConfigured: network is { ByoIgnoredFields.Count: > 0 },
             managed: managed,
             /* #1804: tests pass this explicitly; the running host takes the ambient container marker. */
             inContainer: inContainer ?? DarlingHostBinding.IsRunningInContainer);
@@ -2580,10 +2581,13 @@ public sealed class DarlingMcpHostService : BackgroundService
                 break;
 
             case McpBindReason.ManagedModeRequired:
+                /* #9571: name the fields that are ignored. A token alone never lands here. */
+                var ignored = mcp.Network?.ByoIgnoredFields ?? [];
                 _logger.Log(level.Value,
-                    "mcp.network.* is set but postgres.managed = false. MCP network exposure is available only with the bundled store " +
-                    "(postgres.managed = true) or the container distribution, so listen and allowFrom are ignored. " +
-                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.");
+                    "{Fields} set but postgres.managed = false. MCP network exposure is available only with the bundled store " +
+                    "(postgres.managed = true) or the container distribution, so the network fields are ignored. " +
+                    "Use your own reverse proxy to expose it. Binding loopback-only. A token in the block (mcp.network.encryptedToken / token) still gates the loopback listener.",
+                    string.Join(", ", ignored.Select(f => "mcp.network." + f)) + (ignored.Count == 1 ? " is" : " are"));
                 break;
 
             default:
