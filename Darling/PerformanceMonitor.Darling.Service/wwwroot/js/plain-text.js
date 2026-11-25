@@ -20,7 +20,9 @@
     this file keeps no tool names. A copy of the page's scripts with no such file (a test harness that runs this module from the js
     folder) has no tool names, and the tool-name rules below then rewrite nothing. */
 const REGISTERED_TOOL_NAMES = await import("./mcp-tool-names.js").then((m) => m.MCP_REGISTERED_TOOL_NAMES, (e) => {
-  if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+  /* A file that is not there under Node (ERR_MODULE_NOT_FOUND) is that harness, and stays quiet. Every other failure warns,
+     a browser's failed load among them: it is a TypeError with no such code. */
+  if (!(e && e.code === "ERR_MODULE_NOT_FOUND") && typeof console !== "undefined" && console && typeof console.warn === "function") {
     console.warn("plain-text.js could not load /js/mcp-tool-names.js, so MCP tool names are not rewritten: " + (e && e.message ? e.message : String(e)));
   }
   return [];
