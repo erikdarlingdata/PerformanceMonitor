@@ -23,8 +23,8 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #9523: an AWS-API collector run books its store calls as storage time and the rest of the run, which is the AWS
-/// calls, as the fetch. Before, the whole run was storage time and the SQL time was a literal 0, so a store read as
-/// slow when the time was spent waiting on AWS.
+/// calls, as the fetch. A run booked whole as storage time reads as a slow store when the time is spent waiting on
+/// AWS.
 ///
 /// <para><b>No timing.</b> The ingestors read their store time from a tick source the test owns
 /// (<c>StoreClock</c>). The fake RDS client moves it by a stated amount inside each AWS call and the row writer
@@ -230,7 +230,7 @@ public sealed class RdsStoreTimeBookingTests
 
     /// <summary>
     /// The runner's booking: the store time is storage time, the rest of the run is the fetch, and the two add up to
-    /// the run. A 740 ms cycle whose store calls took 40 ms was booked 0 and 740 before.
+    /// the run. A 740 ms cycle whose store calls take 40 ms books 700 ms of fetch and 40 ms of storage.
     /// </summary>
     [Theory]
     [InlineData(740, 40, 700, 40)]
