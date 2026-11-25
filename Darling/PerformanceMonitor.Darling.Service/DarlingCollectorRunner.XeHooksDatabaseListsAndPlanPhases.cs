@@ -631,7 +631,13 @@ public sealed partial class DarlingCollectorRunner
                     using var planReader = await command.ExecuteReaderAsync(token);
                     /* #4348: one filter session per fetch call; the digest below is taken from the FILTERED plan. */
                     var fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), token, unjudged);
-                    return fetched.ToDictionary(f => f.Key, f => (Plan: f.Value, Unjudged: unjudged.Contains(f.Key)));
+                    var answers = new Dictionary<int, ((string? PlanXml, long? Bytes) Plan, bool Unjudged)>(fetched.Count);
+                    foreach (var (ord, plan) in fetched)
+                    {
+                        answers[ord] = (plan, unjudged.Contains(ord));
+                    }
+
+                    return answers;
                 },
                 (ord, fetched) =>
                 {
@@ -886,6 +892,21 @@ public sealed partial class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// #5158: records one deferred fetch on the context, then renders the run's measurements FROM the context, so the
+    /// stamp is the single source and the collection_log note only reads it. <c>PerItemPlanFetchMs</c> is "inside
+    /// <c>sql:</c>, not drain"; a procedure_stats change that shares these names will stamp the same fields.
+    /// </summary>
+    internal static void StampPlanFetch(CollectorContext context, int renderedRows, long renderedBytes, long fetchMs)
+    {
+        context.PerItemPlanRenderedRows = renderedRows;
+        context.PerItemPlanRenderedBytes = renderedBytes;
+        context.PerItemPlanFetchMs = fetchMs;
+        context.Measure("plans_rendered", context.PerItemPlanRenderedRows);
+        context.Measure("plans_rendered_bytes", context.PerItemPlanRenderedBytes);
+        context.Measure("plan_fetch_ms", context.PerItemPlanFetchMs);
+    }
+
+    /// <summary>
     /// #9535: whether a plan fetch command ended in a way the bounded fetch retries or skips: the lock timeout it set
     /// (error 1222) or its own command timeout. Anything else is a failure of the phase.
     /// </summary>
@@ -954,21 +975,6 @@ public sealed partial class DarlingCollectorRunner
         _logger?.LogWarning(
             "{Collector} on '{Server}': the plan fetch skipped {Skipped} plan(s) that waited on a lock or timed out, and left {NotAttempted} plan(s) unasked when its {Budget} budget was spent. Their rows ship without plans and the plans are fetched again next cycle (#9535).",
             collector, server.Config.DisplayName, bounds.Skipped, bounds.NotAttempted, EnumeratedCollectorDriver.DescribeBudget(PlanFetchBudgetSpan));
-    }
-
-    /// <summary>
-    /// #5158: records one deferred fetch on the context, then renders the run's measurements FROM the context, so the
-    /// stamp is the single source and the collection_log note only reads it. <c>PerItemPlanFetchMs</c> is "inside
-    /// <c>sql:</c>, not drain"; a procedure_stats change that shares these names will stamp the same fields.
-    /// </summary>
-    internal static void StampPlanFetch(CollectorContext context, int renderedRows, long renderedBytes, long fetchMs)
-    {
-        context.PerItemPlanRenderedRows = renderedRows;
-        context.PerItemPlanRenderedBytes = renderedBytes;
-        context.PerItemPlanFetchMs = fetchMs;
-        context.Measure("plans_rendered", context.PerItemPlanRenderedRows);
-        context.Measure("plans_rendered_bytes", context.PerItemPlanRenderedBytes);
-        context.Measure("plan_fetch_ms", context.PerItemPlanFetchMs);
     }
 
     /// <summary>
@@ -1240,7 +1246,13 @@ public sealed partial class DarlingCollectorRunner
                                 using var command = CreateCollectorCommand(provider, query, targetConnection, BoundedPlanFetch.CommandTimeoutSeconds);
                                 using var planReader = await command.ExecuteReaderAsync(chunkToken);
                                 var fetched = await QueryStatsCollector.ReadPlanFetchAsync(planReader, context.BeginStatementScrub(), chunkToken, unjudged);
-                                return fetched.ToDictionary(f => f.Key, f => (Plan: f.Value, Unjudged: unjudged.Contains(f.Key)));
+                                var chunkAnswers = new Dictionary<int, ((string? PlanXml, long? Bytes) Plan, bool Unjudged)>(fetched.Count);
+                                foreach (var (ord, plan) in fetched)
+                                {
+                                    chunkAnswers[ord] = (plan, unjudged.Contains(ord));
+                                }
+
+                                return chunkAnswers;
                             },
                             (ord, fetched) =>
                             {
