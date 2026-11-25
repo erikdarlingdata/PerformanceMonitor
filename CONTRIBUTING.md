@@ -367,16 +367,18 @@ Collector queries specifically:
 - **`OPTION(RECOMPILE)` on collector queries.** These run with parameters whose selectivity
   varies enormously between a first-run catch-up window and a steady-state minute, and a plan
   cached from one is wrong for the other. A statement added to an existing batch needs its own
-  hint — one on a neighbouring statement does not cover it.
-  One narrow exception (#9539). A statement that takes no parameters, and whose inputs are
-  sized by the server's configuration (its availability groups, its databases and files), may
-  drop the hint. It may do so only when a lab run on two engine versions shows less CPU without
-  the hint at idle and under load, with the same rows, and a plan compiled at idle and reused
-  under load still costs less than the hinted statement. The comment at the statement carries
-  those numbers. The statements that use it are the `ag_replica_states` and
-  `ag_database_replica_states` staging statements and the `file_io_stats` text with no
-  excluded databases. A statement that takes a parameter, or reads rows that grow with blocking
-  or load (waiting tasks, blocked sessions, the plan cache), keeps the hint.
+  hint. One on a neighbouring statement does not cover it.
+  One narrow exception (#9539): some statements can drop the hint. Such a statement takes no
+  parameters, and the server's own setup (its availability groups, databases and files) sets
+  how many rows it reads. A lab run on two engine versions must prove the change. Without the
+  hint, the statement uses less CPU at idle and under load, and returns the same rows. A plan
+  compiled at idle and then reused under load must also cost less than the hinted statement.
+  The comment at the statement gives those numbers.
+
+  Today the exception covers the `ag_replica_states` and `ag_database_replica_states` staging
+  statements, and the `file_io_stats` statement used when no databases are excluded. A
+  statement that takes a parameter keeps the hint. So does a statement that reads rows that
+  grow with blocking or load (waiting tasks, blocked sessions, the plan cache).
 - **Comments explain WHY, at length.** This codebase's comments carry measurements, issue
   numbers, and the failure the line prevents. A comment restating the code is noise; one
   recording "this threshold was 300s and the fleet's median gap is 299s, so it discarded half
