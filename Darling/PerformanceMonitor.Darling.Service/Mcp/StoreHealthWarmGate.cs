@@ -35,6 +35,9 @@ public sealed class StoreHealthWarmGate
     /// <summary>The store's migrations are done: every pass waiting starts, and a host that asks later starts at once.</summary>
     public void MarkStoreReady() => _ready.TrySetResult();
 
+    /// <summary>Whether <see cref="MarkStoreReady"/> has been called: the store's migrations are done (#9577: the MCP host holds its tool calls until then).</summary>
+    public bool IsStoreReady => _ready.Task.IsCompleted;
+
     /// <summary>
     /// Takes one pass of every part into <see cref="DarlingStoreTableHealthCache.For"/> of <paramref name="source"/> once the store is
     /// ready, in the background. A test hands in <paramref name="cache"/> over reads it counts. A failed read is logged as a warning (once for each failure) and never stops the host. The returned task ends

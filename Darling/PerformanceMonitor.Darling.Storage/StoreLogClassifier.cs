@@ -398,6 +398,13 @@ public static class StoreLogClassifier
         new("shutdown_in_progress", Fatal, MatchKind.StartsWith, "the database system is shutting down", false,
             "a client reached the store while it was stopping - every service restart writes it, expected"),
 
+        /* EXCLUDING (#9577) - the startup twin of the shutdown line above: a client that connects while the store is
+           starting (recovery, or the first seconds after a restart) reads this FATAL. Every managed store restart
+           writes it, once for each connection attempt made before the store accepts them, so it is counted under its
+           own class rather than left in `unclassified`. FATAL-scoped and anchored at the start, like its twin. */
+        new("startup_in_progress", Fatal, MatchKind.StartsWith, "the database system is starting up", false,
+            "a client reached the store while it was starting - every managed store restart writes it, expected"),
+
         /* EXCLUDING (#9515) - TimescaleDB's WARNING when a hypertable is created on a `timestamp without time zone`
            column. The store keeps UTC in plain `timestamp` columns on purpose, so the HINT that follows (use TIMESTAMPTZ)
            does not apply, and every migration that creates a hypertable writes the pair once per time column. The HINT
