@@ -638,6 +638,12 @@ public sealed class CollectorContext
     public bool DeferTextFetch { get; init; }
 
     /// <summary>
+    /// #9533: the read watermark <c>QueryStatsCollector.BuildQuery</c> took for this run (null when it took none), left for the same
+    /// run's read to judge against the server's own clock and to refresh. Set by the definition, once per query it builds.
+    /// </summary>
+    internal ReadWatermark? ReadWatermarkTaken { get; set; }
+
+    /// <summary>
     /// #5158: when true, <c>procedure_stats</c> appends the three plan-identity columns (<c>plan_statement_count</c>,
     /// <c>plan_last_statement_compile</c>, <c>plan_generation_sum</c>) to its SELECT, so a host can recognize the
     /// plans it holds. With <see cref="CapturePlanXml"/> on and <see cref="DeferPlanXmlFetch"/> off they follow the

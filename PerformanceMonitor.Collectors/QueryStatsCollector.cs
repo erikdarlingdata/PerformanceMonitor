@@ -200,8 +200,13 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     /// which is the order the deferred plan fetch spends its <see cref="MaxPlansPerRun"/> in. A row kept only by executions
     /// or reads sits at its elapsed position.</para>
     /// </summary>
-    internal static List<Row> SkipIdleAndRank(List<Row> fetched, CollectorContext context)
+    internal static List<Row> SkipIdleAndRank(List<Row> fetched, CollectorContext context, DateTime? serverNow = null)
     {
+        /* #9533: the watermark this run's query was built with, judged below against the server's own clock. */
+        var taken = context.ReadWatermarkTaken;
+        context.ReadWatermarkTaken = null;
+        var scope = WatermarkScope;
+
         /* #7419: the loop below advances every candidate's baselines, stored or not. Capture them first, so a host that ends
            the run before the rows are stored (the item budget fires in the text or plan fetch, the store cannot be reached,
            the write fails before it starts) rolls them back and the next run's delta spans both intervals. */
@@ -240,7 +245,7 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
         }
 
         /* The order the plan fetch spends its slots in. A total order, so the same input is written the same way. */
-        var kept = new QueryStatsRows(snapshot);
+        var kept = new QueryStatsRows(snapshot, context, scope);
         kept.AddRange(candidates
             .Where(keep.Contains)
             .OrderByDescending(c => c.Elapsed)
@@ -249,7 +254,64 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
             .ThenBy(c => c.Row.StatementEndOffset)
             .ThenBy(c => c.Row.SqlHandle, StringComparer.Ordinal)
             .Select(c => c.Row));
+
+        KeepWatermarkState(fetched, context, scope, taken, serverNow);
         return kept;
+    }
+
+    /// <summary>
+    /// #9533: after every candidate's baseline has advanced, arms the next read's watermark and keeps the baselines of the keys
+    /// this read did not return as fresh as an idle read would have left them.
+    ///
+    /// <para>The next watermark is this read's own server clock minus <see cref="WatermarkMarginSeconds"/>. A read that returned no
+    /// rows has no clock, advanced nothing, and hands back the watermark it was given, so a quiet server does not alternate between
+    /// narrow and whole-window reads. A rollback (<see cref="QueryStatsRows.RollBackBaselines"/>) clears what is armed here.</para>
+    ///
+    /// <para>The advance runs only when the server accepted the watermark (the same BETWEEN the statement applies, against the clock
+    /// the read returned) and the read cannot have been cut by the candidate cap. Before the watermark, such a key came back idle
+    /// and its baseline timestamp moved with every run, which is what keeps its <c>sample_interval_seconds</c> at one interval.</para>
+    /// </summary>
+    private static void KeepWatermarkState(
+        List<Row> fetched, CollectorContext context, string scope, ReadWatermark? taken, DateTime? serverNow)
+    {
+        if (context.Target.IsAzureSqlDb)
+        {
+            /* #9533: an Azure SQL Database target takes no watermark and arms none, so there is nothing to advance or arm. */
+            return;
+        }
+
+        var returned = new Dictionary<string, DateTime>(fetched.Count);
+        foreach (var row in fetched)
+        {
+            if (row.LastExecutionTime is { } lastExecution)
+            {
+                returned[DeltaKeyOf(row)] = lastExecution;
+            }
+        }
+
+        var accepted = taken is { } used && serverNow is { } now
+            && used.ChangedSince <= now && used.ChangedSince >= now.AddSeconds(-used.MaxAgeSeconds);
+        context.Deltas.AdvanceUnreturnedBaselines(
+            context.ServerId, scope, BaselineGroups, returned, serverNow?.AddMinutes(-10),
+            accepted && fetched.Count < CapBoundRowThreshold, context.CollectionTime);
+
+        if (serverNow is { } clock)
+        {
+            context.Deltas.ArmReadWatermark(
+                context.ServerId, scope, clock.AddSeconds(-WatermarkMarginSeconds), context.CollectionTime);
+        }
+        else if (fetched.Count == 0 && taken is { } prior)
+        {
+            /* #9533: a narrow read that returned no rows has no server_now, but it still proves the keys it did not return idle.
+               If the server accepted the watermark, nothing completed since it. If it fell back to the whole ten-minute window
+               and still returned nothing, no key ran in the last ten minutes. Either way every key's values are unchanged, the
+               same as when an idle row came back, so advance them against the server clock estimated from the prior arm. */
+            var estimatedNow = prior.ChangedSince.AddSeconds(WatermarkMarginSeconds)
+                + (context.CollectionTime - prior.ArmedAt);
+            context.Deltas.AdvanceUnreturnedBaselines(
+                context.ServerId, scope, BaselineGroups, returned, estimatedNow.AddMinutes(-10), true, context.CollectionTime);
+            context.Deltas.ArmReadWatermark(context.ServerId, scope, prior.ChangedSince, prior.ArmedAt);
+        }
     }
 
     private static readonly string[] BaselineGroups =
@@ -259,14 +321,28 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     private sealed class QueryStatsRows : List<Row>, IBaselineRollback
     {
         private IDeltaBaselineSnapshot? _snapshot;
+        private readonly ICollectorDeltaCalculator _deltas;
+        private readonly int _serverId;
+        private readonly string _scope;
+        private readonly DateTime _collectionTime;
 
-        public QueryStatsRows(IDeltaBaselineSnapshot? snapshot) => _snapshot = snapshot;
+        public QueryStatsRows(IDeltaBaselineSnapshot? snapshot, CollectorContext context, string scope)
+        {
+            _snapshot = snapshot;
+            _deltas = context.Deltas;
+            _serverId = context.ServerId;
+            _scope = scope;
+            _collectionTime = context.CollectionTime;
+        }
 
         public void RollBackBaselines()
         {
             var snapshot = _snapshot;
             _snapshot = null;
             snapshot?.Restore();
+
+            /* #9533: the watermark this read armed describes baselines that are now back where they were. The next run reads whole. */
+            _deltas.ClearReadWatermark(_serverId, _scope, _collectionTime);
         }
     }
 
@@ -488,6 +564,42 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
     /// </summary>
     public const int PlansByWeight = MaxPlansPerRun - PlansByRecency;
 
+    /* #9533: "completed since the last successful read", inside the derived table, after the 10-minute predicate. The DMV's
+       last_execution_time is when the last execution STARTED, and the counters move when it COMPLETES, so the test is on
+       the completion time (start plus the last elapsed seconds, plus one). A plain last_execution_time test lost a 12 s
+       statement that began before the previous read and ended after it. @changed_since is the previous read's own server
+       clock (server_now) minus two seconds, so it is on the server's clock and not the host's. @max_age_seconds is the
+       host-measured gap since that read plus a margin. A NULL @changed_since, one in the future, or one older than
+       @max_age_seconds (a restart, a failed run, a gap, a clock step) reads today's 10-minute window in the same statement.
+       The host's idle filter stays the authority: a row inside the two-second margin comes back idle and is dropped. */
+    private const string ReadWatermarkPredicate = @"
+    AND   DATEADD(SECOND, CONVERT(integer, qs.last_elapsed_time / 1000000) + 1, qs.last_execution_time) >=
+          CASE WHEN @changed_since BETWEEN DATEADD(SECOND, -@max_age_seconds, GETDATE()) AND GETDATE()
+               THEN @changed_since ELSE DATEADD(MINUTE, -10, GETDATE()) END";
+
+    /// <summary>
+    /// #9533: the ordinal <c>server_now</c> sits at, the last column of the select list, after the plan columns when the main query
+    /// carries them. The read takes it from the rows, so a reader without the column (a fake) reads no server clock.
+    /// </summary>
+    private static int ServerNowOrdinal(bool inlinePlan) => inlinePlan ? 46 : 44;
+
+    /// <summary>
+    /// #9533: the key a run's read watermark and activity record are kept under: the delta family's own name. An Azure SQL Database
+    /// target keeps no watermark, because both hosts build query_stats' statement once before the per-database loop, when no
+    /// database is current, so a per-database scope would be armed under one name and taken under another.
+    /// </summary>
+    private const string WatermarkScope = ExecGroup;
+
+    /// <summary>
+    /// #9533: a read that returned at least this many rows may have filled <see cref="MaxCandidateRows"/> before the self-filter
+    /// dropped the collector's own statements, so the keys it did not return may have changed and been cut by the cap. The
+    /// baselines of those keys must not be advanced as if they had come back idle.
+    /// </summary>
+    internal const int CapBoundRowThreshold = MaxCandidateRows - 100;
+
+    /// <summary>#9533: the server's clock, minus this, is the next read's watermark. Covers a statement that completes as the read starts.</summary>
+    internal const int WatermarkMarginSeconds = 2;
+
     /* #1959: rank on the CHEAP DMV columns inside the derived table FIRST, and run the text apply, the
        NOT LIKE self-filter, and the (Darling-only) plan-XML render against the survivors ONLY. The optimizer
        does not defer the applies past the TOP on its own - a field plan showed dm_exec_text_query_plan
@@ -505,7 +617,8 @@ public sealed class QueryStatsCollector : CollectorDefinitionBase<QueryStatsColl
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */
-    database_name = qs.database_name," + SelectColumnsText + @"/*PLAN_SELECT*/
+    database_name = qs.database_name," + SelectColumnsText + @"/*PLAN_SELECT*/,
+    server_now = GETDATE()
 FROM
 /*RANK_OPEN*/(
     SELECT TOP (" + MaxCandidateRows + @")
@@ -522,7 +635,7 @@ FROM
     INNER JOIN sys.databases AS d
       ON pa.dbid = d.database_id
     WHERE pa.dbid NOT IN (1, 2, 3, 4, 32761, 32767, ISNULL(DB_ID(N'PerformanceMonitor'), 0))
-    AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
+    AND   qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())" + ReadWatermarkPredicate + @"
     /*EXCLUSION_FILTER*/
     ORDER BY
         qs.last_execution_time DESC,
@@ -539,13 +652,14 @@ OPTION(RECOMPILE);";
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorLite */
-    database_name = DB_NAME()," + SelectColumnsText + @"/*PLAN_SELECT*/
+    database_name = DB_NAME()," + SelectColumnsText + @"/*PLAN_SELECT*/,
+    server_now = GETDATE()
 FROM
 /*RANK_OPEN*/(
     SELECT TOP (" + MaxCandidateRows + @")
         qs.*
     FROM sys.dm_exec_query_stats AS qs
-    WHERE qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())
+    WHERE qs.last_execution_time >= DATEADD(MINUTE, -10, GETDATE())" + ReadWatermarkPredicate + @"
     ORDER BY
         qs.last_execution_time DESC,
         qs.total_elapsed_time DESC
@@ -966,13 +1080,26 @@ OPTION(RECOMPILE);";
         var textApply = inlinePlan ? InlineTextApplyFragment : PlainTextApplyFragment;
         var rankOpen = inlinePlan ? RankOpenFragment : "";
 
+        /* #9533: the previous successful read's watermark, taken (and so forgotten) here, so a run that fails before its read
+           arms a new one finds none next time. The parameters are always present, NULL when there is no watermark. */
+        var taken = context.Target.IsAzureSqlDb
+            ? null
+            : context.Deltas.TakeReadWatermark(context.ServerId, WatermarkScope, context.CollectionTime);
+        context.ReadWatermarkTaken = taken;
+        var watermarkParameters = new[]
+        {
+            new CollectorParameter("@changed_since", taken?.ChangedSince, CollectorParameterType.DateTime2),
+            new CollectorParameter("@max_age_seconds", taken?.MaxAgeSeconds, CollectorParameterType.Int32),
+        };
+
         if (context.Target.IsAzureSqlDb)
         {
             return new CollectorQuery(
                 WithTextExpression(AzureSqlDbQueryText, context)
                     .Replace("/*RANK_OPEN*/", rankOpen, StringComparison.Ordinal)
                     .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
-                    .Replace("/*TEXT_APPLY*/", textApply, StringComparison.Ordinal));
+                    .Replace("/*TEXT_APPLY*/", textApply, StringComparison.Ordinal),
+                watermarkParameters);
         }
 
         var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
@@ -982,7 +1109,7 @@ OPTION(RECOMPILE);";
                 .Replace("/*RANK_OPEN*/", rankOpen, StringComparison.Ordinal)
                 .Replace("/*PLAN_SELECT*/", planSelect, StringComparison.Ordinal)
                 .Replace("/*TEXT_APPLY*/", textApply, StringComparison.Ordinal),
-            exclusionParameters);
+            exclusionParameters.Concat(watermarkParameters).ToList());
     }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -1065,8 +1192,23 @@ OPTION(RECOMPILE);";
            downstream (the writer, the plan digest, the dimension tables, Lite's store) ever holds the raw value. */
         var scrub = context.BeginStatementScrub();
 
+        /* #9533: the server's clock at the read, from the column every row carries (the same value on each row of one read, and the
+           earliest is taken so a stray difference only lowers the next watermark). A reader without the column reads no clock. */
+        var serverNowOrdinal = ServerNowOrdinal(inlinePlan);
+        var hasServerNow = reader.FieldCount > serverNowOrdinal;
+        DateTime? serverNow = null;
+
         while (await reader.ReadAsync(cancellationToken))
         {
+            if (hasServerNow && !reader.IsDBNull(serverNowOrdinal))
+            {
+                var rowNow = reader.GetDateTime(serverNowOrdinal);
+                if (serverNow is null || rowNow < serverNow)
+                {
+                    serverNow = rowNow;
+                }
+            }
+
             var row = new Row
             {
                 DatabaseName = reader.IsDBNull(0) ? null : reader.GetString(0),
@@ -1138,7 +1280,7 @@ OPTION(RECOMPILE);";
             rows.Add(row);
         }
 
-        return SkipIdleAndRank(rows, context);
+        return SkipIdleAndRank(rows, context, serverNow);
     }
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
