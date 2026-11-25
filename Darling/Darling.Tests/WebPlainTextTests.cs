@@ -28,13 +28,26 @@ namespace Darling.Tests;
 [Trait("Stage", "Guard")]
 public sealed class WebPlainTextTests
 {
+    /// <summary>A folder holding the shipped plain-text.js and the tool names module the service serves beside it
+    /// (<see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.ToolNamesModule"/>), so the harness runs the script with the
+    /// names the page gets.</summary>
+    private static readonly Lazy<string> ScriptsWithToolNames = new(() =>
+    {
+        var dir = System.IO.Directory.CreateTempSubdirectory("pm-plain-text-").FullName;
+        System.IO.File.Copy(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js", "plain-text.js"), System.IO.Path.Combine(dir, "plain-text.js"));
+        System.IO.File.WriteAllText(
+            System.IO.Path.Combine(dir, System.IO.Path.GetFileName(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.ToolNamesModulePath)),
+            PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.ToolNamesModule);
+        return dir;
+    }, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+
     private static string[] Run(string[] inputs, out string notCollectedLine) => RunDoc(inputs, out notCollectedLine).Out;
 
     private static (string[] Out, string[] Named, string[] Tools, string[] Labels, string[] Actions, string[] Counts) RunDoc(string[] inputs, out string notCollectedLine)
     {
         var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", "web-plain-text-harness.mjs"));
-        psi.ArgumentList.Add(PathTo("Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js"));
+        psi.ArgumentList.Add(ScriptsWithToolNames.Value);
         psi.Environment["HARNESS_INPUT"] = JsonSerializer.Serialize(inputs);
 
         Process proc;
@@ -189,6 +202,17 @@ public sealed class WebPlainTextTests
     {
         var o = Run(["latest run: shred_gated=1 events_read=0 report_xml_empty=0"], out _);
         Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[0]);
+    }
+
+    /// <summary>#9518: the count a blocked_process_report run leaves where the server's blocked process threshold is 0 says why the session was not read.</summary>
+    [Fact]
+    public void TheBlockedProcessThresholdOffCount_SaysWhyTheSessionWasNotRead()
+    {
+        var o = Run(["latest run: blocked_process_threshold_off=1 events_read=0 report_xml_empty=0 report_xml_unparsed=0 events_stored=0"], out _);
+        Assert.Equal(
+            "latest run: blocked process threshold off: 1 (blocked process reports are off because 'blocked process threshold (s)' is 0, so the session was not read), "
+            + "events read: 0, report xml empty: 0, report xml unparsed: 0, events stored: 0",
+            o[0]);
     }
 
     /* #6649: the left-out databases pointer, the baseline window sentence and the memory clerk note's four arms reached the page
@@ -562,10 +586,8 @@ public sealed class WebPlainTextTests
     {
         /* The get_ rule rewrites only these names, so the list must be the MCP tool registry's get_ tools, both ways. */
         var (_, _, tools, _, actions, _) = RunDoc([], out _);
-        if (tools.Length == 0)
-        {
-            return;
-        }
+        /* Node missing skips in RunDoc, so an empty list here means the names module did not load. */
+        Assert.NotEmpty(tools);
 
         var all = typeof(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpAlertTools).Assembly.GetTypes()
             .Where(t => t.GetCustomAttribute<ModelContextProtocol.Server.McpServerToolTypeAttribute>() is not null)
@@ -591,10 +613,8 @@ public sealed class WebPlainTextTests
     public void TheMeasurementLabelList_CoversEveryLabelTheCollectorsWrite()
     {
         var (_, _, tools, labels, _, _) = RunDoc([], out _);
-        if (tools.Length == 0)
-        {
-            return;
-        }
+        /* Node missing skips in RunDoc, so an empty list here means the names module did not load. */
+        Assert.NotEmpty(tools);
 
         var found = new System.Collections.Generic.SortedSet<string>(StringComparer.Ordinal);
         var dir = PathTo("PerformanceMonitor.Collectors");

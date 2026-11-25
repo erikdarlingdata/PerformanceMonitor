@@ -74,6 +74,10 @@ public sealed class StatementFilterDrillDownWarningsTests : IClassFixture<Shared
     {
         public Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken) =>
             Task.FromResult<string?>(planXml);
+
+        public Task<string?> FetchStatementPlanXmlAsync(
+            int serverId, string planHandle, int statementStartOffset, int statementEndOffset, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(planXml);
     }
 
     private static AnalysisContext Context() => new()

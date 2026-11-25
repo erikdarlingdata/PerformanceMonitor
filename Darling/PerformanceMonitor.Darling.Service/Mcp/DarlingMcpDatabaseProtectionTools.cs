@@ -108,6 +108,7 @@ public sealed class DarlingMcpDatabaseProtectionTools
     /// <summary>"3 days 4 hours", "5 hours 10 minutes" or "42 minutes": the two largest units.</summary>
     internal static string Describe(TimeSpan age) => DatabaseProtectionBands.Describe(age);
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_database_protection"), Description(
         "Per database, the last good CHECKDB, the last full backup and the last log backup, each with its age and a state word, and a server summary naming which databases are overdue on what. <<GUIDE>> " +
         "Thresholds: full backup 7 days, log backup 60 minutes, CHECKDB 14 days (shown in the answer). " +

@@ -276,6 +276,9 @@ public partial class RemoteCollectorService
             PerfmonCounterOverride = GetPerfmonCounterOverride(),
             /* #4961: the long-query definition reads this install's own session, so its context carries the name. */
             LongQuerySessionName = definition is LongQueryCompletionsCollector ? LongQuerySessionName() : null,
+            /* #9529: only query_snapshots reads it. The scheduled run reuses the plans it holds. The live snapshot
+               button builds its own command with no context, so it holds nothing and fetches under the cap. */
+            SnapshotPlanCache = _snapshotPlanCache,
         };
 
         /* Two accumulators, not one contiguous read-then-write pair: the enumeration and Azure paths now

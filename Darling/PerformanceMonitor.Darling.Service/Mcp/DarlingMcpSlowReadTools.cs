@@ -39,6 +39,7 @@ public sealed class DarlingMcpSlowReadTools
 
     private static readonly string[] s_surfaces = { "web", "compose", "mcp" };
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_slow_reads"), Description(
         "Gets the monitoring tool's OWN slow or failed reads: each with the arguments it was asked with, the source "
         + "that answered, and its slowest statements. Not a monitored SQL Server or PostgreSQL target. Newest first. "

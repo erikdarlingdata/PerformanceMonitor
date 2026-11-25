@@ -45,6 +45,7 @@ public sealed class DarlingMcpChangeWatchTools
         ChangeWatchStore.ResultAgentChange, ChangeWatchStore.ResultAutoPlanCorrection, ChangeWatchStore.ResultNoData,
     };
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_change_watches"), Description(
         "Lists a server's change watches, open and closed, newest first: a recorded change (a configuration, trace flag, plan or " +
         "extension change) opens a 60 minute watch, and at its end Darling compares wait time per second, average CPU and query " +

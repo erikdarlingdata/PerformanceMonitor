@@ -248,7 +248,9 @@ public sealed class ProcedureStatsAzureLoopPlanPhaseLiveTests
         protected override DbParameterCollection DbParameterCollection => throw new NotSupportedException();
         protected override DbTransaction? DbTransaction { get; set; }
         public override void Cancel() { }
-        public override int ExecuteNonQuery() => throw new NotSupportedException();
+        /* The plan phase's bounded fetch sends SET LOCK_TIMEOUT on the connection before and after its commands (#9535). */
+        public override int ExecuteNonQuery() =>
+            CommandText.StartsWith("SET LOCK_TIMEOUT", StringComparison.Ordinal) ? -1 : throw new NotSupportedException();
         public override object? ExecuteScalar() => throw new NotSupportedException();
         public override void Prepare() { }
         protected override DbParameter CreateDbParameter() => throw new NotSupportedException();

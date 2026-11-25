@@ -16,68 +16,26 @@
    Only a short list of known names is rewritten, never "every snake_case word": a PostgreSQL object such as
    pg_stat_statements is a real name the reader may need. */
 
+/** Every MCP tool the service registers. The service writes the list from its tool registry and serves it as mcp-tool-names.js, so
+    this file keeps no tool names. A copy of the page's scripts with no such file (a test harness that runs this module from the js
+    folder) has no tool names, and the tool-name rules below then rewrite nothing. */
+const REGISTERED_TOOL_NAMES = await import("./mcp-tool-names.js").then((m) => m.MCP_REGISTERED_TOOL_NAMES, (e) => {
+  /* A file that is not there under Node (ERR_MODULE_NOT_FOUND) is that harness, and stays quiet. Every other failure warns,
+     a browser's failed load among them: it is a TypeError with no such code. */
+  if (!(e && e.code === "ERR_MODULE_NOT_FOUND") && typeof console !== "undefined" && console && typeof console.warn === "function") {
+    console.warn("plain-text.js could not load /js/mcp-tool-names.js, so MCP tool names are not rewritten: " + (e && e.message ? e.message : String(e)));
+  }
+  return [];
+});
+
 /** Every MCP tool whose name starts with get_, the only names the tool-name rule rewrites. A user's own text can hold a
-    get_ word that is no tool (a procedure dbo.get_orders, a server get_prod), and it must reach the page as written.
-    WebPlainTextTests checks this list against the MCP tool registry both ways, so it cannot drift. */
-export const MCP_TOOL_NAMES = [
-  "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_agent_alerts", "get_alert_history", "get_alert_settings",
-  "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking", "get_blocking_plan_xml",
-  "get_blocking_stats", "get_blocking_trend", "get_change_watches", "get_change_windows", "get_known_patterns", "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collection_state", "get_collector_cost", "get_collector_schedules",
-  "get_collector_stall_probes", "get_collector_readiness", "get_agent_changes", "get_command_result", "get_compiles_after_evict", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",
-  "get_custom_alert_rule", "get_custom_view", "get_daily_health_report", "get_daily_summary", "get_daily_summary_range", "get_database_config",
-  "get_database_config_changes", "get_database_protection", "get_database_scoped_config", "get_database_state_expectations", "get_database_sizes", "get_deadlock_detail",
-  "get_deadlock_plan_xml", "get_deadlock_trend", "get_deadlocks", "get_default_trace_events", "get_file_io_stats",
-  "get_file_io_trend", "get_finops", "get_finops_inventory", "get_finops_recommendations", "get_fleet_overview", "get_forced_plans", "get_query_store_hints",
-  "get_health_parser_cpu_tasks", "get_health_parser_io_issues", "get_health_parser_memory_broker",
-  "get_health_parser_memory_conditions", "get_health_parser_memory_node_oom", "get_health_parser_scheduler_issues",
-  "get_health_parser_severe_errors", "get_health_parser_significant_waits", "get_health_parser_system_health",
-  "get_identity_capacity", "get_index_usage", "get_investigation_evidence", "get_investigation_reports", "get_job_history", "get_latch_stats", "get_load_by_caller", "get_lock_wait_trend", "get_long_query_completions",
-  "get_memory_clerks", "get_memory_grants", "get_memory_pressure_events", "get_memory_stats", "get_memory_trend",
-  "get_mute_rules", "get_notification_routes", "get_object_definition", "get_object_locking", "get_object_usage", "get_oversized_plan_backlog", "get_people",
-  "get_perfmon_stats", "get_perfmon_trend", "get_pg_autovacuum_health", "get_pg_blocking", "get_pg_buffer_usage",
-  "get_pg_column_stats", "get_pg_cpu_utilization", "get_pg_database_stats", "get_pg_database_trend",
-  "get_pg_deadlock_detail", "get_pg_deadlocks", "get_pg_extensions", "get_pg_index_bloat", "get_pg_index_usage",
-  "get_pg_io_stats", "get_pg_io_trend", "get_pg_kernel_stats", "get_pg_lock_stats", "get_pg_log_events",
-  "get_pg_logging_audit", "get_pg_plan_capture_readiness", "get_pg_plans", "get_pg_predicate_stats",
-  "get_pg_query_duration_trend", "get_pg_replication_slots", "get_pg_replication_stats", "get_pg_server_config",
-  "get_pg_server_config_changes", "get_pg_session_states", "get_pg_table_bloat", "get_pg_top_queries",
-  "get_pg_wait_sampling", "get_pg_wait_stats", "get_pg_wait_trend", "get_pg_wraparound_risk", "get_pg_write_stats",
-  "get_pg_xmin_horizon", "get_plan_cache_bloat", "get_plan_corrections", "get_plan_force_precheck", "get_plan_xml",
-  "get_procedure_duration_trend", "get_procedure_plan_xml", "get_pvs_stats", "get_query_duration_trend",
-  "get_query_fleet_summary", "get_query_heatmap", "get_query_pileups", "get_query_repro_script", "get_query_store_aborts", "get_query_store_clutter", "get_query_store_duration_trend",
-  "get_query_store_health", "get_query_store_plan_xml", "get_query_store_query_history",
-  "get_query_store_regressions", "get_query_store_top", "get_query_trend", "get_read_latency",
-  "get_resource_semaphore", "get_schema_changes", "get_resource_use_by_tag", "get_running_jobs", "get_server_actions", "get_server_config", "get_server_config_changes", "get_server_settings",
-  "get_server_properties", "get_server_summary", "get_server_trend", "get_session_stats", "get_slow_reads",
-  "get_service_starts", "get_spinlock_stats", "get_store_connections", "get_store_host", "get_store_log", "get_store_lock_waits", "get_store_checkpoints", "get_store_metrics", "get_store_table_health", "get_store_maintenance_readiness", "get_store_compression_health", "get_store_job_runs", "get_store_pass_steps", "get_store_query_history", "get_store_setting_changes",
-  "get_store_query_stats", "get_sweep_reports", "get_table_index_sizes", "get_tempdb_trend", "get_tool_guide",
-  "get_top_procedures_by_cpu", "get_top_queries_by_cpu", "get_trace_flag_changes", "get_trace_flags",
-  "get_wait_stats", "get_wait_trend", "get_wait_types", "get_waiting_tasks",
-];
+    get_ word that is no tool (a procedure dbo.get_orders, a server get_prod), and it must reach the page as written. */
+export const MCP_TOOL_NAMES = REGISTERED_TOOL_NAMES.filter((name) => /^get_/.test(name));
 const TOOL_NAME_SET = new Set(MCP_TOOL_NAMES);
 
 /** Every other MCP tool the service registers (the ones whose name does not start with get_): reads that act, and the write
-    tools. A message that names one tells a client what to call next; a web reader cannot call it. WebPlainTextTests checks
-    this list against the registry, like the get_ list above. */
-export const MCP_ACTION_TOOL_NAMES = [
-  "add_servers", "measure_store_table", "analyze_now", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
-  "analyze_server", "approve_investigation_note", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "call_tool", "claim_investigation_request",
-  "clear_change_window", "clear_quiet_window", "close_investigation_request", "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_known_pattern", "create_mute_rule",
-  "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",
-  "delete_custom_view", "delete_known_pattern", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
-  "declare_change_window", "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
-  "enable_collector", "enable_server", "evict_cached_plan", "find_database", "find_queries_by_text", "find_schema_objects", "find_tools", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
-  "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules",
-  "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_expired_mute_rules", "purge_now",
-  "create_plan_guide", "drop_plan_guide", "recompile_module",
-  "record_investigation_feedback", "reject_investigation_note", "reload_config", "remove_server", "remove_webhook_signing_key", "reset_collector_schedules", "restore_alert_history", "resume_collection", "run_collectors_now", "run_custom_view_panel",
-  "save_environment_profile", "send_daily_health_report_now", "set_agent_actions_enabled", "set_alert_threshold_override", "set_collector_databases", "set_collector_frequency", "set_collector_retention", "set_collector_run_at", "set_database_state_expected", "set_mute_rule_enabled",
-  "set_notification_route_enabled", "set_notification_route_fallback", "set_quiet_window", "set_server_action", "set_server_excluded_databases", "set_server_xe_session_databases",
-  "submit_investigation_report", "post_investigation_message", "test_connection", "test_custom_alert_rule", "test_query_tag_rule", "start_practice_request", "unassign_query_tag",
-  "unassign_server_tag", "undo_agent_change", "undo_plan_change", "unforce_query_store_plan", "unmute_analysis_finding", "update_alert_settings", "update_custom_alert_rule",
-  "update_custom_view", "update_known_pattern", "update_mute_rule", "update_notification_channels", "update_notification_route", "update_query_tag", "update_query_tag_rule",
-  "update_server_tag", "update_service_flags", "validate_custom_alert_rule", "validate_custom_view", "wait_for_investigation_requests", "write_investigation_note",
-];
+    tools. A message that names one tells a client what to call next, and a web reader cannot call it. */
+export const MCP_ACTION_TOOL_NAMES = REGISTERED_TOOL_NAMES.filter((name) => !/^get_/.test(name));
 const ACTION_TOOL_SET = new Set(MCP_ACTION_TOOL_NAMES);
 
 /** The page's own word for the place a read shows, keyed by tool. A message that tells a client to call one of these reads
@@ -113,13 +71,13 @@ const PAGE_FOR_TOOL = new Map(PAGE_FOR_TOOLS.flatMap(([page, tools]) => tools.ma
 /** The label=value measurement labels the collectors write (the CollectorMeasurement labels). A lone label=value pair is
     rewritten only when its label is one of these; WebPlainTextTests checks the list against the collectors' source. */
 export const MEASUREMENT_LABELS = [
-  "cap_buffers", "csv_records_discarded", "default_trace_off", "event_file_attempt", "event_file_buffer_cut", "event_file_error", "event_file_events", "event_file_fallback",
+  "blocked_process_threshold_off", "cap_buffers", "csv_records_discarded", "default_trace_off", "event_file_attempt", "event_file_buffer_cut", "event_file_error", "event_file_events", "event_file_fallback",
   "event_file_lookup_ms", "event_file_read_ms", "event_file_shred_ms", "event_file_wildcard",
   "events_read", "events_stored", "foreign_zone_lines_skipped", "forged_captures_skipped",
   "identity_epoch_changes", "job_history_identity_regressions", "job_history_identity_store_watermark",
-  "job_history_identity_target_row", "json_records_discarded", "log_bytes_skipped", "log_files_skipped_by_rotation",
+  "job_history_identity_target_row", "json_records_discarded", "live_plans_over_cap", "log_bytes_skipped", "log_files_skipped_by_rotation",
   "log_matches_limited", "log_resume_file_missing", "log_resume_file_recycled", "memory_dumps_new", "newest_visible_event_age_s",
-  "pool_buffers", "postmaster_epoch_changes", "raise_shaped_deadlocks_skipped", "relation_scan_skipped", "report_xml_empty", "report_xml_unparsed",
+  "plans_over_cap", "plans_reused", "plans_shared", "pool_buffers", "postmaster_epoch_changes", "raise_shaped_deadlocks_skipped", "relation_scan_skipped", "report_xml_empty", "report_xml_unparsed",
   "ring_buffer_events_hidden", "ring_buffer_events_limit", "ring_buffer_evicted", "ring_buffer_limit_below_setting",
   "ring_buffer_loss_at_least", "ring_buffer_loss_unknown", "ring_buffer_loss_window_s", "ring_buffer_memory_capped",
   "ring_buffer_truncated", "shred_gated", "statement_scrub_ms",
@@ -139,6 +97,8 @@ function toolWords(name) {
 /* #7670: what a count means, for the few a reader cannot work out from the label. The gate skips the XML read when the extended-events counter has not moved since the last run. */
 const COUNT_MEANINGS = {
   shred_gated: { 1: "no new events since the last run, so the XML was not read", 0: "the XML was read" },
+  /* #9518: SQL Server raises no blocked process report while the threshold is 0, so the run reads the setting and not the session. A setting somebody may have left at 0 on purpose, so this states it and asks for nothing. */
+  blocked_process_threshold_off: { 1: "blocked process reports are off because 'blocked process threshold (s)' is 0, so the session was not read" },
   relation_scan_skipped: { 1: "the pool is over the cap, so the per-relation scan was not run" },
 };
 

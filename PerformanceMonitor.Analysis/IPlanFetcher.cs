@@ -24,4 +24,15 @@ public interface IPlanFetcher
     /// under.</para>
     /// </summary>
     Task<string?> FetchPlanXmlAsync(int serverId, string planHandle, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Fetches the execution plan XML of ONE statement of the batch a plan_handle names (#9195), the statement the
+    /// byte offsets <paramref name="statementStartOffset"/> and <paramref name="statementEndOffset"/> locate in the
+    /// batch text (<c>sys.dm_exec_query_stats</c>'s own columns). <paramref name="statementEndOffset"/> of -1 means
+    /// "to the end of the batch" and is passed as it is. A batch plan can carry many statements and megabytes
+    /// of XML, so a caller that knows the statement asks for its plan alone.
+    /// Returns null if the plan is no longer in cache.
+    /// </summary>
+    Task<string?> FetchStatementPlanXmlAsync(
+        int serverId, string planHandle, int statementStartOffset, int statementEndOffset, CancellationToken cancellationToken);
 }

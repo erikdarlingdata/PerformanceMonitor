@@ -80,6 +80,7 @@ RETURNING old.capture_plans, old.query_store_backfill_enabled, old.query_store_t
           c.capture_plans, c.query_store_backfill_enabled, c.query_store_text_budget_mb, c.max_concurrent_sweeps, c.query_store_fetch_top_n,
           c.query_text_trigram_index_enabled, c.query_store_text_trigram_index_enabled";
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_service_flags"), Description(
         "PARTIAL update of the seven service-wide collection flags: the five the Viewer's Settings window saves, capture_plans (global plan capture), " +
         "query_store_backfill_enabled, query_store_text_budget_mb (4-256 MB), max_concurrent_sweeps (1-16) and query_store_fetch_top_n " +

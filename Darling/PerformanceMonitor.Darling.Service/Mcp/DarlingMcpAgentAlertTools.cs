@@ -37,6 +37,7 @@ public sealed class DarlingMcpAgentAlertTools
     /// <summary>msdb stores alert times in the monitored server's own clock, so they carry no zone and no Z.</summary>
     private static string? FormatServerLocal(DateTime? t) => t?.ToString("s", CultureInfo.InvariantCulture);
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_agent_alerts"), Description(
         "The SQL Server Agent alerts defined on an instance, with an instance status that names what they lack. <<GUIDE>> " +
         "instance_status is ok or gaps. gaps[] names each gap by code: missing_severity_alerts (severities 19 to 25 with no alert), " +

@@ -3202,13 +3202,12 @@ LIMIT 1";
            after a connection that dies at open. One honest total beats three precise zeros.
 
            WHICH SLOT each arm reads this into follows where the time was actually spent, not
-           convenience: an arm whose statement reached the target and was refused THERE passes it as
-           sqlMs, and an arm that never queried the target at all passes it as storageMs. The RDS/PI
-           authorization arms are the second kind, and take the accounting their own success paths
-           already use — see IngestRdsPlansAsync, IngestRdsDeadlocksAsync and IngestRdsCpuAsync, which
-           file an HTTPS round trip as storage time so that one target's sql_duration_ms cannot mean
-           something different from every other target's. duration_ms is sqlMs + storageMs either way,
-           so the wall clock is honest under both; only the decomposition differs. */
+           convenience: an arm whose fetch was refused, by the target or by the AWS API that reaches it,
+           passes it as sqlMs, and an arm that only read the store passes it as storageMs. The RDS/PI
+           refusal arms are the first kind, and take the accounting their own success paths use (#9523,
+           DarlingCollectorRunner.RdsRunPhases): the AWS calls are the fetch, and storage time is the
+           store's own. duration_ms is sqlMs + storageMs either way, so the wall clock is honest under
+           both; only the decomposition differs. */
         var runClock = System.Diagnostics.Stopwatch.StartNew();
 
         try
@@ -3569,7 +3568,7 @@ LIMIT 1";
             var roleNote = AwsRoleFaultNote(_logger, server.Config.DisplayName, collectorName, assume);
 
             await LogRunAsync(
-                server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, roleNote,
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, roleNote,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -3585,7 +3584,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName);
 
             await LogRunAsync(
-                server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds, ex.Message,
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }
@@ -3621,7 +3620,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName);
 
             await LogRunAsync(
-                server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0,
                 $"{ex.Message}. The MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: plan capture on managed PostgreSQL reads the server log through "
                 + "the RDS API, so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters, "
@@ -3640,7 +3639,7 @@ LIMIT 1";
                 server.Config.DisplayName, collectorName);
 
             await LogRunAsync(
-                server, runtime, collectorName, "PERMISSIONS", 0, 0, runClock.ElapsedMilliseconds,
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0,
                 $"{ex.Message}. The MONITORING HOST's IAM role lacks a grant this source needs, which is "
                 + "not a database grant: instance CPU on managed PostgreSQL reads AWS Performance Insights, "
                 + "so the role needs rds:DescribeDBInstances, rds:DescribeDBClusters and "
@@ -3671,20 +3670,14 @@ LIMIT 1";
                Both transports arrive here: the pg_read_file route throws out of the collector's ReadAsync,
                the RDS log-API route out of the ingestor's Extract.
 
-               That shared arrival is also why this is the ONE fault arm that records zeros rather than
-               runClock's wall clock. The slot rule at the stopwatch's declaration keys on whether the
-               target was queried, and the two transports answer that oppositely: pg_read_file IS a target
-               query and belongs in sqlMs, while the RDS log API is an HTTPS round trip that belongs in
-               storageMs. The exception carries only ObservedZone, so this catch cannot tell which one it
-               is, and either slot would be wrong for half the fleet. A zero here understates a duration;
-               a guessed slot would misattribute one, and this store's readers decompose sql vs storage
-               per target. Threading the transport onto PgLogTimezoneUnsupportedException is what would
-               let this arm join the rule. */
+               Both are the fetch under the slot rule at the stopwatch's declaration: pg_read_file is a
+               target query, and the RDS log API is the AWS call that reaches the target's log (#9523). So
+               the wall clock is sqlMs here whichever transport threw. */
             _logger.LogWarning("  [{Server}] {Collector} => PERMISSIONS: the server log is stamped '{Zone}', not UTC",
                 server.Config.DisplayName, collectorName, ex.ObservedZone);
 
             await LogRunAsync(
-                server, runtime, collectorName, "PERMISSIONS", 0, 0, 0, ex.Message,
+                server, runtime, collectorName, "PERMISSIONS", 0, runClock.ElapsedMilliseconds, 0, ex.Message,
                 fanout: null, phases: null, drain: null, fetchPhases: null, sweepPeerMaxMs: peerMaxAtDispatchMs, _logger, cancellationToken);
             return 0;
         }

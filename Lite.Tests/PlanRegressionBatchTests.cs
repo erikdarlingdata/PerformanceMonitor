@@ -187,8 +187,10 @@ WHERE r.q <= d.n";
         var collector = new DuckDbFactCollector(_duckDb) { PlanRegressionHoldTargetForTests = TimeSpan.Zero };
         collector.AfterPlanRegressionDatabaseReadForTests = () =>
         {
-            /* The 5 s budget the housekeeping writers use. */
-            using var write = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(5));
+            /* A long wait, as ArchiveSpanReadTests uses (#9564): the write lock is one lock for the whole test process, so another
+               class's InitializeAsync on a busy runner can hold it for more than 5 s. A read lock kept across batches still fails
+               this test: the same thread throws LockRecursionException, and another thread waits out the whole timeout. */
+            using var write = _duckDb.AcquireWriteLock(TimeSpan.FromMinutes(2));
             writes++;
         };
         var context = Context();

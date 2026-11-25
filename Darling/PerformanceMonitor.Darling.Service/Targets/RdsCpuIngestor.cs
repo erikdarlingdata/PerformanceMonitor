@@ -223,6 +223,12 @@ public sealed class RdsCpuIngestor
     private readonly ILogger? _logger;
     private readonly RdsEndpointVerifier _verifier;
 
+    /// <summary>
+    /// The tick source for the store time this ingestor reports on <see cref="RdsIngestOutcome.StoreMs"/> (#9523): null
+    /// is the process stopwatch. A test sets it so a duration is a stated number. Nothing in the service sets it.
+    /// </summary>
+    internal Func<long>? StoreClock { get; init; }
+
     public RdsCpuIngestor(
         NpgsqlDataSource postgres,
         Func<string, IAmazonRDS>? rdsClientFactory = null,
@@ -284,6 +290,9 @@ public sealed class RdsCpuIngestor
 
         List<PgCpuUtilizationCollector.Row> samples;
 
+        /* #9523: the watermark read and the COPY are this cycle's store time. The AWS calls around them are not. */
+        var store = new RdsStorePhase(StoreClock);
+
         try
         {
             /* #5452: a server with its own role reads under it from here on, host check included; a server with no role
@@ -301,7 +310,7 @@ public sealed class RdsCpuIngestor
 
             var dbiResourceId = await ResolveDbiResourceIdAsync(rds, instanceId, cancellationToken);
 
-            var watermark = await GetWatermarkAsync(serverId, cancellationToken);
+            var watermark = await store.TimeAsync(() => GetWatermarkAsync(serverId, cancellationToken));
             var now = DateTime.UtcNow;
             var startTime = watermark.HasValue && watermark.Value > now - LookbackWindow
                 ? watermark.Value
@@ -369,11 +378,12 @@ public sealed class RdsCpuIngestor
             /* READ, and it held nothing new. PI answered — the caller's "no new Performance Insights CPU
                samples this cycle" is a true statement here, which is exactly why the not-reached branch
                above must not share it. */
-            return RdsIngestOutcome.Read(0);
+            return RdsIngestOutcome.Read(0) with { StoreMs = store.ElapsedMs };
         }
 
-        return RdsIngestOutcome.Read(
-            await WriteAsync(serverId, storageName, samples, cancellationToken));
+        var written = await store.TimeAsync(() => WriteAsync(serverId, storageName, samples, cancellationToken));
+
+        return RdsIngestOutcome.Read(written) with { StoreMs = store.ElapsedMs };
     }
 
     /// <summary>

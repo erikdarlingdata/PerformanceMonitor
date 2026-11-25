@@ -38,6 +38,7 @@ public sealed class DarlingMcpWhoDroveItTools
 
     /* ───────────────────────── get_cpu_by_database ───────────────────────── */
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_cpu_by_database"), Description(
         "Ranks databases by CPU over a window ending at as_of, each with its share of the server total and its heaviest statement. " +
         "cpu_ms is the plan cache's per-statement CPU (query_stats deltas, as get_top_queries_by_cpu sums them) per database; share is of the CPU of EVERY database, not of the page. " +
@@ -188,6 +189,7 @@ public sealed class DarlingMcpWhoDroveItTools
     internal const int DefaultStatements = 3;
     internal const int MaxStatements = 10;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_load_by_caller"), Description(
         "Groups the active-query snapshots of a window ending at as_of by caller (host_name, program_name, login_name), ranked by CPU, with requests, CPU, elapsed time, shares of the window and top statements. " +
         "Each request counts once, at the largest CPU any capture saw. Shares are of the window, not of the page. login_name and host_name are masked by mcp.dataDetail. <<GUIDE>> " +
@@ -308,6 +310,7 @@ public sealed class DarlingMcpWhoDroveItTools
     /// <summary>How far either side of a pile-up the nearest DMV blocking snapshot may be, in seconds. The blocking snapshot collector runs about every 30 seconds, so two cycles.</summary>
     internal const int BlockingToleranceSeconds = 60;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_pileups"), Description(
         "Lists the capture times when min_sessions or more sessions ran the same query_hash at once, most sessions first, with the wait types at that capture and the head blocker from the DMV blocking snapshot NEAREST that time. " +
         "head_blocker comes from a separate collector, so it is the nearest snapshot within 60 seconds either side (blocking_snapshot_offset_seconds says how near); null with a note means no blocking was recorded near the capture. " +

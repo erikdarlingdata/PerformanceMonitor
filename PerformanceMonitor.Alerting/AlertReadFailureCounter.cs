@@ -206,6 +206,47 @@ public sealed class AlertReadFailureCounter
 
     private readonly Func<DateTime> _utcNow;
 
+    /// <summary>
+    /// One recent failed or retried read with the time it was recorded (#9549). The counts above keep one stamp per
+    /// bucket, the newest failure's, and a retry carries none, so they cannot say whether a read suffered inside a given
+    /// minute. Darling's Store Checkpointer Pressure self-alert asks exactly that of every checkpoint sync in the hour.
+    /// </summary>
+    /// <param name="AtUtc">When the failure or the retry was recorded, UTC: the moment the read (or its first attempt) ended.</param>
+    /// <param name="Read">The read's short constant name, as its call site gave it.</param>
+    /// <param name="ElapsedMs">How long the read ran before that moment, in milliseconds. Zero when the call site gave none.</param>
+    /// <param name="Retried">True for a read that crossed its deadline and was re-asked, false for one that failed and was swallowed.</param>
+    public readonly record struct RecentRead(DateTime AtUtc, string Read, long ElapsedMs, bool Retried);
+
+    /// <summary>How many recent reads are kept, the newest: the oldest is dropped when another arrives. In memory like
+    /// the counts, and for their reason.</summary>
+    public const int RecentReadCapacity = 1024;
+
+    private readonly Queue<RecentRead> _recentReads = new Queue<RecentRead>();
+    private readonly object _recentReadsGate = new object();
+
+    private void Remember(RecentRead read)
+    {
+        lock (_recentReadsGate)
+        {
+            if (_recentReads.Count == RecentReadCapacity)
+            {
+                _recentReads.Dequeue();
+            }
+
+            _recentReads.Enqueue(read);
+        }
+    }
+
+    /// <summary>The recent failed and retried reads, oldest first, across every server and the fleet-scoped
+    /// conditions. A copy, so a caller reads it without holding anything.</summary>
+    public IReadOnlyList<RecentRead> RecentReads()
+    {
+        lock (_recentReadsGate)
+        {
+            return _recentReads.ToArray();
+        }
+    }
+
     /// <summary>When this counter first counted. For <see cref="Shared"/> that is the first touch of the
     /// static — early in the host's startup, not the process's first instruction, which is why the
     /// surface reports the value rather than describing it.</summary>
@@ -299,6 +340,8 @@ public sealed class AlertReadFailureCounter
         Interlocked.Exchange(ref bucket.Newest, newest);
         Interlocked.Increment(ref _instanceReadFailures);
         Interlocked.Increment(ref bucket.ReadFailures);
+
+        Remember(new RecentRead(new DateTime(nowTicks, DateTimeKind.Utc), name, elapsed, Retried: false));
     }
 
     /// <summary>
@@ -322,7 +365,8 @@ public sealed class AlertReadFailureCounter
     /// recorded the working ones would understate the cost exactly during the episodes where the band was
     /// worst — the confident-zero shape this whole class exists to remove.</para>
     ///
-    /// <para><b>No stamp, no elapsed, and no newest-retry trio</b>, unlike every count above. Those exist
+    /// <para><b>No stamp, no elapsed, and no newest-retry trio on the reading</b>, unlike every count above (the time
+    /// and the elapsed are kept only in <see cref="RecentReads"/>, which no health surface renders). Those exist
     /// because a count of blind reads with nothing to date it cannot separate a healed episode from a live
     /// one (#3010's lesson). A retried read is not blind: the condition WAS judged on real evidence that
     /// arrived late, so there is no episode to attribute, and a trio here would invite exactly the reading
@@ -338,11 +382,16 @@ public sealed class AlertReadFailureCounter
     /// The same short CONSTANT name the failure call site uses for that read. Not currently rendered on
     /// any surface — the block publishes the retry COUNT and no newest-retry identity, for the reason
     /// above — and taken anyway so the producer cannot record a retry it could not name, which is how a
-    /// future per-read breakdown becomes possible without re-instrumenting fourteen sites.
+    /// future per-read breakdown becomes possible without re-instrumenting fourteen sites. It is kept, with the time,
+    /// in <see cref="RecentReads"/> (#9549).
     /// </param>
-    public void RecordRetriedRead(string? serverKey, string readName)
+    /// <param name="elapsedMilliseconds">
+    /// How long the first attempt ran before it crossed its deadline, in milliseconds (#9549). Kept with the retry in
+    /// <see cref="RecentReads"/>, which is the only place it is read. A negative value is clamped to zero.
+    /// </param>
+    public void RecordRetriedRead(string? serverKey, string readName, long elapsedMilliseconds = 0)
     {
-        _ = readName;
+        var name = string.IsNullOrWhiteSpace(readName) ? "unnamed read" : readName;
 
         var bucket = string.IsNullOrWhiteSpace(serverKey) ? _fleet : Bucket(serverKey!);
 
@@ -352,6 +401,8 @@ public sealed class AlertReadFailureCounter
            statements rather than four. */
         Interlocked.Increment(ref _instanceRetriedReads);
         Interlocked.Increment(ref bucket.RetriedReads);
+
+        Remember(new RecentRead(_utcNow(), name, elapsedMilliseconds < 0 ? 0 : elapsedMilliseconds, Retried: true));
     }
 
     /// <summary>

@@ -50,6 +50,7 @@ public sealed class WebRouteStatementCensusTests
         "Hosting/DarlingHealthHostService.cs",
         "Hosting/DarlingMetricsHostService.cs",
         "Mcp/DarlingMcpHostService.cs",
+        "Mcp/DarlingWebHostService.cs",
     };
 
     /// <summary>The routes that put no tool string on the wire, by the route argument as written in the source.</summary>
@@ -103,6 +104,7 @@ public sealed class WebRouteStatementCensusTests
         ["MapMcp()"] = "the MCP transport: every tool result passes the MCP output filter (pinned by the MCP filter tests)",
         ["MapMcp(\"/core\")"] = "the MCP transport, core profile: every tool result passes the MCP output filter",
         ["MapMcp(\"/lean\")"] = "the MCP transport, lean profile: every tool result, including one run through call_tool, passes the MCP output filter",
+        ["DarlingMcpToolTypes.ToolNamesModulePath"] = "the registered MCP tool names as a static script module, built from the tool registry at startup: no store read, no collected text (#9490)",
     };
 
     /// <summary>

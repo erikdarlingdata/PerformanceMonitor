@@ -48,6 +48,7 @@ public sealed class DarlingMcpAgTools
     /// </summary>
     public const int DefaultGroupLimit = 11;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_ag_health"), Description(
         "AG health fleet-wide from each server's latest collection: replica role/state and per-database " +
         "secondary state (queue KB, rate KB/s, lag sec, drain min, suspended+why). One row per REPLICA's view: " +

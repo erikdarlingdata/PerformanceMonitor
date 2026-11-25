@@ -1925,16 +1925,22 @@ LIMIT $1";
     /// <param name="PostmasterStartTime">When the postmaster that produced the newest row started, UTC; null when the
     /// newest row predates V139 or there is no row.</param>
     /// <param name="Timed">(V140, #4037) TIMED checkpoints inside the interval. Null when either sample predates
-    /// the rung — <see cref="IsPressure"/> then has no denominator for the average arm and states no pressure
-    /// from sync alone, never falling back to the old summed-sync rule.</param>
+    /// the rung — <see cref="AverageSyncMsPerCheckpoint"/> then has no denominator and is null, never a figure
+    /// guessed from the requested count alone.</param>
     /// <param name="CumulativeTimed">The newest row's raw timed-checkpoint counter. Null when Absent or the row predates V140.</param>
     /// <param name="LongestSyncMs">(V156, #4834) The longest single checkpoint sync inside the interval, in milliseconds,
     /// as the worker's once-a-minute sample found it and the sweep stored it on the NEWER row. Null unless
     /// <see cref="CheckpointerDeltaStatus.Observed"/> (a restart-spanning interval's sync includes the shutdown
     /// checkpoint), and null on a row from before the rung or in an hour the sampler took no difference in - no
-    /// evidence, never zero. <see cref="IsPressure"/> judges it against the same per-checkpoint bar.</param>
+    /// evidence, never zero. Attribution (#9549): it says why a read or a write suffered, and
+    /// <see cref="IsPressure"/> does not judge it.</param>
     /// <param name="LongestSyncAtUtc">(V156, #4834) The time of the minute sample that saw it, UTC; null with
     /// <paramref name="LongestSyncMs"/>.</param>
+    /// <param name="HarmInsideSync">(#9549) How many store operations suffered while a checkpoint sync of the interval
+    /// ran: alert-pass reads that failed or were retried, served reads cut off at their deadline, and collector store
+    /// writes that stalled. Set by <see cref="WithHarm"/> from the running service's own record of the window, so it is
+    /// null when the service holds no judgment for this interval (it started after the interval began, or the read is
+    /// not an Observed one) and zero when it watched the interval and nothing suffered inside a sync.</param>
     public sealed record CheckpointerReading(
         CheckpointerDeltaStatus Status,
         DateTime? ObservedAt,
@@ -1951,7 +1957,8 @@ LIMIT $1";
         long? Timed = null,
         long? CumulativeTimed = null,
         long? LongestSyncMs = null,
-        DateTime? LongestSyncAtUtc = null)
+        DateTime? LongestSyncAtUtc = null,
+        int? HarmInsideSync = null)
     {
         /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
         public static CheckpointerReading Absent { get; } =
@@ -2049,37 +2056,45 @@ LIMIT $1";
         /// denominator. Null when <see cref="Timed"/> is null (a pre-rung sample on either side of the pair).</summary>
         public long? CheckpointCount => Timed is long timed ? timed + (Requested ?? 0) : null;
 
-        /// <summary>(V140, #4037) <see cref="SyncMs"/> divided by <see cref="CheckpointCount"/> — the figure the
-        /// self-alert and the MCP block judge against <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>,
-        /// in place of the interval's summed sync milliseconds. Null when there is no checkpoint count to divide
-        /// by, or the interval held zero checkpoints (nothing to average).</summary>
+        /// <summary>(V140, #4037) <see cref="SyncMs"/> divided by <see cref="CheckpointCount"/> — the average the
+        /// self-alert's text and the MCP block state as attribution (#9549), set beside
+        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>. Null when there is no checkpoint count to
+        /// divide by, or the interval held zero checkpoints (nothing to average).</summary>
         public double? AverageSyncMsPerCheckpoint =>
             CheckpointCount is long count && count > 0 && SyncMs is long sync ? (double)sync / count : null;
 
         /// <summary>
-        /// The self-alert's condition (#3783, judged per-checkpoint average since #4037), on an Observed
-        /// interval only: the AVERAGE sync milliseconds per checkpoint in the interval
-        /// (<see cref="AverageSyncMsPerCheckpoint"/> = SyncMs / (timed + requested)) held more than
-        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, OR at least one checkpoint was requested.
-        /// The old rule judged the interval's SUMMED sync milliseconds against the same bar, which is a
-        /// PER-CHECKPOINT bar (the MCP read deadline) — an hourly interval covers about twelve timed checkpoints
-        /// on the default five-minute checkpoint_timeout, so a healthy store whose checkpoints synced five to
-        /// eight seconds each summed past the bar every interval and never recovered. A pre-V140 row leaves
-        /// <see cref="Timed"/> null; the average arm then states no pressure from sync alone rather than falling
-        /// back to the old sum, and the requested arm still fires on any requested checkpoint. Zero checkpoints
-        /// in the interval judges neither arm. False on every other status — an unmeasured interval is not a
-        /// finding, and that includes one that spans a postmaster restart (#3955). Since V156 (#4834) a third arm:
-        /// the interval's LONGEST single sync, stored on the newer row, held more than the same bar - an average
-        /// spreads one long sync over the interval's short ones, so a store whose one 23.5 s sync averaged 5.9 s
-        /// read as clean while the alert fired on it. A NULL longest sync (a row from before the rung, or an hour
-        /// the sampler took no difference in) is no evidence and leaves the other two arms to decide exactly as
-        /// they did.
+        /// The self-alert's condition (#3783), on an Observed interval only, and it is harm rather than sync length
+        /// (#9549): at least one store operation suffered while a checkpoint sync of at least the read deadline ran
+        /// (<see cref="HarmInsideSync"/> above zero), OR at least one checkpoint was requested. How long the syncs
+        /// took does not decide it. On a store where PostgreSQL cannot flush early (every <c>*_flush_after</c>
+        /// setting is 0 and has no effect, as on Windows) a checkpoint's whole write lands on its fsync, so a sync
+        /// past ten seconds is normal there and, with nothing suffering inside it, is not a finding. The average
+        /// sync, the longest sync and its minute are the attribution: they say why the read or the write suffered.
+        /// A null <see cref="HarmInsideSync"/> (the running service holds no judgment for this interval) is no
+        /// evidence and leaves the requested arm to decide alone. False on every other status — an unmeasured
+        /// interval is not a finding, and that includes one that spans a postmaster restart (#3955).
         /// </summary>
         public bool IsPressure =>
             Status == CheckpointerDeltaStatus.Observed
             && ((Requested is long requested && requested > 0)
-                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs)
-                || (LongestSyncMs is long longest && longest > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
+                || (HarmInsideSync is int harm && harm > 0));
+
+        /// <summary>
+        /// This reading with <see cref="HarmInsideSync"/> taken from <paramref name="verdict"/> (#9549), the one place
+        /// the service's in-process judgment of a window meets the stored interval: the self-alert and
+        /// <c>get_store_metrics</c> both pass the reading through here, so they judge one number. The reading is
+        /// returned as it is unless it is Observed and the verdict describes its interval
+        /// (<see cref="CheckpointHarmVerdict.Describes"/> against <see cref="ObservedAt"/>): a verdict for another
+        /// hour says nothing about this one.
+        /// </summary>
+        internal CheckpointerReading WithHarm(CheckpointHarmVerdict? verdict) =>
+            Status == CheckpointerDeltaStatus.Observed
+            && verdict is not null
+            && ObservedAt is DateTime observedAt
+            && verdict.Describes(observedAt)
+                ? this with { HarmInsideSync = verdict.Findings.Count }
+                : this;
     }
 
     /// <summary>
