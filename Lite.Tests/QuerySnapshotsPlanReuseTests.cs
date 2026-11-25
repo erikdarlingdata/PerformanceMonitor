@@ -468,6 +468,24 @@ public sealed class QuerySnapshotsPlanReuseTests
     }
 
     [Fact]
+    public void Cache_APlanLargerThanTheServerLimit_LeavesWhatTheServerHoldsAsItWas()
+    {
+        var cache = new QuerySnapshotPlanCache();
+        cache.Store(7, "a", PlanXml, s_start);
+        cache.Store(7, "b", PlanXml, s_start.AddSeconds(1));
+        var charsBefore = cache.TotalChars;
+
+        /* A plan that cannot be held at all makes no room: the plans the server already holds stay. */
+        cache.Store(7, "huge", new string('x', (int)QuerySnapshotPlanCache.MaxServerChars + 1), s_start.AddSeconds(2));
+
+        var held = cache.Known(7, s_start.AddSeconds(3));
+        Assert.Equal(new[] { "a", "b" }, held.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(PlanXml, held["a"]);
+        Assert.Equal(PlanXml, held["b"]);
+        Assert.Equal(charsBefore, cache.TotalChars);
+    }
+
+    [Fact]
     public void Cache_DropsAServersPlans_OnceNoRunHasAskedForThemForALifetime()
     {
         var cache = new QuerySnapshotPlanCache();

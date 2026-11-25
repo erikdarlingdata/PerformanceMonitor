@@ -98,7 +98,16 @@ public sealed class QuerySnapshotPlanCache
 
         lock (_gate)
         {
-            if (!_servers.TryGetValue(serverId, out var plans))
+            _servers.TryGetValue(serverId, out var plans);
+
+            /* A plan that does not fit even when every other plan of this server leaves is not held, and it makes
+               no room: evicting for it would empty the server's cache for a plan that is then refused. */
+            if (planXml.Length > MaxServerChars || _totalChars - (plans is null ? 0 : CharsOf(plans)) + planXml.Length > MaxTotalChars)
+            {
+                return;
+            }
+
+            if (plans is null)
             {
                 plans = new Dictionary<string, Entry>(StringComparer.Ordinal);
                 _servers[serverId] = plans;
@@ -110,23 +119,17 @@ public sealed class QuerySnapshotPlanCache
             }
 
             /* Make room among this server's own plans first, the one seen longest ago leaving first: a plan no
-               request has used lately is the cheapest to lose. */
+               request has used lately is the cheapest to lose. The check above means this ends with room. */
             while (plans.Count > 0
-                && (plans.Count >= MaxKnownPlansPerServer || CharsOf(plans) + planXml.Length > MaxServerChars))
+                && (plans.Count >= MaxKnownPlansPerServer
+                    || CharsOf(plans) + planXml.Length > MaxServerChars
+                    || _totalChars + planXml.Length > MaxTotalChars))
             {
                 Evict(plans, OldestSeen(plans));
             }
 
-            if (planXml.Length <= MaxServerChars && _totalChars + planXml.Length <= MaxTotalChars)
-            {
-                plans[planKey] = new Entry { PlanXml = planXml, FetchedUtc = nowUtc, LastSeenUtc = nowUtc };
-                _totalChars += planXml.Length;
-            }
-
-            if (plans.Count == 0)
-            {
-                _servers.Remove(serverId);
-            }
+            plans[planKey] = new Entry { PlanXml = planXml, FetchedUtc = nowUtc, LastSeenUtc = nowUtc };
+            _totalChars += planXml.Length;
         }
     }
 
