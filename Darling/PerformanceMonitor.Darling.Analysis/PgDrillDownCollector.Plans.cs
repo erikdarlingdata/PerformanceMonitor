@@ -22,10 +22,12 @@ public sealed partial class PgDrillDownCollector
 {
     /// <summary>
     /// The newest plan handle for the hash in the finding's database (<c>$3</c>), or in any database when
-    /// <c>$3</c> is empty (#8317). Byte-identical to Lite's <c>CollectPlanAnalysis</c> text.
+    /// <c>$3</c> is empty (#8317), with the statement's byte offsets from the same row (#9195): the pair names one
+    /// statement of one plan. The offsets are NULL on a row collected before they were stored. Byte-identical to
+    /// Lite's <c>CollectPlanAnalysis</c> text.
     /// </summary>
     public const string PlanHandleLookupSql = @"
-SELECT plan_handle
+SELECT plan_handle, statement_start_offset, statement_end_offset
 FROM v_query_stats
 WHERE server_id = $1
 AND   query_hash = $2
@@ -51,8 +53,11 @@ LIMIT 1";
         var queryHash = finding.RootFactKey.Replace("BAD_ACTOR_", "");
         if (string.IsNullOrEmpty(queryHash)) return;
 
-        // Look up plan_handle from the store for this query_hash in the finding's database (#8317)
+        // Look up plan_handle and the statement's offsets from the store for this query_hash in the finding's database
+        // (#8317). The offsets come from the same newest row as the handle (#9195).
         string? planHandle = null;
+        int? statementStartOffset = null;
+        int? statementEndOffset = null;
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
@@ -64,7 +69,15 @@ LIMIT 1";
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             if (await reader.ReadAsync(context.CancellationToken) && !reader.IsDBNull(0))
+            {
                 planHandle = reader.GetString(0);
+                /* A row collected before the offsets were stored has neither: the whole batch's plan is fetched. */
+                if (!reader.IsDBNull(1) && !reader.IsDBNull(2))
+                {
+                    statementStartOffset = reader.GetInt32(1);
+                    statementEndOffset = reader.GetInt32(2);
+                }
+            }
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))
         {
@@ -75,8 +88,11 @@ LIMIT 1";
 
         if (string.IsNullOrEmpty(planHandle)) return;
 
-        // Fetch plan XML live from SQL Server
-        var planXml = await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
+        // Fetch plan XML live from SQL Server: the bad actor's own statement when its offsets are known, because a batch
+        // plan can carry over a hundred statements and ten million characters (#9195).
+        var planXml = statementStartOffset is { } start && statementEndOffset is { } end
+            ? await _planFetcher.FetchStatementPlanXmlAsync(context.ServerId, planHandle, start, end, context.CancellationToken)
+            : await _planFetcher.FetchPlanXmlAsync(context.ServerId, planHandle, context.CancellationToken);
         if (string.IsNullOrEmpty(planXml)) return;
         // #4348: the plan is judged BEFORE it is analyzed. A warning quotes up to 300 characters of a predicate or
         // a statement from the plan, so a statement the filter withholds must reach the analyzer already withheld,

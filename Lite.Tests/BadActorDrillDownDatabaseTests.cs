@@ -170,6 +170,13 @@ public sealed class BadActorDrillDownDatabaseTests : IClassFixture<SharedDuckDbF
             Handles.Add(planHandle);
             return Task.FromResult<string?>(null);
         }
+
+        public Task<string?> FetchStatementPlanXmlAsync(
+            int serverId, string planHandle, int statementStartOffset, int statementEndOffset, CancellationToken cancellationToken)
+        {
+            Handles.Add(planHandle);
+            return Task.FromResult<string?>(null);
+        }
     }
 
     private async Task<JsonElement> CollectBadActorAsync(string? databaseName)
