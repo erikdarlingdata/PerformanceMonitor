@@ -278,7 +278,7 @@ public partial class StoreHealthTab : UserControl
 
         if (tablesShown || _indexesFromSnapshot)
         {
-            timer.NotePhase("store saved rows read", $"showed {(tablesShown ? CountText.Plural(saved.Tables!.Count, "table") : "no tables")} and {(_indexesFromSnapshot ? CountText.Plural(saved.Indexes!.Count, "index") : "no indexes")} from the last measurement");
+            timer.NotePhase("store saved rows read", $"showed {(tablesShown ? CountText.Plural(saved.Tables!.Count, "table") : "no tables")} and {(_indexesFromSnapshot ? CountText.Plural(saved.Indexes!.Count, "index", "indexes") : "no indexes")} from the last measurement");
             ShowRefreshing();
         }
 

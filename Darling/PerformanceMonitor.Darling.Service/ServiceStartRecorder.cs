@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -87,33 +88,35 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
     /// <summary>The recorder for this process: this machine, this build, a new start id.</summary>
     internal static ServiceStartRecorder ForThisProcess(ServiceLogTally tally, DateTime processStartedUtc)
     {
+        var assembly = typeof(DarlingCliCommands).Assembly;
         var (version, commit) = SplitBuild(
-            typeof(DarlingCliCommands).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion,
-            DarlingCliCommands.ProductVersion());
+            assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion,
+            DarlingCliCommands.ProductVersion(),
+            ProductBuildText.MetadataCommit(assembly));
         return new ServiceStartRecorder(tally, Guid.NewGuid(), Environment.MachineName, version, commit, processStartedUtc);
     }
 
     /// <summary>
     /// The full build string and the commit from an informational version (<c>3.14.0-nightly.20261124.730+0993a1441...</c>): everything before the
-    /// <c>+</c> is the build, everything after it is the commit. A version with no <c>+</c> has no commit.
+    /// <c>+</c> is the build. The commit is the build's metadata commit when it has text (#9591), else everything after the <c>+</c>
+    /// (<see cref="ProductBuildText.Commit(string?, string?)"/>), so a clean informational version still names its commit. A build with neither has no commit.
     /// </summary>
-    internal static (string Version, string? Commit) SplitBuild(string? informationalVersion, string fallbackVersion)
+    internal static (string Version, string? Commit) SplitBuild(string? informationalVersion, string fallbackVersion, string? metadataCommit = null)
     {
         if (string.IsNullOrWhiteSpace(informationalVersion))
         {
-            return (fallbackVersion, null);
+            return (fallbackVersion, ProductBuildText.Commit(null, metadataCommit));
         }
 
         var raw = informationalVersion.Trim();
         var plus = raw.IndexOf('+', StringComparison.Ordinal);
         if (plus < 0)
         {
-            return (raw, null);
+            return (raw, ProductBuildText.Commit(raw, metadataCommit));
         }
 
         var version = raw[..plus].Trim();
-        var commit = raw[(plus + 1)..].Trim();
-        return (version.Length == 0 ? fallbackVersion : version, commit.Length == 0 ? null : commit);
+        return (version.Length == 0 ? fallbackVersion : version, ProductBuildText.Commit(raw, metadataCommit));
     }
 
     /// <inheritdoc />

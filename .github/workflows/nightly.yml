@@ -1741,7 +1741,9 @@ jobs:
           # defect again, one artifact over. The Dockerfile defaults the arg to empty, so
           # build.yml's release image and any hand-run docker build keep publishing against the
           # clean declared version.
-          docker build -f Darling/Dockerfile --build-arg VERSION="${version}" -t "${image}:nightly" -t "${image}:${version}" .
+          # #9591: the checkout's own commit, the one the runner-side publishes stamp, since the image build's context has no .git.
+          commit="$(git rev-parse HEAD)"
+          docker build -f Darling/Dockerfile --build-arg VERSION="${version}" --build-arg SOURCE_COMMIT="${commit}" -t "${image}:nightly" -t "${image}:${version}" .
           mkdir -p releases
           docker save "${image}:nightly" "${image}:${version}" -o releases/darling-container-image.tar
 

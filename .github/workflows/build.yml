@@ -1233,7 +1233,9 @@ jobs:
           version="${{ steps.version.outputs.VERSION }}"
           image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker build -f Darling/Dockerfile -t "${image}:${version}" -t "${image}:latest" .
+          # #9591: the checkout's own commit, since the image build's context has no .git.
+          commit="$(git rev-parse HEAD)"
+          docker build -f Darling/Dockerfile --build-arg SOURCE_COMMIT="${commit}" -t "${image}:${version}" -t "${image}:latest" .
           docker push "${image}:${version}"
           docker push "${image}:latest"
 
