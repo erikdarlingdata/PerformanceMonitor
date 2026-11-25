@@ -26,6 +26,9 @@ namespace PerformanceMonitorLite.Tests;
 /// from before that holds it), ties on collection_time, NULL execution counts and row counts, two replica roles, a forced plan,
 /// two plan_ids sharing one plan hash, rows collected after the window end, and text that only a row the read must ignore carries.
 /// </summary>
+/* The DuckDB lock is process-wide, and this class waits on it with the 5 s budget the housekeeping writers use, so
+   it joins the serialized collection: no other class's initializer can hold the lock while it waits. */
+[Collection("CollectionResetGate")]
 public sealed class PlanRegressionReadEquivalenceTests : IDisposable
 {
     private const int ServerId = 9195;

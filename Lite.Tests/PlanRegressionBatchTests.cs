@@ -24,6 +24,9 @@ namespace PerformanceMonitorLite.Tests;
 /// the batches, the rows and their order are the one statement's, and a writer gets the lock between them. Six databases of unequal
 /// size, with query ids repeated across them so rows tie on the CPU lost and the factor.
 /// </summary>
+/* The DuckDB lock is process-wide, and this class waits on it with the 5 s budget the housekeeping writers use, so
+   it joins the serialized collection: no other class's initializer can hold the lock while it waits. */
+[Collection("CollectionResetGate")]
 public sealed class PlanRegressionBatchTests : IDisposable
 {
     private const int ServerId = 9353;
