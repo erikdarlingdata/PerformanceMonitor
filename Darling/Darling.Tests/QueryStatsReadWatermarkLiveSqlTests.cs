@@ -23,8 +23,9 @@ namespace Darling.Tests;
 /// bound by the host's own command builder, run twice. The first read arms the watermark. The second read must not return a
 /// statement that completed before it, and must return one that STARTED before the first read and COMPLETED after it.
 ///
-/// <para>The slow statement is one WAITFOR DELAY of eight seconds, so the statement's <c>last_execution_time</c> is its start, before the watermark, and its counters move at the end.
-/// A test on the start time alone would lose it. The second read is read raw, not through <c>ReadAsync</c>, because the host's idle
+/// <para>The slow statement is a SELECT blocked by a table lock another connection holds, until the test commits that connection
+/// after the first read. Its <c>last_execution_time</c> is its start, before the watermark, and its row appears (a WAITFOR leaves
+/// none) only when it completes. A test on the start time alone would lose it. The second read is read raw, not through <c>ReadAsync</c>, because the host's idle
 /// filter would drop an idle row and hide the statement-level exclusion this proves.</para>
 ///
 /// <para>The test creates one throwaway database, and drops it, even on failure. Gated on
@@ -135,6 +136,8 @@ public sealed class QueryStatsReadWatermarkLiveSqlTests
 
         await using var admin = new SqlConnection(master!);
         await admin.OpenAsync(ct);
+        await using var blocker = new SqlConnection(master!);
+        await blocker.OpenAsync(ct);
         var created = false;
         Task? slow = null;
         try
@@ -145,14 +148,17 @@ public sealed class QueryStatsReadWatermarkLiveSqlTests
             await using (var work = new SqlConnection(ConnectionString(database)))
             {
                 await work.OpenAsync(ct);
-                /* The spanning statement starts now and runs for eight seconds. */
+                await ExecuteAsync(work, "CREATE TABLE dbo.t (id integer NOT NULL);", ct);
+                await ExecuteAsync(blocker, $"USE [{database}]; BEGIN TRANSACTION; INSERT dbo.t WITH (TABLOCKX) (id) VALUES (1);", ct);
+
+                /* The spanning statement starts now and waits for the table lock. */
                 var slowConnection = new SqlConnection(ConnectionString(database));
                 slow = Task.Run(async () =>
                 {
                     await using (slowConnection)
                     {
                         await slowConnection.OpenAsync(ct);
-                        await using var command = new SqlCommand($"WAITFOR DELAY '00:00:08' /* {spanning} */;", slowConnection) { CommandTimeout = 60 };
+                        await using var command = new SqlCommand($"SELECT c = COUNT_BIG(*) /* {spanning} */ FROM dbo.t;", slowConnection) { CommandTimeout = 60 };
                         await command.ExecuteScalarAsync(ct);
                     }
                 }, ct);
@@ -174,6 +180,7 @@ public sealed class QueryStatsReadWatermarkLiveSqlTests
                 $"The first read did not return the statement that completed before it. Rows: {first.Count}.");
             Assert.DoesNotContain(first, r => r.QueryText is not null && r.QueryText.Contains(spanning, StringComparison.Ordinal));
 
+            await ExecuteAsync(blocker, "COMMIT TRANSACTION;", ct);
             await slow;
             slow = null;
             await Task.Delay(TimeSpan.FromSeconds(1), ct);
@@ -196,6 +203,18 @@ public sealed class QueryStatsReadWatermarkLiveSqlTests
                 catch (Exception)
                 {
                     /* The cleanup below drops the database whatever state the statement is in. */
+                }
+            }
+
+            if (blocker.State == System.Data.ConnectionState.Open)
+            {
+                try
+                {
+                    await ExecuteAsync(blocker, "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;", CancellationToken.None);
+                }
+                catch (Exception)
+                {
+                    /* The drop below rolls the connection back if this did not. */
                 }
             }
 
