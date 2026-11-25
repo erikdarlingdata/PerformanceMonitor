@@ -306,6 +306,134 @@ public sealed class AttentionCollectorLiveSqlTests
     }
 
     /// <summary>
+    /// #9538: a call the application cancelled a few milliseconds into its run (a data layer cancelling before it closes a reader) is not
+    /// kept: the session's Abort arm has the same 0.9 s floor as its Error arm, so the cancel takes no ring buffer slot from the attention
+    /// samples. Its attention event is still sampled, and a command timeout of 2 s still leaves its captured call.
+    /// </summary>
+    [Fact]
+    public async Task OwnSession_ACallCancelledUnderTheFloorLeavesNoCapturedCall_ButItsAttentionIsSampled()
+    {
+        const string cancelApp = "pm-9538-cancel";
+        const string timeoutApp = "pm-9538-timeout";
+        var connectionString = ConnectionString(cancelApp);
+        Assert.SkipWhen(connectionString is null, "Set DARLING_TEST_SQL (and, for SQL auth, DARLING_TEST_SQL_USER / DARLING_TEST_SQL_PASSWORD) to run the live attention collector test.");
+        Assert.SkipWhen(ReadOnlyMode, "DARLING_TEST_SQL_READONLY=1: this server holds real monitoring data.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var sessionName = AlwaysOnXeSessions.OwnNameFor(
+            LongQueryCompletionsCollector.DarlingProduct, Guid.NewGuid().ToString("N")[..8], AlwaysOnXeSessionKind.Attention);
+        var create = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+            .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + sessionName + "]", StringComparison.Ordinal)
+            .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
+        Assert.DoesNotContain("[" + AttentionCollector.XeSessionName + "]", create, StringComparison.Ordinal);
+
+        var created = false;
+        try
+        {
+            await ExecuteAsync(connectionString!, create, ct);
+            created = true;
+
+            string Conn(string app) => new SqlConnectionStringBuilder(connectionString!) { ApplicationName = app }.ConnectionString;
+            await using (var connection = new SqlConnection(Conn(cancelApp)))
+            {
+                await connection.OpenAsync(ct);
+                await using var command = new SqlCommand("WAITFOR DELAY '00:00:05';", connection) { CommandTimeout = 30 };
+                using var cancelAfter = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cancelAfter.CancelAfter(TimeSpan.FromMilliseconds(100));
+                try
+                {
+                    await command.ExecuteNonQueryAsync(cancelAfter.Token);
+                }
+                catch (Exception ex) when (ex is SqlException or OperationCanceledException)
+                {
+                    /* The call is meant to be cancelled. */
+                }
+            }
+
+            await RunCallAsync(Conn(timeoutApp), "WAITFOR DELAY '00:00:05';", 2, ct);
+
+            var rows = await CollectUntilAsync(
+                connectionString!, sessionName,
+                r => r.Exists(x => x.EventKind == AttentionCollector.KindAborted && x.ClientAppName == timeoutApp)
+                    && r.Exists(x => x.EventKind == AttentionCollector.KindSample && x.ClientAppName == timeoutApp)
+                    && r.Exists(x => x.EventKind == AttentionCollector.KindSample && x.ClientAppName == cancelApp), ct);
+
+            Assert.Contains(rows, r => r.EventKind == AttentionCollector.KindSample && r.ClientAppName == cancelApp);
+            Assert.DoesNotContain(rows, r => r.EventKind == AttentionCollector.KindAborted && r.ClientAppName == cancelApp);
+        }
+        finally
+        {
+            if (created)
+            {
+                await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + sessionName + "] ON SERVER;", CancellationToken.None);
+            }
+        }
+    }
+
+    /// <summary>
+    /// #9538: a session an earlier build made, with the 0.9 s floor on the Error arm only, reads as another definition, so the host drops it
+    /// and creates it again with the floor on both arms. The probe is the shipped one, pointed at two scratch sessions of this test's own.
+    /// </summary>
+    [Fact]
+    public async Task ServerProbe_ReadsAFloorOnTheErrorArmOnlyAsAMismatch_AndTheCurrentDefinitionAsOurs()
+    {
+        var connectionString = ConnectionString("pm-9538-probe-live");
+        Assert.SkipWhen(connectionString is null, "Set DARLING_TEST_SQL to run the live attention definition test.");
+        Assert.SkipWhen(ReadOnlyMode, "DARLING_TEST_SQL_READONLY=1: this server holds real monitoring data.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var oldName = "PerformanceMonitor_Darling_" + Guid.NewGuid().ToString("N")[..8] + "_Attention";
+        var newName = "PerformanceMonitor_Darling_" + Guid.NewGuid().ToString("N")[..8] + "_Attention";
+
+        const string actions = "ACTION (sqlserver.client_app_name, sqlserver.client_hostname, sqlserver.database_name, sqlserver.session_id, sqlserver.sql_text)";
+        var oldCreate = "CREATE EVENT SESSION [" + oldName + "] ON SERVER "
+            + "ADD EVENT sqlserver.attention (" + actions + "), "
+            + "ADD EVENT sqlserver.rpc_completed (SET collect_statement = (0) " + actions + " WHERE ([result] = 2 OR ([result] = 1 AND [duration] >= 900000))), "
+            + "ADD EVENT sqlserver.sql_batch_completed (SET collect_batch_text = (0) " + actions + " WHERE ([result] = 2 OR ([result] = 1 AND [duration] >= 900000))) "
+            + "ADD TARGET package0.event_counter, ADD TARGET package0.ring_buffer (SET max_memory = 1024) WITH (MEMORY_PARTITION_MODE = NONE, STARTUP_STATE = OFF);";
+        var newCreate = AlwaysOnXeSessions.BuildAttentionServerCreateSql()
+            .Replace("[" + AttentionCollector.XeSessionName + "]", "[" + newName + "]", StringComparison.Ordinal)
+            .Replace("STARTUP_STATE = ON", "STARTUP_STATE = OFF", StringComparison.Ordinal);
+        /* Not started: the probe answers 0 (stopped) for a matching definition and 2 for a mismatch. */
+        newCreate = newCreate.Substring(0, newCreate.IndexOf("ALTER EVENT SESSION", StringComparison.Ordinal));
+
+        async Task<int?> ProbeAsync(string name)
+        {
+            await using var connection = new SqlConnection(connectionString!);
+            await connection.OpenAsync(ct);
+            await using var command = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("pm-9538-test"), connection);
+            command.Parameters.AddWithValue("@session_name", name);
+            var value = await command.ExecuteScalarAsync(ct);
+            return value is null or DBNull ? null : Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+
+        var madeOld = false;
+        var madeNew = false;
+        try
+        {
+            await ExecuteAsync(connectionString!, oldCreate, ct);
+            madeOld = true;
+            await ExecuteAsync(connectionString!, newCreate, ct);
+            madeNew = true;
+
+            Assert.Equal(AlwaysOnXeSessions.AttentionDefinitionMismatch, await ProbeAsync(oldName));
+            Assert.Equal(0, await ProbeAsync(newName));
+        }
+        finally
+        {
+            if (madeOld)
+            {
+                await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + oldName + "] ON SERVER;", CancellationToken.None);
+            }
+
+            if (madeNew)
+            {
+                await ExecuteAsync(connectionString!, "DROP EVENT SESSION [" + newName + "] ON SERVER;", CancellationToken.None);
+            }
+        }
+    }
+
+    /// <summary>
     /// #9507: the session keeps the call's parameter values out of the store. rpc_completed's own <c>statement</c> field carries them
     /// (<c>exec dbo.proc @name=N'...'</c>), and sensitive-statement withholding does not strip values, so the session switches that field
     /// and <c>batch_text</c> off and the row's text comes from the <c>sql_text</c> action, which declares parameters and holds no value.

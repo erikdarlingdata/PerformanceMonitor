@@ -435,16 +435,17 @@ public static class AlwaysOnXeSessions
             + "    (\n"
             + string.Join(",\n", actions) + "\n"
             + "    )\n";
-        var abortPredicate = "    WHERE ([result] = " + AbortResultMapKey.ToString(CultureInfo.InvariantCulture)
-            + " OR ([result] = " + ErrorResultMapKey.ToString(CultureInfo.InvariantCulture)
-            + " AND [duration] >= " + CapturedCallMinDurationUs.ToString(CultureInfo.InvariantCulture) + "))\n";
+        var floor = " AND [duration] >= " + CapturedCallMinDurationUs.ToString(CultureInfo.InvariantCulture);
+        var abortPredicate = "    WHERE (([result] = " + AbortResultMapKey.ToString(CultureInfo.InvariantCulture) + floor + ")"
+            + " OR ([result] = " + ErrorResultMapKey.ToString(CultureInfo.InvariantCulture) + floor + "))\n";
 
         /* #9507: a real application command timeout raises an attention event that times the cancel (milliseconds), so the
            attention duration says nothing about how long the command ran. The call that was still running when the client
            cancelled ends with an rpc_completed or sql_batch_completed carrying its elapsed duration, its object or statement
            and the same actions. SQL Server 2016 to 2022 end it with result Abort, 2025 with result Error, so the predicate keeps
-           an Abort, and an Error that ran at least 0.9 s (a command timeout is whole seconds in every driver). A cancel that
-           arrives after the command finished raises no such event.
+           an Abort or an Error that ran at least 0.9 s (a command timeout is whole seconds in every driver). A cancel that
+           arrives after the command finished raises no such event, and one a data layer issues a few milliseconds into a call
+           (a reader closed with rows unread) is left out, so it takes no ring buffer slot from the attention samples (#9538).
            The two completed events keep their statement and batch_text fields OFF (the SET lines). rpc_completed's statement
            carries the call's parameter values, which sensitive-statement withholding does not strip, and the engine copies the
            field on every call of every monitored server before the predicate drops the event. The sql_text action carries the
@@ -478,10 +479,12 @@ public static class AlwaysOnXeSessions
     internal const int ErrorResultMapKey = 1;
 
     /// <summary>
-    /// The shortest elapsed time, in microseconds, of an Error call the session keeps (#9507). A command timeout is whole seconds in
-    /// every driver, so a real one runs at least about 1 s, and the floor keeps ordinary fast failed batches out of the ring buffer.
+    /// The shortest elapsed time, in microseconds, of a completed call the session keeps (#9507). A command timeout is whole seconds in
+    /// every driver, so a real one runs about 1 s and can be recorded just under it, and the floor keeps ordinary fast failed batches out of
+    /// the ring buffer. The value lives in <see cref="PerformanceMonitor.Common.AttentionWindowSql.CapturedCallMinDurationUs"/> so the read of the captured calls
+    /// keeps the same floor (#9538).
     /// </summary>
-    internal const long CapturedCallMinDurationUs = 900_000;
+    internal const long CapturedCallMinDurationUs = PerformanceMonitor.Common.AttentionWindowSql.CapturedCallMinDurationUs;
 
     /* event_counter is the exact count (it never drops an event); the ring buffer is a sample for the detail. 1024 KB is
        Microsoft's tip for a ring buffer and stays under the 4 MB cut-off of the XML a read shreds. */
@@ -576,6 +579,11 @@ WHERE ses.name = @session_name;";
         var allowedList = string.Join(", ", allowed);
         var requiredList = string.Join(", ", required);
 
+        /* #9538: the engine stores the predicate text with the floor as written, so a completed event whose predicate holds the floor
+           fewer than twice (once per arm) is a session an older build made, with the floor on the Error arm only. It reads as another
+           definition, so the host drops it and creates it again. */
+        var floorText = CapturedCallMinDurationUs.ToString(CultureInfo.InvariantCulture);
+
         return @"
             (
                 (
@@ -600,7 +608,7 @@ WHERE ses.name = @session_name;";
                     FROM " + prefix + @"_events AS e
                     WHERE e.event_session_id = " + key + @"
                     AND   e.name IN (N'rpc_completed', N'sql_batch_completed')
-                    AND   e.predicate IS NULL
+                    AND   (e.predicate IS NULL OR (LEN(e.predicate) - LEN(REPLACE(e.predicate, N'" + floorText + @"', N''))) < " + (2 * floorText.Length).ToString(CultureInfo.InvariantCulture) + @")
                 )
                 AND
                 (
