@@ -8,6 +8,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Linq;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.FrontDoor;
@@ -41,10 +42,16 @@ public sealed class DarlingMcpToolSearchTools
             return refusal;
         }
 
-        return McpToolSearch.Render(server.ServerOptions.ToolCollection, query, detail, limit, LeanReconnectSentence);
+        /* call_tool is in this request's collection on /lean only (every other path serves a copy without it), so the sentence about it
+           goes only where a client can use it without connecting somewhere else. */
+        var served = server.ServerOptions.ToolCollection;
+        var servesCallTool = served?.Any(t => string.Equals(t.ProtocolTool.Name, DarlingLeanToolProfile.CallToolName, StringComparison.Ordinal)) == true;
+        return McpToolSearch.Render(served, query, detail, limit, servesCallTool ? LeanReconnectSentence : null);
     }
 
-    /// <summary>Darling's addition to the shared reconnect note (#9584): <c>/lean</c> serves <c>call_tool</c>, which runs a tool the
-    /// client's own list lacks by its name, so a stale list needs no reconnect there.</summary>
-    private const string LeanReconnectSentence = "On the /lean path, call_tool runs a named tool by its name without a reconnect.";
+    /// <summary>Darling's addition to the shared reconnect note (#9584), sent on <c>/lean</c>, the one path that serves <c>call_tool</c>:
+    /// it runs a read tool the client's own list lacks by its name, so a stale list needs no reconnect there for a read. <c>call_tool</c>
+    /// refuses a tool that writes (<see cref="DarlingLeanToolProfile.CallToolFilter"/>), so a write still needs the reconnect.</summary>
+    internal const string LeanReconnectSentence =
+        "On the /lean path, call_tool runs a read tool by its name without a reconnect. A tool that writes is not run there and still needs the client to reconnect.";
 }

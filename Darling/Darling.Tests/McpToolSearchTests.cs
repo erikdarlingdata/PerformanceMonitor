@@ -203,7 +203,7 @@ public sealed class McpToolSearchTests
         var big = new string('x', 6_000);
         var served = Enumerable.Range(0, 10).Select(i => Tool($"get_big_{i}", $"Big tool {i}. {big}")).ToArray();
 
-        var text = McpToolSearch.Render(served, "big", "full", 10);
+        var text = McpToolSearch.Render(served, "big", "full", 10, DarlingMcpToolSearchTools.LeanReconnectSentence);
 
         Assert.True(Encoding.UTF8.GetByteCount(text) <= McpResponseBudget.DefaultBytes, "the answer is over the response budget");
         using var answer = JsonDocument.Parse(text);
@@ -226,7 +226,7 @@ public sealed class McpToolSearchTests
         var largest = 0;
         foreach (var query in queries)
         {
-            var bytes = Encoding.UTF8.GetByteCount(McpToolSearch.Render(tools, query, "full", McpToolSearch.MaxFullLimit));
+            var bytes = Encoding.UTF8.GetByteCount(McpToolSearch.Render(tools, query, "full", McpToolSearch.MaxFullLimit, DarlingMcpToolSearchTools.LeanReconnectSentence));
             largest = Math.Max(largest, bytes);
             Assert.True(bytes <= McpResponseBudget.DefaultBytes, $"find_tools query \"{query}\" at full answers {bytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0} budget");
         }
@@ -346,22 +346,31 @@ public sealed class McpToolSearchTests
         return Notes(answer);
     }
 
-    /// <summary>#9584: Darling's note adds the way round a stale tool list that only the <c>/lean</c> path has: <c>call_tool</c> runs a
-    /// named tool without a reconnect. It is there with a match and with none, on <c>/</c> and on <c>/lean</c>.</summary>
+    /// <summary>#9584: on <c>/lean</c>, the one path that serves <c>call_tool</c>, Darling's note adds the way round a stale tool list that
+    /// path has: <c>call_tool</c> runs a read tool without a reconnect, and a tool that writes, which <c>call_tool</c> refuses, still needs
+    /// one. On <c>/</c>, where <c>call_tool</c> is not served, the note does not offer it. <c>/core</c> serves no <c>find_tools</c>. With a match
+    /// and with none.</summary>
     [Theory]
-    [InlineData("list_servers", "/")]
-    [InlineData("zzzzqq", "/")]
-    [InlineData("list_servers", "/lean")]
-    [InlineData("zzzzqq", "/lean")]
-    public async Task TheAnswer_CarriesOneReconnectNote_ThatNamesCallToolOnTheLeanPath(string query, string path)
+    [InlineData("list_servers", "/", false)]
+    [InlineData("zzzzqq", "/", false)]
+    [InlineData("list_servers", "/lean", true)]
+    [InlineData("zzzzqq", "/lean", true)]
+    public async Task TheAnswer_CarriesOneReconnectNote_ThatOffersCallToolOnlyWhereItIsServed(string query, string path, bool servesCallTool)
     {
         using var server = await DarlingMcpWritePolicyTests.BuildServer(new McpConfig(), "");
 
         var notes = await NotesFromAsync(server, query, path);
 
         var note = Assert.Single(notes, n => n.Contains("reconnect", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains("call_tool", note, StringComparison.Ordinal);
-        Assert.Contains("/lean", note, StringComparison.Ordinal);
+        if (servesCallTool)
+        {
+            Assert.Contains("call_tool runs a read tool", note, StringComparison.Ordinal);
+            Assert.Contains("A tool that writes is not run there and still needs the client to reconnect", note, StringComparison.Ordinal);
+        }
+        else
+        {
+            Assert.DoesNotContain("call_tool", note, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
