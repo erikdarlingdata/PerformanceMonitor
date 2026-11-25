@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -1082,7 +1083,7 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     private void ReopenSentinel()
     {
-        var connection = new DuckDBConnection(ConnectionString);
+        var connection = NewMainConnection();
         connection.Open();
         _sentinel = connection;
     }
@@ -1280,12 +1281,14 @@ public partial class DuckDbInitializer : IDisposable
     /// - prefetch_all_parquet_files=true (#9362): DuckDB's default reads a local Parquet file one column chunk at a time. With the
     ///   archive's 2,048-row row groups (#5381, kept) a wide scan of many files becomes tens of thousands of small serial reads, and
     ///   that is where the 168 hour Query Store regressions and top queries reads spent nearly all their time. With the setting on,
-    ///   each column chunk the scan needs is fetched whole. Only this main connection takes it: the archive service and compaction
+    ///   each column chunk the scan needs is fetched whole. It is NOT in this string: the win-arm64 DuckDB library rejects the
+    ///   option at open ("options were not recognized") and Lite would not start (#9553). <see cref="NewMainConnection"/> sets it
+    ///   with <c>SET</c> right after every open instead. Only this main connection takes it: the archive service and compaction
     ///   open their own in-memory connections, and the memory limit still bounds what a read may hold (the #5381 memory tests run
     ///   through this connection string).
     /// </summary>
     public string ConnectionString =>
-        $"Data Source={_databasePath};memory_limit={MainConnectionMemoryLimit};threads={MainConnectionThreads};checkpoint_threshold=1GB;prefetch_all_parquet_files=true";
+        $"Data Source={_databasePath};memory_limit={MainConnectionMemoryLimit};threads={MainConnectionThreads};checkpoint_threshold=1GB";
 
     /// <summary>
     /// The main connection's resting <c>memory_limit</c> (#5381, owner ruling 2026-10-06). It was 1 GB, which
@@ -1381,7 +1384,7 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     internal void AdoptInitializedFileForTests()
     {
-        var connection = new DuckDBConnection(ConnectionString);
+        var connection = NewMainConnection();
         try
         {
             connection.Open();
@@ -1414,7 +1417,7 @@ public partial class DuckDbInitializer : IDisposable
         string? currentIdentity;
         try
         {
-            using var connection = new DuckDBConnection(ConnectionString);
+            using var connection = NewMainConnection();
             await connection.OpenAsync();
             using var cmd = connection.CreateCommand();
             cmd.CommandText = "SELECT id FROM store_identity LIMIT 1";
@@ -1546,7 +1549,7 @@ public partial class DuckDbInitializer : IDisposable
                        already present win. */
                     var restored = 0;
                     var failed = false;
-                    var connection = new DuckDBConnection(ConnectionString);
+                    var connection = NewMainConnection();
                     try
                     {
                         await connection.OpenAsync();
@@ -1784,7 +1787,7 @@ public partial class DuckDbInitializer : IDisposable
 
         for (int attempt = 1; ; attempt++)
         {
-            var connection = new DuckDBConnection(ConnectionString);
+            var connection = NewMainConnection();
             try
             {
                 await connection.OpenAsync();
@@ -1796,7 +1799,7 @@ public partial class DuckDbInitializer : IDisposable
                 _logger?.LogWarning("DuckDB storage version mismatch detected. Migrating data via Parquet export/import.");
                 await MigrateViaParquetAsync(archivePath);
 
-                var migrated = new DuckDBConnection(ConnectionString);
+                var migrated = NewMainConnection();
                 await migrated.OpenAsync();
                 return migrated;
             }
@@ -1980,7 +1983,7 @@ public partial class DuckDbInitializer : IDisposable
         {
             try
             {
-                using var newConn = new DuckDBConnection(ConnectionString);
+                using var newConn = NewMainConnection();
                 await newConn.OpenAsync();
 
                 using var cmd = newConn.CreateCommand();
@@ -3810,7 +3813,53 @@ public partial class DuckDbInitializer : IDisposable
     /// </summary>
     public DuckDBConnection CreateConnection()
     {
-        return new DuckDBConnection(ConnectionString);
+        return NewMainConnection();
+    }
+
+    /// <summary>The statement every main connection runs right after it opens (#9362, #9553).</summary>
+    internal const string PrefetchParquetFilesSql = "SET prefetch_all_parquet_files = true";
+
+    private int _prefetchWarned;
+
+    /// <summary>
+    /// The one place a connection to the main database is built (#9553): <see cref="CreateConnection"/> and every open this class
+    /// does itself. The caller still opens it, with <c>Open</c> or <c>OpenAsync</c>, and the <c>StateChange</c> handler runs
+    /// <see cref="PrefetchParquetFilesSql"/> as the open completes. The setting cannot ride in <see cref="ConnectionString"/>
+    /// because the win-arm64 DuckDB library rejects it there and the open fails.
+    /// </summary>
+    private DuckDBConnection NewMainConnection()
+    {
+        var connection = new DuckDBConnection(ConnectionString);
+        connection.StateChange += (sender, e) =>
+        {
+            if (e.CurrentState == ConnectionState.Open && sender is DuckDBConnection opened)
+            {
+                ApplyPrefetchSetting(opened);
+            }
+        };
+        return connection;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="sql"/> (the prefetch SET) on a connection that has just opened. It only makes Parquet reads faster, so
+    /// a DuckDB error is logged once as a Warning and the open carries on, and a performance setting can never stop Lite from
+    /// starting (#9553). Other exceptions, cancellation included, still propagate.
+    /// </summary>
+    internal void ApplyPrefetchSetting(DuckDBConnection connection, string sql = PrefetchParquetFilesSql)
+    {
+        try
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
+        }
+        catch (DuckDBException ex)
+        {
+            if (Interlocked.Exchange(ref _prefetchWarned, 1) == 0)
+            {
+                AppLogger.Warn("DuckDbInitializer", $"Could not set prefetch_all_parquet_files on the main connection, Parquet reads stay at DuckDB's default: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>
