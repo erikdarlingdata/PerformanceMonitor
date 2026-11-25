@@ -117,7 +117,7 @@ internal static class DarlingMcpInstructions
     /// The agent action tools are writes an agent may call under the investigations arm (#5915), so they do not make the writes arm "on".</summary>
     private static bool WritesArmServed(IReadOnlyCollection<string> served) =>
         served.Any(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n)
-            && !DarlingMcpWritePolicy.AgentActionTools.Contains(n));
+            && !DarlingMcpWritePolicy.AgentActionTools.Contains(n) && !DarlingMcpWritePolicy.ChangeWindowTools.Contains(n));
 
     /// <summary>True when <paramref name="served"/> is what the investigations arm serves: an investigation tool, and not the writes arm.</summary>
     private static bool InvestigationsArmServed(IReadOnlyCollection<string> served) =>
@@ -153,6 +153,8 @@ internal static class DarlingMcpInstructions
         var writesServed = WritesArmServed(served);
         var agentActionServed = writesServed ? 0 : served.Count(n => DarlingMcpWritePolicy.IsWrite(n)
             && DarlingMcpWritePolicy.AgentActionTools.Contains(n) && !DarlingMcpWritePolicy.NeverAgentTools.Contains(n));
+        /* #9485: the change window tools are writes an agent token is served too, so they are not among the unserved writes while the arm serves them. */
+        var agentServedWrites = agentActionServed + (writesServed ? 0 : served.Count(DarlingMcpWritePolicy.ChangeWindowTools.Contains));
         var adminServed = served.Any(DarlingMcpWritePolicy.IsServerAdmin);
         var writeCount = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
         var adminCount = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
@@ -181,8 +183,8 @@ internal static class DarlingMcpInstructions
             }
         }
         else if (!writesServed)
-            off.Add($"the write tools are off, so the {writeCount + adminCount - agentActionServed} that change monitoring configuration are not served " +
-                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentActionServed}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
+            off.Add($"the write tools are off, so the {writeCount + adminCount - agentServedWrites} that change monitoring configuration are not served " +
+                    $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentServedWrites}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
                         ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)" + (agentMuteRules ? $", except the four mute rule tools, which an agent token (named, or the unnamed one under `mcp.allowInvestigations`) may also call without one for {DirectMuteLimits} (reason and expires_at required)" : string.Empty)
                         : string.Empty));

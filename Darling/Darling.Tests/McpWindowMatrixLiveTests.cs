@@ -413,6 +413,8 @@ public sealed class McpWindowMatrixLiveTests : IClassFixture<McpWindowMatrixStor
         ["get_cpu_scheduler_pressure"] = SnapshotSearch,
         ["get_database_protection"] = SnapshotSearch,
         /* #7010: not a data window by design. The reads are investigation REQUESTS opened in the last hours_back hours (hours_back 1-168, no as_of), the service's own work log of alert-triggered runs, not a span of collected data: a window with no request is a true negative, and the log is not floored by the collector tables. */
+        /* #9485: not a data window by design. hours_back is how far back a change window ended, read from the declared windows table, not a span of collected data. */
+        ["get_change_windows"] = "declared change windows: hours_back is how far back a window ended, not a collected-data window (#9485)",
         ["get_investigation_reports"] = "investigation request log: hours_back is the age of requests opened, not a collected-data window (#7010)",
         /* #7609: a fleet read of one query_hash across every server (no server_name to probe a collector table for), so it is in the NoNotice group with the other fleet reads. */
         ["get_query_fleet_summary"] = NoNotice,

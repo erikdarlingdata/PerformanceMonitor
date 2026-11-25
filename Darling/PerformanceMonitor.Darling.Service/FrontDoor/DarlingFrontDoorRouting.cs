@@ -89,7 +89,7 @@ internal static class DarlingFrontDoorRouting
     internal static readonly IReadOnlySet<string> StoreLocalIdArguments = new HashSet<string>(StringComparer.Ordinal)
     {
         "rule_id", "view_id", "route_id", "fallback_route_id", "tag_id", "parent_id", "note_id", "request_id", "claim_id",
-        "command_id", "journal_id", "sweep_id", "called_id", "query_id", "route_ids", "server_ids",
+        "command_id", "journal_id", "sweep_id", "called_id", "query_id", "route_ids", "server_ids", "window_id",
     };
 
     /// <summary>The tools that name no server and are asked of every store when no store is named (#6840). Together with the other two
@@ -97,6 +97,7 @@ internal static class DarlingFrontDoorRouting
     internal static readonly IReadOnlySet<string> FanOutTools = new HashSet<string>(StringComparer.Ordinal)
     {
         "find_database",
+        "get_change_windows",
         "get_agent_changes",
         "get_collection_state",
         "get_collector_cost",

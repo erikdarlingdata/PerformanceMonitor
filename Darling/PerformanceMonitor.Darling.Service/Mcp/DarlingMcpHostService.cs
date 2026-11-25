@@ -2039,6 +2039,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                its result, over the same ChangeWatchStore the worker pass writes. A read of the monitoring store: the investigation
                agent may call it. */
             .WithGeminiCompatibleTools<DarlingMcpChangeWatchTools>()
+            .WithGeminiCompatibleTools<DarlingMcpChangeWindowTools>()
             /* The known-pattern read - get_known_patterns (#6334) - the operator-written entries that get_alert_history rows carry the matches of. */
             .WithGeminiCompatibleTools<DarlingMcpKnownPatternTools>()
             /* The known-pattern writes - create_known_pattern / update_known_pattern / delete_known_pattern (#6398) - admin writes over the same store
@@ -2101,6 +2102,8 @@ public sealed class DarlingMcpHostService : BackgroundService
             .WithGeminiCompatibleTools<DarlingMcpCollectorRunTools>()
             /* #6231: set_quiet_window / clear_quiet_window - a mute rule with only a server scope (or none) and an end, optionally a start. */
             .WithGeminiCompatibleTools<DarlingMcpQuietWindowTools>()
+            /* #9485: declare_change_window / clear_change_window - a planned change window that holds the investigation requests opened inside it. */
+            .WithGeminiCompatibleTools<DarlingMcpChangeWindowWriteTools>()
             /* #6397: get_database_state_expectations (read) and set_database_state_expected (write): the Database State alert's per-database
                expected state, through the store code the Viewer's override editor runs. The mcp role holds INSERT/UPDATE/DELETE on only that table. */
             .WithGeminiCompatibleTools<DarlingMcpDatabaseStateTools>()

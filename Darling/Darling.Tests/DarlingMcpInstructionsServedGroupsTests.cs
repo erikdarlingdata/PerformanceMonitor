@@ -46,9 +46,9 @@ public sealed class DarlingMcpInstructionsServedGroupsTests
 
         internal string[] ServerAdmin => Tools.Where(DarlingMcpWritePolicy.IsServerAdmin).ToArray();
 
-        /// <summary>True when a write tool outside the server admin and agent action sets is served: the writes arm, or an operator token.</summary>
+        /// <summary>True when a write tool outside the server admin, agent action and change window (#9485, served to an agent token too) sets is served: the writes arm, or an operator token.</summary>
         internal bool WritesArm => Tools.Any(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n)
-            && !DarlingMcpWritePolicy.AgentActionTools.Contains(n));
+            && !DarlingMcpWritePolicy.AgentActionTools.Contains(n) && !DarlingMcpWritePolicy.ChangeWindowTools.Contains(n));
 
         /// <summary>The agent action tools served as such: write tools from the action set, served while the other write tools are not.</summary>
         internal string[] AgentActions => WritesArm

@@ -68,6 +68,17 @@ public sealed partial class DarlingMcpInvestigationTools
     private static InvestigationRequestStore Store(NpgsqlDataSource postgres) =>
         new(postgres, ServiceCommandDeadlines.SerialLoopSeconds) { ReadServerIds = DarlingServerResolver.WebAllowedServerIds };
 
+    private static readonly string[] HeldFilters = [InvestigationChangeWindows.HeldOnly, InvestigationChangeWindows.HeldExclude];
+
+    /// <summary>#9485: a row as the list answers it, with held_by always present (null when the request was never held).</summary>
+    private static JsonNode WithHeldBy(InvestigationRequestRow row)
+    {
+        var node = JsonSerializer.SerializeToNode(InvestigationToolCore.RequestPayload(row), McpHelpers.JsonOptions)!;
+        if (node is JsonObject obj && !obj.ContainsKey("held_by"))
+            obj["held_by"] = null;
+        return node;
+    }
+
     [McpServerTool(Name = "list_investigation_requests"), Description(
         "Lists the investigation requests alerts opened for your agent, newest first, with state, lease and expiry. Writes " +
         "nothing. status ok or empty. Claim one with claim_investigation_request. <<GUIDE>> " +
@@ -79,17 +90,22 @@ public sealed partial class DarlingMcpInvestigationTools
         "States: open (claimable), claimed (a live lease), reported, closed, expired (past its expiry, or out of its " +
         "three claims). Filters are optional: state, server_name (exact, then partial), family (blocking, query_performance, " +
         "resources, availability, jobs, self_monitor, other), limit (1-100, default 20). requests_returned is how many rows " +
-        "you got; truncated says more requests matched than limit (raise limit or narrow the filters).")]
+        "you got; truncated says more requests matched than limit (raise limit or narrow the filters). " +
+        "held_by on each row is the planned change window that held the request when it opened (window_id, reason, ends_at, released_at), null when it was never held. " +
+        "A request is held when it opened inside a planned change window or its 30 minute tail: it stays listable and claimable but never wakes wait_for_investigation_requests, " +
+        "and the held filter lists only those (only), leaves them out (exclude), or lists both (omit).")]
     public static async Task<string> ListInvestigationRequests(
         NpgsqlDataSource postgres,
         [Description("open, claimed, reported, closed or expired. Omit for all.")] string? state = null,
         [Description("Server name. Omit for all.")] string? server_name = null,
         [Description("Alert family (see the guide). Omit for all.")] string? family = null,
         [Description("1-100. Default 20.")] int limit = 20,
+        [Description("only: just the requests a planned change window is holding. exclude: leave them out. Omit for both.")] string? held = null,
         CancellationToken cancellationToken = default)
     {
         var refusal = McpHelpers.ValidateChoice(state, InvestigationToolCore.States, "state")
-                      ?? McpHelpers.ValidateChoice(family, InvestigationToolCore.Families, "family");
+                      ?? McpHelpers.ValidateChoice(family, InvestigationToolCore.Families, "family")
+                      ?? McpHelpers.ValidateChoice(held, HeldFilters, "held");
         if (refusal is not null)
             return refusal;
         if (limit < 1 || limit > InvestigationToolCore.MaxLimit)
@@ -107,7 +123,7 @@ public sealed partial class DarlingMcpInvestigationTools
             }
 
             /* #5834, the #3699 shape: read one row past the limit, return the page, and say whether more matched. */
-            var fetched = await Store(postgres).ListAsync(state, serverId, family, limit + 1, cancellationToken);
+            var fetched = await Store(postgres).ListAsync(state, serverId, family, limit + 1, held, cancellationToken);
             var truncated = fetched.Count > limit;
             IReadOnlyList<InvestigationRequestRow> rows = truncated ? fetched.Take(limit).ToList() : fetched;
             return JsonSerializer.Serialize(new
@@ -116,7 +132,7 @@ public sealed partial class DarlingMcpInvestigationTools
                 message = rows.Count == 0 ? "No investigation request matches these filters." : null,
                 requests_returned = rows.Count,
                 truncated,
-                requests = rows.Select(InvestigationToolCore.RequestPayload),
+                requests = rows.Select(WithHeldBy),
             }, McpHelpers.JsonOptions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
