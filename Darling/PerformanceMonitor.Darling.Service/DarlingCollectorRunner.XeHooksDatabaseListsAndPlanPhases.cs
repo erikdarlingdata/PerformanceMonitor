@@ -980,9 +980,11 @@ public sealed partial class DarlingCollectorRunner
     }
 
     /// <summary>
-    /// #5449: procedure_stats' plan phase. Runs one second target query for the first
+    /// #5449: procedure_stats' plan phase. Asks the target for the first
     /// <see cref="ProcedureStatsCollector.MaxPlansPerRun"/> kept rows with a parsable plan handle, on the main read's
-    /// connection and inside its budget, and merges each row's plan and identity onto it. Closes the main reader first (one
+    /// connection and inside its budget, and merges each row's plan and identity onto it. A phase that renders plans
+    /// asks in the chunks and under the lock timeout and budget of <see cref="BoundedPlanFetch"/> (#9535); a phase
+    /// that reads only identities is one query. Closes the main reader first (one
     /// command at a time on the connection), as the deferred fetch does. A failed query ships every row without plans and
     /// marks them all skipped, so the reuse pass counts no miss and caches nothing; the plans are fetched again next
     /// cycle. A stop or the item budget expiring is not a phase failure and propagates. Returns the phase's milliseconds,
@@ -1012,12 +1014,47 @@ public sealed partial class DarlingCollectorRunner
 
         var watch = Stopwatch.StartNew();
         Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>? results = null;
+        BoundedPlanFetch.Outcome? bounds = null;
         try
         {
-            var query = ProcedureStatsCollector.BuildPlanPhaseQuery(context, handles);
-            using var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds);
-            using var phaseReader = await command.ExecuteReaderAsync(cancellationToken);
-            results = await ProcedureStatsCollector.ReadPlanPhaseAsync(phaseReader, context, cancellationToken);
+            if (ProcedureStatsCollector.PlanPhaseRendersPlans(context))
+            {
+                /* #9535: a phase that renders plans waits on schema locks, so it takes the bounds of the deferred fetch.
+                   A handle that is skipped or not reached has no result, and ApplyPlanPhase marks its row skipped. */
+                var answers = new Dictionary<int, ProcedureStatsCollector.PlanPhaseResult>();
+                await SetPlanFetchLockTimeoutAsync(provider, targetConnection, cancellationToken);
+                try
+                {
+                    bounds = await BoundedPlanFetch.RunAsync(
+                        handles,
+                        async (chunk, token) =>
+                        {
+                            var query = ProcedureStatsCollector.BuildPlanPhaseQuery(context, chunk);
+                            using var command = CreateCollectorCommand(provider, query, targetConnection, BoundedPlanFetch.CommandTimeoutSeconds);
+                            using var phaseReader = await command.ExecuteReaderAsync(token);
+                            return await ProcedureStatsCollector.ReadPlanPhaseAsync(phaseReader, context, token);
+                        },
+                        (ord, result) => answers[ord] = result,
+                        ex => IsBoundedPlanFetchFault(provider, ex),
+                        PlanFetchBudgetSpan,
+                        () => watch.Elapsed,
+                        cancellationToken);
+                }
+                finally
+                {
+                    await RestorePlanFetchLockTimeoutAsync(provider, targetConnection);
+                }
+
+                results = answers;
+            }
+            else
+            {
+                /* An identity-only phase reads aggregates over a DMV and takes no schema lock: one command. */
+                var query = ProcedureStatsCollector.BuildPlanPhaseQuery(context, handles);
+                using var command = CreateCollectorCommand(provider, query, targetConnection, CommandTimeoutSeconds);
+                using var phaseReader = await command.ExecuteReaderAsync(cancellationToken);
+                results = await ProcedureStatsCollector.ReadPlanPhaseAsync(phaseReader, context, cancellationToken);
+            }
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not OutOfMemoryException
                                    && !cancellationToken.IsCancellationRequested)
@@ -1029,6 +1066,8 @@ public sealed partial class DarlingCollectorRunner
         }
 
         ProcedureStatsCollector.ApplyPlanPhase(rows, indexes, results);
+        StampPlanFetchBounds(context, bounds);
+        LogPlanFetchBounds(ProcedureStatsCollector.Instance.Name, server, bounds);
         return Math.Max(1L, watch.ElapsedMilliseconds);
     }
 
