@@ -507,6 +507,12 @@ public class CollectionBackgroundService : BackgroundService
         [
             new HousekeepingStep("analysis", token => RunAnalysisIfDueAsync(token)),
         ]),
+        /* #9596: the object usage chain get_object_usage reads. Its own loop, because a backfill of a large database is minutes of short
+           locked steps and must not hold archival, analysis or the evidence capture back. It reads Lite's own database only. */
+        new HousekeepingLoop("object_usage_chain",
+        [
+            new HousekeepingStep("object_usage_chain", token => RunObjectUsageChainIfDueAsync(token)),
+        ]),
     ];
 
     /// <summary>
@@ -918,6 +924,47 @@ public class CollectionBackgroundService : BackgroundService
         catch (Exception ex)
         {
             _logger?.LogError(ex, "Findings cleanup failed");
+        }
+    }
+
+    /// <summary>#9596: how often the object usage chain pass looks for databases whose newest <c>index_object_stats</c> snapshot is ahead of their chain.
+    /// The collector runs daily, so a pass within minutes of a collection leaves the chain behind for only that long, and a pass that finds nothing
+    /// is one grouped read of the hot table.</summary>
+    internal static readonly TimeSpan ObjectUsageChainInterval = TimeSpan.FromMinutes(5);
+
+    private DateTime _lastObjectUsageChainTime = DateTime.MinValue;
+    private ObjectUsageChainBuilder? _objectUsageChainBuilder;
+
+    /// <summary>
+    /// #9596: builds the chain of every database that is behind (a store upgraded from v86 backfills each database from its oldest stored
+    /// snapshot here, in the background, while <c>get_object_usage</c> folds), then purges chain rows past their horizon. Never throws: a
+    /// failed pass is logged and the next one retries, and the stamp moves only when a pass ran, so a pass that found the store busy is retried
+    /// at the next tick.
+    /// </summary>
+    private async Task RunObjectUsageChainIfDueAsync(CancellationToken stoppingToken)
+    {
+        if (_duckDb == null || !HousekeepingIsDue(_lastObjectUsageChainTime, ObjectUsageChainInterval, DateTime.UtcNow))
+        {
+            return;
+        }
+
+        try
+        {
+            _objectUsageChainBuilder ??= new ObjectUsageChainBuilder(_duckDb);
+            var built = await _objectUsageChainBuilder.BuildPassAsync(ObjectUsageChainBuilder.MaxStepsPerPass, stoppingToken);
+            _lastObjectUsageChainTime = DateTime.UtcNow;
+            if (built > 0)
+            {
+                _logger?.LogInformation("Object usage chain: built {Snapshots} snapshots", built);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Object usage chain pass failed; the next pass retries");
         }
     }
 
