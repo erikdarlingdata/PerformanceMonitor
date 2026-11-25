@@ -126,6 +126,9 @@ public sealed class IdentityCapacityCollector : CollectorDefinitionBase<Identity
     /// <summary>Darling stores and reads it; Lite has no twin (ruling 10-21: new collection is Darling-only).</summary>
     public override bool IsDarlingOnly => true;
 
+    /// <summary>The read sets a 5 s lock timeout, so a 1222 behind a DDL's schema lock is a yield, not a failure (#9526).</summary>
+    public override bool YieldsOnLockTimeout => true;
+
     /// <summary>Catalog views exist on every SQL Server version and platform this supports.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 

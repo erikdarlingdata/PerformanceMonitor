@@ -22,7 +22,7 @@
 export const MCP_TOOL_NAMES = [
   "get_active_queries", "get_active_query_plan_xml", "get_ag_health", "get_agent_alerts", "get_alert_history", "get_alert_settings",
   "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking", "get_blocking_plan_xml",
-  "get_blocking_stats", "get_blocking_trend", "get_change_watches", "get_known_patterns", "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collection_state", "get_collector_cost", "get_collector_schedules",
+  "get_blocking_stats", "get_blocking_trend", "get_change_watches", "get_change_windows", "get_known_patterns", "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collection_state", "get_collector_cost", "get_collector_schedules",
   "get_collector_stall_probes", "get_collector_readiness", "get_agent_changes", "get_command_result", "get_compiles_after_evict", "get_cpu_by_database", "get_cpu_scheduler_pressure", "get_cpu_utilization", "get_current_waits_trend",
   "get_custom_alert_rule", "get_custom_view", "get_daily_health_report", "get_daily_summary", "get_daily_summary_range", "get_database_config",
   "get_database_config_changes", "get_database_protection", "get_database_scoped_config", "get_database_state_expectations", "get_database_sizes", "get_deadlock_detail",
@@ -62,10 +62,10 @@ const TOOL_NAME_SET = new Set(MCP_TOOL_NAMES);
 export const MCP_ACTION_TOOL_NAMES = [
   "add_servers", "measure_store_table", "analyze_now", "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
   "analyze_server", "approve_investigation_note", "assign_query_tag", "assign_server_tag", "audit_config", "backtest_custom_alert_rule", "call_tool", "claim_investigation_request",
-  "clear_quiet_window", "close_investigation_request", "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_known_pattern", "create_mute_rule",
+  "clear_change_window", "clear_quiet_window", "close_investigation_request", "compare_analysis", "create_custom_alert_rule", "create_custom_view", "create_known_pattern", "create_mute_rule",
   "create_notification_route", "create_query_tag", "create_query_tag_rule", "create_server_tag", "delete_custom_alert_rule",
   "delete_custom_view", "delete_known_pattern", "delete_mute_rule", "delete_notification_route", "delete_query_tag", "delete_query_tag_rule",
-  "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
+  "declare_change_window", "delete_server_tag", "describe_custom_view_catalog", "disable_collector", "disable_server", "dismiss_alert_history", "edit_server",
   "enable_collector", "enable_server", "evict_cached_plan", "find_database", "find_queries_by_text", "find_schema_objects", "find_tools", "force_query_store_plan", "generate_webhook_signing_key", "kill_session",
   "list_custom_alert_rules", "list_custom_alert_templates", "list_custom_views", "list_investigation_requests", "list_query_tag_rules",
   "list_query_tags", "list_servers", "merge_deadlock_signatures", "mute_analysis_finding", "pause_collection", "purge_expired_mute_rules", "purge_now",

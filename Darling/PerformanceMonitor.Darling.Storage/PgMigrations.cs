@@ -4133,6 +4133,10 @@ END $$;";
         new Migration(StoreLockWaits.Version, "store-lock-waits", StoreLockWaits.CreateSql),
         /* V317 (#9433): the reply size in bytes on the slow read record and the read latency histogram, two nullable columns. No data moves and old rows keep NULL. An older build ignores the columns. */
         new Migration(ReadReplyBytes.Version, "read-reply-bytes", V317Sql),
+        /* V318 (#9485): planned change windows. config.investigation_change_windows (a declared window over one server, a list or every server) and two nullable
+           columns on config.investigation_requests that say which window held a request and when a late join released the hold. One new table and two catalog-only
+           columns: no data moves. An older build ignores them, so it hands a request that opened in a window to the request runner as it always did. */
+        new Migration(InvestigationChangeWindows.Version, "investigation-change-windows", InvestigationChangeWindows.CreateSql),
     };
 
     /// <summary>

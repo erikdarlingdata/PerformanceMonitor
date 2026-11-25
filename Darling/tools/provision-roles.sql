@@ -3711,7 +3711,7 @@ BEGIN
       RETURN NEW;
    END IF;
 
-   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'person_deleted', 'mcp_personal_token_created', 'mcp_personal_token_revoked', 'mcp_personal_token_expiry_cut', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'slack_thread_posted', 'slack_press', 'person_message', 'agent_message') THEN
+   IF NEW.event IN ('opened', 'joined', 'resolved', 'expired', 'claims_exhausted', 'evidence_ready', 'follow_up', 'deadlock_digest', 'hold_released', 'event_delivered', 'fallback_sent', 'server_action_switched', 'action_called', 'action_done', 'action_failed', 'person_added', 'person_renamed', 'person_enabled', 'person_disabled', 'person_identity_added', 'person_identity_removed', 'person_grant_added', 'person_grant_removed', 'person_deleted', 'mcp_personal_token_created', 'mcp_personal_token_revoked', 'mcp_personal_token_expiry_cut', 'proposal_created', 'proposal_first_press', 'proposal_approved', 'proposal_run', 'proposal_failed', 'proposal_unknown', 'proposal_refused', 'proposal_expired', 'proposal_superseded', 'proposal_voided', 'proposal_notice_sent', 'slack_thread_posted', 'slack_press', 'person_message', 'agent_message', 'change_window_closed') THEN
       IF NEW.event = 'opened'
          AND EXISTS (SELECT 1 FROM config.investigation_requests AS r
                      WHERE r.request_id = NEW.request_id AND r.practice_of IS NOT NULL
@@ -3919,6 +3919,21 @@ BEGIN
    GRANT SELECT ON config.investigation_request_askers TO admin;
    REVOKE ALL ON config.investigation_person_messages FROM PUBLIC, admin, viewer, web, mcp CASCADE;
    GRANT SELECT ON config.investigation_person_messages TO admin;
+END $do$;
+
+-- 3j8. The planned change windows (V318, #9485), mirroring managed provisioning's section 10e8: REVOKE ALL ... CASCADE, then SELECT back to every
+--     role. The service opens requests as the owner and reads the windows to hold a request that opens inside one. It is created by V318: on a store below
+--     it the block warns and skips, so the rest of the script still runs.
+DO $do$
+BEGIN
+   IF pg_catalog.to_regclass('config.investigation_change_windows') IS NULL THEN
+      RAISE WARNING 'The change window table was not found, so its grants were skipped. Run this script again after the service has upgraded the store.';
+      RETURN;
+   END IF;
+
+   REVOKE ALL ON config.investigation_change_windows FROM PUBLIC, admin, viewer, web, mcp CASCADE;
+   GRANT SELECT ON config.investigation_change_windows TO admin, viewer, web;
+   GRANT SELECT ON config.investigation_change_windows TO mcp;
 END $do$;
 
 -- 3k. Query-tag tables (V192, #5977), mirroring managed provisioning's grants for them. mcp writes the three tables a person

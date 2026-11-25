@@ -17,7 +17,8 @@ namespace PerformanceMonitor.Common;
 /// as one JSON object a POST runner can act on. Its request fields are <c>list_investigation_requests</c>' own, with the
 /// same names; <c>brief</c> is the stored brief as <c>get_investigation_reports</c> serves it, masked at
 /// <c>mcp.dataDetail</c> before it leaves the service (null until a claim composes it); <c>outcome</c> says whether this
-/// alert opened the request or joined it; <c>claim_tool</c> and <c>report_tool</c> name the MCP tools the runner calls
+/// alert opened the request or joined it; <c>held</c> (#9485) is true when the request opened inside a planned change window, with the
+/// window's reason in <c>held_reason</c>, and false otherwise; <c>claim_tool</c> and <c>report_tool</c> name the MCP tools the runner calls
 /// next, since the claim and the report still go through MCP.
 /// </summary>
 public static class InvestigationWebhookToken
@@ -41,6 +42,11 @@ public static class InvestigationWebhookToken
             : new JsonObject { ["request_id"] = requestId.ToString() };
 
         node["outcome"] = opened ? "opened" : "joined";
+        /* #9485: a request that opened inside a planned change window is held, and the page says so with the window's reason. */
+        var heldBy = row?.HeldBy is { IsHeld: true } hold ? hold : null;
+        node["held"] = heldBy is not null;
+        if (heldBy is not null)
+            node["held_reason"] = heldBy.Reason;
         node["brief"] = brief is null
             ? null
             : InvestigationFieldMasking.StoredBrief(brief, mode, McpDataDetailMasker.ForAnswer(mode, key));

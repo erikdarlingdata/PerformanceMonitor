@@ -935,7 +935,7 @@ public static partial class DarlingWebEndpoints
                fetched when its Analysis row is first expanded. The key is the page's own row identity. */
             ["get_alert_details"] = R(CatAlerts, "One fired alert's advice: the heading, fields, advice text and fix script the desktop's Alert Detail shows (never the Apply payload), found by server_id, metric_name and alert_time exactly as get_alert_history reports them. An alert with no advice, or no match, answers an empty details list. For High CPU, Blocking Detected, Blocking Wait Time and Deadlocks Detected it also answers attached_findings: the analysis findings held back from paging because that alert was open.", new CatalogParam("server_id", TypeInt, true, null), PReqText("metric_name"), PReqText("alert_time")),
             ["list_investigation_requests"] = R(CatAlerts, "Level 1 investigation requests alerts opened for an agent, newest first, with the state computed from the lease and expiry.",
-                PText("state"), PServer(), PText("family"), PLimit(20)),
+                PText("state"), PServer(), PText("family"), PLimit(20), PText("held")),
             ["get_investigation_reports"] = R(CatAlerts, "Investigation requests with their agent reports and journal: one request by id (with its brief), or those opened in the window.",
                 PServer(), PText("request_id"), PHours(24)),
             ["get_mute_rules"] = R(CatAlerts, "The alert mute rules (enabled-only by default).", PBool("enabled_only", true)),

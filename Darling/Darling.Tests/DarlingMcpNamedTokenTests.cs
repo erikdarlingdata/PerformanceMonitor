@@ -223,7 +223,12 @@ public sealed class DarlingMcpNamedTokenTests
         var agentTools = await ToolNamesAsync(server, AgentToken);
 
         Assert.DoesNotContain(agentTools, DarlingMcpWritePolicy.NeverAgentTools.Contains);
-        Assert.All(agentTools.Where(DarlingMcpWritePolicy.IsWrite), t => Assert.Contains(t, DarlingMcpWritePolicy.AgentActionTools));
+        /* The Level 2 action tools, and the change window tools (#9485), which an agent token holds under the investigations arm without
+           an agent_action, behind the per-call agent switch. */
+        Assert.All(agentTools.Where(DarlingMcpWritePolicy.IsWrite),
+            t => Assert.True(
+                DarlingMcpWritePolicy.AgentActionTools.Contains(t) || DarlingMcpWritePolicy.ChangeWindowTools.Contains(t),
+                $"{t} is a write an agent token is served beyond the Level 2 action tools and the change window tools"));
         Assert.DoesNotContain(agentTools, DarlingMcpWritePolicy.IsServerAdmin);
         Assert.Contains("list_servers", agentTools);
     }

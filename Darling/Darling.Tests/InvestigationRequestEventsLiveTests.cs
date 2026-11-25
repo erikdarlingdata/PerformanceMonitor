@@ -563,6 +563,11 @@ public sealed class InvestigationRequestEventsLiveTests
                 await ExecAsync(connection, $"DROP OWNED BY {roleName}; DROP ROLE IF EXISTS {roleName};", ct);
             }
 
+            /* The owner's own request-less summary row (#9485) goes through the same trigger. */
+            await ExecAsync(connection, JournalRow(null, InvestigationEvents.ChangeWindowClosed), ct);
+            Assert.Equal("1", await ScalarAsync(connection,
+                $"SELECT count(*) FROM config.investigation_journal WHERE event = '{InvestigationEvents.ChangeWindowClosed}' AND request_id IS NULL", ct));
+
             /* The service writes through the trigger: a join event, the resolved sweep, the delivery marks. Only the real
                events are delivered. */
             var sends = new FakeSends();
@@ -580,10 +585,72 @@ public sealed class InvestigationRequestEventsLiveTests
         });
     }
 
-    private static string JournalRow(Guid request, string journalEvent, string? onceKey = null, string time = "now()", string? reason = null,
+    /// <summary>#9485 review: a request that was held and is then released reaches the route once, as hold_released. Its opened and joined rows
+    /// were journaled while it was held, and neither the signed delivery nor the long-poll hands them out with the release.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AReleasedRequest_IsDeliveredOnce_AsHoldReleased_WhetherAClearOrALateJoinReleasedIt(bool clearTheWindow)
+    {
+        await RunAsync(async (store, connection, ct) =>
+        {
+            var windowId = long.Parse(await ScalarAsync(connection,
+                $"INSERT INTO config.investigation_change_windows (server_ids, starts_at, ends_at, reason, declared_by) VALUES (NULL, '{T0:O}', '{T0.AddMinutes(20):O}', 'resize', 'test') RETURNING window_id",
+                ct) ?? "0", CultureInfo.InvariantCulture);
+            _now = T0.AddMinutes(5);
+            var id = (await store.OpenOrJoinAsync(Alert(_now, "High CPU", InvestigationEvents.Warning), ct)).RequestId!.Value;
+            _now = T0.AddMinutes(8);
+            Assert.True((await store.OpenOrJoinAsync(Alert(_now, "Memory Pressure", InvestigationEvents.Warning), ct)).Evented);
+            Assert.Equal("opened,joined", await ScalarAsync(connection,
+                "SELECT string_agg(event, ',' ORDER BY journal_id) FROM config.investigation_journal", ct));
+
+            /* While it is held nothing is deliverable. */
+            Assert.Empty(await store.PendingDeliveriesAsync(T0.AddHours(-1), 100, ct));
+            Assert.Empty(await store.OpenedSinceAsync(T0.AddHours(-1), null, 100, ct));
+
+            if (clearTheWindow)
+            {
+                _now = T0.AddMinutes(10);
+                var operatorSeat = new DarlingAgentActionSeat(new DarlingMcpWritePolicy.Effective(true, false));
+                var cleared = await DarlingMcpChangeWindowWriteTools.ClearAsync(_dataSource!, operatorSeat, windowId, "work cancelled", _now, ct);
+                Assert.Contains("\"cleared\"", cleared, StringComparison.Ordinal);
+            }
+            else
+            {
+                /* Same-metric joins inside the tail keep the 30 minute grouping window open without releasing. The tail ends 30 minutes after the
+                   window (T0 + 50): the join after it is new evidence from outside the window. */
+                foreach (var minutes in new[] { 25, 45 })
+                {
+                    _now = T0.AddMinutes(minutes);
+                    Assert.False((await store.OpenOrJoinAsync(Alert(_now, "High CPU", InvestigationEvents.Warning), ct)).Evented);
+                }
+
+                Assert.Empty(await store.PendingDeliveriesAsync(T0.AddHours(-1), 100, ct));
+                _now = T0.AddMinutes(55);
+                Assert.True((await store.OpenOrJoinAsync(Alert(_now, "Disk Space", InvestigationEvents.Warning), ct)).Evented);
+            }
+
+            var pending = await store.PendingDeliveriesAsync(T0.AddHours(-1), 100, ct);
+            var row = Assert.Single(pending);
+            Assert.Equal((id, InvestigationEvents.HoldReleased), (row.RequestId, row.Event));
+            var waited = await store.OpenedSinceAsync(T0.AddHours(-1), null, 100, ct);
+            var waitRow = Assert.Single(waited);
+            Assert.Equal((id, InvestigationEvents.HoldReleased), (waitRow.RequestId, waitRow.Event));
+
+            /* The signed delivery sends exactly one POST for the request, then nothing more. */
+            var sends = new FakeSends();
+            var delivery = Delivery(store, sends, Route(1, generic: "https://agent.example/hook"));
+            Assert.Equal(1, (await delivery.RunOnceAsync(ct)).Posted);
+            Assert.Equal(0, (await delivery.RunOnceAsync(ct)).Posted);
+            var post = Assert.Single(sends.Posts);
+            Assert.Equal(InvestigationEvents.HoldReleased, (string)JsonNode.Parse(post.Payload)!["event"]!);
+        });
+    }
+
+    private static string JournalRow(Guid? request, string journalEvent, string? onceKey = null, string time = "now()", string? reason = null,
         string columns = "event_time, request_id, route_id, server_id, event, actor, reason, once_key", string? idValues = null) =>
         $"INSERT INTO config.investigation_journal ({columns}) {(idValues is null ? "" : "OVERRIDING SYSTEM VALUE ")}"
-        + $"VALUES ({idValues}{time}, '{request}', 1, {ServerId}, '{journalEvent}', 'agent:forger', "
+        + $"VALUES ({idValues}{time}, {(request is null ? "NULL" : "'" + request + "'")}, 1, {ServerId}, '{journalEvent}', 'agent:forger', "
         + (reason is null ? "NULL, " : $"'{reason}', ")
         + (onceKey is null ? "NULL)" : $"'{onceKey}')");
 
@@ -605,6 +672,10 @@ public sealed class InvestigationRequestEventsLiveTests
         {
             forged.Add(JournalRow(id, kind));
         }
+
+        /* The summary row of a closed change window (#9485) has no request and belongs to the service alone: no other login may write a false one. */
+        forged.Add(JournalRow(null, InvestigationEvents.ChangeWindowClosed));
+        forged.Add(JournalRow(id, InvestigationEvents.ChangeWindowClosed));
 
         /* A practice request's opened row with a reason that is not the exact sentence. */
         forged.Add(JournalRow(practiceId, InvestigationEvents.Opened, reason: "because I said so"));
