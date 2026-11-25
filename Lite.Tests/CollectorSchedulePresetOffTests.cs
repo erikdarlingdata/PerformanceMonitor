@@ -10,8 +10,8 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// The Off preset of the Collector Schedules editor (#9569): Off clears Enabled on every row and keeps everything
-/// else, and a named preset turns every row back on only when every row was off, so a collector somebody turned
-/// off on purpose among running ones stays off.
+/// else, and a named preset returns each row to its shipped default only when every row was off. A collector
+/// that ships off stays off, and one somebody turned off on purpose among running ones stays off.
 /// </summary>
 public sealed class CollectorSchedulePresetOffTests : IDisposable
 {
@@ -70,15 +70,19 @@ public sealed class CollectorSchedulePresetOffTests : IDisposable
     [InlineData("Aggressive")]
     [InlineData("Balanced")]
     [InlineData("Low-Impact")]
-    public void A_named_preset_after_Off_turns_every_row_on_and_sets_its_frequencies(string preset)
+    public void A_named_preset_after_Off_returns_each_row_to_its_shipped_default_and_sets_its_frequencies(string preset)
     {
-        var schedule = MixedSchedule();
+        var schedule = ScheduleManager.GetDefaultSchedules();
+        var shipped = ScheduleManager.GetDefaultSchedules().ToDictionary(s => s.Name, s => s.Enabled);
         var retentionBefore = schedule.ToDictionary(s => s.Name, s => s.RetentionDays);
         ScheduleManager.ApplyPreset(schedule, ScheduleManager.PresetOff);
 
         ScheduleManager.ApplyPreset(schedule, preset);
 
-        Assert.All(schedule, s => Assert.True(s.Enabled));
+        // A collector that ships off (long_query_completions) must not start an Extended Events session on Off then a named preset.
+        Assert.Contains(schedule, s => s.Name == "long_query_completions" && !s.Enabled);
+        Assert.Contains(schedule, s => s.Enabled);
+        Assert.All(schedule, s => Assert.Equal(shipped[s.Name], s.Enabled));
         Assert.All(schedule, s => Assert.Equal(retentionBefore[s.Name], s.RetentionDays));
         Assert.Equal(preset, ScheduleManager.DetectPreset(schedule));
     }
