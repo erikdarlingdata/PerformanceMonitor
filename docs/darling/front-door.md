@@ -232,7 +232,7 @@ The first five accept `GET` only.
 {"build":"Version 3.13.0 (commit 0993a1441)","commit":"0993a1441...","started_utc":"2026-11-24T06:00:00Z","upstreams_total":2,"upstreams_up":1}
 ```
 
-- `build` is the same line the web footer shows. `commit` is the full commit, or null for a build made outside a git checkout.
+- `build` is the same line the web footer shows. `commit` is the full commit the build was made from, read from the build's `SourceCommit` assembly metadata (#9591), or null for a build made with no source revision, such as one outside a git checkout.
 - `started_utc` is when the service process started, so a restart after an upgrade shows.
 - `upstreams_total` is how many stores the front door has. `upstreams_up` is how many of them it can use: a store counts when its last refresh worked. A store that was never reached, refused the token or answered last time but not this time does not count. The answer has no store name, no address and no error text, because anyone who can reach the address can read it.
 - The answer comes from the front door's last result for each store. A request to `/version` sends nothing to any store.
