@@ -182,8 +182,7 @@ public class StoreLogSelfMonitoringStoreTests
     [Fact]
     public void TheReadIsWiredEverywhereItHasToBe()
     {
-        var host = ReadSource("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpHostService.cs");
-        Assert.Contains("WithGeminiCompatibleTools<DarlingMcpStoreLogTools>", host, StringComparison.Ordinal);
+        Assert.Contains(typeof(DarlingMcpStoreLogTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
 
         Assert.Contains("get_store_log", DarlingWebEndpoints.BuildReadDispatch().Keys);
         Assert.True(DarlingWebEndpoints.CatalogDescriptors.ContainsKey("get_store_log"));

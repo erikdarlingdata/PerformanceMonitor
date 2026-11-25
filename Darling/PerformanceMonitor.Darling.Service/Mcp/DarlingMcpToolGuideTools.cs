@@ -9,6 +9,7 @@
 using System.ComponentModel;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -22,6 +23,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpToolGuideTools
 {
+    [FrontDoorClass(FrontDoorToolClass.AnyOneStore)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_tool_guide"), Description("Returns the reading guides tools/list leaves out. A tool whose description ends \"Reading guide: get_tool_guide.\" has one: pass its name in tools for what its fields mean and its edge cases. Pass topic names in topics for guides that span tools. Call with neither to get only the names of the tools with guides and the topics: then call again with tools=[...] to read each guide. Unknown names are reported in the answer, not as errors; an answer over its size budget lists the rest under deferred. Read-only: reads no collected data and no monitored server.")]
     public static string GetToolGuide(
         McpToolGuideCatalog catalog,

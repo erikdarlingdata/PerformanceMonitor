@@ -83,11 +83,7 @@ public sealed class OversizedPlanBacklogReadPins
            read-only tool has an endpoint — this names THIS tool, so a failure says which one. */
         Assert.Equal(ToolName, ToolMethod.GetCustomAttribute<McpServerToolAttribute>()?.Name);
 
-        var host = CSharpMemberMap.Of(ReadRepoFile(HostSource)).Code;
-        Assert.Contains(
-            ".WithGeminiCompatibleTools<" + nameof(DarlingMcpOversizedPlanBacklogTools) + ">()",
-            host,
-            StringComparison.Ordinal);
+        Assert.Contains(typeof(DarlingMcpOversizedPlanBacklogTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
 
         Assert.Contains(ToolName, DarlingWebEndpoints.BuildReadDispatch().Keys);
         Assert.Contains(ToolName, DarlingWebEndpoints.CatalogDescriptors.Keys);
