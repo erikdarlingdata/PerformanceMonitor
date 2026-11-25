@@ -5710,6 +5710,11 @@ public sealed class AlertEngineTests
 
         var fired = Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Instance Restarted");
         Assert.Equal(AlertSeverityLevel.Warning, fired.Severity);
+        /* #9583: stores the 0 sentinel, not the 2026 the text scan read out of the start time, and the grids show a dash for it. */
+        Assert.Equal(0d, AlertValueParser.ResolveStoredValue(fired.NumericCurrentValue, fired.CurrentValue));
+        Assert.Equal(0d, AlertValueParser.ResolveStoredValue(fired.NumericThresholdValue, fired.ThresholdValue));
+        Assert.True(AlertMetricClassifier.IsStateOnly(fired.MetricName));
+        Assert.False(AlertMetricClassifier.IsResolution(fired.MetricName));
         Assert.Contains("2026-11-01 06:00:00", fired.DetailText, StringComparison.Ordinal);
         Assert.Contains("2026-07-01 11:58:00", fired.DetailText, StringComparison.Ordinal);
     }

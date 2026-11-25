@@ -21,9 +21,12 @@ using PerformanceMonitorLite.Models;
 namespace PerformanceMonitorLite.Services;
 
 /// <summary>The non-secret fields <c>--add-server</c> takes as flags. There is no password flag: an argument shows in the process list.</summary>
-internal sealed record AddServerFlags(string? Host = null, string? DisplayName = null, string? Auth = null, string? Username = null, string? Database = null)
+internal sealed record AddServerFlags(
+    string? Host = null, string? DisplayName = null, string? Auth = null, string? Username = null, string? Database = null,
+    string? EncryptMode = null, bool? TrustServerCertificate = null, bool? ReadOnlyIntent = null, bool? MultiSubnetFailover = null)
 {
-    internal bool Any => Host is not null || DisplayName is not null || Auth is not null || Username is not null || Database is not null;
+    internal bool Any => Host is not null || DisplayName is not null || Auth is not null || Username is not null || Database is not null
+        || EncryptMode is not null || TrustServerCertificate is not null || ReadOnlyIntent is not null || MultiSubnetFailover is not null;
 }
 
 /// <summary>
@@ -33,7 +36,8 @@ internal sealed record AddServerFlags(string? Host = null, string? DisplayName =
 /// user's Credential Manager (target <c>PerformanceMonitorLite_</c> plus the server id) and records that user's host confirmation.
 ///
 /// <para>The servers come from a JSON array on standard input (fields <c>host</c>, <c>display_name</c>, <c>auth</c>,
-/// <c>username</c>, <c>password</c>, <c>database</c>, as Darling's) or from flags for one server. A password is only ever read
+/// <c>username</c>, <c>password</c>, <c>database</c>, <c>encrypt_mode</c>, <c>trust_server_certificate</c>,
+/// <c>read_only_intent</c> and <c>multi_subnet_failover</c>, as Darling's; #9582) or from flags for one server. A password is only ever read
 /// from standard input, one line when flags name the server: never an argument, never echoed, never logged. There is no hidden
 /// password prompt, because Lite is a GUI-subsystem exe and a shell does not wait for one, so the shell and the exe would both read
 /// the keyboard.</para>
@@ -53,7 +57,10 @@ internal static class AddServerCommand
         + "Run PerformanceMonitorLite.exe --stop, then --add-server again, then start Lite: it collects from the new server from that start.";
 
     /// <summary>One server to add, as read from JSON or flags and normalised.</summary>
-    internal sealed record Entry(string Host, string? DisplayName, string AuthenticationType, string? Username, string? Password, string? Database);
+    /// <remarks>#9582: a null encryption mode or switch is one the run did not give. A new server then takes the default, and a listed one keeps its value.</remarks>
+    internal sealed record Entry(
+        string Host, string? DisplayName, string AuthenticationType, string? Username, string? Password, string? Database,
+        string? EncryptMode = null, bool? TrustServerCertificate = null, bool? ReadOnlyIntent = null, bool? MultiSubnetFailover = null);
 
     /// <summary>What the verb needs from the machine, so a test runs it with none of it.</summary>
     internal sealed record Machine(
@@ -73,15 +80,37 @@ internal static class AddServerCommand
         _ => string.Empty
     };
 
+    /// <summary>#9582: the encryption word as Darling's <c>encrypt_mode</c> reads it, or empty for an unknown word.</summary>
+    internal static string EncryptWord(string value) => value.Trim().ToUpperInvariant() switch
+    {
+        "OPTIONAL" => "Optional",
+        "MANDATORY" => "Mandatory",
+        "STRICT" => "Strict",
+        _ => string.Empty
+    };
+
+    private static bool IsBoolFlag(string name) =>
+        name.Equals("--trust-server-certificate", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("--read-only-intent", StringComparison.OrdinalIgnoreCase)
+        || name.Equals("--multi-subnet-failover", StringComparison.OrdinalIgnoreCase);
+
+    private static bool? TrueOrFalse(string? text) =>
+        string.Equals(text?.Trim(), "true", StringComparison.OrdinalIgnoreCase) ? true
+        : string.Equals(text?.Trim(), "false", StringComparison.OrdinalIgnoreCase) ? false
+        : null;
+
     /// <summary>
-    /// Parses the arguments after the verb: <c>--host</c>, <c>--name</c>, <c>--auth</c>, <c>--username</c> (or <c>--login</c>) and
-    /// <c>--database</c>, each as <c>--flag value</c> or <c>--flag=value</c>. A password flag is refused with the reason, and so is
+    /// Parses the arguments after the verb: <c>--host</c>, <c>--name</c>, <c>--auth</c>, <c>--username</c> (or <c>--login</c>),
+    /// <c>--database</c> and <c>--encrypt-mode</c>, each as <c>--flag value</c> or <c>--flag=value</c>, and the switches
+    /// <c>--trust-server-certificate</c>, <c>--read-only-intent</c> and <c>--multi-subnet-failover</c> (#9582), each alone (true) or
+    /// with <c>true</c> or <c>false</c> as its value. A password flag is refused with the reason, and so is
     /// anything else.
     /// </summary>
     internal static bool TryParseArgs(IEnumerable<string> args, out AddServerFlags flags, out string? errorMessage)
     {
         errorMessage = null;
-        string? host = null, displayName = null, auth = null, username = null, database = null;
+        string? host = null, displayName = null, auth = null, username = null, database = null, encryptMode = null;
+        bool? trustCertificate = null, readOnlyIntent = null, multiSubnet = null;
         var rest = args
             .Where(a => !string.Equals(a, LiteStartupPlan.AddServerArg, StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(a, LiteStartupPlan.AddServersArg, StringComparison.OrdinalIgnoreCase))
@@ -102,7 +131,7 @@ internal static class AddServerCommand
             if (!name.StartsWith('-'))
             {
                 /* The position, never the text: a stray value can be a password typed in the wrong place. */
-                errorMessage = $"Unexpected argument {i + 1}. --add-server takes --host, --name, --auth, --username (--login) and --database, each with a value.";
+                errorMessage = $"Unexpected argument {i + 1}. --add-server takes --host, --name, --auth, --username (--login), --database, --encrypt-mode, --trust-server-certificate, --read-only-intent and --multi-subnet-failover.";
                 break;
             }
 
@@ -115,11 +144,34 @@ internal static class AddServerCommand
 
             if (!(name.Equals("--host", StringComparison.OrdinalIgnoreCase) || name.Equals("--name", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("--auth", StringComparison.OrdinalIgnoreCase) || name.Equals("--username", StringComparison.OrdinalIgnoreCase)
-                || name.Equals("--login", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase)))
+                || name.Equals("--login", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--encrypt-mode", StringComparison.OrdinalIgnoreCase) || IsBoolFlag(name)))
             {
                 /* The position, never the text: a password typed as an option (-PSecret, -Password:Secret) would be echoed back. */
-                errorMessage = $"Unknown option at argument {i + 1}. --add-server takes --host, --name, --auth, --username (--login) and --database.";
+                errorMessage = $"Unknown option at argument {i + 1}. --add-server takes --host, --name, --auth, --username (--login), --database, --encrypt-mode, --trust-server-certificate, --read-only-intent and --multi-subnet-failover.";
                 break;
+            }
+
+            if (IsBoolFlag(name))
+            {
+                /* A switch alone means true. The next argument is its value only when it is true or false. */
+                if (value is null && i + 1 < rest.Length && TrueOrFalse(rest[i + 1]) is not null)
+                    value = rest[++i];
+                var flagValue = value is null ? true : TrueOrFalse(value);
+                if (flagValue is null)
+                {
+                    errorMessage = $"{name} takes true or false, or no value for true.";
+                    break;
+                }
+
+                switch (name.ToLowerInvariant())
+                {
+                    case "--trust-server-certificate": trustCertificate = flagValue; break;
+                    case "--read-only-intent": readOnlyIntent = flagValue; break;
+                    default: multiSubnet = flagValue; break;
+                }
+
+                continue;
             }
 
             if (value is null)
@@ -140,11 +192,12 @@ internal static class AddServerCommand
                 case "--auth": auth = value; break;
                 case "--username":
                 case "--login": username = value; break;
+                case "--encrypt-mode": encryptMode = value; break;
                 default: database = value; break;
             }
         }
 
-        flags = new AddServerFlags(host, displayName, auth, username, database);
+        flags = new AddServerFlags(host, displayName, auth, username, database, encryptMode, trustCertificate, readOnlyIntent, multiSubnet);
         return errorMessage is null;
     }
 
@@ -154,7 +207,11 @@ internal static class AddServerCommand
         if (flags.Any)
         {
             if (string.IsNullOrWhiteSpace(flags.Host))
-                return (null, "--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|sql|serviceprincipal|managedidentity|entradefault] [--username <login>] [--database <db>]");
+                return (null, "--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|sql|serviceprincipal|managedidentity|entradefault] [--username <login>] [--database <db>] [--encrypt-mode optional|mandatory|strict] [--trust-server-certificate [true|false]] [--read-only-intent [true|false]] [--multi-subnet-failover [true|false]]");
+
+            var encrypt = string.IsNullOrWhiteSpace(flags.EncryptMode) ? null : EncryptWord(flags.EncryptMode);
+            if (encrypt is { Length: 0 })
+                return (null, EncryptRefusal(flags.EncryptMode!));
 
             var auth = string.IsNullOrWhiteSpace(flags.Auth) ? AuthenticationTypes.Windows : AuthWord(flags.Auth);
             if (auth.Length == 0)
@@ -173,7 +230,8 @@ internal static class AddServerCommand
                     return (null, "No password was read from stdin, so no server was added.");
             }
 
-            return ([new Entry(flags.Host.Trim(), NullIfBlank(flags.DisplayName), auth, NullIfBlank(flags.Username), password, NullIfBlank(flags.Database))], null);
+            return ([new Entry(flags.Host.Trim(), NullIfBlank(flags.DisplayName), auth, NullIfBlank(flags.Username), password, NullIfBlank(flags.Database),
+                encrypt, flags.TrustServerCertificate, flags.ReadOnlyIntent, flags.MultiSubnetFailover)], null);
         }
 
         if (!inputRedirected)
@@ -241,11 +299,50 @@ internal static class AddServerCommand
             if (auth.Length == 0)
                 return (null, $"Entry {number}: {AuthRefusal(authText!)}");
 
-            entries.Add(new Entry(host, NullIfBlank(Field("display_name")), auth, NullIfBlank(Field("username")), Field("password"), NullIfBlank(Field("database"))));
+            /* #9582: read as Darling's add_servers reads them. A JSON null is not given. An unknown word, or a value that is not a JSON true or false, is refused. */
+            string? encrypt = null;
+            var encryptKind = ValueKind(item, "encrypt_mode");
+            if (encryptKind is not (JsonValueKind.Undefined or JsonValueKind.Null or JsonValueKind.String))
+                return (null, $"Entry {number}: encrypt_mode must be \"Optional\", \"Mandatory\" or \"Strict\".");
+            if (NullIfBlank(Field("encrypt_mode")) is { } encryptText)
+            {
+                encrypt = EncryptWord(encryptText);
+                if (encrypt.Length == 0)
+                    return (null, $"Entry {number}: {EncryptRefusal(encryptText)}");
+            }
+
+            var switches = new bool?[3];
+            var switchNames = new[] { "trust_server_certificate", "read_only_intent", "multi_subnet_failover" };
+            for (var f = 0; f < switchNames.Length; f++)
+            {
+                var kind = ValueKind(item, switchNames[f]);
+                if (kind is JsonValueKind.Undefined or JsonValueKind.Null)
+                    continue;
+                if (kind is not (JsonValueKind.True or JsonValueKind.False))
+                    return (null, $"Entry {number}: {switchNames[f]} must be true or false.");
+                switches[f] = kind == JsonValueKind.True;
+            }
+
+            entries.Add(new Entry(host, NullIfBlank(Field("display_name")), auth, NullIfBlank(Field("username")), Field("password"), NullIfBlank(Field("database")),
+                encrypt, switches[0], switches[1], switches[2]));
         }
 
         return entries.Count == 0 ? (null, "The array is empty, so no server was added.") : (entries, null);
     }
+
+    private static JsonValueKind ValueKind(JsonElement item, string name)
+    {
+        foreach (var property in item.EnumerateObject())
+        {
+            if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                return property.Value.ValueKind;
+        }
+
+        return JsonValueKind.Undefined;
+    }
+
+    private static string EncryptRefusal(string word) =>
+        $"encrypt_mode '{word}' is not supported here. Use Optional, Mandatory or Strict.";
 
     private static string AuthRefusal(string word) =>
         $"Authentication '{word}' is not supported here. Use windows, sql, serviceprincipal, managedidentity or entradefault. "
@@ -256,7 +353,7 @@ internal static class AddServerCommand
     internal static string UsageText() =>
         "Nothing arrived on stdin, so no server was added." + System.Environment.NewLine
         + "--add-server reads a JSON ARRAY of servers from stdin: [{\"host\":\"sql01\",\"auth\":\"sql\",\"username\":\"login\",\"password\":\"...\"}]" + System.Environment.NewLine
-        + "or one server from flags: --host <host> [--name <name>] [--auth windows|sql|serviceprincipal|managedidentity|entradefault] [--username <login>] [--database <db>]," + System.Environment.NewLine
+        + "or one server from flags: --host <host> [--name <name>] [--auth windows|sql|serviceprincipal|managedidentity|entradefault] [--username <login>] [--database <db>] [--encrypt-mode optional|mandatory|strict] [--trust-server-certificate [true|false]] [--read-only-intent [true|false]] [--multi-subnet-failover [true|false]]," + System.Environment.NewLine
         + "with the password piped on stdin as one line. There is no password flag. Run it as the Windows user that runs Lite: the password is stored for that user.";
 
     /// <summary>
@@ -297,7 +394,8 @@ internal static class AddServerCommand
         {
             number++;
             var label = $"Entry {number} ({entry.Host})";
-            var candidate = new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database };
+            /* The read-only intent is part of the server's identity, so a run that does not give it names the server without it. */
+            var candidate = new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database, ReadOnlyIntent = entry.ReadOnlyIntent ?? false };
 
             if (ServerManager.HostRefusal(entry.Host, null) is { } hostRefusal)
             {
@@ -379,7 +477,8 @@ internal static class AddServerCommand
 
                 /* The entry's own settings are in a file any local account can change. The connection test below and the stored password
                    would use them, so one this Windows account has not confirmed is refused here, before anything connects. */
-                var unconfirmed = UnconfirmedSettings(existing, manager.HostChangeIfSaved(existing), keepsManagedIdentityClientId: entry.AuthenticationType == AuthenticationTypes.ManagedIdentity);
+                var unconfirmed = UnconfirmedSettings(existing, manager.HostChangeIfSaved(existing), keepsManagedIdentityClientId: entry.AuthenticationType == AuthenticationTypes.ManagedIdentity,
+                    replacesEncryption: entry.EncryptMode is not null, replacesCertificate: entry.TrustServerCertificate is not null);
                 if (unconfirmed.Count > 0)
                 {
                     error.WriteLine($"{label}: the listed entry for this server holds {string.Join(", ", unconfirmed)} that this Windows account has not confirmed, so nothing was changed. "
@@ -388,11 +487,18 @@ internal static class AddServerCommand
                 }
             }
 
-            var server = existing ?? new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database };
+            var server = existing ?? new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database, ReadOnlyIntent = entry.ReadOnlyIntent ?? false };
             if (existing is null)
                 server.DisplayName = entry.DisplayName ?? entry.Host;
             else if (entry.DisplayName is not null)
                 server.DisplayName = entry.DisplayName;
+            /* #9582: a setting the run gives replaces the listed one, and the host confirmation records it for this account. */
+            if (entry.EncryptMode is not null)
+                server.EncryptMode = entry.EncryptMode;
+            if (entry.TrustServerCertificate is not null)
+                server.TrustServerCertificate = entry.TrustServerCertificate.Value;
+            if (entry.MultiSubnetFailover is not null)
+                server.MultiSubnetFailover = entry.MultiSubnetFailover.Value;
             server.AuthenticationType = entry.AuthenticationType;
             server.CredentialProfileId = null;
             server.AzureClientId = entry.AuthenticationType == AuthenticationTypes.ServicePrincipal ? entry.Username : null;
@@ -471,9 +577,12 @@ internal static class AddServerCommand
     /// about: a Query Store replica, a utility database, a certificate trusted without a check, and encryption that is Optional (or
     /// weaker than the confirmed one), and a managed identity client id the run keeps (<paramref name="keepsManagedIdentityClientId"/>).
     /// Every setting counts as unconfirmed when the record is not for this host. Empty when <paramref name="change"/> is null (the
-    /// record confirms the entry).
+    /// record confirms the entry). #9582: a run that gives the encryption mode or the certificate trust replaces the listed value and
+    /// confirms it, so <paramref name="replacesEncryption"/> and <paramref name="replacesCertificate"/> leave that setting out.
     /// </summary>
-    internal static List<string> UnconfirmedSettings(ServerConnection server, ServerHostChange? change, bool keepsManagedIdentityClientId)
+    internal static List<string> UnconfirmedSettings(
+        ServerConnection server, ServerHostChange? change, bool keepsManagedIdentityClientId,
+        bool replacesEncryption = false, bool replacesCertificate = false)
     {
         var names = new List<string>();
         if (change is null)
@@ -487,9 +596,9 @@ internal static class AddServerCommand
             names.Add("a Query Store replica");
         if (!string.IsNullOrWhiteSpace(server.UtilityDatabase) && (neverConfirmed || Asked(ServerHostBindings.UtilityDatabaseSetting)))
             names.Add("a utility database");
-        if (server.TrustServerCertificate && (neverConfirmed || Asked(ServerHostBindings.CertificateSetting)))
+        if (!replacesCertificate && server.TrustServerCertificate && (neverConfirmed || Asked(ServerHostBindings.CertificateSetting)))
             names.Add("TrustServerCertificate");
-        if (neverConfirmed ? ServerHostBindings.EncryptRank(server.EncryptMode) == 0 : Asked(ServerHostBindings.EncryptionSetting))
+        if (!replacesEncryption && (neverConfirmed ? ServerHostBindings.EncryptRank(server.EncryptMode) == 0 : Asked(ServerHostBindings.EncryptionSetting)))
             names.Add("encryption that is Optional or weaker than the confirmed one");
         if (keepsManagedIdentityClientId && !string.IsNullOrWhiteSpace(server.ManagedIdentityClientId)
             && (neverConfirmed || Asked(ServerHostBindings.ManagedIdentityClientIdSetting)))
