@@ -184,11 +184,16 @@ public sealed class DarlingMcpBlockingTools
                     /* #4966: an empty answer over a window the store may not reach back to is not a true negative, so the window keys
                        ride on it under hints. The page is fed by two collectors, so the probe is both (the earlier of the two). */
                     ?? await DarlingServerOfflineNote.EmptyAsync(postgres, resolved.ServerId, resolved.DisplayName, now, McpHelpers.Status("empty", $"No blocking events found in this window{ForChosenDatabases(databases)}.",
+                        /* #9518: a server whose 'blocked process threshold (s)' is 0 raises no report, so the report collector reads
+                           nothing there. The answer stays empty when the DMV blocking snapshots covered the window (they looked and
+                           found nothing), and a hint names the threshold so the reader knows which of the two collectors answered. */
+                        BlockedProcessThresholdOffNote.WithHint(
                         /* #8146: the loss of the blocked-process-report collector's runs rides beside the window keys (the DMV collector has no ring buffer). */
                         RingBufferLossAnswer.WithLoss((await DarlingMcpWindowNotice.ReadEventAsync(
                             () => DarlingMcpWindowNotice.Probe(postgres, BlockingPageSources, resolved.ServerName, windowStart, now, cancellationToken),
                             null, windowStart, now, BlockingPageTables, emptyAnswer: true, logger: logger, cancellationToken: cancellationToken)).AsHints(),
-                            await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken), !databases.IsAll)), cancellationToken, windowStart);
+                            await DarlingSystemHealthReader.GetLossRunsInWindowAsync(postgres, resolved.ServerId, BlockedProcessReportCollector.Instance.Name, windowStart, now, cancellationToken), !databases.IsAll),
+                            await DarlingBlockingReader.ReportsOffWithSnapshotCoverAsync(postgres, resolved.ServerId, windowStart, now, cancellationToken))), cancellationToken, windowStart);
 
             var scanTruncated = filtering && rows.Count > DarlingBlockingReader.FingerprintScanCeiling;
             if (scanTruncated) rows = rows.Take(DarlingBlockingReader.FingerprintScanCeiling).ToList();

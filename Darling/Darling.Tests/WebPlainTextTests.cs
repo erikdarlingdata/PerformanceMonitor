@@ -191,6 +191,17 @@ public sealed class WebPlainTextTests
         Assert.Equal("latest run: shred gated: 1 (no new events since the last run, so the XML was not read), events read: 0, report xml empty: 0", o[0]);
     }
 
+    /// <summary>#9518: the count a blocked_process_report run leaves where the server's blocked process threshold is 0 says why the session was not read.</summary>
+    [Fact]
+    public void TheBlockedProcessThresholdOffCount_SaysWhyTheSessionWasNotRead()
+    {
+        var o = Run(["latest run: blocked_process_threshold_off=1 events_read=0 report_xml_empty=0 report_xml_unparsed=0 events_stored=0"], out _);
+        Assert.Equal(
+            "latest run: blocked process threshold off: 1 (blocked process reports are off because 'blocked process threshold (s)' is 0, so the session was not read), "
+            + "events read: 0, report xml empty: 0, report xml unparsed: 0, events stored: 0",
+            o[0]);
+    }
+
     /* #6649: the left-out databases pointer, the baseline window sentence and the memory clerk note's four arms reached the page
        with the MCP answer's field names in them. The baseline sentence and the clerk notes are read from the C# that owns them
        (QueryStoreRegressionRules.BaselineWindowTail, DarlingMcpQueryStoreClutterTools.ClerkNote*), so a reword there breaks this

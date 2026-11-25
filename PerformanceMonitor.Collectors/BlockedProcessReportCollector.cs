@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.Common;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
@@ -207,6 +208,12 @@ JOIN sys.dm_xe_sessions AS xes
         var planApply = context.CapturePlanXml
             ? BuildPlanResolutionApply("blocked-process", "bqp") + BuildPlanResolutionApply("blocking-process", "kqp")
             : "";
+        /* #9518: the same two columns for the empty payload a threshold of 0 returns, so its shape matches the payload's. */
+        var planOffSelect = context.CapturePlanXml
+            ? @",
+        blocked_query_plan_xml = CONVERT(nvarchar(max), NULL),
+        blocking_query_plan_xml = CONVERT(nvarchar(max), NULL)"
+            : "";
 
         var sessionPositionSql = context.Target.IsAzureSqlDb
             ? RingBufferXml.SessionPositionDatabaseSql
@@ -272,6 +279,41 @@ DECLARE
     name sysname NOT NULL,
     error_text nvarchar(4000) NULL
 );
+
+/* #9518: the server setting, read BEFORE the session. With 'blocked process threshold (s)' at 0 in use SQL Server never
+   raises blocked_process_report, so the session's ring buffer can hold no event and every read below it answers a
+   question the engine cannot: the batch returns its three result sets empty and reads nothing else. The catalog read
+   runs on every run, so a threshold set later is seen by the next run with no restart. NULL (no such row) is unknown
+   and never reads as off. Not read on Azure SQL Database, where the setting is not sp_configure's to set and the
+   hosts' threshold bootstrap does not run either. */
+DECLARE
+    @blocked_process_threshold integer;
+
+IF @azure = 0
+BEGIN
+    SELECT
+        @blocked_process_threshold = CONVERT(integer, c.value_in_use)
+    FROM sys.configurations AS c
+    WHERE c.name = N'{PerformanceMonitor.Common.BlockedProcessThresholdOffNote.SettingName}'
+    OPTION(RECOMPILE);
+END;
+
+IF @blocked_process_threshold = 0
+BEGIN
+    /* The payload's own shape with no row, so the reader and the host see the result sets they always see. */
+    SELECT
+        event_time = CONVERT(datetime2, NULL),
+        blocked_process_report_xml = CONVERT(nvarchar(max), NULL),
+        object_id = CONVERT(integer, NULL),
+        database_id = CONVERT(integer, NULL),
+        contentious_object = CONVERT(nvarchar(4000), NULL){planOffSelect}
+    WHERE 1 = 0
+    OPTION(RECOMPILE);
+
+    /* The gate row and the probe-failure set are one statement each for both paths, so their shapes cannot drift:
+       every variable the gate row reads is still NULL here, and its last column carries the threshold. */
+    GOTO gate_result;
+END;
 
 /* #4200: read BEFORE the cast -- no XML materialized, so this costs one integer whether or not
    anything shreds below. Compared against @last_execution_count (the prior cycle's own read of
@@ -780,14 +822,19 @@ OPTION(RECOMPILE);
 
 /* #4200: the gate's own result, between the payload and the probe-failure set. Always one row,
    whichever branch ran above -- ReadAsync consumes this one itself (NextResultAsync), so the
-   reader is correctly positioned on the probe-failure set below by the time the host reads it. */
+   reader is correctly positioned on the probe-failure set below by the time the host reads it.
+   #9518: a threshold of 0 jumps here from the top of the batch, past every read of the session. */
+gate_result:
+
 SELECT
     execution_count = @execution_count,
     gated = CASE WHEN @shred_needed = 1 THEN CONVERT(bit, 0) ELSE CONVERT(bit, 1) END,
     /* #6441: whether SQL Server truncated the ring buffer's XML (all NULL when the gate skipped the read). */
     {RingBufferXml.TruncationColumnsSql},
     /* #8146: the target header, the session row and the limit, for ReadAsync's loss accounting. */
-    {RingBufferXml.PositionColumnsSql};
+    {RingBufferXml.PositionColumnsSql},
+    /* #9518: the threshold in use (NULL where it is not read or has no row). 0 means nothing above ran. */
+    blocked_process_threshold = @blocked_process_threshold;
 
 /* Trailing result set = the payload path's probe-failure contract (#1851/#1865,
    EnumeratedCollectorDriver.ReadPayloadProbeFailuresAsync). Always returned, and empty on both of
@@ -943,6 +990,16 @@ OUTER APPLY
     /// <summary>1 when this cycle's gate (#4200) skipped the cast+shred, else 0.</summary>
     public const string ShredGatedMeasurement = "shred_gated";
 
+    /* #9518: the measurement label for a run that found 'blocked process threshold (s)' at 0 and read nothing else. A literal on
+       purpose (the measurement-label scan reads a const string declared in this file); it must equal
+       PerformanceMonitor.Common.BlockedProcessThresholdOffNote.Label, which the readers parse, and the threshold-off test runs a
+       note rendered from this label through BlockedProcessThresholdOffNote.TryParse so a drift fails. */
+    public const string ThresholdOffMeasurement = "blocked_process_threshold_off";
+
+    /* #9518: where the gate row carries the threshold in use: after execution_count, gated, the three truncation columns and
+       the six position columns. */
+    private const int ThresholdOrdinal = 11;
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
@@ -1015,20 +1072,33 @@ OUTER APPLY
            never reaches here at all. */
         if (await reader.NextResultAsync(cancellationToken) && await reader.ReadAsync(cancellationToken))
         {
-            if (!reader.IsDBNull(0))
+            /* #9518: the batch found the threshold at 0 and read nothing of the session, so the row's other columns describe
+               no read: no counter to carry forward, no gate verdict, no ring buffer to account for. A COUNT, not a verdict
+               (the readers derive what to say from the newest run), on a run that stays a SUCCESS: a threshold somebody
+               left at 0 is not a fault. A row without the column (a test fake) or with a NULL is unknown and says nothing. */
+            if (reader.FieldCount > ThresholdOrdinal
+                && !reader.IsDBNull(ThresholdOrdinal)
+                && Convert.ToInt32(reader.GetValue(ThresholdOrdinal), CultureInfo.InvariantCulture) == 0)
             {
-                context.StagedItemState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
-                    XeShredGate.ToStateValue(reader.GetInt64(0));
+                context.Measure(ThresholdOffMeasurement, 1);
             }
+            else
+            {
+                if (!reader.IsDBNull(0))
+                {
+                    context.StagedItemState[XeShredGate.KeyFor(context.CurrentDatabaseName)] =
+                        XeShredGate.ToStateValue(reader.GetInt64(0));
+                }
 
-            context.Measure(ShredGatedMeasurement, !reader.IsDBNull(1) && reader.GetBoolean(1) ? 1 : 0);
+                context.Measure(ShredGatedMeasurement, !reader.IsDBNull(1) && reader.GetBoolean(1) ? 1 : 0);
 
-            /* #6441: SQL Server cuts a ring buffer's XML at about 4 MB and keeps the OLDEST events. */
-            RingBufferXml.MeasureTruncation(reader, 2, context);
+                /* #6441: SQL Server cuts a ring buffer's XML at about 4 MB and keeps the OLDEST events. */
+                RingBufferXml.MeasureTruncation(reader, 2, context);
 
-            /* #8146: what the ring buffer evicted and the session dropped since the last run, gated run included. */
-            var truncated = reader.FieldCount > 2 && !reader.IsDBNull(2) && reader.GetBoolean(2);
-            RingBufferLossAccounting.Apply(context, RingBufferObservation.Read(reader, 5), truncated);
+                /* #8146: what the ring buffer evicted and the session dropped since the last run, gated run included. */
+                var truncated = reader.FieldCount > 2 && !reader.IsDBNull(2) && reader.GetBoolean(2);
+                RingBufferLossAccounting.Apply(context, RingBufferObservation.Read(reader, 5), truncated);
+            }
         }
 
         /* Measure() ACCUMULATES a repeated label, which is what makes this correct on the per-database
