@@ -154,6 +154,17 @@ public sealed class DarlingMcpHostTests
     }
 
     [Fact]
+    public void ResolveMcpBind_Byo_TokenOnly_IsLoopbackByDefault_NotManagedModeRequired()
+    {
+        /* #9571: the token is honored in BYO (loopback MCP and the write tools use it), so a block holding only
+           a token has nothing the mode ignores and must not produce the "ignored" notice. */
+        var decision = Host.ResolveMcpBind(Mcp(token: "s3cr3t-token-value"), managed: false, inContainer: false);
+
+        Assert.Equal(Host.McpBindMode.LoopbackOnly, decision.Mode);
+        Assert.Equal(Host.McpBindReason.LoopbackByDefault, decision.Reason);
+    }
+
+    [Fact]
     public void ResolveMcpBind_LoopbackListen_IsLoopbackByDefault_NoCollision()
     {
         /* 127.0.0.1 must resolve to the loopback single-bind path, never a network bind. */

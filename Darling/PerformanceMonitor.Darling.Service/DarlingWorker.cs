@@ -893,10 +893,14 @@ public sealed partial class DarlingWorker : BackgroundService
                gate), so this notice would be a lie there — the smoke test caught it warning IGNORED in
                the same breath as 'Starting MCP server on 0.0.0.0'. The postgres.network notice above
                stays: the bundled store never runs in BYO mode, container or not. */
-            if (config.Mcp.Network?.IsConfigured == true && !Hosting.DarlingHostBinding.IsRunningInContainer)
+            /* #9571: only the fields this mode ignores count. A token alone is honored (loopback MCP and the
+               write tools use it), so it must not trip a warning that says the setup does not work. */
+            var ignoredMcpFields = config.Mcp.Network?.ByoIgnoredFields ?? [];
+            if (ignoredMcpFields.Count > 0 && !Hosting.DarlingHostBinding.IsRunningInContainer)
             {
+                var named = string.Join(", ", ignoredMcpFields.Select(f => "mcp.network." + f));
                 warnings.Add(
-                    "mcp.network.* is set but postgres.managed is false. The MCP network endpoint is available only with the bundled store (postgres.managed = true) or the container distribution, so it is ignored and the MCP server stays on loopback.");
+                    $"{named} {(ignoredMcpFields.Count == 1 ? "is" : "are")} set but postgres.managed is false. The MCP network endpoint is available only with the bundled store (postgres.managed = true) or the container distribution, so {(ignoredMcpFields.Count == 1 ? "it is" : "they are")} ignored and the MCP server stays on loopback.");
             }
 
             return warnings;

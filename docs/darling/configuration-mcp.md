@@ -104,6 +104,8 @@ Register with Claude Code, sending the token as a header:
 claude mcp add --transport http --scope user sql-monitor-darling http://localhost:5152/ --header "Authorization: Bearer <token>"
 ```
 
+`mcp.enabled` and `mcp.port` in `darling.json` are first-start values only. After the store holds them, change them in the Viewer's settings, or run `--enable-mcp` or `--disable-mcp`. The Viewer shows the live port.
+
 In a project's `.mcp.json`, read the token from an environment variable, because project files get committed:
 
 ```json
@@ -121,6 +123,39 @@ The service account needs Read on the key. Use `certlm.msc` (All Tasks, Manage P
 If the port is already in use at startup, the MCP server logs an error and does not start; collection is unaffected.
 
 **The `store` argument (front door only).** On a service that runs as a front door, every tool also takes an optional `store` argument that names one of the front door's stores. A store itself has no `store` argument. The front door sends a call to a store by `store`, then by `server_name`, then by the kind of tool, and it answers a read that names no server from every store. See [How MCP calls route](front-door.md#how-mcp-calls-route).
+
+### Call a tool from a script
+
+A script does not need an MCP client. It can send one `tools/call` request with an HTTP POST to `http://127.0.0.1:<port>/`. Send no `initialize` request first, because the service runs MCP without sessions.
+
+The request needs three headers:
+
+- `Authorization: Bearer <token>`. A missing or wrong token gets HTTP 401.
+- `Content-Type: application/json`. A type such as `text/plain` gets HTTP 415.
+- `Accept: application/json, text/event-stream`. Send both types. `application/json` alone, or no `Accept` header, gets HTTP 406.
+
+The reply has the type `text/event-stream`. The JSON-RPC answer is on the line that starts with `data:`. The tool's own answer is JSON text in `result.content[0].text`. If the service does not serve the tool, the answer is a JSON-RPC error: `Unknown tool: '<name>'`.
+
+A write tool needs one of two settings. Set `mcp.allowWrites` to `true` and use the token from `mcp.network`, or use a named token in `mcp.tokens` with the role `operator`. An operator token needs no `allowWrites`. The service reads both settings at start only, so restart it after a change.
+
+This example calls the read tool `get_collection_state`. It reads the token from a file, so the token stays out of the script and the shell history.
+
+```powershell
+$token = (Get-Content -Raw 'C:\secure\darling-mcp-token.txt').Trim()
+$body = @{
+    jsonrpc = '2.0'; id = 1; method = 'tools/call'
+    params = @{ name = 'get_collection_state'; arguments = @{} }
+} | ConvertTo-Json -Depth 5
+$headers = @{
+    Authorization = "Bearer $token"
+    Accept = 'application/json, text/event-stream'
+}
+$reply = Invoke-WebRequest -Uri 'http://127.0.0.1:5152/' -Method Post -Headers $headers -ContentType 'application/json' -Body $body
+$line = ($reply.Content -split "`n") | Where-Object { $_ -like 'data:*' } | Select-Object -First 1
+$rpc = ($line -replace '^data:\s*', '') | ConvertFrom-Json
+if ($rpc.error) { throw $rpc.error.message }
+$rpc.result.content[0].text | ConvertFrom-Json
+```
 
 ### Personal tokens
 

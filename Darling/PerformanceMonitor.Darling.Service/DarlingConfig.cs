@@ -2084,8 +2084,8 @@ public sealed class McpNetworkConfig
     public string? HostName { get; set; }
 
     /// <summary>
-    /// True when any field is set — used only for the BYO "network.* is ignored" caller warning (D-BYO);
-    /// NOT the same as "exposed".
+    /// True when any field is set, the token included. NOT the same as "exposed", and NOT the BYO "network.* is
+    /// ignored" test: a token is honored in bring-your-own mode, so that warning uses <see cref="ByoIgnoredFields"/>.
     /// </summary>
     [JsonIgnore]
     public bool IsConfigured =>
@@ -2095,6 +2095,25 @@ public sealed class McpNetworkConfig
         || !string.IsNullOrWhiteSpace(Token)
         || !string.IsNullOrWhiteSpace(HostName)
         || (Tls?.IsConfigured ?? false);
+
+    /// <summary>
+    /// #9571: the fields bring-your-own mode (<c>postgres.managed</c> false, outside a container) really ignores,
+    /// for the start-up warning. The token and encrypted token are NOT here: the MCP server on loopback uses
+    /// them, and the write tools need them. Names are the JSON keys, in a fixed order.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<string> ByoIgnoredFields
+    {
+        get
+        {
+            var fields = new List<string>();
+            if (!string.IsNullOrWhiteSpace(Listen)) { fields.Add("listen"); }
+            if (!string.IsNullOrWhiteSpace(AllowFrom)) { fields.Add("allowFrom"); }
+            if (!string.IsNullOrWhiteSpace(HostName)) { fields.Add("hostName"); }
+            if (Tls?.IsConfigured ?? false) { fields.Add("tls"); }
+            return fields;
+        }
+    }
 
     /// <summary>
     /// The bare DNS name a raw <see cref="HostName"/> stands for, or null when there is none to use (#5288). PURE:
