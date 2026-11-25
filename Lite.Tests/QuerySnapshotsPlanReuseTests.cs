@@ -89,6 +89,42 @@ public sealed class QuerySnapshotsPlanReuseTests
         Assert.Contains("live_plan_over_cap = CONVERT(bit, 0),", sql, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildSnapshotQuery_RanksAndRendersOnlyTheFirstRequestOfEachPlanKey(bool azure)
+    {
+        var sql = QuerySnapshotsCollector.BuildSnapshotQuery(supportsLiveQueryPlan: true, isAzureSqlDatabase: azure)
+            .ReplaceLineEndings("\n");
+        var alias = azure ? "der" : "r";
+        var flat = string.Join(' ', sql.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        /* Each plan key is numbered by the result's own order, and only its first request counts toward the cap,
+           so plan_rank counts distinct plans. The plan function's own condition (plan_state 0 inside the cap) then
+           leaves every other request of the key unrendered. */
+        Assert.Contains(
+            $"key_ordinal = ROW_NUMBER() OVER ( PARTITION BY pk.plan_key ORDER BY {alias}.cpu_time DESC, "
+            + $"{alias}.parallel_worker_count DESC, {alias}.session_id, {alias}.request_id )",
+            flat,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "plan_rank = SUM(CASE WHEN rk.key_state = 0 AND rk.key_ordinal = 1 THEN 1 ELSE 0 END) OVER ( ORDER BY rk.cpu_time DESC, "
+            + "rk.parallel_worker_count DESC, rk.session_id, rk.request_id ROWS UNBOUNDED PRECEDING )",
+            flat,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "plan_state = CASE WHEN rk.key_state = 0 AND rk.key_ordinal > 1 THEN 4 ELSE rk.key_state END,",
+            flat,
+            StringComparison.Ordinal);
+
+        /* The live plan is a reading of one request, so its rank counts every request with a plan handle. */
+        Assert.Contains(
+            "live_plan_rank = SUM(CASE WHEN rk.plan_handle IS NOT NULL THEN 1 ELSE 0 END) OVER ( ORDER BY rk.cpu_time DESC, "
+            + "rk.parallel_worker_count DESC, rk.session_id, rk.request_id ROWS UNBOUNDED PRECEDING )",
+            flat,
+            StringComparison.Ordinal);
+    }
+
     [Fact]
     public void BuildSnapshotQuery_RendersALivePlanOnlyForTheFirstRankedRows()
     {
@@ -307,6 +343,72 @@ public sealed class QuerySnapshotsPlanReuseTests
         Assert.Equal(PlanXml, rows[0].QueryPlan);
         Assert.Null(rows[1].QueryPlan);
         Assert.Equal(1, Measured(context, QuerySnapshotsCollector.PlansOverCapMeasurement));
+    }
+
+    [Fact]
+    public async Task ReadAsync_RequestsThatShareAPlanKey_AllCarryThePlanItsFirstRequestFetched_AndTheRunCountsThem()
+    {
+        var cache = new QuerySnapshotPlanCache();
+        var context = Context(cache, s_start);
+        QuerySnapshotsCollector.Instance.BuildQuery(context);
+
+        using var reader = new FakeCollectorDataReader(
+            QueryRow(61, PlanXml, planState: 0, PlanKey),
+            QueryRow(62, DBNull.Value, planState: 4, PlanKey),
+            QueryRow(63, DBNull.Value, planState: 4, PlanKey),
+            /* A key past the cap: neither its first request nor the one that shares it was rendered. */
+            QueryRow(64, DBNull.Value, planState: 2, OtherPlanKey),
+            QueryRow(65, DBNull.Value, planState: 4, OtherPlanKey));
+        var rows = await QuerySnapshotsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(5, rows.Count);
+        Assert.Equal(PlanXml, rows[0].QueryPlan);
+        Assert.Equal(PlanXml, rows[1].QueryPlan);
+        Assert.Equal(PlanXml, rows[2].QueryPlan);
+        Assert.Null(rows[3].QueryPlan);
+        Assert.Null(rows[4].QueryPlan);
+        Assert.Equal(2, Measured(context, QuerySnapshotsCollector.PlansSharedMeasurement));
+        Assert.Equal(2, Measured(context, QuerySnapshotsCollector.PlansOverCapMeasurement));
+        Assert.Null(Measured(context, QuerySnapshotsCollector.PlansReusedMeasurement));
+
+        /* One fetch per key: only the fetched key is held, once. */
+        Assert.Equal(new[] { PlanKey }, cache.Known(7, s_start.AddMinutes(1)).Keys);
+    }
+
+    [Fact]
+    public async Task ReadAsync_ARequestThatSharesAPlanKey_IsFilledWhereverItsFirstRequestSitsInTheResult()
+    {
+        var context = Context(cache: null, s_start);
+        QuerySnapshotsCollector.Instance.BuildQuery(context);
+
+        /* No host cache (the live snapshot read), and the sharing row arrives before the row that fetched. */
+        using var reader = new FakeCollectorDataReader(
+            QueryRow(62, DBNull.Value, planState: 4, PlanKey),
+            QueryRow(61, PlanXml, planState: 0, PlanKey));
+        var rows = await QuerySnapshotsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Equal(62, rows[0].SessionId);
+        Assert.Equal(PlanXml, rows[0].QueryPlan);
+        Assert.Equal(PlanXml, rows[1].QueryPlan);
+        Assert.Equal(1, Measured(context, QuerySnapshotsCollector.PlansSharedMeasurement));
+    }
+
+    [Fact]
+    public async Task ReadAsync_ARequestThatSharesAPlanKeyTheTargetRenderedNothingFor_IsStoredWithNoPlan_AndIsNotCounted()
+    {
+        var context = Context(new QuerySnapshotPlanCache(), s_start);
+        QuerySnapshotsCollector.Instance.BuildQuery(context);
+
+        /* The first request was inside the cap and the target returned no plan for it. */
+        using var reader = new FakeCollectorDataReader(
+            QueryRow(61, DBNull.Value, planState: 0, PlanKey),
+            QueryRow(62, DBNull.Value, planState: 4, PlanKey));
+        var rows = await QuerySnapshotsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+
+        Assert.Null(rows[0].QueryPlan);
+        Assert.Null(rows[1].QueryPlan);
+        Assert.Null(Measured(context, QuerySnapshotsCollector.PlansSharedMeasurement));
+        Assert.Null(Measured(context, QuerySnapshotsCollector.PlansOverCapMeasurement));
     }
 
     [Fact]

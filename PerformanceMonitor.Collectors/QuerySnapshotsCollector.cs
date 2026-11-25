@@ -30,13 +30,15 @@ namespace PerformanceMonitor.Collectors;
 /// same SQL — the templates are the single source for both paths.
 ///
 /// <para><b>Plans are bounded and reused (#9529).</b> A run renders at most <see cref="MaxPlansPerRun"/>
-/// estimated plans and as many live plans, highest CPU first, and it does not render an estimated plan the host
-/// already holds in <see cref="CollectorContext.SnapshotPlanCache"/>: the read fills that row from the held
-/// copy, so the stored row carries the same plan XML a fetch would have returned. The live plan is a reading of
-/// the request at that minute (its operator row counts move), so it is never reused, only capped. A row past
-/// the cap is stored with a NULL plan, and the run's note counts those rows
-/// (<see cref="PlansOverCapMeasurement"/>, <see cref="LivePlansOverCapMeasurement"/>), which is what tells a
-/// plan the cap skipped from a request that has none.</para>
+/// distinct estimated plans and as many live plans, highest CPU first, and it does not render an estimated plan
+/// the host already holds in <see cref="CollectorContext.SnapshotPlanCache"/>: the read fills that row from the
+/// held copy, so the stored row carries the same plan XML a fetch would have returned. Requests that share one
+/// plan key in a run have it rendered once, on the first of them by CPU, and the read gives the others that
+/// same plan (<see cref="PlansSharedMeasurement"/>). The live plan is a reading of the request at that minute
+/// (its operator row counts move), so it is never reused, only capped. A row past the cap is stored with a NULL
+/// plan, and the run's note counts those rows (<see cref="PlansOverCapMeasurement"/>,
+/// <see cref="LivePlansOverCapMeasurement"/>), which is what tells a plan the cap skipped from a request that
+/// has none.</para>
 /// </summary>
 public sealed class QuerySnapshotsCollector : CollectorDefinitionBase<QuerySnapshotsCollector.Row>
 {
@@ -99,7 +101,17 @@ public sealed class QuerySnapshotsCollector : CollectorDefinitionBase<QuerySnaps
     /// <summary>Rows whose estimated plan came from the host's held copy instead of the target this run (#9529).</summary>
     public const string PlansReusedMeasurement = "plans_reused";
 
-    /// <summary>Rows past <see cref="MaxPlansPerRun"/> whose estimated plan was not rendered this run (#9529).</summary>
+    /// <summary>
+    /// Rows whose estimated plan is the one another request with the same plan key fetched in this same run
+    /// (#9529). Kept apart from <see cref="PlansReusedMeasurement"/>, so the note still shows whether the host's
+    /// held copies are being used across runs.
+    /// </summary>
+    public const string PlansSharedMeasurement = "plans_shared";
+
+    /// <summary>
+    /// Rows whose estimated plan was not rendered this run because their plan key is past
+    /// <see cref="MaxPlansPerRun"/> distinct keys (#9529).
+    /// </summary>
     public const string PlansOverCapMeasurement = "plans_over_cap";
 
     /// <summary>Rows past <see cref="MaxPlansPerRun"/> whose live plan was not rendered this run (#9529).</summary>
@@ -109,6 +121,7 @@ public sealed class QuerySnapshotsCollector : CollectorDefinitionBase<QuerySnaps
     private const int PlanStateFetched = 0;
     private const int PlanStateHeld = 1;
     private const int PlanStateOverCap = 2;
+    private const int PlanStateShared = 4;
 
     /* The three columns the query returns after the payload. They are read, never stored. */
     private const int PlanStateOrdinal = 35;
@@ -238,89 +251,132 @@ FROM
     /* #9529: which requests get a plan this run. The estimated plan of one (plan_handle, statement offsets,
        query_plan_hash) does not change while it stays cached, so plan_key names it, and a request whose key
        the host already holds (plan_state 1) is not rendered again: its plan handle reaches
-       sys.dm_exec_text_query_plan as NULL, which returns no row. The rest (plan_state 0) are ranked by CPU
-       and only the first {3} are rendered, and the live plan is rendered for the first {3} requests by CPU.
-       Without the bound, every request has both plans rendered and shipped every minute. A request with no plan
-       handle (plan_state 3: a background task, or a statement still compiling) has no plan to render and is
-       not counted by either rank, and the session and database filters sit in this set, so none of those
-       ever takes a plan from a request that is stored. Both ranks are running counts over one order, which
-       is also the order of the result: one sort of the request rows serves all three, and no sort carries
-       the statement text or a plan. */
+       sys.dm_exec_text_query_plan as NULL, which returns no row. In a pileup many requests share one key, so
+       only the first request of each key by CPU (key_ordinal 1, plan_state 0) is ranked and rendered: the cap
+       of {3} counts distinct plans, and every other request of that key (plan_state 4) takes the plan its
+       first request fetched, on the host, from this same result. The live plan is rendered for the first {3}
+       requests by CPU. Without the bound, every request has both plans rendered and shipped every minute. A
+       request with no plan handle (plan_state 3: a background task, or a statement still compiling) has no
+       plan to render and is not counted by either rank, and the session and database filters sit in this
+       set, so none of those ever takes a plan from a request that is stored. Both ranks are running counts
+       over one order, which is also the order of the result, and they are computed after key_ordinal, so the
+       last sort of the request rows is the result's order and no sort carries the statement text or a plan. */
     SELECT
-        r.session_id,
-        r.request_id,
-        r.database_id,
-        r.sql_handle,
-        r.plan_handle,
-        r.statement_start_offset,
-        r.statement_end_offset,
-        r.status,
-        r.blocking_session_id,
-        r.wait_type,
-        r.wait_time,
-        r.wait_resource,
-        r.cpu_time,
-        r.total_elapsed_time,
-        r.reads,
-        r.writes,
-        r.logical_reads,
-        r.granted_query_memory,
-        r.transaction_isolation_level,
-        r.dop,
-        r.parallel_worker_count,
-        r.percent_complete,
-        r.query_hash,
-        database_name = d.name,
-        pk.plan_key,
-        ps.plan_state,
+        rk.session_id,
+        rk.request_id,
+        rk.database_id,
+        rk.sql_handle,
+        rk.plan_handle,
+        rk.statement_start_offset,
+        rk.statement_end_offset,
+        rk.status,
+        rk.blocking_session_id,
+        rk.wait_type,
+        rk.wait_time,
+        rk.wait_resource,
+        rk.cpu_time,
+        rk.total_elapsed_time,
+        rk.reads,
+        rk.writes,
+        rk.logical_reads,
+        rk.granted_query_memory,
+        rk.transaction_isolation_level,
+        rk.dop,
+        rk.parallel_worker_count,
+        rk.percent_complete,
+        rk.query_hash,
+        rk.database_name,
+        rk.plan_key,
+        plan_state = CASE WHEN rk.key_state = 0 AND rk.key_ordinal > 1 THEN 4 ELSE rk.key_state END,
         plan_rank =
-            SUM(CASE WHEN ps.plan_state = 0 THEN 1 ELSE 0 END) OVER
+            SUM(CASE WHEN rk.key_state = 0 AND rk.key_ordinal = 1 THEN 1 ELSE 0 END) OVER
             (
                 ORDER BY
-                    r.cpu_time DESC,
-                    r.parallel_worker_count DESC,
-                    r.session_id,
-                    r.request_id
+                    rk.cpu_time DESC,
+                    rk.parallel_worker_count DESC,
+                    rk.session_id,
+                    rk.request_id
                 ROWS UNBOUNDED PRECEDING
             ),
         live_plan_rank =
-            SUM(CASE WHEN r.plan_handle IS NOT NULL THEN 1 ELSE 0 END) OVER
+            SUM(CASE WHEN rk.plan_handle IS NOT NULL THEN 1 ELSE 0 END) OVER
             (
                 ORDER BY
-                    r.cpu_time DESC,
-                    r.parallel_worker_count DESC,
-                    r.session_id,
-                    r.request_id
+                    rk.cpu_time DESC,
+                    rk.parallel_worker_count DESC,
+                    rk.session_id,
+                    rk.request_id
                 ROWS UNBOUNDED PRECEDING
             )
-    FROM sys.dm_exec_requests AS r
-    LEFT JOIN sys.databases AS d
-      ON d.database_id = r.database_id
-    CROSS APPLY
+    FROM
     (
         SELECT
-            plan_key =
-                CONVERT(nvarchar(130), r.plan_handle, 1) + N'|' +
-                CONVERT(nvarchar(11), r.statement_start_offset) + N'|' +
-                CONVERT(nvarchar(11), r.statement_end_offset) + N'|' +
-                ISNULL(CONVERT(nvarchar(18), r.query_plan_hash, 1), N'')
-    ) AS pk
-    CROSS APPLY
-    (
-        SELECT
-            plan_state =
-                CASE
-                    WHEN r.plan_handle IS NULL
-                    THEN 3
-                    WHEN {2}
-                    THEN 1
-                    ELSE 0
-                END
-    ) AS ps
-    WHERE r.session_id <> @@SPID
-    AND   r.session_id >= 50
-    AND   r.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
-    {4}
+            r.session_id,
+            r.request_id,
+            r.database_id,
+            r.sql_handle,
+            r.plan_handle,
+            r.statement_start_offset,
+            r.statement_end_offset,
+            r.status,
+            r.blocking_session_id,
+            r.wait_type,
+            r.wait_time,
+            r.wait_resource,
+            r.cpu_time,
+            r.total_elapsed_time,
+            r.reads,
+            r.writes,
+            r.logical_reads,
+            r.granted_query_memory,
+            r.transaction_isolation_level,
+            r.dop,
+            r.parallel_worker_count,
+            r.percent_complete,
+            r.query_hash,
+            database_name = d.name,
+            pk.plan_key,
+            key_state = ps.plan_state,
+            key_ordinal =
+                ROW_NUMBER() OVER
+                (
+                    PARTITION BY
+                        pk.plan_key
+                    ORDER BY
+                        r.cpu_time DESC,
+                        r.parallel_worker_count DESC,
+                        r.session_id,
+                        r.request_id
+                )
+        FROM sys.dm_exec_requests AS r
+        LEFT JOIN sys.databases AS d
+          ON d.database_id = r.database_id
+        CROSS APPLY
+        (
+            SELECT
+                plan_key =
+                    CONVERT(nvarchar(130), r.plan_handle, 1) + N'|' +
+                    CONVERT(nvarchar(11), r.statement_start_offset) + N'|' +
+                    CONVERT(nvarchar(11), r.statement_end_offset) + N'|' +
+                    ISNULL(CONVERT(nvarchar(18), r.query_plan_hash, 1), N'')
+        ) AS pk
+        CROSS APPLY
+        (
+            SELECT
+                plan_state =
+                    CASE
+                        WHEN r.plan_handle IS NULL
+                        THEN 3
+                        WHEN {2}
+                        THEN 1
+                        ELSE 0
+                    END
+        ) AS ps
+        WHERE r.session_id <> @@SPID
+        AND   r.session_id >= 50
+        AND   r.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
+        {4}
+    ) AS rk
 ) AS der
 JOIN sys.dm_exec_sessions AS des
     ON des.session_id = der.session_id
@@ -410,85 +466,127 @@ SET LOCK_TIMEOUT 1000;
 IF OBJECT_ID(N'tempdb..#req') IS NOT NULL DROP TABLE #req;
 
 SELECT
-    der.session_id,
-    der.database_id,
-    der.sql_handle,
-    der.plan_handle,
-    der.statement_start_offset,
-    der.statement_end_offset,
-    der.status,
-    der.blocking_session_id,
-    der.wait_type,
-    der.wait_time,
-    der.wait_resource,
-    der.cpu_time,
-    der.total_elapsed_time,
-    der.reads,
-    der.writes,
-    der.logical_reads,
-    der.granted_query_memory,
-    der.transaction_isolation_level,
-    der.dop,
-    der.parallel_worker_count,
-    der.percent_complete,
-    der.query_hash,
-    der.request_id,
+    rk.session_id,
+    rk.database_id,
+    rk.sql_handle,
+    rk.plan_handle,
+    rk.statement_start_offset,
+    rk.statement_end_offset,
+    rk.status,
+    rk.blocking_session_id,
+    rk.wait_type,
+    rk.wait_time,
+    rk.wait_resource,
+    rk.cpu_time,
+    rk.total_elapsed_time,
+    rk.reads,
+    rk.writes,
+    rk.logical_reads,
+    rk.granted_query_memory,
+    rk.transaction_isolation_level,
+    rk.dop,
+    rk.parallel_worker_count,
+    rk.percent_complete,
+    rk.query_hash,
+    rk.request_id,
     /* #9529: which requests get a plan this run. The estimated plan of one (plan_handle, statement offsets,
        query_plan_hash) does not change while it stays cached, so plan_key names it, and a request whose key
        the host already holds (plan_state 1) is not rendered again: its plan handle reaches
-       sys.dm_exec_text_query_plan as NULL, which returns no row. The rest (plan_state 0) are ranked by CPU
-       and only the first {3} are rendered. Without the bound, every request has its plan rendered and shipped
-       every minute. A request with no plan handle (plan_state 3) has no plan to render and is not counted
-       by either rank, so it never takes a plan from a request that is stored. */
-    pk.plan_key,
-    ps.plan_state,
+       sys.dm_exec_text_query_plan as NULL, which returns no row. In a pileup many requests share one key, so
+       only the first request of each key by CPU (key_ordinal 1, plan_state 0) is ranked and rendered: the cap
+       of {3} counts distinct plans, and every other request of that key (plan_state 4) takes the plan its
+       first request fetched, on the host, from this same result. Without the bound, every request has its
+       plan rendered and shipped every minute. A request with no plan handle (plan_state 3) has no plan to
+       render and is not counted by either rank, so it never takes a plan from a request that is stored. */
+    rk.plan_key,
+    plan_state = CASE WHEN rk.key_state = 0 AND rk.key_ordinal > 1 THEN 4 ELSE rk.key_state END,
     plan_rank =
-        SUM(CASE WHEN ps.plan_state = 0 THEN 1 ELSE 0 END) OVER
+        SUM(CASE WHEN rk.key_state = 0 AND rk.key_ordinal = 1 THEN 1 ELSE 0 END) OVER
         (
             ORDER BY
-                der.cpu_time DESC,
-                der.parallel_worker_count DESC,
-                der.session_id,
-                der.request_id
+                rk.cpu_time DESC,
+                rk.parallel_worker_count DESC,
+                rk.session_id,
+                rk.request_id
             ROWS UNBOUNDED PRECEDING
         ),
     live_plan_rank =
-        SUM(CASE WHEN der.plan_handle IS NOT NULL THEN 1 ELSE 0 END) OVER
+        SUM(CASE WHEN rk.plan_handle IS NOT NULL THEN 1 ELSE 0 END) OVER
         (
             ORDER BY
-                der.cpu_time DESC,
-                der.parallel_worker_count DESC,
-                der.session_id,
-                der.request_id
+                rk.cpu_time DESC,
+                rk.parallel_worker_count DESC,
+                rk.session_id,
+                rk.request_id
             ROWS UNBOUNDED PRECEDING
         )
 INTO #req
-FROM sys.dm_exec_requests AS der
-CROSS APPLY
+FROM
 (
     SELECT
-        plan_key =
-            CONVERT(nvarchar(130), der.plan_handle, 1) + N'|' +
-            CONVERT(nvarchar(11), der.statement_start_offset) + N'|' +
-            CONVERT(nvarchar(11), der.statement_end_offset) + N'|' +
-            ISNULL(CONVERT(nvarchar(18), der.query_plan_hash, 1), N'')
-) AS pk
-CROSS APPLY
-(
-    SELECT
-        plan_state =
-            CASE
-                WHEN der.plan_handle IS NULL
-                THEN 3
-                WHEN {2}
-                THEN 1
-                ELSE 0
-            END
-) AS ps
-WHERE der.session_id <> @@SPID
-AND   der.session_id >= 50
-AND   der.database_id = DB_ID()
-AND   der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
+        der.session_id,
+        der.database_id,
+        der.sql_handle,
+        der.plan_handle,
+        der.statement_start_offset,
+        der.statement_end_offset,
+        der.status,
+        der.blocking_session_id,
+        der.wait_type,
+        der.wait_time,
+        der.wait_resource,
+        der.cpu_time,
+        der.total_elapsed_time,
+        der.reads,
+        der.writes,
+        der.logical_reads,
+        der.granted_query_memory,
+        der.transaction_isolation_level,
+        der.dop,
+        der.parallel_worker_count,
+        der.percent_complete,
+        der.query_hash,
+        der.request_id,
+        pk.plan_key,
+        key_state = ps.plan_state,
+        key_ordinal =
+            ROW_NUMBER() OVER
+            (
+                PARTITION BY
+                    pk.plan_key
+                ORDER BY
+                    der.cpu_time DESC,
+                    der.parallel_worker_count DESC,
+                    der.session_id,
+                    der.request_id
+            )
+    FROM sys.dm_exec_requests AS der
+    CROSS APPLY
+    (
+        SELECT
+            plan_key =
+                CONVERT(nvarchar(130), der.plan_handle, 1) + N'|' +
+                CONVERT(nvarchar(11), der.statement_start_offset) + N'|' +
+                CONVERT(nvarchar(11), der.statement_end_offset) + N'|' +
+                ISNULL(CONVERT(nvarchar(18), der.query_plan_hash, 1), N'')
+    ) AS pk
+    CROSS APPLY
+    (
+        SELECT
+            plan_state =
+                CASE
+                    WHEN der.plan_handle IS NULL
+                    THEN 3
+                    WHEN {2}
+                    THEN 1
+                    ELSE 0
+                END
+    ) AS ps
+    WHERE der.session_id <> @@SPID
+    AND   der.session_id >= 50
+    AND   der.database_id = DB_ID()
+    AND   der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
+) AS rk
 OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */
@@ -785,8 +883,16 @@ OUTER APPLY
         var cache = context.SnapshotPlanCache;
         var held = context.SnapshotKnownPlans;
         long plansReused = 0;
+        long plansShared = 0;
         long plansOverCap = 0;
         long livePlansOverCap = 0;
+
+        /* The plans this run fetched and the keys it left past the cap, by plan key, and the rows that share a
+           key with an earlier request (plan_state 4). Those rows are settled after the last row is read, so
+           they do not depend on where their first request sits in the result. */
+        Dictionary<string, string>? fetchedThisRun = null;
+        HashSet<string>? overCapKeys = null;
+        List<(int RowIndex, string PlanKey)>? sharedRows = null;
 
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -813,12 +919,24 @@ OUTER APPLY
                 else if (planState == PlanStateOverCap)
                 {
                     plansOverCap++;
+                    if (planKey is not null)
+                    {
+                        (overCapKeys ??= new HashSet<string>(StringComparer.Ordinal)).Add(planKey);
+                    }
+                }
+                else if (planState == PlanStateShared)
+                {
+                    if (planKey is not null)
+                    {
+                        (sharedRows ??= []).Add((rows.Count, planKey));
+                    }
                 }
                 else if (planState == PlanStateFetched && queryPlan is not null && planKey is not null)
                 {
                     /* Held as fetched, before the statement filter: the filter judges it on every run, as it
                        does a plan the target sent. */
                     cache?.Store(context.ServerId, planKey, queryPlan, context.CollectionTime);
+                    (fetchedThisRun ??= new Dictionary<string, string>(StringComparer.Ordinal))[planKey] = queryPlan;
                 }
 
                 if (!reader.IsDBNull(LivePlanOverCapOrdinal)
@@ -869,10 +987,34 @@ OUTER APPLY
             });
         }
 
+        if (sharedRows is not null)
+        {
+            foreach (var (rowIndex, planKey) in sharedRows)
+            {
+                if (fetchedThisRun is not null && fetchedThisRun.TryGetValue(planKey, out var sharedPlan))
+                {
+                    /* The plan the first request of this key fetched, judged by the statement filter for this
+                       row as a plan the target sent would be. */
+                    rows[rowIndex].QueryPlan = scrub.Xml(sharedPlan);
+                    plansShared++;
+                }
+                else if (overCapKeys is not null && overCapKeys.Contains(planKey))
+                {
+                    /* Its key is past the cap, so no request of that key was rendered. */
+                    plansOverCap++;
+                }
+            }
+        }
+
         /* Only a run that reused or skipped something says so: a run that fetched every plan keeps a NULL note. */
         if (plansReused > 0)
         {
             context.Measure(PlansReusedMeasurement, plansReused);
+        }
+
+        if (plansShared > 0)
+        {
+            context.Measure(PlansSharedMeasurement, plansShared);
         }
 
         if (plansOverCap > 0)
