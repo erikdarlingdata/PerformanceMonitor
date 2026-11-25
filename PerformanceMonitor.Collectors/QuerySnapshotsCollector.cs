@@ -27,10 +27,11 @@ namespace PerformanceMonitor.Collectors;
 /// DMFs away from master-scoped rows (#857), the #1286 memory-grant/tempdb/transaction triage
 /// columns, and the exclusion clause injected ahead of the ORDER BY.
 /// <see cref="BuildSnapshotQuery"/> is public because Lite's live-snapshot button builds the
-/// same SQL — the templates are the single source for both paths.
+/// same SQL — the templates are the single source for both paths. The button reads its query itself, so it builds
+/// the unbounded form (the default), in which every request renders its own plans.
 ///
-/// <para><b>Plans are bounded and reused (#9529).</b> A run renders at most <see cref="MaxPlansPerRun"/>
-/// distinct estimated plans and as many live plans, highest CPU first, and it does not render an estimated plan
+/// <para><b>Plans are bounded and reused (#9529).</b> The collector's form (<c>boundPlans</c>) renders at most
+/// <see cref="MaxPlansPerRun"/> distinct estimated plans and as many live plans, highest CPU first, and it does not render an estimated plan
 /// the host already holds in <see cref="CollectorContext.SnapshotPlanCache"/>: the read fills that row from the
 /// held copy, so the stored row carries the same plan XML a fetch would have returned. Requests that share one
 /// plan key in a run have it rendered once, on the first of them by CPU, and the read gives the others that
@@ -129,7 +130,7 @@ public sealed class QuerySnapshotsCollector : CollectorDefinitionBase<QuerySnaps
     private const int PlanKeyOrdinal = 37;
 
     /* A query built with no held plans: the predicate is constant, so plan_state is never 1 and no parameter is
-       bound. This is the text Lite's live snapshot button and the on-demand live reads run. */
+       bound. This is the predicate of the form Lite's live snapshot button runs and of the on-demand live reads. */
     private const string NoHeldPlansPredicate = "1 = 0";
 
     /* The held-plan predicate always names every parameter, the unused ones bound NULL, so the batch text is the
@@ -253,12 +254,14 @@ FROM
        the host already holds (plan_state 1) is not rendered again: its plan handle reaches
        sys.dm_exec_text_query_plan as NULL, which returns no row. In a pileup many requests share one key, so
        only the first request of each key by CPU (key_ordinal 1, plan_state 0) is ranked and rendered: the cap
-       of {3} counts distinct plans, and every other request of that key (plan_state 4) takes the plan its
-       first request fetched, on the host, from this same result. The live plan is rendered for the first {3}
-       requests by CPU. Without the bound, every request has both plans rendered and shipped every minute. A
-       request with no plan handle (plan_state 3: a background task, or a statement still compiling) has no
-       plan to render and is not counted by either rank, and the session and database filters sit in this
-       set, so none of those ever takes a plan from a request that is stored. Both ranks are running counts
+       counts distinct plans, and every other request of that key (plan_state 4) takes the plan its first
+       request fetched, on the host, from this same result. The live plan is rendered for the requests inside
+       the same cap, by CPU. Without the bound, every request has both plans rendered and shipped every minute,
+       which is the form BuildSnapshotQuery builds by default: its cap is the largest int and no request is
+       plan_state 4, so every request renders its own plans. A request with no plan handle (plan_state 3: a
+       background task, or a statement still compiling) has no plan to render and is not counted by either
+       rank, and the session and database filters sit in this set, so none of those ever takes a plan from a
+       request that is stored. Both ranks are running counts
        over one order, which is also the order of the result, and they are computed after key_ordinal, so the
        last sort of the request rows is the result's order and no sort carries the statement text or a plan. */
     SELECT
@@ -287,7 +290,7 @@ FROM
         rk.query_hash,
         rk.database_name,
         rk.plan_key,
-        plan_state = CASE WHEN rk.key_state = 0 AND rk.key_ordinal > 1 THEN 4 ELSE rk.key_state END,
+        plan_state = {6},
         plan_rank =
             SUM(CASE WHEN rk.key_state = 0 AND rk.key_ordinal = 1 THEN 1 ELSE 0 END) OVER
             (
@@ -494,12 +497,13 @@ SELECT
        the host already holds (plan_state 1) is not rendered again: its plan handle reaches
        sys.dm_exec_text_query_plan as NULL, which returns no row. In a pileup many requests share one key, so
        only the first request of each key by CPU (key_ordinal 1, plan_state 0) is ranked and rendered: the cap
-       of {3} counts distinct plans, and every other request of that key (plan_state 4) takes the plan its
-       first request fetched, on the host, from this same result. Without the bound, every request has its
-       plan rendered and shipped every minute. A request with no plan handle (plan_state 3) has no plan to
-       render and is not counted by either rank, so it never takes a plan from a request that is stored. */
+       counts distinct plans, and every other request of that key (plan_state 4) takes the plan its first
+       request fetched, on the host, from this same result. Without the bound, every request has its plan
+       rendered and shipped every minute, which is the form BuildSnapshotQuery builds by default. A request
+       with no plan handle (plan_state 3) has no plan to render and is not counted by either rank, so it never
+       takes a plan from a request that is stored. */
     rk.plan_key,
-    plan_state = CASE WHEN rk.key_state = 0 AND rk.key_ordinal > 1 THEN 4 ELSE rk.key_state END,
+    plan_state = {6},
     plan_rank =
         SUM(CASE WHEN rk.key_state = 0 AND rk.key_ordinal = 1 THEN 1 ELSE 0 END) OVER
         (
@@ -739,30 +743,43 @@ OUTER APPLY
 ) AS deqs
 """;
 
+    /* The sharing expression of the bounded form: a request that shares its plan key with an earlier request
+       renders nothing, and the read gives it the plan that request fetched. */
+    private const string SharedPlanState = "CASE WHEN rk.key_state = 0 AND rk.key_ordinal > 1 THEN 4 ELSE rk.key_state END";
+
     /// <summary>
-    /// Builds the query snapshots SQL with or without live query plan support — the single
-    /// source for both the scheduled collector and Lite's live snapshot button (#857 for the
-    /// Azure #req staging).
+    /// Builds the query snapshots SQL with or without live query plan support, the single source for both the
+    /// scheduled collector and Lite's live snapshot button (#857 for the Azure #req staging).
+    ///
+    /// <para><paramref name="boundPlans"/> false, the default, is the query as the live snapshot button runs it:
+    /// every request renders its own estimated plan and its own live plan, with no cap and no sharing, and a reader
+    /// that takes the payload columns as they come (the button's own) has every plan in them. True is the
+    /// collector's form (#9529): at most <see cref="MaxPlansPerRun"/> plans of each kind, one estimated plan for all
+    /// the requests that share a plan key, and the plan_state, live_plan_over_cap and plan_key columns that
+    /// <see cref="ReadAsync"/> reads to give those requests the plan the target did not send.</para>
     /// </summary>
-    public static string BuildSnapshotQuery(bool supportsLiveQueryPlan, bool isAzureSqlDatabase)
-        => BuildSnapshotQuery(supportsLiveQueryPlan, isAzureSqlDatabase, NoHeldPlansPredicate, exclusionClause: "");
+    public static string BuildSnapshotQuery(bool supportsLiveQueryPlan, bool isAzureSqlDatabase, bool boundPlans = false)
+        => BuildSnapshotQuery(supportsLiveQueryPlan, isAzureSqlDatabase, boundPlans, NoHeldPlansPredicate, exclusionClause: "");
 
     private static string BuildSnapshotQuery(
-        bool supportsLiveQueryPlan, bool isAzureSqlDatabase, string heldPlansPredicate, string exclusionClause)
+        bool supportsLiveQueryPlan, bool isAzureSqlDatabase, bool boundPlans, string heldPlansPredicate, string exclusionClause)
     {
-        var cap = MaxPlansPerRun.ToString(CultureInfo.InvariantCulture);
+        var cap = (boundPlans ? MaxPlansPerRun : int.MaxValue).ToString(CultureInfo.InvariantCulture);
         var liveQueryPlanColumn = supportsLiveQueryPlan
             ? "live_query_plan = deqs.query_plan,"
             : "live_query_plan = CONVERT(xml, NULL),";
-        var liveQueryPlanApply = supportsLiveQueryPlan
-            ? LivePlanApply.Replace("{cap}", cap, StringComparison.Ordinal)
-            : "";
-        var livePlanOverCap = supportsLiveQueryPlan
+        var liveQueryPlanApply = !supportsLiveQueryPlan
+            ? ""
+            : boundPlans
+                ? LivePlanApply.Replace("{cap}", cap, StringComparison.Ordinal)
+                : "OUTER APPLY sys.dm_exec_query_statistics_xml(der.session_id) AS deqs";
+        var livePlanOverCap = supportsLiveQueryPlan && boundPlans
             ? "CONVERT(bit, CASE WHEN der.plan_handle IS NOT NULL AND der.live_plan_rank > " + cap + " THEN 1 ELSE 0 END)"
             : "CONVERT(bit, 0)";
+        var planState = boundPlans ? SharedPlanState : "rk.key_state";
         var template = isAzureSqlDatabase ? s_snapshotsAzureBaseFormat : s_snapshotsBaseFormat;
         return string.Format(
-            null, template, liveQueryPlanColumn, liveQueryPlanApply, heldPlansPredicate, cap, exclusionClause, livePlanOverCap);
+            null, template, liveQueryPlanColumn, liveQueryPlanApply, heldPlansPredicate, cap, exclusionClause, livePlanOverCap, planState);
     }
 
     /// <summary>The live-plan gate: 2016 SP1+/version-unknown/MI; never on Azure SQL DB (#857).</summary>
@@ -826,7 +843,7 @@ OUTER APPLY
         }
 
         var query = BuildSnapshotQuery(
-            SupportsLiveQueryPlan(context.Target), context.Target.IsAzureSqlDb, heldPlansPredicate, exclusionClause);
+            SupportsLiveQueryPlan(context.Target), context.Target.IsAzureSqlDb, boundPlans: true, heldPlansPredicate, exclusionClause);
 
         return new CollectorQuery(query, parameters);
     }

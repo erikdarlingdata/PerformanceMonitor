@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Collectors;
 ///
 /// <para><b>Host-owned, like the delta calculator.</b> One instance per host process, handed to the definition
 /// through <see cref="CollectorContext.SnapshotPlanCache"/>. The definition itself stays stateless. A context
-/// with no cache (the on-demand live reads) reuses nothing and fetches every plan under the per-run cap.</para>
+/// with no cache (Darling's on-demand live read) reuses nothing and fetches every plan under the per-run cap.</para>
 ///
 /// <para><b>Bounds.</b> A plan is held for <see cref="PlanLifetime"/> from its fetch and then fetched again. A
 /// server holds at most <see cref="MaxKnownPlansPerServer"/> plans and <see cref="MaxServerChars"/> characters,
