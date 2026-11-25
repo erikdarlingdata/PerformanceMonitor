@@ -171,6 +171,32 @@ public sealed class McpToolSearchTests
         Assert.NotEmpty(Notes(unknownDetail));
     }
 
+    /// <summary>#9584: stateless HTTP gives the service no session to push <c>tools/list_changed</c> on, so a client that connected
+    /// before an upgrade keeps its old list. Every answer that names tools, or says none match, carries one plain note that a tool
+    /// named here which the client cannot call needs a reconnect. The shared note names no SKU's way round it. The empty-query error
+    /// names no tools and carries no note.</summary>
+    [Theory]
+    [InlineData("names")]
+    [InlineData("summaries")]
+    [InlineData("full")]
+    public void EveryAnswer_WithAMatchOrWithNone_CarriesOneReconnectNote_AtEveryDetailLevel(string detail)
+    {
+        var served = new[] { Tool("get_wait_stats", "Wait totals.") };
+
+        foreach (var query in new[] { "wait", "zzzz" })
+        {
+            using var answer = Answer(served, query, detail);
+
+            var note = Assert.Single(Notes(answer), n => n.Contains("reconnect", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains("connects", note, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("call_tool", note, StringComparison.Ordinal);
+        }
+
+        using var empty = Answer(served, "  ,  ", detail);
+        Assert.Equal("error", empty.RootElement.GetProperty("status").GetString());
+        Assert.Empty(Notes(empty));
+    }
+
     [Fact]
     public void Full_StaysInsideTheResponseBudget_AndNamesWhatDidNotFit()
     {
@@ -304,6 +330,38 @@ public sealed class McpToolSearchTests
         using var server = await DarlingMcpWritePolicyTests.BuildServer(new McpConfig { AllowWrites = true }, DarlingMcpWritePolicyTests.Token);
 
         Assert.Contains("create_mute_rule", await FoundAsync(server, DarlingMcpWritePolicyTests.Token, "create_mute_rule"));
+    }
+
+    /// <summary>The notes the <c>find_tools</c> answer for one query carries, through the host's own transport at the path given.</summary>
+    private static async Task<string[]> NotesFromAsync(Microsoft.AspNetCore.TestHost.TestServer server, string query, string path)
+    {
+        var (status, body) = await DarlingMcpWritePolicyTests.ToolsCallAsync(
+            server, McpToolSearch.ToolName, JsonSerializer.Serialize(new { query, detail = "names", limit = 50 }), null, path);
+        Assert.Equal(200, status);
+        var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+        using var response = JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+        var result = response.RootElement.GetProperty("result");
+        Assert.False(result.TryGetProperty("isError", out var isError) && isError.GetBoolean(), "find_tools answered as an error: " + body);
+        using var answer = JsonDocument.Parse(result.GetProperty("content")[0].GetProperty("text").GetString()!);
+        return Notes(answer);
+    }
+
+    /// <summary>#9584: Darling's note adds the way round a stale tool list that only the <c>/lean</c> path has: <c>call_tool</c> runs a
+    /// named tool without a reconnect. It is there with a match and with none, on <c>/</c> and on <c>/lean</c>.</summary>
+    [Theory]
+    [InlineData("list_servers", "/")]
+    [InlineData("zzzzqq", "/")]
+    [InlineData("list_servers", "/lean")]
+    [InlineData("zzzzqq", "/lean")]
+    public async Task TheAnswer_CarriesOneReconnectNote_ThatNamesCallToolOnTheLeanPath(string query, string path)
+    {
+        using var server = await DarlingMcpWritePolicyTests.BuildServer(new McpConfig(), "");
+
+        var notes = await NotesFromAsync(server, query, path);
+
+        var note = Assert.Single(notes, n => n.Contains("reconnect", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("call_tool", note, StringComparison.Ordinal);
+        Assert.Contains("/lean", note, StringComparison.Ordinal);
     }
 
     [Fact]

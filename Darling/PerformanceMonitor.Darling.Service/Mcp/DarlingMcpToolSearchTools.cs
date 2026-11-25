@@ -41,6 +41,10 @@ public sealed class DarlingMcpToolSearchTools
             return refusal;
         }
 
-        return McpToolSearch.Render(server.ServerOptions.ToolCollection, query, detail, limit);
+        return McpToolSearch.Render(server.ServerOptions.ToolCollection, query, detail, limit, LeanReconnectSentence);
     }
+
+    /// <summary>Darling's addition to the shared reconnect note (#9584): <c>/lean</c> serves <c>call_tool</c>, which runs a tool the
+    /// client's own list lacks by its name, so a stale list needs no reconnect there.</summary>
+    private const string LeanReconnectSentence = "On the /lean path, call_tool runs a named tool by its name without a reconnect.";
 }

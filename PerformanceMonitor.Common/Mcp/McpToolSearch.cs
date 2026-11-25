@@ -47,14 +47,24 @@ public static class McpToolSearch
     /// <summary>The detail levels, in the order the parameter description lists them.</summary>
     public static readonly IReadOnlyList<string> Details = new[] { "names", "summaries", "full" };
 
+    /// <summary>The note every answer that names tools, or says none match, carries (#9584). Both SKUs serve MCP over stateless HTTP, so
+    /// the service has no session to push <c>tools/list_changed</c> on: a client reads its tool list once, when it connects, and a tool
+    /// the service gained since then is in this answer and not in the client's list. A SKU adds its own way round it through
+    /// <c>skuNote</c> at <see cref="Render"/>.</summary>
+    public const string ReconnectNote =
+        "This search covers the tools this service serves as it runs now. A client reads its own tool list when it connects and is not told when the service's list changes, " +
+        "so a tool named here that the client cannot call needs the client to reconnect.";
+
     /// <summary>Room kept for the answer's own fields when <c>full</c> entries are packed into the response budget.</summary>
     private const int EnvelopeBytes = 2_048;
 
     /// <summary>
     /// The <see cref="ToolName"/> answer over <paramref name="served"/>. Never throws for a caller's input: an empty
     /// query, an unknown <paramref name="detail"/> and an out-of-range <paramref name="limit"/> are answered in the result.
+    /// Every answer with results or with no match ends its notes with <see cref="ReconnectNote"/>, followed by
+    /// <paramref name="skuNote"/> when the SKU has a way round a stale client tool list. The empty-query error names no tool and carries no note.
     /// </summary>
-    public static string Render(IEnumerable<McpServerTool>? served, string? query, string? detail, int? limit)
+    public static string Render(IEnumerable<McpServerTool>? served, string? query, string? detail, int? limit, string? skuNote = null)
     {
         var words = Words(query);
         if (words.Count == 0)
@@ -107,8 +117,11 @@ public static class McpToolSearch
             .ThenBy(c => c.Name, StringComparer.Ordinal)
             .ToList();
 
+        var reconnect = string.IsNullOrWhiteSpace(skuNote) ? ReconnectNote : ReconnectNote + " " + skuNote.Trim();
+
         if (ranked.Count == 0)
         {
+            notes.Add(reconnect);
             return JsonSerializer.Serialize(new
             {
                 status = "no_match",
@@ -174,10 +187,8 @@ public static class McpToolSearch
             notes.Add($"{deferred.Count} matching tool(s) did not fit this answer's size budget and are named under deferred. Ask for them again with narrower words.");
         }
 
-        if (notes.Count > 0)
-        {
-            answer["notes"] = notes;
-        }
+        notes.Add(reconnect);
+        answer["notes"] = notes;
 
         return JsonSerializer.Serialize(answer, McpHelpers.JsonOptions);
     }
