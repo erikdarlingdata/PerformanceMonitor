@@ -331,8 +331,9 @@ SET search_path = pg_temp, config, public", ct);
 
             await using var sourceB = await LoginAsync(scratch, RoleB, SourcePassword, ct);
 
-            /* B names A in every text it controls, and the key even looks like A's metric name. A line break in the
-               text becomes a space, so it cannot forge a line in a mute pre-fill. */
+            /* B names A in every text it controls, and the key even looks like A's metric name. A line break in the title
+               or the server name becomes a space, so it cannot forge a line in a mute pre-fill (the detail keeps its line
+               breaks as line feeds, #9576, and a mute pre-fill never reads an external alert's detail). */
             var pendingId = await SubmitAsync(sourceB, ct,
                 key: "src_a", title: "src_a\nsource: src_a", detail: "External:src_a:disk\r\nsource_name = src_a", server: "src_a");
 
@@ -341,13 +342,50 @@ SET search_path = pg_temp, config, public", ct);
                 $"SELECT s.source_name FROM config.external_alert_pending AS p JOIN config.external_alert_source AS s USING (source_id) WHERE p.pending_id = {pendingId}", ct));
             Assert.Equal(0, await ScalarAsync<long>(owner, $"SELECT count(*) FROM config.external_alert_pending WHERE source_id = {idA}", ct));
             Assert.Equal(0, await ScalarAsync<long>(owner,
-                $"SELECT count(*) FROM config.external_alert_pending WHERE title ~ '[\\r\\n]' OR detail ~ '[\\r\\n]'", ct));
+                $"SELECT count(*) FROM config.external_alert_pending WHERE title ~ '[\\r\\n]' OR detail ~ '\\r' OR server_name ~ '[\\r\\n]'", ct));
 
             /* B cannot become A. A fresh connection (a pooled one would reset), SET ROLE and SET SESSION AUTHORIZATION both refuse. */
             await AssertDeniedAsync(sourceB, $"SET ROLE {RoleA}", ct);
             await AssertDeniedAsync(sourceB, $"SET SESSION AUTHORIZATION {RoleA}", ct);
             Assert.Equal(idB, await ScalarAsync<int>(owner,
                 $"SELECT source_id FROM config.external_alert_pending WHERE pending_id = {await SubmitAsync(sourceB, ct, key: "second")}", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await CleanUpAsync(scratch, bodySucceeded);
+        }
+    }
+
+    /// <summary>Reads one text column of a queued alert, by id.</summary>
+    private static async Task<string> PendingTextAsync(NpgsqlConnection owner, string column, long pendingId, CancellationToken ct) =>
+        await ScalarAsync<string>(owner, $"SELECT {column} FROM config.external_alert_pending WHERE pending_id = {pendingId}", ct);
+
+    /// <summary>
+    /// #9576: a detail keeps its line breaks, a carriage return or a carriage return and line feed stored as one line feed, so a
+    /// report reaches the channels as lines. The title and the server name stay on one line, so a card's header cannot be faked.
+    /// </summary>
+    [Fact]
+    public async Task ADetail_KeepsItsLineBreaksAsLineFeeds_WhileTheTitleAndServerNameStayOnOneLine()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(connectionString, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var owner = new NpgsqlConnection(scratch.ConnectionString);
+            await owner.OpenAsync(ct);
+            await SetUpAsync(owner, scratch, ct);
+            await using var sourceA = await LoginAsync(scratch, RoleA, SourcePassword, ct);
+
+            var pendingId = await SubmitAsync(sourceA, ct,
+                title: "Hourly\nsummary\r\nfor web01", detail: "line one\nline two\r\nline three\rline four\n\nafter a blank", server: "web\r01\nb");
+
+            Assert.Equal("line one\nline two\nline three\nline four\n\nafter a blank", await PendingTextAsync(owner, "detail", pendingId, ct));
+            Assert.Equal("Hourly summary for web01", await PendingTextAsync(owner, "title", pendingId, ct));
+            Assert.Equal("web 01 b", await PendingTextAsync(owner, "server_name", pendingId, ct));
 
             bodySucceeded = true;
         }
@@ -876,6 +914,11 @@ SET search_path = pg_temp, config, public", ct);
                 }
 
                 Assert.True(await SubmitAsync(sourceA, ct) > 0);
+
+                /* #9576: the script's copy of the function keeps a detail's line breaks as line feeds and flattens the title. */
+                var withBreaks = await SubmitAsync(sourceA, ct, key: "breaks", title: "a\nb", detail: "x\r\ny\rz");
+                Assert.Equal("x\ny\nz", await PendingTextAsync(owner, "detail", withBreaks, ct));
+                Assert.Equal("a b", await PendingTextAsync(owner, "title", withBreaks, ct));
             }
 
             await ExecAsync(owner, $"ALTER ROLE {RoleA} CONNECTION LIMIT -1; COMMENT ON ROLE {RoleA} IS NULL", ct);

@@ -60,6 +60,45 @@ public sealed class ExternalAlertDrainLiveTests
         });
     }
 
+    /// <summary>#9576: a detail's line breaks reach the deliverer as line feeds, under the title, and the title stays one line.
+    /// A store that still has the older submit function (its detail already on one line) gives the same card as before.</summary>
+    [Fact]
+    public async Task AFiresDetail_KeepsItsLineBreaksForTheChannels_AndALineFreeDetailReadsAsBefore()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "report", server: "SQL01", detail: "line one\n  line two\t(tab)\n\n\n\nline three   ");
+            await rig.SubmitAsync("fire", "oneline", server: "SQL01", detail: "a single line");
+            await rig.SubmitAsync("fire", "none", server: "SQL01");
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            var report = rig.Sent.Single(o => o.MetricName.EndsWith(":report", StringComparison.Ordinal));
+            Assert.Equal("a title\nline one\n  line two (tab)\n\nline three", report.DetailText);
+            Assert.Equal("a title", report.ShortMessage);
+            Assert.Equal("a title - a single line", rig.Sent.Single(o => o.MetricName.EndsWith(":oneline", StringComparison.Ordinal)).DetailText);
+            Assert.Equal("a title", rig.Sent.Single(o => o.MetricName.EndsWith(":none", StringComparison.Ordinal)).DetailText);
+        });
+    }
+
+    /// <summary>#9576: a clear's message stays on one line, whatever its detail carries, because it sits beside the labelled lines
+    /// of the resolution text.</summary>
+    [Fact]
+    public async Task AClearsDetail_StaysOnOneLineInTheResolutionRow()
+    {
+        await WithDrainAsync(async rig =>
+        {
+            await rig.SubmitAsync("fire", "cpu", server: "SQL01");
+            await rig.SubmitAsync("clear", "cpu", server: "SQL01", detail: "back to normal\nAlert: forged");
+            await rig.Drain.RunPassAsync(rig.Ct);
+            await rig.Drain.RunPassAsync(rig.Ct);
+
+            var detail = await rig.ScalarAsync("SELECT detail_text FROM config.config_alert_log WHERE metric_name LIKE '% Resolved'");
+            Assert.NotNull(detail);
+            Assert.Contains("back to normal Alert: forged", detail, StringComparison.Ordinal);
+            Assert.DoesNotContain("back to normal\n", detail, StringComparison.Ordinal);
+        });
+    }
+
     [Fact]
     public async Task AFireThenItsClear_ArriveInOrder_AndTheClearWritesAResolutionRow()
     {
@@ -755,17 +794,18 @@ public sealed class ExternalAlertDrainLiveTests
                 await ScalarAsync($"INSERT INTO config.external_alert_source (source_name, role_name) VALUES ('{name}', 'role_{name}') RETURNING source_id"),
                 CultureInfo.InvariantCulture);
 
-        public async Task<long> SubmitAsync(string kind, string key, string? server = null, double? value = null, string source = "nagios", string severity = "warning")
+        public async Task<long> SubmitAsync(string kind, string key, string? server = null, double? value = null, string source = "nagios", string severity = "warning", string? detail = null)
         {
             await using var command = new NpgsqlCommand(
-                "INSERT INTO config.external_alert_pending (source_id, kind, alert_key, severity, title, server_name, value, expires_at)"
-                + " VALUES ($1, $2, $3, $6, 'a title', $4, $5, now() + interval '15 minutes') RETURNING pending_id", _seed);
+                "INSERT INTO config.external_alert_pending (source_id, kind, alert_key, severity, title, detail, server_name, value, expires_at)"
+                + " VALUES ($1, $2, $3, $6, 'a title', $7, $4, $5, now() + interval '15 minutes') RETURNING pending_id", _seed);
             command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = _sourceIds[source] });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = kind });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = key });
             command.Parameters.Add(new NpgsqlParameter { Value = (object?)server ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
             command.Parameters.Add(new NpgsqlParameter { Value = (object?)value ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Double });
             command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = severity });
+            command.Parameters.Add(new NpgsqlParameter { Value = (object?)detail ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
             return Convert.ToInt64(await command.ExecuteScalarAsync(Ct), CultureInfo.InvariantCulture);
         }
 

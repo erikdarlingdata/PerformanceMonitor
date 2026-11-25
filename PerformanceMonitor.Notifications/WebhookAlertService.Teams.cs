@@ -336,7 +336,16 @@ public partial class WebhookAlertService
         /* #3297: ahead of the per-incident sections — it is the actionable half of the alert. */
         if (prose is not null)
         {
-            itemSections.Add(new { activityTitle = "Details", text = CapTeamsProse(TeamsEscape(prose)), markdown = true });
+            /* #9576: an external alert's detail keeps its line breaks, and a MessageCard's markdown text shows a lone line feed as a
+               space, so each one becomes a blank-line paragraph break (the doubled line feed the card documents for a new line).
+               Only the text a source sent carries breaks this way: an engine alert's prose is left exactly as it was. */
+            var escapedProse = TeamsEscape(prose);
+            if (context?.External is not null)
+            {
+                escapedProse = escapedProse.Replace("\n", "\n\n", StringComparison.Ordinal);
+            }
+
+            itemSections.Add(new { activityTitle = "Details", text = CapTeamsProse(escapedProse), markdown = true });
         }
 
         if (context?.Details != null)

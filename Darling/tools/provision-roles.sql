@@ -3204,7 +3204,7 @@ BEGIN
    VALUES
       (v_source_id, p_kind, p_alert_key, v_severity,
        regexp_replace(p_title, '[\r\n]+', ' ', 'g'),
-       regexp_replace(p_detail, '[\r\n]+', ' ', 'g'),
+       regexp_replace(p_detail, '\r\n?', E'\n', 'g'),
        regexp_replace(p_server_name, '[\r\n]+', ' ', 'g'),
        p_value, clock_timestamp(), clock_timestamp() + interval '15 minutes')
    RETURNING pending_id INTO v_pending_id;

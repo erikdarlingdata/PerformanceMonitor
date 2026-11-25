@@ -296,7 +296,15 @@ internal static class EmailTemplateBuilder
             sb.Append("<tr><td style=\"padding:2px 24px 8px 24px;\">");
             foreach (var para in prose.Replace("\r\n", "\n", StringComparison.Ordinal).Split("\n\n", StringSplitOptions.RemoveEmptyEntries))
             {
-                sb.Append($"<p style=\"margin:0 0 8px 0;font-family:{FontStack};font-size:13px;color:#E0E0E0;line-height:1.5;\">{WebUtility.HtmlEncode(para)}</p>");
+                /* #9576: an external alert's detail keeps its line breaks, and HTML shows a bare line feed as a space. The text is
+                   encoded first and the break turned into <br> after, so nothing a source sent can become markup. */
+                var encoded = WebUtility.HtmlEncode(para);
+                if (context?.External is not null)
+                {
+                    encoded = encoded.Replace("\n", "<br>", StringComparison.Ordinal);
+                }
+
+                sb.Append($"<p style=\"margin:0 0 8px 0;font-family:{FontStack};font-size:13px;color:#E0E0E0;line-height:1.5;\">{encoded}</p>");
             }
             sb.Append("</td></tr>");
         }
