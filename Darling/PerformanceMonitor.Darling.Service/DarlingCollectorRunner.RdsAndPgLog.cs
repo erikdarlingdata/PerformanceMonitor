@@ -76,6 +76,14 @@ public sealed partial class DarlingCollectorRunner
        not once per collector, and ForgetRdsVerdicts clears both when the server's definition changes. */
     private readonly RdsEndpointVerifier _rdsVerifier = new();
 
+    /* #9522: one cache of AWS answers for the four RDS readers, built beside the verifier and handed to each. The
+       readers of one cycle ask AWS the same things about the same instance seconds apart: which instance is the
+       writer, which log files it has, what the newest one holds past a marker, and its DbiResourceId. The first to
+       ask calls AWS and the others read its answer. Each log reader still has its own ingestor and its own
+       position, for the reason on _rdsDeadlocks above. A reader gets another's download only when its own position
+       is the one that download was made from. */
+    private readonly RdsLookupCache _rdsLookups = new();
+
     /* #5452: the assumed-role credentials of every server that names its own AWS role, one session per (role, external ID)
        however many servers share it. Built beside the verifier and handed to the four RDS readers; the allow list it checks
        is AwsRoleAllowlist.Current, which the worker sets at start. A server with no role never touches it. */
@@ -107,7 +115,7 @@ public sealed partial class DarlingCollectorRunner
     internal RdsPlanIngestor PublishedRdsPlanIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsPlans,
-            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
+            () => new RdsPlanIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgPlanCaptureCollector.Instance.Name), verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>#8982: hands this runner the plan ingestor <see cref="PublishedRdsPlanIngestor"/> returns, so a test can see whether a run reached it.</summary>
     internal void UseRdsPlanIngestorForTests(RdsPlanIngestor ingestor) => Volatile.Write(ref _rdsPlans, ingestor);
@@ -116,18 +124,18 @@ public sealed partial class DarlingCollectorRunner
     internal RdsDeadlockIngestor PublishedRdsDeadlockIngestor()
         => LazyInitializer.EnsureInitialized(
             ref _rdsDeadlocks,
-            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
+            () => new RdsDeadlockIngestor(_postgres, logger: _logger, resume: RdsResumeStoreFor(PgDeadlocksCollector.Instance.Name), verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>The one log-event ingestor of this runner, built the first time a target needs it with the store's
     /// log-hash key <paramref name="logHashKey"/>.</summary>
     internal RdsLogEventIngestor PublishedRdsLogEventIngestor(PgLogHashKey logHashKey)
         => LazyInitializer.EnsureInitialized(
             ref _rdsLogEvents,
-            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier, roles: _awsRoles));
+            () => new RdsLogEventIngestor(_postgres, logHashKey, logger: _logger, resume: RdsResumeStoreFor(PgLogEventsCollector.Instance.Name), verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>The one CPU ingestor of this runner, built the first time a target needs it.</summary>
     internal RdsCpuIngestor PublishedRdsCpuIngestor()
-        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier, roles: _awsRoles));
+        => LazyInitializer.EnsureInitialized(ref _rdsCpu, () => new RdsCpuIngestor(_postgres, logger: _logger, verifier: _rdsVerifier, lookups: _rdsLookups, roles: _awsRoles));
 
     /// <summary>
     /// <paramref name="result"/> with <see cref="PgServerLogTail.ForeignZoneLinesNote"/> merged into its host note
