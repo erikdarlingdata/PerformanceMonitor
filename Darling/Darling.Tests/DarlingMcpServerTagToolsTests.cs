@@ -563,11 +563,14 @@ public sealed class DarlingMcpServerTagToolsTests
     }
 
     [Fact]
-    public void TheHost_RegistersTheClass_RightAfterTheCustomAlertTools()
+    public void TheHost_RegistersTheClass_AndServesItsFiveTools()
     {
-        var registered = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All.ToList();
-        var alert = registered.IndexOf(typeof(DarlingMcpCustomAlertTools));
-        var tags = registered.IndexOf(typeof(DarlingMcpServerTagTools));
-        Assert.True(alert >= 0 && tags > alert, "DarlingMcpServerTagTools must be registered after DarlingMcpCustomAlertTools.");
+        Assert.Contains(typeof(DarlingMcpServerTagTools), PerformanceMonitor.Darling.Service.Mcp.DarlingMcpToolTypes.All);
+
+        var (tools, _, _) = McpToolsListBudgetTests.BuildServedTools();
+        var served = tools.Select(t => t.ProtocolTool.Name).ToHashSet(StringComparer.Ordinal);
+        var missing = ExpectedSurface.Where(n => !served.Contains(n)).ToArray();
+        Assert.True(missing.Length == 0, $"The host does not serve these server tag tools: [{string.Join(", ", missing)}]");
+        Assert.All(ExpectedSurface, n => Assert.True(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpWritePolicy.IsWrite(n), $"{n} is a write tool"));
     }
 }

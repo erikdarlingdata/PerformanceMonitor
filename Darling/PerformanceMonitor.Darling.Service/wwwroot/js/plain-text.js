@@ -19,7 +19,12 @@
 /** Every MCP tool the service registers. The service writes the list from its tool registry and serves it as mcp-tool-names.js, so
     this file keeps no tool names. A copy of the page's scripts with no such file (a test harness that runs this module from the js
     folder) has no tool names, and the tool-name rules below then rewrite nothing. */
-const REGISTERED_TOOL_NAMES = await import("./mcp-tool-names.js").then((m) => m.MCP_REGISTERED_TOOL_NAMES, () => []);
+const REGISTERED_TOOL_NAMES = await import("./mcp-tool-names.js").then((m) => m.MCP_REGISTERED_TOOL_NAMES, (e) => {
+  if (typeof console !== "undefined" && console && typeof console.warn === "function") {
+    console.warn("plain-text.js could not load /js/mcp-tool-names.js, so MCP tool names are not rewritten: " + (e && e.message ? e.message : String(e)));
+  }
+  return [];
+});
 
 /** Every MCP tool whose name starts with get_, the only names the tool-name rule rewrites. A user's own text can hold a
     get_ word that is no tool (a procedure dbo.get_orders, a server get_prod), and it must reach the page as written. */
