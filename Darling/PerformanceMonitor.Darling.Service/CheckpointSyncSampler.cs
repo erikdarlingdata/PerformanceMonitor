@@ -45,7 +45,8 @@ internal readonly record struct CheckpointSync(DateTime PreviousSampleUtc, DateT
 /// checkpointer's CUMULATIVE sync time (#4823). The hourly rows hold cumulative counters, so they give the hour's
 /// total sync time and an average per checkpoint: one checkpoint that synced for 23.5 s among four in the hour reads
 /// as an average of 5.9 s, and neither figure says which minute it ran in. A difference taken every minute does, and
-/// the Store Checkpointer Pressure self-alert fires when a store read or write suffered in such a minute (#9549).
+/// the Store Checkpointer Pressure self-alert fires when a store read or write suffered in such a minute,
+/// inside a sync that ran for at least the read deadline (#9549).
 ///
 /// <para><b>Why the sync delta alone, with no checkpoint count beside it.</b> PostgreSQL adds a checkpoint's whole
 /// sync time to <c>sync_time</c> when the checkpoint ENDS, while <c>num_timed</c> counts it when it STARTS (and

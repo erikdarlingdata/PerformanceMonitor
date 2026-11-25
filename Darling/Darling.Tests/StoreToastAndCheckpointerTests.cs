@@ -1672,7 +1672,7 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.DoesNotContain("CHECKPOINTER PRESSURE", longOnly, StringComparison.Ordinal);
         Assert.Contains("was 23.5s, in the minute ending 12:41 UTC.", longOnly, StringComparison.Ordinal);
         Assert.Contains("That is past the 10s read deadline", longOnly, StringComparison.Ordinal);
-        Assert.Contains("No store read or collector store write suffered while a checkpoint sync ran.", longOnly, StringComparison.Ordinal);
+        Assert.Contains("No store read or collector store write suffered while a checkpoint sync of 10s or longer ran.", longOnly, StringComparison.Ordinal);
         Assert.Contains("How long a sync took does not fire it.", longOnly, StringComparison.Ordinal);
 
         /* The same hour with a read that failed inside the sync: pressure, as the alert says. */

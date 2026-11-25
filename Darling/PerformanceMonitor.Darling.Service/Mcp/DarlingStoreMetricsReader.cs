@@ -2065,7 +2065,7 @@ LIMIT $1";
 
         /// <summary>
         /// The self-alert's condition (#3783), on an Observed interval only, and it is harm rather than sync length
-        /// (#9549): at least one store operation suffered while a checkpoint sync ran
+        /// (#9549): at least one store operation suffered while a checkpoint sync of at least the read deadline ran
         /// (<see cref="HarmInsideSync"/> above zero), OR at least one checkpoint was requested. How long the syncs
         /// took does not decide it. On a store where PostgreSQL cannot flush early (every <c>*_flush_after</c>
         /// setting is 0 and has no effect, as on Windows) a checkpoint's whole write lands on its fsync, so a sync

@@ -1147,7 +1147,7 @@ public sealed class DarlingMcpStoreMetricsTools
         {
             null => " Whether a store read or a collector store write suffered inside a sync is judged from the running "
                 + "service's own record, which does not cover this interval.",
-            0 => " No store read or collector store write suffered while a checkpoint sync ran.",
+            0 => $" No store read or collector store write suffered while a checkpoint sync of {barSeconds}s or longer ran.",
             int harm => $" {StoreHarmLog.CountText(harm)} suffered while a checkpoint sync ran (alert-pass reads that failed or "
                 + "were retried, served reads cut off at their deadline, collector store writes that stalled).",
         };

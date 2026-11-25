@@ -1190,7 +1190,8 @@ internal sealed class DarlingSelfAlertEvaluator
        key, STANDING like Store Job Over Cadence: active flag + shared-cooldown re-fire while each new hourly
        interval keeps breaching, one "Store Checkpointer Pressure Recovered" resolution when an interval comes
        back clean. The shared cooldown rather than a daily interval, deliberately: every breaching hour is a NEW
-       hour in which a store read or write suffered inside a checkpoint sync (#9549), or a checkpoint was requested,
+       hour in which a store read or write suffered inside a checkpoint sync of at least the read deadline (#9549), or a
+       checkpoint was requested,
        not a restatement of a standing fact. */
     private readonly ConcurrentDictionary<string, bool> _activeCheckpointerPressure = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTime> _lastCheckpointerPressureAlert = new(StringComparer.Ordinal);
@@ -1198,7 +1199,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>The #3783 checkpointer metric name. A WEBHOOK AUTOMATION KEY like its siblings. Fired with NO
     /// severity override so the declared INFO arm styles it, for <see cref="ToastSlackMetric"/>'s reason: the
     /// two levers are configuration the maintainer weighs, not a page. The value it carries is how many store
-    /// operations suffered inside a checkpoint sync, against a threshold of one (#9549). A fire on the requested arm
+    /// operations suffered inside a checkpoint sync of at least <see cref="CheckpointSyncBarMs"/>, against a threshold of one
+    /// (#9549). A fire on the requested arm
     /// alone carries the interval's average sync milliseconds PER CHECKPOINT (#4037) against
     /// <see cref="CheckpointSyncBarMs"/>, as attribution.</summary>
     internal const string CheckpointerPressureMetric = "Store Checkpointer Pressure";
@@ -9630,7 +9632,7 @@ WHERE c.is_enabled";
     /// <summary>
     /// Applies the fleet-level Store Checkpointer Pressure condition (#3783) from the store's last measured
     /// checkpointer interval. It fires on HARM, not on how long a sync took (#9549): at least one store operation
-    /// suffered while a checkpoint sync ran, OR at least one checkpoint was REQUESTED — started by WAL volume
+    /// suffered while a checkpoint sync of at least <see cref="CheckpointSyncBarMs"/> ran, OR at least one checkpoint was REQUESTED — started by WAL volume
     /// reaching <c>max_wal_size</c>, a base backup, or a <c>CHECKPOINT</c> statement rather than by the clock.
     /// PostgreSQL's counters do not record which, only its <c>log_checkpoints</c> lines do, so the text names all
     /// three causes and offers raising <c>max_wal_size</c> as the remedy for the first only (#4758). A STANDING
@@ -9780,7 +9782,7 @@ WHERE c.is_enabled";
                     .ToList();
                 var harmDetail = suffered.Count == 0
                     ? harmJudged
-                        ? "No store read or collector store write suffered while a checkpoint sync ran in this interval. "
+                        ? $"No store read or collector store write suffered while a checkpoint sync of {barSeconds}s or longer ran in this interval. "
                         : "Whether a store read or a collector store write suffered inside a sync is judged from the running service's " +
                           "own record, which does not cover this interval. "
                     : $"{StoreHarmLog.CountText(suffered.Count)} suffered while a checkpoint sync ran: {string.Join("; ", named)}" +
@@ -9851,7 +9853,7 @@ WHERE c.is_enabled";
                 $"{_storeLabel}: checkpointer {recoveredAverageText} and {requested} requested {(requested == 1 ? "checkpoint" : "checkpoints")} over {checkpointCount} " +
                 $"{(checkpointCount == 1 ? "checkpoint" : "checkpoints")} in the last {intervalMinutes} min" +
                 (longestSync is CheckpointSyncMax recoveredLongest ? $", longest single sync {FormatSyncSeconds(recoveredLongest.SyncMs)}s" : "") +
-                (harmJudged ? ", and no store operation suffered inside a checkpoint sync" : "") +
+                (harmJudged ? $", and no store operation suffered inside a checkpoint sync of {barSeconds}s or longer" : "") +
                 ". Clean again"), cancellationToken);
         }
     }

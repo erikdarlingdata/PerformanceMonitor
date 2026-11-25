@@ -531,7 +531,8 @@ public sealed partial class DarlingWorker
     {
             await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
 
-            /* #9549: which store operations suffered inside a checkpoint sync of the window the launch just took. Judged
+            /* #9549: which store operations suffered inside a checkpoint sync of at least the read deadline in the window the launch
+               just took. Judged
                once, after the sweep stored the hour's checkpointer row (so a read that began inside the window's last
                sync has had its deadline to land), with or without the alert engine, and kept where get_store_metrics
                reads it: the Store Checkpointer Pressure check below and that tool are handed one verdict. */
