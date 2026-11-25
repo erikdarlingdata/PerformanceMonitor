@@ -84,6 +84,12 @@ public sealed class AgReplicaStatesCollector : CollectorDefinitionBase<AgReplica
         string? GroupId,
         string? PrimaryReplica = null);
 
+    /* #9539: the four staging statements carry no OPTION(RECOMPILE), the one exception the rule in CONTRIBUTING.md
+       allows. Each reads one view with no parameters, and its row count follows the availability group layout,
+       which does not swing between runs the way a catch-up window does. Measured on SQL Server 2022 and 2025 against
+       the hinted batch: 81 to 85% less CPU per run with no groups and 53 to 63% less with 20 groups. The plan
+       compiled with no groups, reused with 20, still cost less than the hinted batch, and the rows matched. The
+       final SELECT joins the staged rows and keeps its hint. */
     private const string QueryText = @"
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -97,15 +103,13 @@ SELECT /* PerformanceMonitorLite */
     ars.synchronization_health_desc,
     is_local = CONVERT(bit, ars.is_local)
 INTO #pm_ag_replica_states
-FROM sys.dm_hadr_availability_replica_states AS ars
-OPTION(RECOMPILE);
+FROM sys.dm_hadr_availability_replica_states AS ars;
 
 SELECT /* PerformanceMonitorLite */
     group_id = CONVERT(uniqueidentifier, ags.group_id),
     ags.primary_replica
 INTO #pm_ag_group_states
-FROM sys.dm_hadr_availability_group_states AS ags
-OPTION(RECOMPILE);
+FROM sys.dm_hadr_availability_group_states AS ags;
 
 SELECT /* PerformanceMonitorLite */
     replica_id = CONVERT(uniqueidentifier, ar.replica_id),
@@ -115,16 +119,14 @@ SELECT /* PerformanceMonitorLite */
     ar.failover_mode_desc,
     ar.endpoint_url
 INTO #pm_ag_replicas
-FROM sys.availability_replicas AS ar
-OPTION(RECOMPILE);
+FROM sys.availability_replicas AS ar;
 
 SELECT /* PerformanceMonitorLite */
     group_id = CONVERT(uniqueidentifier, ag.group_id),
     ag.name,
     ag.is_distributed
 INTO #pm_ag_groups
-FROM sys.availability_groups AS ag
-OPTION(RECOMPILE);
+FROM sys.availability_groups AS ag;
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,

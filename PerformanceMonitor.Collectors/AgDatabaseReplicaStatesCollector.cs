@@ -129,6 +129,12 @@ public sealed class AgDatabaseReplicaStatesCollector : CollectorDefinitionBase<A
         double? EstSendDrainTimeMin,
         string? GroupId);
 
+    /* #9539: the three staging statements carry no OPTION(RECOMPILE), the one exception the rule in CONTRIBUTING.md
+       allows. Each reads one view with no parameters, and its row count follows the availability group layout,
+       which does not swing between runs the way a catch-up window does. Measured on SQL Server 2022 and 2025 against
+       the hinted batch: 31 to 35% less CPU per run with no groups and 25 to 27% less with 20 groups. The plan
+       compiled with no groups, reused with 20, still cost less than the hinted batch, and the rows matched. The
+       final SELECT joins the staged rows and sys.databases and keeps its hint. */
     private const string QueryText = @"
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -153,8 +159,7 @@ SELECT /* PerformanceMonitorLite */
     hdrs.last_redone_time,
     hdrs.last_received_time
 INTO #pm_ag_database_replica_states
-FROM sys.dm_hadr_database_replica_states AS hdrs
-OPTION(RECOMPILE);
+FROM sys.dm_hadr_database_replica_states AS hdrs;
 
 SELECT /* PerformanceMonitorLite */
     replica_id = CONVERT(uniqueidentifier, ar.replica_id),
@@ -162,16 +167,14 @@ SELECT /* PerformanceMonitorLite */
     ar.replica_server_name,
     ar.availability_mode_desc
 INTO #pm_ag_replicas
-FROM sys.availability_replicas AS ar
-OPTION(RECOMPILE);
+FROM sys.availability_replicas AS ar;
 
 SELECT /* PerformanceMonitorLite */
     group_id = CONVERT(uniqueidentifier, ag.group_id),
     ag.name,
     ag.is_distributed
 INTO #pm_ag_groups
-FROM sys.availability_groups AS ag
-OPTION(RECOMPILE);
+FROM sys.availability_groups AS ag;
 
 SELECT /* PerformanceMonitorLite */
     ag_name = ag.name,
