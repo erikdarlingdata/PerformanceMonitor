@@ -362,6 +362,174 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.False(File.Exists(HostsFile));
     }
 
+    private List<string> UnconfirmedFor(ServerConnection listed)
+    {
+        var manager = Reload();
+        return AddServerCommand.UnconfirmedSettings(listed, manager.HostChangeIfSaved(listed), keepsManagedIdentityClientId: false);
+    }
+
+    [Fact]
+    public async Task TheJsonFields_SetEncryptionAndCertificateTrust_AndThisAccountConfirmsThem()
+    {
+        ServerConnection? tested = null;
+        var run = await RunVerbAsync(
+            ["--add-server"],
+            """[{"host":"sql01","encrypt_mode":"Optional","trust_server_certificate":true,"read_only_intent":false,"multi_subnet_failover":true}]""",
+            connect: server =>
+            {
+                tested = server;
+                return null;
+            });
+
+        Assert.Equal(0, run.Exit);
+        Assert.NotNull(tested);
+        Assert.Equal("Optional", tested.EncryptMode);
+        Assert.True(tested.TrustServerCertificate);
+        var listed = Reload().GetAllServers().Single();
+        Assert.Equal("Optional", listed.EncryptMode);
+        Assert.True(listed.TrustServerCertificate);
+        Assert.False(listed.ReadOnlyIntent);
+        Assert.True(listed.MultiSubnetFailover);
+        Assert.Empty(UnconfirmedFor(listed));
+    }
+
+    [Fact]
+    public async Task ANewServer_ThatGivesNone_TakesTheDefaults()
+    {
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01"}]""");
+
+        Assert.Equal(0, run.Exit);
+        var listed = Reload().GetAllServers().Single();
+        Assert.Equal("Mandatory", listed.EncryptMode);
+        Assert.False(listed.TrustServerCertificate);
+        Assert.False(listed.ReadOnlyIntent);
+        Assert.False(listed.MultiSubnetFailover);
+    }
+
+    [Theory]
+    [InlineData("""[{"host":"sql01","encrypt_mode":"Sometimes"}]""", "encrypt_mode")]
+    [InlineData("""[{"host":"sql01","encrypt_mode":3}]""", "encrypt_mode")]
+    [InlineData("""[{"host":"sql01","trust_server_certificate":"true"}]""", "trust_server_certificate")]
+    [InlineData("""[{"host":"sql01","read_only_intent":1}]""", "read_only_intent")]
+    [InlineData("""[{"host":"sql01","multi_subnet_failover":"yes"}]""", "multi_subnet_failover")]
+    [InlineData("""[{"host":"sql02"},{"host":"sql01","encrypt_mode":"Sometimes"}]""", "Entry 2")]
+    public async Task ARefusedValue_ExitsWithOne_AndWritesNothing(string json, string named)
+    {
+        var run = await RunVerbAsync(["--add-server"], json);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains(named, run.Err);
+        Assert.Empty(run.Tested);
+        Assert.False(run.ManagerMade);
+        Assert.Empty(ServerNames());
+        Assert.False(File.Exists(HostsFile));
+    }
+
+    [Fact]
+    public async Task AnUnknownEncryptionFlag_ExitsWithOne_AndWritesNothing()
+    {
+        var run = await RunVerbAsync(["--add-server", "--host", "sql01", "--encrypt-mode", "Sometimes"], "");
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("encrypt_mode", run.Err);
+        Assert.Empty(ServerNames());
+        Assert.False(File.Exists(HostsFile));
+    }
+
+    [Fact]
+    public async Task TheFlags_SetTheSameValues_AndThisAccountConfirmsThem()
+    {
+        var run = await RunVerbAsync(
+            ["--add-server", "--host", "sql01", "--encrypt-mode", "optional", "--trust-server-certificate", "--read-only-intent", "false", "--multi-subnet-failover=true"],
+            "");
+
+        Assert.Equal(0, run.Exit);
+        var listed = Reload().GetAllServers().Single();
+        Assert.Equal("Optional", listed.EncryptMode);
+        Assert.True(listed.TrustServerCertificate);
+        Assert.False(listed.ReadOnlyIntent);
+        Assert.True(listed.MultiSubnetFailover);
+        Assert.Empty(UnconfirmedFor(listed));
+    }
+
+    [Fact]
+    public async Task AnUpdate_ThatOmitsTheFields_KeepsTheListedValues()
+    {
+        await RunVerbAsync(["--add-server"], """[{"host":"sql01","encrypt_mode":"Optional","trust_server_certificate":true,"multi_subnet_failover":true}]""");
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","display_name":"Renamed"}]""");
+
+        Assert.Equal(0, run.Exit);
+        var listed = Reload().GetAllServers().Single();
+        Assert.Equal("Renamed", listed.DisplayName);
+        Assert.Equal("Optional", listed.EncryptMode);
+        Assert.True(listed.TrustServerCertificate);
+        Assert.True(listed.MultiSubnetFailover);
+    }
+
+    [Fact]
+    public async Task AnUpdate_ThatGivesTheFields_ReplacesTheListedValues()
+    {
+        await RunVerbAsync(["--add-server"], """[{"host":"sql01","encrypt_mode":"Optional","trust_server_certificate":true}]""");
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","encrypt_mode":"Strict","trust_server_certificate":false}]""");
+
+        Assert.Equal(0, run.Exit);
+        var listed = Reload().GetAllServers().Single();
+        Assert.Equal("Strict", listed.EncryptMode);
+        Assert.False(listed.TrustServerCertificate);
+    }
+
+    [Fact]
+    public async Task AnUpdate_ThatGivesAValue_ReplacesAnUnconfirmedListedOne_AndConfirmsIt()
+    {
+        await AddSql01Async();
+        EditListedEntry(entry =>
+        {
+            entry["TrustServerCertificate"] = true;
+            entry["EncryptMode"] = "Optional";
+        });
+
+        var run = await RunVerbAsync(
+            ["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor","password":"second-value","encrypt_mode":"Optional","trust_server_certificate":true}]""");
+
+        Assert.Equal(0, run.Exit);
+        var listed = Reload().GetAllServers().Single();
+        Assert.True(listed.TrustServerCertificate);
+        Assert.Empty(UnconfirmedFor(listed));
+    }
+
+    [Fact]
+    public async Task AnUpdate_ThatOmitsAField_StillRefusesAnUnconfirmedListedValue()
+    {
+        await AddSql01Async();
+        EditListedEntry(entry =>
+        {
+            entry["TrustServerCertificate"] = true;
+            entry["EncryptMode"] = "Optional";
+        });
+
+        var run = await RunVerbAsync(
+            ["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor","password":"second-value","encrypt_mode":"Mandatory"}]""");
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("TrustServerCertificate", run.Err);
+        Assert.DoesNotContain("encryption", run.Err);
+    }
+
+    [Fact]
+    public async Task ReadOnlyIntent_IsPartOfTheServersIdentity_SoItAddsASecondEntry()
+    {
+        await RunVerbAsync(["--add-server"], """[{"host":"sql01"}]""");
+
+        var run = await RunVerbAsync(["--add-server"], """[{"host":"sql01","read_only_intent":true}]""");
+
+        Assert.Equal(0, run.Exit);
+        var listed = Reload().GetAllServers();
+        Assert.Equal(2, listed.Count);
+        Assert.Single(listed, s => s.ReadOnlyIntent);
+    }
+
     /// <summary>Edits the first listed server in servers.json, as any local account can.</summary>
     private void EditListedEntry(Action<JsonObject> edit)
     {
