@@ -89,9 +89,9 @@ public sealed class StoreHarmLogTests
     [Fact]
     public void Judge_StatesAnOperationThatOverlapsTwoSyncs_AgainstTheLongerOne()
     {
-        /* A 400 ms sync finished in the next minute. A read that ran from 12:40:50 to 12:41:20 overlaps both, and is
+        /* A 12 s sync finished in the next minute. A read that ran from 12:40:50 to 12:41:20 overlaps both, and is
            one finding, stated against the 23.5 s sync, in whichever order the syncs arrive. */
-        var shortSync = new CheckpointSync(Minute, Minute.AddMinutes(1), 400);
+        var shortSync = new CheckpointSync(Minute, Minute.AddMinutes(1), 12_000);
         var harm = Harm(Minute.AddSeconds(20), elapsedMs: 30_000);
 
         foreach (var syncs in new[] { new[] { shortSync, Sync }, new[] { Sync, shortSync } })
@@ -100,6 +100,42 @@ public sealed class StoreHarmLogTests
             Assert.Equal(harm, finding.Harm);
             Assert.Equal(Sync, finding.Sync);
         }
+    }
+
+    /// <summary>
+    /// A sync shorter than the store read deadline (<see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>) cannot cut
+    /// a read off by itself, so harm that overlaps only such a sync is nobody's finding, and the sync stays in the verdict
+    /// as a sync the minute samples saw. A sync at the deadline can carry harm.
+    /// </summary>
+    [Theory]
+    [InlineData(400L, false)]
+    [InlineData(9_999L, false)]
+    [InlineData(10_000L, true)]
+    [InlineData(23_542L, true)]
+    public void Judge_BlamesOnlyASyncOfAtLeastTheReadDeadline(long syncMs, bool carriesHarm)
+    {
+        var sync = new CheckpointSync(Minute.AddMinutes(-1), Minute, syncMs);
+        var harm = Harm(Minute.AddSeconds(-30));
+        Assert.True(sync.Overlaps(harm.StartedUtc, harm.EndedUtc), "the harm overlaps the sync either way");
+
+        var verdict = StoreHarmLog.Judge(Minute.AddMinutes(19), new[] { sync }, new[] { harm });
+
+        Assert.Equal(carriesHarm, StoreHarmLog.CanCarryHarm(sync));
+        Assert.Equal(carriesHarm ? new[] { harm } : Array.Empty<StoreHarmEvent>(), verdict.Findings.Select(finding => finding.Harm));
+        Assert.Equal(new[] { sync }, verdict.Syncs);
+    }
+
+    [Fact]
+    public void Judge_StatesHarmAgainstTheLongSync_WhenAShortOneOverlapsItToo()
+    {
+        /* The 400 ms sync overlaps the read as well, but only the 23.5 s sync can carry it, in whichever order they arrive. */
+        var shortSync = new CheckpointSync(Minute, Minute.AddMinutes(1), 400);
+        var harm = Harm(Minute.AddSeconds(20), elapsedMs: 30_000);
+
+        var finding = Assert.Single(StoreHarmLog.Judge(Minute.AddMinutes(19), new[] { shortSync, Sync }, new[] { harm }).Findings);
+        Assert.Equal(Sync, finding.Sync);
+
+        Assert.Empty(StoreHarmLog.Judge(Minute.AddMinutes(19), new[] { shortSync }, new[] { harm }).Findings);
     }
 
     [Fact]

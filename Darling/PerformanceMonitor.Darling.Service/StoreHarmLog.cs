@@ -63,7 +63,8 @@ internal sealed record CheckpointHarmFinding(StoreHarmEvent Harm, CheckpointSync
 /// </summary>
 /// <param name="JudgedUtc">When the window was judged, UTC: right after the sweep stored the hour's checkpointer row.</param>
 /// <param name="Syncs">The syncs of the window, oldest first.</param>
-/// <param name="Findings">One per operation that overlapped a sync, oldest first. An operation that overlapped several is
+/// <param name="Findings">One per operation that overlapped a sync that can carry harm (one of at least
+/// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>), oldest first. An operation that overlapped several is
 /// stated against the longest of them.</param>
 internal sealed record CheckpointHarmVerdict(
     DateTime JudgedUtc, IReadOnlyList<CheckpointSync> Syncs, IReadOnlyList<CheckpointHarmFinding> Findings)
@@ -188,9 +189,17 @@ internal sealed class StoreHarmLog
                 read.Read));
 
     /// <summary>
-    /// Judges one window: every event in <paramref name="harm"/> that overlaps one of <paramref name="syncs"/>
-    /// (<see cref="CheckpointSync.Overlaps"/>) is a finding, stated against the longest sync it overlapped. Pure, so the
-    /// rule the alert fires on is tested without a store or a clock.
+    /// True when <paramref name="sync"/> can carry harm: it ran for at least the store read deadline
+    /// (<see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, the milliseconds compared as stored). A sync shorter
+    /// than the deadline cannot cut a read off by itself, so a read that failed or ran long beside one has another cause.
+    /// </summary>
+    internal static bool CanCarryHarm(CheckpointSync sync) => sync.SyncMs >= DarlingSelfAlertEvaluator.CheckpointSyncBarMs;
+
+    /// <summary>
+    /// Judges one window: every event in <paramref name="harm"/> that overlaps one of the <paramref name="syncs"/> that
+    /// <see cref="CanCarryHarm"/> (<see cref="CheckpointSync.Overlaps"/>) is a finding, stated against the longest sync it
+    /// overlapped. A shorter sync stays in the verdict's <see cref="CheckpointHarmVerdict.Syncs"/> and is never blamed.
+    /// Pure, so the rule the alert fires on is tested without a store or a clock.
     /// </summary>
     public static CheckpointHarmVerdict Judge(
         DateTime judgedUtc, IReadOnlyList<CheckpointSync> syncs, IEnumerable<StoreHarmEvent> harm)
@@ -201,7 +210,8 @@ internal sealed class StoreHarmLog
             CheckpointSync? inside = null;
             foreach (var sync in syncs)
             {
-                if (sync.Overlaps(suffered.StartedUtc, suffered.EndedUtc)
+                if (CanCarryHarm(sync)
+                    && sync.Overlaps(suffered.StartedUtc, suffered.EndedUtc)
                     && (inside is not CheckpointSync held || sync.SyncMs > held.SyncMs))
                 {
                     inside = sync;

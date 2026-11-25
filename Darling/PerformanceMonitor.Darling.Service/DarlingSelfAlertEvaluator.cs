@@ -1216,8 +1216,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// I/O stall can outlast a read that started inside it: three read kills on a production store in one day all sat
     /// inside sync phases of 25.2 s and 14.0 s.
     ///
-    /// <para><b>It is attribution and breaches nothing (#9549).</b> The Store Checkpointer Pressure self-alert fires
-    /// when a store read or a collector store write suffered while a sync ran, or a checkpoint was requested; the
+    /// <para><b>It is attribution and the floor on the syncs that can carry harm, and breaches nothing (#9549).</b> The
+    /// Store Checkpointer Pressure self-alert fires when a store read or a collector store write suffered while a sync of
+    /// at least this length ran (a shorter sync cannot cut a read off by itself), or a checkpoint was requested; the
     /// text and <c>get_store_metrics</c> state the interval's average sync per checkpoint
     /// (<c>SyncMs / (timed + requested)</c>, #4037) and its longest single sync (#4823) beside this line to say why
     /// the operation suffered. A sync past it with nothing suffering inside is not a finding: on a store where
@@ -9653,7 +9654,8 @@ WHERE c.is_enabled";
     /// a composed panel served that ended at its deadline, and a collector store write that ended in a transport
     /// fault (both from <see cref="StoreHarmLog"/>). The worker's once-a-minute sampler keeps every sync it saw
     /// finish, as the two sample times it finished between and its length, and
-    /// <see cref="StoreHarmLog.Judge"/> pairs each operation with a sync it overlapped. The worker hands the result
+    /// <see cref="StoreHarmLog.Judge"/> pairs each operation with a sync it overlapped that ran for at least
+    /// <see cref="CheckpointSyncBarMs"/> (<see cref="StoreHarmLog.CanCarryHarm"/>). The worker hands the result
     /// here as <paramref name="harm"/>, and <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerReading.WithHarm"/>
     /// applies it to the reading only when it describes this interval. A sync that nothing suffered inside does not
     /// breach, however long it took: on a store where PostgreSQL cannot flush early (every <c>*_flush_after</c>
@@ -9670,7 +9672,9 @@ WHERE c.is_enabled";
     /// raise no alert of their own: they are counted on <c>get_collection_health</c> and stored in
     /// <c>collect.slow_reads</c>. A collector whose store writes keep failing does: Collection Stopped for its server,
     /// or Collection Falling Behind for the fleet. While either stands, collector store writes are left out of the
-    /// harm this condition counts, so the same failure is not announced twice; the reads still count.</para>
+    /// harm this condition counts, so the same failure is not announced twice; the reads still count. An interval whose
+    /// harm was all left out this way, with no requested checkpoint to make it pressure, neither fires nor recovers: it
+    /// was not clean, so the standing state and the hold count stay as found.</para>
     ///
     /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
     /// shutdown checkpoint as requested and keeps the count across the restart, so every service restart that
@@ -9706,9 +9710,12 @@ WHERE c.is_enabled";
 
         /* One harm, one alert: a collector store write that a standing collection alert already announced is not
            counted here a second time. */
+        var harmLeftOut = false;
         if (suffered.Count > 0 && CollectionAlertStanding())
         {
-            suffered = suffered.Where(finding => finding.Harm.Kind != StoreHarmKind.CollectorWriteStalled).ToList();
+            var kept = suffered.Where(finding => finding.Harm.Kind != StoreHarmKind.CollectorWriteStalled).ToList();
+            harmLeftOut = kept.Count < suffered.Count;
+            suffered = kept;
             reading = reading with { HarmInsideSync = suffered.Count };
         }
 
@@ -9778,8 +9785,9 @@ WHERE c.is_enabled";
                           "own record, which does not cover this interval. "
                     : $"{StoreHarmLog.CountText(suffered.Count)} suffered while a checkpoint sync ran: {string.Join("; ", named)}" +
                       (suffered.Count > named.Count ? $"; and {suffered.Count - named.Count} more" : "") + ". " +
-                      "A sync is an I/O stall every reader and writer on the store shares, which is why this alert names the sync: " +
-                      $"one that runs past {barSeconds}s outlasts the deadline of an alert-pass read and of a read the MCP host serves. " +
+                      "A sync is an I/O stall every reader and writer on the store shares, which is why this alert names the sync. " +
+                      $"Only a sync of {barSeconds}s or longer, the read deadline of an alert-pass read and of a read the MCP host serves, " +
+                      "is counted: a shorter one cannot cut a read off by itself. " +
                       "How long a sync takes is a property of the store host's disk and of how much each checkpoint has to write. ";
 
                 var thresholdText = "any store read or collector store write that failed, was retried, was cut off or stalled inside a " +
@@ -9827,7 +9835,10 @@ WHERE c.is_enabled";
                 }
             }
         }
-        else if (_activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
+        /* An interval whose harm was all left out above (collector store writes a standing collection alert announces)
+           is not a clean one: it neither fires nor recovers. The standing flag and the hold count stay as found, and
+           the next interval that reads clean writes the one Recovered row. */
+        else if (!harmLeftOut && _activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
         {
             EndSelfHoldEpisode(CheckpointerPressureMetric, CheckpointerKey);
             var recoveredAverageText = averageSyncMs is double recoveredAvg
