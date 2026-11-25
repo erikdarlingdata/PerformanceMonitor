@@ -31,12 +31,14 @@ namespace Lite.Tests;
 /// A plan handle that names no cached plan returns null.
 ///
 /// <para>The fetcher is the real one: it finds the server through a <see cref="ServerManager"/> that holds the test
-/// server (an in-memory credential store, a temp config folder) and resolves the connection string the app resolves.</para>
+/// server (an in-memory credential store through <c>[InMemoryCredentials]</c>, a temp config folder) and resolves the
+/// connection string the app resolves.</para>
 ///
 /// <para>Gated on <c>DARLING_TEST_SQL</c> (the SQL Server host; optional <c>DARLING_TEST_SQL_USER</c> and
 /// <c>DARLING_TEST_SQL_PASSWORD</c> for SQL auth), so it skips where the runner has no SQL Server. It creates nothing: the
 /// batches are selects over a system view, which leave plan cache entries and no object.</para>
 /// </summary>
+[InMemoryCredentials]
 public sealed class StatementPlanFetchLiveSqlTests : IDisposable
 {
     private const string SkipReason =
@@ -91,7 +93,7 @@ public sealed class StatementPlanFetchLiveSqlTests : IDisposable
         }
 
         Directory.CreateDirectory(_root);
-        var manager = new ServerManager(_root, null, Path.Combine(_root, ServerHostBindings.FileName), new CredentialService(new InMemoryCredentialStore()));
+        var manager = new ServerManager(_root, null, Path.Combine(_root, ServerHostBindings.FileName));
         var server = new ServerConnection
         {
             ServerName = host,
