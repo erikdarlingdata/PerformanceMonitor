@@ -66,13 +66,23 @@ public sealed class McpClientTimeoutTools
                     dataService, QueryWindowRelation.AttentionEvents, resolved.ServerId, windowStart, windowEnd, "attention_events");
             }
 
-            return await McpQueryTools.WithDataWindowNoticeAsync(JsonSerializer.Serialize(new
+            /* #9593: the window notice is read first, because its three keys close the reply and count against the response budget with the rest.
+               The newest sampled events that fit are kept (the oldest are left off whole), and count, the rates, the top lists and matched_calls stay whole. */
+            var notice = await McpQueryTools.WindowNoticeAsync(
+                () => dataService.GetQueryWindowFloorAsync(QueryWindowRelation.AttentionEvents, resolved.ServerId, windowStart, windowEnd),
+                windowStart, windowEnd, "attention_events");
+
+            string Reply(int kept) => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
-                client_timeouts = ClientTimeoutsRead.Payload(reading!, window, samples, limit, 2000),
-            }, McpHelpers.JsonOptions),
-                dataService, QueryWindowRelation.AttentionEvents, resolved.ServerId, windowStart, windowEnd, "attention_events");
+                client_timeouts = ClientTimeoutsRead.Payload(reading!, window, samples, limit, 2000, kept),
+                effective_start = notice.EffectiveStart,
+                window_truncated = notice.WindowTruncated,
+                truncation_note = notice.TruncationNote,
+            }, McpHelpers.JsonOptions);
+
+            return ClientTimeoutsRead.FitToBudget(ClientTimeoutsRead.EventsReturned(samples, limit), Reply);
         }
         catch (Exception ex)
         {

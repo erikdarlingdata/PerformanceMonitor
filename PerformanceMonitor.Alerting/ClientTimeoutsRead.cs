@@ -123,14 +123,42 @@ public static class ClientTimeoutsRead
         $"No client timeouts on '{serverName}': the attention collector ran {reading.RunCount} time{(reading.RunCount == 1 ? "" : "s")} " +
         $"across {reading.CoveredMinutes.ToString("N0", CultureInfo.InvariantCulture)} minutes of the last {hoursBack} hours and its counter did not move.";
 
-    /// <summary>The data answer's fields, in the order they are serialized (<paramref name="statementTextLength"/> cuts each sample text).</summary>
+    /// <summary>How many sampled events a reply holds before the response budget cuts any: the newest <paramref name="limit"/> of <paramref name="samples"/>.</summary>
+    public static int EventsReturned(IReadOnlyList<ClientTimeoutSample> samples, int limit) => Math.Min(samples.Count, limit);
+
+    /// <summary>
+    /// #9593: the reply that fits <see cref="McpResponseBudget.DefaultBytes"/>, for both SKUs. <paramref name="reply"/> is the SKU's whole
+    /// answer (its envelope and window notice around <see cref="Payload"/>) carrying the first n sampled events, so the envelope counts
+    /// against the budget. Events are listed newest first, so the ones left off the end are the oldest. Every other field is kept whole:
+    /// <c>count</c>, the rates, the top lists and <c>matched_calls</c> do not shrink, so a reply whose matched calls alone are over the
+    /// budget keeps no events and says so in <c>budget_note</c> (a smaller <c>limit</c> shortens that list too).
+    /// </summary>
+    public static string FitToBudget(int eventsReturned, Func<int, string> reply, int budgetBytes = McpResponseBudget.DefaultBytes) =>
+        McpResponseBudget.FitPrefix(eventsReturned, reply, budgetBytes, minimum: 0).Json;
+
+    /// <summary>The sentence <c>budget_note</c> carries when the response budget left sampled events out (#9593), null when none were left out.</summary>
+    private static string? BudgetNote(int eventsReturned, int kept) =>
+        kept >= eventsReturned
+            ? null
+            : McpResponseBudget.PageCutNote(eventsReturned, kept, "newest first", "sampled events",
+                "Move as_of back to the oldest returned event_time or narrow hours_back to read the older ones, or pass a smaller limit. " +
+                "count, the rates, the top lists and matched_calls are whole.");
+
+    /// <summary>
+    /// The data answer's fields, in the order they are serialized (<paramref name="statementTextLength"/> cuts each sample text).
+    /// <paramref name="sampledEventsKept"/> (#9593) is how many of the <paramref name="limit"/>-cut sampled events the reply lists, the newest
+    /// first: <see cref="FitToBudget"/> sets it to the count that fits the response budget, and null keeps every one the limit allows.
+    /// </summary>
     public static object Payload(
         AttentionReading reading,
         AttentionWindow window,
         IReadOnlyList<ClientTimeoutSample> samples,
         int limit,
-        int statementTextLength)
+        int statementTextLength,
+        int? sampledEventsKept = null)
     {
+        var eventsReturned = EventsReturned(samples, limit);
+        var kept = Math.Clamp(sampledEventsKept ?? eventsReturned, 0, eventsReturned);
         var rate = Math.Round(reading.TotalCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero);
 
         /* #6131: the same monitoring-tool T-SQL (1.5 KB) came back twice in one answer, once as a top statement's sample and
@@ -208,9 +236,11 @@ public static class ClientTimeoutsRead
             }).ToList(),
             matched_calls_returned = Math.Min(window.MatchedCalls.Count, limit),
             matched_calls_truncated = window.MatchedCalls.Count > limit,
-            sampled_events_returned = Math.Min(samples.Count, limit),
+            sampled_events_returned = kept,
             sampled_events_truncated = samples.Count > limit,
-            sampled_events = events,
+            budget_truncated = kept < eventsReturned,
+            budget_note = BudgetNote(eventsReturned, kept),
+            sampled_events = events.Take(kept).ToList(),
         };
     }
 

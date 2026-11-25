@@ -98,16 +98,20 @@ public sealed class DarlingMcpClientTimeoutTools
                     quietNotice, cancellationToken, windowStart);
             }
 
+            /* #9593: the newest sampled events that fit the response budget (the oldest are left off whole), the same cut Lite's twin makes; the window notice
+               is inside the measured reply, and count, the rates, the top lists and matched_calls stay whole. */
             var notice = await NoticeAsync(emptyAnswer: false);
-            return DarlingMcpWindowNotice.Finish(JsonSerializer.Serialize(new
+            string Reply(int kept) => JsonSerializer.Serialize(new
             {
                 server = resolved.DisplayName,
                 hours_back,
                 effective_start = notice.EffectiveStart,
                 window_truncated = notice.WindowTruncated,
                 truncation_note = notice.TruncationNote,
-                client_timeouts = ClientTimeoutsRead.Payload(reading!, window, samples, limit, 2000),
-            }, McpHelpers.JsonOptions), notice);
+                client_timeouts = ClientTimeoutsRead.Payload(reading!, window, samples, limit, 2000, kept),
+            }, McpHelpers.JsonOptions);
+
+            return DarlingMcpWindowNotice.Finish(ClientTimeoutsRead.FitToBudget(ClientTimeoutsRead.EventsReturned(samples, limit), Reply), notice);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
