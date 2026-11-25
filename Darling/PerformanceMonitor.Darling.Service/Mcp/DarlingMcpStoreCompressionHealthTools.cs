@@ -45,6 +45,7 @@ public sealed class DarlingMcpStoreCompressionHealthTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_compression_health"), Description(
         "Says whether the monitoring STORE's own compression is keeping up (not a monitored server): per hypertable, how many chunks are "
         + "past the compression delay and still uncompressed, and the policy job's last run. <<GUIDE>> No server_name. Read live from the "

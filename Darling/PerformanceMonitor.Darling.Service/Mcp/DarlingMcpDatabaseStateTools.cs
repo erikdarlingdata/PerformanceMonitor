@@ -46,6 +46,7 @@ public sealed class DarlingMcpDatabaseStateTools
         "Possible cause: the database_states collector is switched off in this server's collector schedule; get_collector_schedules shows it.";
 
     [ReadsLatestSnapshot(LatestSnapshotShape.Stamped)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_database_state_expectations"), Description(
         "Lists one server's databases with the state each is in now and the state the Database State alert expects it to be in: expected_state, whether a person set it (is_user_override), and status (as_expected, deviating, ignored, or pending when no baseline is learned yet). The Viewer's database state override editor shows the same. " +
         "<<GUIDE>>" +
@@ -123,6 +124,7 @@ public sealed class DarlingMcpDatabaseStateTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_database_state_expected"), Description(
         "Sets or clears the state the Database State alert expects one database to be in, the same override the Viewer's editor sets: expected_state is a state (ONLINE, OFFLINE, RESTORING, RECOVERING, RECOVERY_PENDING, SUSPECT, EMERGENCY, STANDBY), IGNORE (never alert for this database) or CLEAR (remove the expectation). Changes shared alert configuration. Returns previous and the undo call." +
         "<<GUIDE>>" +

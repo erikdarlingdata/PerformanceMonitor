@@ -95,6 +95,7 @@ WHERE s.name = 'log_lock_waits'";
         + "means a deadlock was detected, and waiting means the log ended while the wait was still open (duration_ms is its age then).";
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_lock_waits"), Description(
         "Gets the lock waits the monitoring STORE's OWN sessions suffered, not a monitored server's; no server_name. Newest first: waiter and "
         + "holder roles and applications, lock mode, relation, duration, outcome. Only waits past threshold_ms (5 s). Needs log_lock_waits = on "

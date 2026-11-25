@@ -78,6 +78,7 @@ public sealed class DarlingMcpStoreMetricsTools
     private static DateTime ClockNowUtc() => TimeProvider.System.GetUtcNow().UtcDateTime;
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_metrics"), Description(
         "Gets the monitoring STORE's size/growth/health, not a monitored server's; no server_name. Default is a "
         + "SUMMARY: store blocks + 4 ranked lists bounded by limit; object_kind/object_name narrow it. Daily "

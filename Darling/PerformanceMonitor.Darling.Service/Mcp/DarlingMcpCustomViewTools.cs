@@ -50,6 +50,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpCustomViewTools
 {
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "list_custom_views"), Description(
         "Lists every saved custom view (dashboards and notebooks) as lightweight summaries: id, name, description, " +
         "kind ('dashboard' or 'notebook'), folder (null = the top level), personal (true = one person's own view), " +
@@ -74,6 +75,7 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_custom_view"), Description(
         "Gets one saved custom view in full, including its definition JSON (a dashboard's panels or a notebook's " +
         "cells) plus name, description, kind, and version. Get the id from list_custom_views. Use the returned " +
@@ -97,6 +99,7 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.AnyOneStore)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "validate_custom_view"), Description(
         "Dry-run: validates a custom-view definition (dashboard {\"panels\":[...]} or notebook " +
         "{\"kind\":\"notebook\",\"cells\":[...]}) against the measure catalog and composer rules WITHOUT " +
@@ -140,6 +143,7 @@ public sealed class DarlingMcpCustomViewTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "create_custom_view"), Description(
         "Creates a new saved custom view. The definition is VALIDATED first (same as validate_custom_view); an " +
         "invalid definition returns {status:\"invalid\", ...} and saves nothing. On success returns the stored view " +
@@ -179,6 +183,7 @@ public sealed class DarlingMcpCustomViewTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_custom_view"), Description(
         "Updates an existing custom view in place: name and definition are REQUIRED and replace the stored ones; " +
         "description is optional and follows the one write vocabulary shared with update_custom_alert_rule - " +
@@ -250,6 +255,7 @@ public sealed class DarlingMcpCustomViewTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "delete_custom_view"), Description(
         "Deletes a saved custom view by id. Returns {status:\"deleted\", view_id:N, previous (the deleted view), undo (the create_custom_view call that recreates it under a new id), undo_note} on success, or " +
         "{status:\"not_found\", ...} when no view has that id. Unlike update_custom_view, this DOES delete a PERSONAL view, " +
@@ -348,6 +354,7 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.StoreRequired)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "run_custom_view_panel"), Description(
         "Runs one composed (v2) panel and returns DATA: {sql, rows, annotations, notice?}, with no 'status' " +
         "field on success. Failures return {status, message}: \"invalid\" for a bad spec or panel, or a " +
@@ -418,6 +425,7 @@ public sealed class DarlingMcpCustomViewTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.AnyOneStore)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "describe_custom_view_catalog"), Description(
         "Returns the COMPOSE CATALOG: the exact vocabulary (measures, dimensions, aggregates, units, timeBuckets, viz) " +
         "a composed (v2) panel may use; the compiler emits ONLY these identifiers. CALL THIS FIRST before " +

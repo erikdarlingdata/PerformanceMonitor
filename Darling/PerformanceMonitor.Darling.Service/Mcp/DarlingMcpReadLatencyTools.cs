@@ -47,6 +47,7 @@ public sealed class DarlingMcpReadLatencyTools
         + "the true duration is only proven to exceed the last finite bucket bound, with no bound above it to report.";
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_read_latency"), Description(
         "Gets the monitoring tool's OWN read-latency history (web and MCP reads); no server_name. "
         + "Sums hourly histograms into p50/p95/p99 bucket upper bounds, count, mean, max and timeouts per "

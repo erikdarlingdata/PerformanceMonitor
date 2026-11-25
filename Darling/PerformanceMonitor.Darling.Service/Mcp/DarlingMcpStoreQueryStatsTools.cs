@@ -168,6 +168,7 @@ ORDER BY ranked.{orderColumn} DESC NULLS LAST, ranked.queryid
 LIMIT $2";
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_query_stats"), Description(
         "Ranks the STORE's own SQL statements by server-side cost (pg_stat_statements), not a monitored " +
         "server's queries. No server_name: the store is the subject. Each " +

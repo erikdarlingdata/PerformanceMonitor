@@ -64,6 +64,7 @@ public sealed class DarlingMcpStoreJobRunsTools
     public const int MaxHours = 744;
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_job_runs"), Description(
         "Each run of the monitoring STORE's own TimescaleDB background jobs (compression, retention, refresh), newest first, with start, end, "
         + "outcome and error. Not a monitored server; no server_name. Filter with job_kind and hypertable. <<GUIDE>> "

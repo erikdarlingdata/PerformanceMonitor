@@ -28,6 +28,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpStoreTableMeasureTools
 {
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "measure_store_table"), Description(
         "Measures the empty space of ONE table in the monitoring STORE (not a monitored server's), by adding up the size of its live rows "
         + "against the space of its file pages and counting which pages hold a live row: a measurement, where get_store_table_health gives an estimate. One call, one table, never a sweep. "

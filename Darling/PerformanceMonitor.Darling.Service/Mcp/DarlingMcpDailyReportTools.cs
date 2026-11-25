@@ -31,6 +31,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpDailyReportTools
 {
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_daily_health_report"), Description(
         "Builds the Daily Health Report for one day from stored data and returns it as text plus structured sections: the fleet counts, " +
         "then each server worst first with its alerts, failed Agent jobs, overdue backups and CHECKDB, low disk and collection problems. " +

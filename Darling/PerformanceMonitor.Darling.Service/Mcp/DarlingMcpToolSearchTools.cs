@@ -26,6 +26,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpToolSearchTools
 {
     [FrontDoorClass(FrontDoorToolClass.Local)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "find_tools"), Description(McpToolSearchToolText.Description)]
     public static string FindTools(
         McpServer server,

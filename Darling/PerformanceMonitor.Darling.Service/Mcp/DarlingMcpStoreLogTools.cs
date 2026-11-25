@@ -36,6 +36,7 @@ public sealed class DarlingMcpStoreLogTools
     public const int DefaultRetainedLimit = 50;
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_log"), Description(
         "Gets the monitoring STORE's OWN PostgreSQL log, not a monitored server's; no server_name. Returns a "
         + "per-class CENSUS (window total, per-hour median/max over every captured hour), not raw lines. "

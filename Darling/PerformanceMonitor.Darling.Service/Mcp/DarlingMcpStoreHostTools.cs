@@ -43,6 +43,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpStoreHostTools
 {
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_host"), Description(
         "The monitoring STORE's own host/settings profile - is IT sized right, not a monitored server. No "
         + "server_name, no window: a snapshot. Reads the managed data directory's conf files off local disk for "

@@ -61,6 +61,7 @@ public sealed class DarlingMcpChangeWindowTools
         new(postgres, ServiceCommandDeadlines.SerialLoopSeconds) { ReadServerIds = DarlingServerResolver.WebAllowedServerIds };
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_change_windows"), Description(
         "Lists the planned change windows and what each held. A request that opens inside a window, or within 30 minutes after its end, is "
         + "created held: it is listable and claimable but does not wake wait_for_investigation_requests. A late alert that joins a held request "

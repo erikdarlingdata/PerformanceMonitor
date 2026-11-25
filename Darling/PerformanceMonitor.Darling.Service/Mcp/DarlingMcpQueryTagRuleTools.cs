@@ -69,6 +69,7 @@ public sealed class DarlingMcpQueryTagRuleTools
     /// <summary>The per-command deadline the tools use, the same as the other store writes.</summary>
     internal const int CommandSeconds = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds;
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "create_query_tag_rule"), Description(
         "Creates a query tag rule: new queries whose application, login, host, database, object or query text matches the pattern get the rule's tag " +
         "the next time the collector rebuilds the tag map (this call changes no map row). field is one of application, login, host, database, object, text, text_tag. " +
@@ -88,6 +89,7 @@ public sealed class DarlingMcpQueryTagRuleTools
         CancellationToken cancellationToken = default) =>
         CreateCore(new QueryTagRuleStore(postgres, CommandSeconds), field, pattern, tag_id, priority, enabled, server_id, null, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_query_tag_rule"), Description(
         "PARTIAL edit of a query tag rule: send only the fields to change in changes_json, from pattern, priority, enabled, tag_id and server_id. An explicit null for server_id " +
         "makes the rule apply to every server. The rule's field cannot change (delete it and create another). The edit is validated like a new rule. " +
@@ -99,6 +101,7 @@ public sealed class DarlingMcpQueryTagRuleTools
         CancellationToken cancellationToken = default) =>
         UpdateCore(new QueryTagRuleStore(postgres, CommandSeconds), rule_id, changes_json, cancellationToken);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "delete_query_tag_rule"), Description(
         "Deletes a query tag rule. Permanent; queries it tagged lose that tag at the next collector pass (unless another rule or a hand assignment holds them). " +
         "To keep the rule but stop it applying, set enabled to false with update_query_tag_rule. The answer carries previous (the deleted rule) and undo (the create_query_tag_rule call, which makes a new id).")]
@@ -109,6 +112,7 @@ public sealed class DarlingMcpQueryTagRuleTools
         DeleteCore(new QueryTagRuleStore(postgres, CommandSeconds), rule_id, cancellationToken);
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "list_query_tag_rules"), Description(
         "Lists the query tag rules in the order they apply (priority, then id): id, field, pattern, priority, enabled, tag_id and tag path, server_id, who created it and when. " +
         "Disabled rules are listed with enabled false. Also returns rules_version and built_version: the tag map is stale while built_version is below rules_version, until the next collector pass. " +
@@ -120,6 +124,7 @@ public sealed class DarlingMcpQueryTagRuleTools
         ListCore(new QueryTagRuleStore(postgres, CommandSeconds), server_id, cancellationToken);
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "test_query_tag_rule"), Description(
         "Dry run, writes nothing: runs a saved rule (rule_id) or a draft rule (field, pattern, tag_id, priority) over the recent query sightings of one server or every server and reports " +
         "what it would tag: how many keys the rule matches, how many of those a hand assignment or a rule that ranks ahead already holds (so the rule would not change them), " +

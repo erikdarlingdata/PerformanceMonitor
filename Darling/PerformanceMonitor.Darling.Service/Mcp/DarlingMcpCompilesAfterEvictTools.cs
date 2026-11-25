@@ -63,6 +63,7 @@ JOIN LATERAL (
 WHERE c.journal_id = $1 AND c.event = 'action_called' AND c.detail->>'kind' = '" + Storage.AgentChangeKinds.PlanEvict + "'";
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_compiles_after_evict"), Description(
         "Reads what happened after an evict_cached_plan: for each statement Darling collected for that handle, whether it compiled again and whether the new plan has the same shape. Reads the store only; changes nothing. <<GUIDE>> " +
         "Call it with the journal_id evict_cached_plan returned, after the next query_stats collection (about a minute), and again later: a statement that has not run yet is not_collected_yet. " +

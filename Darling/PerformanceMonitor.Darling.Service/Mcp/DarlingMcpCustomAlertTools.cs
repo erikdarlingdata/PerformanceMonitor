@@ -60,6 +60,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpCustomAlertTools
 {
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "list_custom_alert_rules"), Description(
         "Lists every saved custom alert rule as a lightweight summary - id, name, description, whether it is " +
         "enabled, version, who/when it was last updated, and when it last fired (last_fired, an ISO-8601 UTC " +
@@ -83,6 +84,7 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_custom_alert_rule"), Description(
         "Gets one saved custom alert rule in full, including its definition JSON (the metric + predicate + " +
         "optional hysteresis/scope/cadence) plus name, description, enabled, version, and expires_at_utc / expired (see " +
@@ -108,6 +110,7 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.AnyOneStore)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "validate_custom_alert_rule"), Description(
         "Dry-run: validates a custom-alert-rule definition JSON WITHOUT persisting anything, returning {valid:true} or " +
         "{valid:false, error} naming the first problem. This is the exact authority create_custom_alert_rule / " +
@@ -283,6 +286,7 @@ public sealed class DarlingMcpCustomAlertTools
             + consequence + ". unmatched_servers lists each entry with the registry name it points at, or the candidates when several match.";
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "create_custom_alert_rule"), Description(
         "Agent arm: needs agent_action, request's server only. Creates a new saved custom alert rule. The definition is VALIDATED first (same as " +
         "validate_custom_alert_rule); an invalid definition returns {status:\"invalid\", ...} and saves " +
@@ -345,6 +349,7 @@ public sealed class DarlingMcpCustomAlertTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_custom_alert_rule"), Description(
         "Agent arm: needs agent_action, request's server only. Partial update of an existing rule: send only the fields to change (incl. expires_at_utc); an " +
         "omitted field keeps its current value. description ALSO accepts an empty string \"\" to clear it (vocabulary " +
@@ -464,6 +469,7 @@ public sealed class DarlingMcpCustomAlertTools
         }
     }
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "delete_custom_alert_rule"), Description(
         "Agent arm: needs agent_action, request's server only. Deletes a saved custom alert rule by id. Returns {status:\"deleted\", rule_id:N, previous (the deleted rule), undo (the create_custom_alert_rule call that recreates it under a new id), undo_note} on success, or " +
         "{status:\"not_found\", ...} when no rule has that id. This is permanent, and it also drops the rule's " +
@@ -554,6 +560,7 @@ public sealed class DarlingMcpCustomAlertTools
         "not that the rule has fired. A null current_value is no-data and never breaches.";
 
     [FrontDoorClass(FrontDoorToolClass.StoreRequired)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "test_custom_alert_rule"), Description(
         "Evaluate-now for a SAVED rule (rule_id) OR a supplied definition (exactly one): compiles the metric and reads " +
         "its CURRENT value on each in-scope server, reporting per-server {server, current_value, breaching, severity} " +
@@ -692,6 +699,7 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.StoreRequired)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "backtest_custom_alert_rule"), Description(
         "Replays a SAVED rule (rule_id) OR a supplied definition over STORED history and reports per server the fire and clear " +
         "points it WOULD have produced, with the same persistence rule the live engine applies. Writes and delivers nothing. " +
@@ -1040,6 +1048,7 @@ public sealed class DarlingMcpCustomAlertTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.AnyOneStore)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "list_custom_alert_templates"), Description(
         "Lists the built-in STARTER custom-alert-rule templates: curated {key, name, description, definition} entries for " +
         "common PostgreSQL and SQL Server signals, where definition is a ready-to-use rule body. The starters are " +

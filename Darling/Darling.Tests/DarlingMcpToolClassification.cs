@@ -9,22 +9,33 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using ModelContextProtocol.Server;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace Darling.Tests;
 
 /// <summary>
-/// The read-only Darling MCP tools: every registered tool (<see cref="DarlingMcpToolTypes.Tools"/>) that is not in
-/// <see cref="DarlingMcpWritePolicy.WriteTools"/> or <see cref="DarlingMcpWritePolicy.InvestigationTools"/>. The decision a new tool needs is
-/// made where it is read: a write goes in the write policy's set, and the tool's row in <c>docs/darling/mcp-tool-tables.md</c> sits in the
-/// table that says so. <c>DarlingMcpToolTablesDocTests</c> fails when the "Tools that change something" table and the write policy's sets
-/// disagree, so a write that is missing from <see cref="DarlingMcpWritePolicy.WriteTools"/> fails there instead of shipping unswitched.
-/// <c>analyze_server</c> persists the findings it derives but is a read.
+/// The Darling MCP tools by access class. Every tool method carries a <see cref="DarlingToolAccessAttribute"/> naming the decision
+/// (<see cref="ToolAccess"/>), and <see cref="ReadOnlyTools"/> is the set of registered tools marked <see cref="ToolAccess.Read"/>. A tool
+/// with no attribute is in no set here, so <c>DarlingMcpWritePolicyTests</c> fails it as unclassified, and <c>DarlingToolAccessTests</c>
+/// fails a tool whose attribute disagrees with <see cref="DarlingMcpWritePolicy.WriteTools"/> or
+/// <see cref="DarlingMcpWritePolicy.InvestigationTools"/>. <c>analyze_server</c> persists the findings it derives but is a read.
 /// </summary>
 internal static class DarlingMcpToolClassification
 {
-    internal static readonly IReadOnlySet<string> ReadOnlyTools = DarlingMcpToolTypes.Tools
-        .Select(t => t.Name)
-        .Where(n => !DarlingMcpWritePolicy.WriteTools.Contains(n) && !DarlingMcpWritePolicy.InvestigationTools.Contains(n))
+    internal const BindingFlags AnyMethod = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+
+    /// <summary>The access a method declares, or null when it carries none.</summary>
+    internal static ToolAccess? AccessOf(MethodInfo method) => method.GetCustomAttribute<DarlingToolAccessAttribute>()?.Access;
+
+    /// <summary>Every registered tool by its served name with the access its method declares, null for a method that declares none.</summary>
+    internal static readonly IReadOnlyDictionary<string, ToolAccess?> RegisteredAccess = DarlingMcpToolTypes.Tools
+        .ToDictionary(t => t.Name, t => AccessOf(t.Method), StringComparer.Ordinal);
+
+    /// <summary>The registered tools whose method is marked <see cref="ToolAccess.Read"/>.</summary>
+    internal static readonly IReadOnlySet<string> ReadOnlyTools = RegisteredAccess
+        .Where(a => a.Value == ToolAccess.Read)
+        .Select(a => a.Key)
         .ToHashSet(StringComparer.Ordinal);
 }

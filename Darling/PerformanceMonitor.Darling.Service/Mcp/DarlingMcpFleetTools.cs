@@ -41,6 +41,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpFleetTools
 {
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_fleet_overview"), Description(
         "One pre-banded card per server (CPU, memory, blocking, deadlocks, threads, collector health) plus a " +
         "fleet rollup (band counts, cross-server totals, worst-first ranking). Blocking/deadlock counts window " +

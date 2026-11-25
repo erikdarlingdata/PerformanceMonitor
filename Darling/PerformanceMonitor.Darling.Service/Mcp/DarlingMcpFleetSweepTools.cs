@@ -53,6 +53,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpFleetSweepTools
 {
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_sweep_reports"), Description(
         "Reads the scheduled Fleet Sweep Report: the timeline for the window, the newest sweep in full, and the " +
         "watch worklist (default: open+carried only; pass watch_state for pending/closed); pass sweep_id (a " +

@@ -227,6 +227,7 @@ GROUP BY f.queryid";
     public const string TextGone = "text no longer in pg_stat_statements";
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_query_history"), Description(
         "The STORE's own SQL statements hour by hour (pg_stat_statements deltas the service snapshots), not a " +
         "monitored server's queries. No server_name. Without query_id: top statements over hours_back by time " +

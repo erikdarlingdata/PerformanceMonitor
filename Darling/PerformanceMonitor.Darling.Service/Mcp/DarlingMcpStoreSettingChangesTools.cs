@@ -57,6 +57,7 @@ public sealed class DarlingMcpStoreSettingChangesTools
     public const int DefaultLimit = 50;
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_setting_changes"), Description(
         "Lists changes to the monitoring STORE's own PostgreSQL settings between service starts, newest first (not a monitored server's). "
         + "No server_name. Each row: the setting, old and new value, where the new value came from (source, source file and line), pending_restart, "

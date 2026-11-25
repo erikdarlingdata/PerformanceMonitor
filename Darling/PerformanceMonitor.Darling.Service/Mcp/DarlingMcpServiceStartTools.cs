@@ -49,6 +49,7 @@ SELECT to_regclass('collect.service_starts') IS NOT NULL
         "The store has no service start history yet (it predates the start tables), so builds are not marked. The service migrates the store at its next start.";
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_service_starts"), Description(
         "The monitoring SERVICE's own starts, newest first: for each, the build it ran, the schema version before and after, how long each " +
         "migration rung took, and the ERROR and WARN counts since the start. Use it to tell which build ran when and what a start did. " +

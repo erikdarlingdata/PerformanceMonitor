@@ -64,6 +64,7 @@ public sealed class DarlingMcpStoreTableHealthTools
     internal static readonly string[] Sections = { "tables", "indexes", "all" };
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_table_health"), Description(
         "Gets the health of the monitoring STORE's OWN tables and indexes, not a monitored server's; no server_name. Per table: size "
         + "split, estimated empty space (an ESTIMATE, null with a reason when statistics are missing or stale, never zero), dead rows, "

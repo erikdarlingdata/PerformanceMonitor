@@ -41,6 +41,7 @@ public sealed class DarlingMcpStoreMaintenanceReadinessTools
     }
 
     [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_maintenance_readiness"), Description(
         "Says whether the monitoring STORE (not a monitored server) is safe for maintenance right now: an install, an upgrade or a table "
         + "rewrite. One verdict line, 'Safe for maintenance now.' or the reasons it is not, plus the detail. Run it before every install. "
