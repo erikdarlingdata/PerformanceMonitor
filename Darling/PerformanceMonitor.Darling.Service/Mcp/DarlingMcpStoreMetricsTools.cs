@@ -18,6 +18,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -76,6 +77,8 @@ public sealed class DarlingMcpStoreMetricsTools
        the clock through this one seam and not as an anchored window's "now". */
     private static DateTime ClockNowUtc() => TimeProvider.System.GetUtcNow().UtcDateTime;
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_metrics"), Description(
         "Gets the monitoring STORE's size/growth/health, not a monitored server's; no server_name. Default is a "
         + "SUMMARY: store blocks + 4 ranked lists bounded by limit; object_kind/object_name narrow it. Daily "

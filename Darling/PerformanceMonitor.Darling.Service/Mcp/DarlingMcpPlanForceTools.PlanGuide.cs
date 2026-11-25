@@ -486,6 +486,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
     /* The tool methods are the last members on purpose: the payload contract census reads a tool's span up to the next tool or the end of the file, and the
        body above has its own catch, which the census must not read as this one-line method's. */
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "create_plan_guide"), Description(
         "Agent arm, SQL Server only (Azure SQL is refused): creates ONE plan guide with sys.sp_create_plan_guide, so a statement runs with the OPTION (...) hints you give it (OPTIMIZE FOR, RECOMPILE, MAXDOP, USE PLAN) without a change to the application. Dry run by default: returns the exact statement and what the guide matches, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's create_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
         "<<GUIDE>>" +
@@ -513,6 +514,7 @@ public sealed partial class DarlingMcpPlanForceTools
         RunCreatePlanGuideAsync(postgres, ownerSource?.Read(), logger, server_name, database_name, name, statement, type, module_or_batch, @params, hints, agent_action, dry_run, cancellationToken,
             served?.Policy.AgentTokenName, served?.NamedAgentNames);
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "drop_plan_guide"), Description(
         "Agent arm, SQL Server only (an Azure SQL target is refused as engine_not_supported): drops ONE plan guide by name with sys.sp_control_plan_guide N'DROP', so the statement it applied to runs without the guide's hints again. Dry run by default: reads the guide and returns the exact statement and the whole definition that would be journaled, and writes nothing. A write needs dry_run=false. Needs agent_action at Level 3 plus that server's drop_plan_guide switch and remediation login (with ALTER on the module for an OBJECT guide, ALTER on the database for a SQL guide); ships off. " +
         "<<GUIDE>>" +

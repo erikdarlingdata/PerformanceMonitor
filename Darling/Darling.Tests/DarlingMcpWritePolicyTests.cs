@@ -76,11 +76,13 @@ public sealed class DarlingMcpWritePolicyTests
         var both = readOnly.Intersect(writes).Concat(investigations.Intersect(readOnly)).Concat(investigations.Intersect(writes)).ToArray();
         var stale = readOnly.Concat(writes).Concat(investigations).Except(registered).ToArray();
 
+        /* The read-only list is the tools marked ToolAccess.Read (DarlingMcpToolClassification), so a tool with no DarlingToolAccess, or one
+           marked Write or Investigation that is missing from its set, is on none of the three and lands in unclassified. */
         Assert.True(
             unclassified.Length == 0,
-            "a registered tool is on neither the read-only list (DarlingMcpToolClassification) nor DarlingMcpWritePolicy.WriteTools nor InvestigationTools; "
-            + $"decide which it is and add it: [{string.Join(", ", unclassified)}]");
-        Assert.True(both.Length == 0, $"a tool is on the read-only list AND in the write set: [{string.Join(", ", both)}]");
+            "a registered tool is not marked ToolAccess.Read and is not in DarlingMcpWritePolicy.WriteTools or InvestigationTools; "
+            + $"mark it with [DarlingToolAccess] and, for a write or an investigation tool, add it to its set: [{string.Join(", ", unclassified)}]");
+        Assert.True(both.Length == 0, $"a tool is marked ToolAccess.Read AND is in the write or investigation set: [{string.Join(", ", both)}]");
         Assert.True(stale.Length == 0, $"a classified name is not a registered tool: [{string.Join(", ", stale)}]");
         Assert.True(DarlingMcpWritePolicy.ServerAdminTools.IsSubsetOf(writes));
         Assert.Contains("edit_server", writes);

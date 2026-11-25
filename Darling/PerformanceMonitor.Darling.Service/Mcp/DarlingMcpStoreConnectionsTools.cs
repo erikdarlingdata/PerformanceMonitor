@@ -16,6 +16,7 @@ using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -70,6 +71,8 @@ public sealed class DarlingMcpStoreConnectionsTools
         "No returned minute has a host figure. The service reads available memory only for a managed store on its own Windows host, "
         + "and reads no CPU percent or disk queue for any store, so a bring-your-own or compose store has none of the three.";
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_store_connections"), Description(
         "Gets the monitoring STORE's OWN connections a minute at a time, not a monitored server's; no server_name. Each minute: client backends by role, "
         + "application, state and wait type, and slots_available (max_connections less the reserved slots less the backends counted). "

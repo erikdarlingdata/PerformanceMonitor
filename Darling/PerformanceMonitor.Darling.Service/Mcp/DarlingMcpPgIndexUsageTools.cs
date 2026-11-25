@@ -276,6 +276,7 @@ public sealed class DarlingMcpPgIndexUsageTools
         return Math.Round(bytes / 1024.0, 0).ToString("0", CultureInfo.InvariantCulture) + " KB";
     }
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_pg_index_usage")]
     [Description(
         "Per-index usage and droppability advice, beyond raw pg_stat_user_indexes. scans_in_window, not "
