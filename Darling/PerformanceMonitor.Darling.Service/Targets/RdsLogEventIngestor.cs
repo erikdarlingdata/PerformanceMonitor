@@ -85,11 +85,11 @@ public sealed class RdsLogEventIngestor
 
     /// <param name="logHashKey">The store's log-hash key (#4004), the same instance the <c>pg_read_file</c> route's
     /// runs carry, so the two transports store identical identities for identical text.</param>
-    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null)
+    public RdsLogEventIngestor(NpgsqlDataSource postgres, PgLogHashKey logHashKey, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null, RdsLookupCache? lookups = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _classifier = new PgLogEventClassifier(logHashKey ?? throw new ArgumentNullException(nameof(logHashKey)));
-        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles);
+        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles, lookups: lookups);
         _logger = logger;
         _resume = resume;
     }

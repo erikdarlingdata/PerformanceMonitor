@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -189,14 +190,23 @@ public sealed class RdsLogSource
 
     private readonly RdsEndpointVerifier _verifier;
 
+    /// <summary>
+    /// #9522: the writer, the log file listing and the downloaded portions this source shares with the other RDS
+    /// readers of its runner, or null for a source that asks AWS on every read (a source built on its own, as a
+    /// test builds one). The positions are not in it: each source keeps its own in <see cref="_markers"/>.
+    /// </summary>
+    private readonly RdsLookupCache? _lookups;
+
     public RdsLogSource(
         Func<string, IAmazonRDS>? clientFactory = null,
         Func<DateTime>? clock = null,
         ILogger? logger = null,
         RdsEndpointVerifier? verifier = null,
         AwsRoleCredentialCache? roles = null,
-        Func<string, AwsRoleKey?, IAmazonRDS>? roleClientFactory = null)
+        Func<string, AwsRoleKey?, IAmazonRDS>? roleClientFactory = null,
+        RdsLookupCache? lookups = null)
     {
+        _lookups = lookups;
         _verifier = verifier ?? new RdsEndpointVerifier(clock);
         _clientFactory = roleClientFactory ?? AwsRoleClients.Rds(clientFactory, roles);
         _clock = clock ?? (() => DateTime.UtcNow);
@@ -444,11 +454,48 @@ public sealed class RdsLogSource
         await _verifier.EnsureAsync(
             client, parsed, host, serverId, cancellationToken, loginConnectionString, AwsRoleKey.ScopeOf(role));
 
-        var instanceId = parsed.Kind == RdsEndpointKind.ClusterWriter
-            ? await ResolveWriterAsync(client, parsed.Identifier, cancellationToken)
-            : parsed.Identifier;
+        var isCluster = parsed.Kind == RdsEndpointKind.ClusterWriter;
 
-        var files = await LogFilesNewestFirstAsync(client, instanceId, kind, cancellationToken);
+        /* #9522: the writer is the one the other readers of this cycle resolved, when they share a cache. */
+        var instanceId = !isCluster
+            ? parsed.Identifier
+            : _lookups is null
+                ? await ResolveWriterAsync(client, parsed.Identifier, cancellationToken)
+                : await _lookups.WriterAsync(
+                    role, parsed.Region, parsed.Identifier,
+                    () => ResolveWriterAsync(client, parsed.Identifier, cancellationToken), cancellationToken);
+
+        try
+        {
+            return await ReadInstanceAsync(client, role, parsed.Region, instanceId, kind, cancellationToken);
+        }
+        catch (Exception ex) when (_lookups is not null && ex is not OperationCanceledException)
+        {
+            /* #9522: a call addressed to this instance failed, so nothing held for it is trusted: not its listing or
+               portions, and not the writer that named it. After a failover that removes or renames the old writer
+               this is the first failing call, and the next read resolves the writer again. That is one failed run,
+               the same as a read that resolves the writer itself. */
+            _lookups.ForgetInstance(role, parsed.Region, instanceId);
+
+            if (isCluster)
+            {
+                _lookups.ForgetWriter(role, parsed.Region, parsed.Identifier);
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The read of one instance's log: list its files, then download the portion this source's own position asks
+    /// for. The listing and the portion come from <see cref="_lookups"/> when another reader of the same runner
+    /// fetched the same ones inside their lifetime (#9522).
+    /// </summary>
+    private async Task<LogChunk?> ReadInstanceAsync(
+        IAmazonRDS client, AwsRoleKey? role, string region, string instanceId, LogFileKind kind,
+        CancellationToken cancellationToken)
+    {
+        var files = await LogFilesNewestFirstAsync(client, role, region, instanceId, kind, cancellationToken);
         var newest = files[0];
 
         var held = FindHeldPosition(instanceId, kind);
@@ -463,15 +510,8 @@ public sealed class RdsLogSource
 
         if (held is not null && heldFileIndex > 0)
         {
-            var drain = await client.DownloadDBLogFilePortionAsync(
-                new DownloadDBLogFilePortionRequest
-                {
-                    DBInstanceIdentifier = instanceId,
-                    LogFileName = held.Value.File,
-                    Marker = held.Value.Marker,
-                    NumberOfLines = 0,
-                },
-                cancellationToken);
+            var drain = await DownloadPortionAsync(
+                client, role, region, instanceId, held.Value.File, held.Value.Marker, 0, cancellationToken);
 
             var morePending = drain.AdditionalDataPending == true;
 
@@ -499,15 +539,8 @@ public sealed class RdsLogSource
         string? requestedMarker = hasMarkerForThisFile ? held!.Value.Marker : null;
         var requestedLines = hasMarkerForThisFile ? 0 : FirstReadLines;
 
-        var response = await client.DownloadDBLogFilePortionAsync(
-            new DownloadDBLogFilePortionRequest
-            {
-                DBInstanceIdentifier = instanceId,
-                LogFileName = newest,
-                Marker = requestedMarker,
-                NumberOfLines = requestedLines,
-            },
-            cancellationToken);
+        var response = await DownloadPortionAsync(
+            client, role, region, instanceId, newest, requestedMarker, requestedLines, cancellationToken);
 
         /* The marker is RETURNED, not recorded. Recording it here would advance this source past text the
            caller has not looked at yet, and on a consume-once transport that is a permanent loss rather
@@ -521,6 +554,40 @@ public sealed class RdsLogSource
             new ResumeMarker(key, response.Marker),
             StartsAtFileStart: string.Equals(requestedMarker, StartOfFileMarker, StringComparison.Ordinal),
             ResumeFileMissing: resumeFileMissing);
+    }
+
+    /// <summary>
+    /// One <c>DownloadDBLogFilePortion</c> call, or the answer another reader of this runner got for the same call
+    /// (#9522).
+    ///
+    /// <para><b>The same call means the same file, marker and line count.</b> <c>pg_deadlocks</c> and
+    /// <c>pg_log_events</c> run on one cadence and commit the marker each read returns, so their positions are
+    /// normally equal and the second one's request is the first one's. It then gets the first one's bytes and marker
+    /// without a call. The answer is the reader's to parse, store and commit under its own position, as if it had
+    /// made the call. A reader whose position differs (its last store write failed, or it runs on another cadence)
+    /// sends a different request and gets its own download, so a shared answer never moves a reader past bytes it
+    /// has not been handed.</para>
+    /// </summary>
+    private Task<DownloadDBLogFilePortionResponse> DownloadPortionAsync(
+        IAmazonRDS client, AwsRoleKey? role, string region, string instanceId, string fileName, string? marker,
+        int numberOfLines, CancellationToken cancellationToken)
+    {
+        Task<DownloadDBLogFilePortionResponse> Download() => client.DownloadDBLogFilePortionAsync(
+            new DownloadDBLogFilePortionRequest
+            {
+                DBInstanceIdentifier = instanceId,
+                LogFileName = fileName,
+                Marker = marker,
+                NumberOfLines = numberOfLines,
+            },
+            cancellationToken);
+
+        return _lookups is null
+            ? Download()
+            : _lookups.PortionAsync(
+                role, region, instanceId, fileName,
+                (marker is null ? "first" : "marker " + marker) + "|" + numberOfLines.ToString(CultureInfo.InvariantCulture),
+                Download, cancellationToken);
     }
 
     /// <summary>
@@ -624,9 +691,15 @@ public sealed class RdsLogSource
     /// caller decide that again, which is where the silent empty read came from.</para>
     /// </summary>
     private async Task<List<string>> LogFilesNewestFirstAsync(
-        IAmazonRDS client, string instanceId, LogFileKind kind, CancellationToken cancellationToken)
+        IAmazonRDS client, AwsRoleKey? role, string region, string instanceId, LogFileKind kind,
+        CancellationToken cancellationToken)
     {
-        var files = await ListLogFilesAsync(client, instanceId, cancellationToken);
+        /* #9522: one listing serves the readers of a cycle. It is the whole listing, before the name filter, so the
+           stderr and the csv reader choose from the same one. Nothing below changes it. */
+        var files = _lookups is null
+            ? await ListLogFilesAsync(client, instanceId, cancellationToken)
+            : await _lookups.ListingAsync(
+                role, region, instanceId, () => ListLogFilesAsync(client, instanceId, cancellationToken), cancellationToken);
 
         /* Guarding the omitted collection is load bearing, as in ResolveWriterAsync above: the SDK omits the
            collection entirely on an answer that carried no file, so ordering a null raises

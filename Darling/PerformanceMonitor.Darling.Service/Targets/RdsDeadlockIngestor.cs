@@ -71,10 +71,10 @@ public sealed class RdsDeadlockIngestor
     /// </summary>
     internal Func<long>? StoreClock { get; init; }
 
-    public RdsDeadlockIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null)
+    public RdsDeadlockIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null, RdsEndpointVerifier? verifier = null, AwsRoleCredentialCache? roles = null, RdsLookupCache? lookups = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
-        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles);
+        _logs = logs ?? new RdsLogSource(logger: logger, verifier: verifier, roles: roles, lookups: lookups);
         _logger = logger;
         _resume = resume;
     }
