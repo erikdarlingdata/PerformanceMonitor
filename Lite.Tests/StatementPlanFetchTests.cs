@@ -27,21 +27,20 @@ namespace Lite.Tests;
 /// #9195: a bad actor's live plan is fetched for its own statement. A plan handle names a whole batch, and a batch can
 /// hold many statements and megabytes of plan XML, so the fetch asks the text DMV for the statement the
 /// stored byte offsets locate and falls back to the batch DMV when the offsets are not known. These tests hold the
-/// command the fetcher sends: no connection is opened, and the command is read as it would be executed.
+/// parameters the fetcher sends: no connection is opened, and the command is read as it would be executed. The DMV call
+/// itself runs against a real SQL Server in <see cref="StatementPlanFetchLiveSqlTests"/>.
 /// </summary>
 public sealed class SqlPlanFetcherStatementPlanTests
 {
     private const string Handle = "0x06000500FE5C5D1CB0E1DB5A0300000001000000000000000000000000000000000000000000000000000000";
 
     [Fact]
-    public void WithOffsets_TheCommandIsTheTextDmv_WithTheHandleAndBothOffsets()
+    public void WithOffsets_TheCommandCarriesTheHandleAndBothOffsets()
     {
         using var connection = new SqlConnection();
 
         using var command = SqlPlanFetcher.CreatePlanCommand(connection, Handle, (4096, 8192));
 
-        Assert.Contains("sys.dm_exec_text_query_plan(CONVERT(varbinary(64), @plan_handle, 1), @statement_start_offset, @statement_end_offset)", command.CommandText, StringComparison.Ordinal);
-        Assert.DoesNotContain("sys.dm_exec_query_plan", command.CommandText, StringComparison.Ordinal);
         Assert.Equal(15, command.CommandTimeout);
         Assert.Equal(3, command.Parameters.Count);
         Assert.Equal(Handle, command.Parameters["@plan_handle"].Value);
@@ -61,14 +60,12 @@ public sealed class SqlPlanFetcherStatementPlanTests
     }
 
     [Fact]
-    public void WithoutOffsets_TheCommandIsTheBatchDmv_WithOnlyTheHandle()
+    public void WithoutOffsets_TheCommandCarriesOnlyTheHandle()
     {
         using var connection = new SqlConnection();
 
         using var command = SqlPlanFetcher.CreatePlanCommand(connection, Handle, null);
 
-        Assert.Contains("sys.dm_exec_query_plan(CONVERT(varbinary(64), @plan_handle, 1))", command.CommandText, StringComparison.Ordinal);
-        Assert.DoesNotContain("dm_exec_text_query_plan", command.CommandText, StringComparison.Ordinal);
         Assert.Equal(15, command.CommandTimeout);
         var only = Assert.Single(command.Parameters.OfType<SqlParameter>());
         Assert.Equal("@plan_handle", only.ParameterName);
@@ -87,8 +84,8 @@ public sealed class SqlPlanFetcherStatementPlanTests
 /// #9195: <see cref="DrillDownCollector"/> reads the bad actor's plan_handle and statement offsets from the newest
 /// <c>v_query_stats</c> row of the hash and hands them to the plan fetcher together. A newest row stored before the
 /// offsets existed carries none, and the fetch is the whole batch's: an older row's offsets never pair with the
-/// newest row's handle. The warnings of a statement plan are that statement's own, nested procedure bodies included,
-/// and the statement filter judges the statement plan before it is analyzed.
+/// newest row's handle. The warnings of a statement plan are that statement's own, and the statement filter judges the
+/// statement plan before it is analyzed.
 ///
 /// <para>Real DuckDB (the shared fixture); the fetcher is a fake that answers each call by the entry point it came in
 /// through.</para>
@@ -182,11 +179,11 @@ public sealed class BadActorStatementPlanFetchTests : IClassFixture<SharedDuckDb
     }
 
     [Fact]
-    public async Task APlanAnalysisOverAStatementPlan_CountsOnlyThatStatementsWarnings_NestedBodyIncluded()
+    public async Task APlanAnalysisOverAStatementPlan_CountsOnlyThatStatementsWarnings()
     {
-        var fetcher = new RecordingFetcher { BatchPlan = BatchPlanOfFourStatements(), StatementPlan = ExecStatementPlan() };
+        var fetcher = new RecordingFetcher { BatchPlan = BatchPlanOfFourStatements(), StatementPlan = OneStatementPlan() };
 
-        /* The statement's offsets are known: the plan is the one EXEC statement and the procedure body it nests. */
+        /* The statement's offsets are known: the plan is that one statement. */
         await SeedAsync("0x9195NEWHANDLE", 4096, 8192, WindowEnd.AddMinutes(-30));
         var statementFinding = Finding();
         await new DrillDownCollector(_duckDb, fetcher).EnrichFindingsAsync([statementFinding], Context());
@@ -200,7 +197,7 @@ public sealed class BadActorStatementPlanFetchTests : IClassFixture<SharedDuckDb
         var batchWarnings = WarningCount(batchFinding);
 
         Assert.Equal(new[] { "statement 0x9195NEWHANDLE 4096 8192", "batch 0x9195NEWHANDLE" }, fetcher.Calls);
-        Assert.True(statementWarnings > 0, "the nested procedure body's warning was not counted");
+        Assert.True(statementWarnings > 0, "the statement's warning was not counted");
         Assert.Equal(statementWarnings * 4, batchWarnings);
     }
 
@@ -254,12 +251,13 @@ public sealed class BadActorStatementPlanFetchTests : IClassFixture<SharedDuckDb
         return Plan(statements);
     }
 
-    /// <summary>An EXEC statement that carries no query plan of its own and nests a procedure body of one scanning statement.</summary>
-    private static string ExecStatementPlan() => Plan(
-        "<StmtSimple StatementText=\"EXEC dbo.GetByA @p\" StatementId=\"1\" StatementCompId=\"1\" StatementType=\"EXEC\">"
-        + "<StoredProc ProcName=\"[db].[dbo].[GetByA]\" IsNativelyCompiled=\"false\"><Statements>"
-        + Scan("SELECT a FROM dbo.t WHERE upper(a) = @p", "upper([db].[dbo].[t].[a])=[@p]", "1")
-        + "</Statements></StoredProc></StmtSimple>");
+    /// <summary>
+    /// What <c>sys.dm_exec_text_query_plan</c> returns for one statement of a cached plan: a batch holding that one
+    /// statement (SQL Server 2025, 17.0.4050.1). A cached plan never nests a procedure body under an EXEC statement. The
+    /// body's statements are cached under the procedure's own plan_handle, and the statement DMVs return them one at a time.
+    /// </summary>
+    private static string OneStatementPlan() => Plan(
+        Scan("SELECT a FROM dbo.t WHERE upper(a) = @p", "upper([db].[dbo].[t].[a])=[@p]", "1"));
 
     private static string TwoStatementPlanWithACanary() => Plan(
         Scan(Darling.Tests.StatementScrubCanary.CanaryStatement, "upper([db].[dbo].[t].[c])=N'const-secret-9195'", "N'const-secret-9195'")
