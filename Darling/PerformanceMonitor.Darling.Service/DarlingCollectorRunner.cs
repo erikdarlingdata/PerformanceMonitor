@@ -457,6 +457,9 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     internal Func<CancellationToken, Task>? BetweenPlanPhasesForTests { get; set; }
 
+    /// <summary>The pool-size cap pg_buffer_usage applies, in buffers (#9508), for a test that cannot build a pool over the real cap. Null in production: the collector's own cap.</summary>
+    internal long? PgBufferUsagePoolCapBuffersForTests { get; set; }
+
     /* Resolves the per-collector database scope (#3477) for one (collector, server) pair — the worker
        passes StoreConfigProvider.ResolveDatabaseScope over its live schedule overrides, so a store
        write to config_collector_schedules.databases is honored on the collector's NEXT run through the

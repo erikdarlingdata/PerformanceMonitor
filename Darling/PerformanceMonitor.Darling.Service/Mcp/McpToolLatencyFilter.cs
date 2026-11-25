@@ -673,7 +673,7 @@ public sealed class McpToolLatencyFilter
         }
     }
 
-    private void Record(string toolName, ReadOutcome outcome, long elapsedMs, string windowBand, ReadScope scope, string caller, long replyBytes = 0)
+    private void Record(string toolName, ReadOutcome outcome, long elapsedMs, string windowBand, ReadScope scope, string caller, long? replyBytes = null)
     {
         try
         {

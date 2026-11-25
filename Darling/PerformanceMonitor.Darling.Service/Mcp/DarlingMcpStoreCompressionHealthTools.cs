@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
@@ -34,7 +35,9 @@ public sealed class DarlingMcpStoreCompressionHealthTools
     {
         public ReadToolRegistration Read { get; } = new(
             "get_store_compression_health",
-            (c, pg, an) => GetStoreCompressionHealth(pg, c.RequestAborted),
+            /* #9527: full_detail=true keeps the web read's payload what it was: every hypertable with its whole row. The MCP default lists a
+                   healthy hypertable by name only, to stay under the reply budget. */
+                (c, pg, an) => GetStoreCompressionHealth(pg, full_detail: true, cancellationToken: c.RequestAborted),
             new(
                 DarlingWebEndpoints.CatOverview,
                 "Whether the monitoring store compression is keeping up: per hypertable, the chunks past the compression delay and still uncompressed, the oldest of them, the policy delay, the newest compressed chunk, and the policy job last run, last success, next start and last error.",
@@ -46,8 +49,13 @@ public sealed class DarlingMcpStoreCompressionHealthTools
         "Says whether the monitoring STORE's own compression is keeping up (not a monitored server): per hypertable, how many chunks are "
         + "past the compression delay and still uncompressed, and the policy job's last run. <<GUIDE>> No server_name. Read live from the "
         + "TimescaleDB catalog and job stats, the same statement the hourly store tick counts the backlog with, so it adds no table and "
-        + "the service log is no longer the only place the figure lives. summary: hypertables (policies read), hypertables_with_backlog, "
-        + "backlog_chunks. hypertables, the table with the most waiting chunks first, each with: hypertable, eligible_uncompressed_chunks "
+        + "the service log is no longer the only place the figure lives. A hypertable that is keeping up comes back by NAME ONLY in "
+        + "healthy_hypertables, so the answer stays small as the store adds hypertables. Every hypertable that needs a look comes back in "
+        + "full in hypertables: one with a backlog (eligible_uncompressed_chunks above 0), a last run that is not Success, a job that is not "
+        + "Scheduled or Running, a crash_backoff next_start_state, or a recorded error. A job that has never run and has no backlog counts as "
+        + "keeping up. Pass full_detail=true to get every hypertable in full in hypertables, with no healthy_hypertables list. "
+        + "summary: hypertables (policies read, both lists together), hypertables_with_backlog, backlog_chunks, healthy_hypertables (how many "
+        + "are listed by name). hypertables, the table with the most waiting chunks first, each with: hypertable, eligible_uncompressed_chunks "
         + "(closed chunks older than compress_after and not compressed), oldest_eligible_range_end (the range end of the oldest of them, "
         + "null when none), compress_after_days (the policy's own delay, null when its config has none), newest_compressed_range_end "
         + "(the range end of the newest compressed chunk: the horizon a reader that must not touch compressed chunks, such as an exporter, "
@@ -64,6 +72,7 @@ public sealed class DarlingMcpStoreCompressionHealthTools
         + "compression policy answers empty. Read-only and live.")]
     public static async Task<string> GetStoreCompressionHealth(
         NpgsqlDataSource postgres,
+        [Description("Return every hypertable in full. Default lists a hypertable that is keeping up by name only, in healthy_hypertables, and keeps the full row for each one that needs a look.")] bool full_detail = false,
         CancellationToken cancellationToken = default)
     {
         try
@@ -84,6 +93,13 @@ public sealed class DarlingMcpStoreCompressionHealthTools
                     "TimescaleDB is installed but the store has no compression policy job, so there is no backlog to report.");
             }
 
+            /* #9527: the full row of every hypertable was ~400 B, so the answer grew with each hypertable the store added and
+               passed the default reply budget. A hypertable that needs nothing is a name in one list instead. */
+            var shown = full_detail ? read.Hypertables : read.Hypertables.Where(h => NeedsALook(h, read)).ToList();
+            var healthy = full_detail
+                ? new List<string?>()
+                : read.Hypertables.Where(h => !NeedsALook(h, read)).Select(h => h.HypertableName).ToList();
+
             return JsonSerializer.Serialize(new
             {
                 summary = new
@@ -91,9 +107,11 @@ public sealed class DarlingMcpStoreCompressionHealthTools
                     hypertables = read.Hypertables.Count,
                     hypertables_with_backlog = read.HypertablesWithBacklog,
                     backlog_chunks = read.TotalBacklogChunks,
+                    healthy_hypertables = healthy.Count,
                 },
                 errors_read_failure = read.ErrorsReadFailure,
-                hypertables = read.Hypertables.Select(h => new
+                healthy_hypertables = full_detail ? null : healthy,
+                hypertables = shown.Select(h => new
                 {
                     hypertable = h.HypertableName,
                     eligible_uncompressed_chunks = h.EligibleUncompressedChunks,
@@ -126,6 +144,20 @@ public sealed class DarlingMcpStoreCompressionHealthTools
             return McpHelpers.FormatError("get_store_compression_health", ex);
         }
     }
+
+    /// <summary>
+    /// #9527: does this hypertable need a look, so the default answer gives its full row? Yes for a backlog, a last run that is
+    /// not Success, a job that is not Scheduled or Running, a crash_backoff state, or a recorded error. A job that has not run yet
+    /// (no last run status) with no backlog is keeping up. Nothing a reader needs to act on is dropped: a Failed run whose error the
+    /// role cannot read is still a last run that is not Success.
+    /// </summary>
+    internal static bool NeedsALook(CompressionActivity h, DarlingStoreCompressionHealthReader.CompressionHealth read) =>
+        h.EligibleUncompressedChunks > 0
+        || (h.LastRunStatus is not null && !string.Equals(h.LastRunStatus, "Success", StringComparison.OrdinalIgnoreCase))
+        || !(string.Equals(h.JobStatus, "Scheduled", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(h.JobStatus, "Running", StringComparison.OrdinalIgnoreCase))
+        || DarlingStoreCompressionHealthReader.NextStartStateFor(h.JobStatus, h.NextStartSentinel) == DarlingStoreCompressionHealthReader.NextStartCrashBackoff
+        || (h.JobId is { } id && read.Errors.ContainsKey(id));
 
     /// <summary>Naive UTC with no trailing Z, like every other timestamp on an MCP payload here.</summary>
     private static string? Iso(DateTime? value) =>

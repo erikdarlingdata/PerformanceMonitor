@@ -30,11 +30,17 @@ public sealed partial class StatementCollectionCensusTests
         var rows = EventsTable(
             ("event_time", typeof(DateTime)), ("database_name", typeof(string)), ("client_app_name", typeof(string)),
             ("client_hostname", typeof(string)), ("session_id", typeof(int)), ("request_id", typeof(int)),
-            ("interrupt_duration_us", typeof(long)), ("statement_text", typeof(string)));
+            ("interrupt_duration_us", typeof(long)), ("statement_text", typeof(string)),
+            ("event_kind", typeof(string)), ("object_name", typeof(string)));
         foreach (var text in new[] { canary, plain })
         {
-            rows.Rows.Add(Stamp, "db", "app", "host", 55, 0, 350L, text);
+            rows.Rows.Add(Stamp, "db", "app", "host", 55, 0, 350L, text, AttentionCollector.KindSample, DBNull.Value);
         }
+
+        /* #9507: the captured aborted calls carry statement text too: an RPC with its object name, and a batch with none. */
+        rows.Rows.Add(Stamp, "db", "app", "host", 56, 0, 1_200_000L, canary, AttentionCollector.KindAborted, "dbo.some_proc");
+        rows.Rows.Add(Stamp, "db", "app", "host", 57, 0, 1_200_000L, plain, AttentionCollector.KindAborted, "dbo.some_proc");
+        rows.Rows.Add(Stamp, "db", "app", "host", 58, 0, 1_200_000L, canary, AttentionCollector.KindAborted, DBNull.Value);
 
         var trailer = EventsTable(("execution_count", typeof(long)), ("event_count", typeof(long)), ("shred_gated", typeof(bool)));
         trailer.Rows.Add(4L, 2L, false);
@@ -62,5 +68,14 @@ public sealed partial class StatementCollectionCensusTests
         Assert.Contains(writer.Strings, s => ReferenceEquals(s, plainInstance));
         Assert.Null(rows[0].StatementFingerprint);
         Assert.NotNull(rows[1].StatementFingerprint);
+
+        /* The aborted rows: a withheld statement stays the bare marker with no fingerprint, even with an object name in front. */
+        Assert.Equal(AttentionCollector.KindAborted, rows[2].EventKind);
+        Assert.Equal(SensitiveStatements.PlaceholderText, rows[2].StatementText);
+        Assert.Null(rows[2].StatementFingerprint);
+        Assert.Equal("dbo.some_proc: " + StatementScrubCanary.PlainStatement, rows[3].StatementText);
+        Assert.NotNull(rows[3].StatementFingerprint);
+        Assert.Equal(SensitiveStatements.PlaceholderText, rows[4].StatementText);
+        Assert.Null(rows[4].StatementFingerprint);
     }
 }

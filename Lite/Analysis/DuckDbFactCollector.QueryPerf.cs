@@ -243,31 +243,51 @@ WITH svr AS
 ),
 latest AS
 (
+    -- #9195: each plan's newest row by one hash aggregate, not ROW_NUMBER() over the window. The window sorted every row of the
+    -- analysis window, so its time and memory grew with the window (a week's rows against a day's). The newest row is the
+    -- largest (collection_time, collection_id), the old ORDER BY collection_time DESC, collection_id DESC, and the grouping
+    -- is the old PARTITION BY (a NULL key groups with its own kind in both). Its fields ride in the struct, so they are the winner row's.
     SELECT
-        query_hash,
-        query_plan_hash,
-        database_name,
-        execution_count,
-        creation_time,
-        creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
+        g.query_hash,
+        g.query_plan_hash,
+        g.database_name,
+        g.w.execution_count AS execution_count,
+        g.w.creation_time AS creation_time,
+        g.w.creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
         svr.offset_minutes AS server_offset_minutes,
         svr.time_zone_id AS server_time_zone_id,
-        min_worker_time,
-        max_worker_time,
-        min_grant_kb,
-        max_grant_kb,
-        min_spills,
-        max_spills,
-        ROW_NUMBER() OVER
-        (
-            PARTITION BY database_name, query_hash, query_plan_hash
-            ORDER BY collection_time DESC, collection_id DESC
-        ) AS rn
-    FROM v_query_stats, svr
-    WHERE server_id = $1
-    AND   collection_time >= $2
-    AND   collection_time <= $3
-    AND   delta_execution_count > 0
+        g.w.min_worker_time AS min_worker_time,
+        g.w.max_worker_time AS max_worker_time,
+        g.w.min_grant_kb AS min_grant_kb,
+        g.w.max_grant_kb AS max_grant_kb,
+        g.w.min_spills AS min_spills,
+        g.w.max_spills AS max_spills
+    FROM
+    (
+        SELECT
+            database_name,
+            query_hash,
+            query_plan_hash,
+            max(
+            {
+                'collection_time': collection_time,
+                'collection_id': collection_id,
+                'execution_count': execution_count,
+                'creation_time': creation_time,
+                'min_worker_time': min_worker_time,
+                'max_worker_time': max_worker_time,
+                'min_grant_kb': min_grant_kb,
+                'max_grant_kb': max_grant_kb,
+                'min_spills': min_spills,
+                'max_spills': max_spills
+            }) AS w
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        AND   delta_execution_count > 0
+        GROUP BY database_name, query_hash, query_plan_hash
+    ) AS g, svr
 )
 SELECT
     min_worker_time,
@@ -282,7 +302,7 @@ SELECT
     query_hash,
     query_plan_hash
 FROM latest
-WHERE rn = 1
+WHERE 1 = 1
 " + ParameterSensitivitySignature.PredicateSql("creation_time_utc <= $4") + @"
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
@@ -383,7 +403,7 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     }
 
     /// <summary>One statement of the plan regression pass: the wait for its read lock, the statement alone, the whole hold and the rows it returned.</summary>
-    private struct PlanRegressionStatementTime
+    internal struct PlanRegressionStatementTime
     {
         public TimeSpan Wait;
         public TimeSpan Statement;
@@ -396,6 +416,15 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
     /// test can see what the lock allows in between (#9353). Null in production.
     /// </summary>
     internal Action? AfterPlanRegressionFailuresReadForTests { get; set; }
+
+    /// <summary>
+    /// A test seam: runs before each database's cost read after the first, with the store's read lock let go, so a test can see that a
+    /// writer gets in between the databases (#9353). Null in production.
+    /// </summary>
+    internal Action? AfterPlanRegressionDatabaseReadForTests { get; set; }
+
+    /// <summary>A test seam: the longest hold a batch of databases aims for (#9353), so a test can make every database a batch of its own (zero) or none. Null in production.</summary>
+    internal TimeSpan? PlanRegressionHoldTargetForTests { get; set; }
 
     /// <summary>
     /// #9195, #9353: one Information line when the plan regression pass took over <see cref="ReadLockWaitTally.SlowReadThreshold"/>,
@@ -480,20 +509,9 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
             AfterPlanRegressionFailuresReadForTests?.Invoke();
 
-            {
-                var waitStarted = Stopwatch.GetTimestamp();
-                using var readLock = _duckDb.AcquireReadLock(context.CancellationToken);
-                var heldFrom = Stopwatch.GetTimestamp();
-                costRead.Wait = Stopwatch.GetElapsedTime(waitStarted, heldFrom);
-                using var connection = _duckDb.CreateConnection();
-                await connection.OpenAsync(context.CancellationToken);
-
-                var statementFrom = Stopwatch.GetTimestamp();
-                candidates = await ReadPlanRegressionCandidatesAsync(connection, context, plan, PlanRegressionCostSql);
-                costRead.Statement = Stopwatch.GetElapsedTime(statementFrom);
-                costRead.Rows = candidates.Count;
-                costRead.Held = Stopwatch.GetElapsedTime(heldFrom);
-            }
+            /* #9353: the cost statement is the pass's longest hold of the read lock, so it is read one database at a time. */
+            (candidates, costRead) = await ReadPlanRegressionCostAsync(context, plan);
+            costRead.Rows = candidates.Count;
 
             /* #5630: the lock and the connection are released before any plan is fetched: a fetch is a network
                call to the monitored server and must not hold the store's read lock. */

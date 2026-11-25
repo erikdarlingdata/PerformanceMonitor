@@ -146,7 +146,8 @@ public partial class RemoteCollectorService
 
             var current = _alwaysOnChoices.Get(server.Id, databaseName, kind);
             var result = await AlwaysOnXeAzureEnsure.RunAsync(
-                database, kind, AlwaysOnOwnSessionName(kind), current, cancellationToken, InstallIdFailure(), App.XeRingBufferMaxEvents);
+                database, kind, AlwaysOnOwnSessionName(kind), current, cancellationToken, InstallIdFailure(), App.XeRingBufferMaxEvents,
+                () => _alwaysOnChoices.TryClaimAttentionReplace(server.Id, databaseName));
             _alwaysOnChoices.Set(server.Id, databaseName, kind, result.Choice);
             _alwaysOnReadOnlyRefusedAt.TryRemove(refusalKey, out _);
             _alwaysOnCreateRefused.TryRemove(refusalKey, out _);

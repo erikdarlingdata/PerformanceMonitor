@@ -73,4 +73,33 @@ public sealed class ClientTimeoutsJudgedCountTests
         Assert.False(events[1].GetProperty("dbatools_metadata").GetBoolean());
         Assert.True(events[3].GetProperty("excluded").GetBoolean());
     }
+
+    [Fact]
+    public void AMatchedUnderFloorSample_IsJudged_NotLeftOut_AndTheAnswerListsTheCall()
+    {
+        /* 100 sampled events from etl: 10 under the floor with no captured call, 6 under the floor that match one (judged), 84 over the floor. */
+        var reading = new AttentionReading(
+            TotalCount: 500, CoveredMinutes: 5, RunCount: 6, NewestRunTime: new DateTime(2026, 10, 1, 12, 0, 0, DateTimeKind.Utc),
+            Groups: new[] { new AttentionGroup("sales", "etl", 100, ShortSamples: 10, MatchedSamples: 6) });
+
+        var finding = AttentionEvaluator.Evaluate(reading, warningPerMinute: 10, criticalPerMinute: 20);
+        Assert.NotNull(finding);
+        Assert.Equal(6, finding.MatchedCalls);
+        Assert.Equal(450.0, finding.JudgedCount);
+
+        var created = new DateTime(2026, 10, 1, 11, 59, 0, DateTimeKind.Utc);
+        var window = AttentionWindow.Empty with
+        {
+            MatchedCallList = new[] { new ClientTimeoutMatchedCall(created, created, "sales", "etl", "ws-1", 51, 30_000_000, "dbo.GetOrders: EXEC dbo.GetOrders") },
+        };
+        var payload = JsonSerializer.SerializeToElement(ClientTimeoutsRead.Payload(reading, window, [], limit: 10, statementTextLength: 200));
+        var excluded = payload.GetProperty("excluded_from_alert");
+
+        Assert.Equal(10, excluded.GetProperty("below_duration_floor_events").GetInt64());
+        Assert.Equal(6, excluded.GetProperty("matched_calls").GetInt64());
+        Assert.Equal(450.0, excluded.GetProperty("count_judged").GetDouble());
+        var call = payload.GetProperty("matched_calls")[0];
+        Assert.Equal(30.0, call.GetProperty("elapsed_seconds").GetDouble());
+        Assert.Equal("sales", call.GetProperty("database_name").GetString());
+    }
 }

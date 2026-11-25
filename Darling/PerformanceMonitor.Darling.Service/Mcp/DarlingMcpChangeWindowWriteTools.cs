@@ -229,6 +229,11 @@ public sealed class DarlingMcpChangeWindowWriteTools
             if (agent && await DarlingMcpAgentMuteDirect.GuardAsync(connection, transaction, now, DarlingMcpAgentMuteDirect.AgentIdOf(seat!), RateMessage, ct) is { } guard)
                 return DarlingAgentActionGate.RefusalAnswer(guard);
 
+            /* The twin check and the insert are one step: two declares started together (an operator has no hourly guard to queue behind)
+               would both find no twin and both insert, and the second twin would keep holding requests after the first was cleared. */
+            await using (var lockCommand = new NpgsqlCommand(DeclareLockSql, connection, transaction) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+                await lockCommand.ExecuteNonQueryAsync(ct);
+
             if (await FindOpenTwinAsync(connection, transaction, all ? null : ids, start, end, now, ct) is { } twin)
                 return AlreadyDeclared(twin);
 
@@ -282,6 +287,9 @@ public sealed class DarlingMcpChangeWindowWriteTools
 INSERT INTO config.investigation_change_windows (server_ids, starts_at, ends_at, reason, declared_by, declared_at)
 VALUES ($1, $2, $3, $4, $5, $6)
 RETURNING window_id";
+
+    /* Serializes the twin check with the insert, for every caller. The key pair is this feature's own. */
+    private const string DeclareLockSql = "SELECT pg_advisory_xact_lock(9485, 1)";
 
     /* A repeated declare (a client retry after a slow answer) must not stack a second identical window: the same server list, start and end,
        not cleared, whose tail has not ended. The list compares as a set because the insert stores it sorted. */

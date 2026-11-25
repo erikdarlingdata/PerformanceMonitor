@@ -412,6 +412,17 @@ WHERE request_id = $1 AND claim_id = $2 AND state = 'claimed'";
         + $"(SELECT a.detail_text FROM config.investigation_request_alerts AS a WHERE a.request_id = {requests}.request_id "
         + "ORDER BY a.alert_time, a.dedup_key LIMIT 1) END AS change_watch_detail";
 
+    /* #9485: which journal rows of a request a reader may hand out. A request that was never held delivers as always. A held request
+       delivers nothing while it is held, and once released delivers its hold_released row and every row journaled after it. The rows
+       journaled while it was held (its opened and joined rows, and the joined row of the late join that released it) stay back, so a
+       released request reaches the route once, as hold_released. The release row is found by its once key (unique index), and rows
+       compare by journal_id, which only grows, so a row journaled at the release's own timestamp is ordered correctly. `j` is the
+       journal row and `r` its request. */
+    internal const string DeliverableAfterReleaseSql = @"(r.held_window_id IS NULL
+       OR (r.hold_released_at IS NOT NULL
+           AND j.journal_id >= (SELECT h.journal_id FROM config.investigation_journal AS h
+                                WHERE h.once_key = 'hold_released:' || r.request_id::text)))";
+
     /* #5822, #6003: the long-poll's catch-up read. Every request event (InvestigationEvents.Kinds, $4) journaled after $1 on the
        routes in $2 (all routes when NULL), oldest first, whatever the request's state now: it answers what happened, and the
        claim decides what is still claimable. An open is its request's "opened" row. */
@@ -426,7 +437,7 @@ LEFT JOIN collect.servers AS sv ON sv.server_id = r.server_id
 WHERE j.event_time > $1
   AND j.event = ANY ($4)
   AND ($2::integer[] IS NULL OR r.route_id = ANY ($2))
-  AND (r.held_window_id IS NULL OR r.hold_released_at IS NOT NULL)
+  AND {DeliverableAfterReleaseSql}
 ORDER BY j.event_time, j.event_id
 LIMIT $3";
 
@@ -439,7 +450,7 @@ FROM config.investigation_journal AS j
 JOIN config.investigation_requests AS r ON r.request_id = j.request_id
 WHERE j.event_time > $1
   AND j.event = ANY ($2)
-  AND (r.held_window_id IS NULL OR r.hold_released_at IS NOT NULL)
+  AND " + DeliverableAfterReleaseSql + @"
   AND NOT EXISTS (SELECT 1 FROM config.investigation_journal AS d
                   WHERE d.once_key = 'delivered:' || j.event_id::text)
 ORDER BY j.journal_id

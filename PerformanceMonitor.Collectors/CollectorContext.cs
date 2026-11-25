@@ -134,6 +134,25 @@ public sealed class CollectorContext
     /// </summary>
     public IReadOnlyDictionary<string, string>? PgExtensionVersions { get; set; }
 
+    /// <summary>
+    /// Names of functions that <c>pg_buffercache</c> owns, read from <c>pg_proc</c> and <c>pg_depend</c> in the same catalog
+    /// read as <see cref="PgExtensionSchemas"/> (#9508). Null until the host has read it. The extension's catalog version
+    /// is not the test: a function is only usable when <c>pg_proc</c> shows it, and a query that names a missing function
+    /// fails at parse time, so the choice has to be made before the query is built.
+    /// </summary>
+    public IReadOnlySet<string>? PgExtensionMemberFunctions { get; set; }
+
+    /// <summary>True when <paramref name="functionName"/> is one the host found owned by the extension; false when it was not found or not read.</summary>
+    public bool PgExtensionHasFunction(string functionName) =>
+        PgExtensionMemberFunctions is not null && PgExtensionMemberFunctions.Contains(functionName);
+
+    /// <summary>
+    /// The pool-size cap for <c>pg_buffer_usage</c>, in buffers, when a caller needs a different one (#9508). Null is the
+    /// collector's own <see cref="PgBufferUsageCollector.PoolCapBuffers"/>. A test drives the gate with a small cap here
+    /// instead of building a 16 GB pool.
+    /// </summary>
+    public long? PgBufferUsagePoolCapBuffers { get; set; }
+
     /// <summary>The <c>extversion</c> of <paramref name="extensionName"/> in the connected database, or null when not read or not created.</summary>
     public string? PgExtensionVersion(string extensionName) =>
         PgExtensionVersions is not null && PgExtensionVersions.TryGetValue(extensionName, out var version) ? version : null;

@@ -130,10 +130,11 @@ public static class OptionalTables
     private const string Group7c = "7c";
 
     /// <summary>
-    /// The newest schema rung that the <c>pg_log_events</c> parsing rewrite lands in. Not yet known, so it is pinned to
-    /// <c>int.MaxValue</c> and the table is always skipped by the schema gate until this constant is updated.
+    /// The oldest store schema whose <c>pg_log_events</c> rows the export trusts. The parsing rewrite (#4501) merged at
+    /// rung 152, a named <c>log_timezone</c> fix (#6866) at rung 221, and the RDS stderr portion carry (#7186) at rung
+    /// 239, the newest change to how the collector parses a log line. A store below 239 is skipped by the schema gate.
     /// </summary>
-    public const int PgLogEventsMinSchema = int.MaxValue;
+    public const int PgLogEventsMinSchema = 239;
 
     public static readonly IReadOnlyList<OptionalTable> All =
     [
@@ -300,6 +301,9 @@ public static class OptionalTables
         },
         new("pg_blocking_edges", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Blocked,
             "Blocked(LATER): text-heavy blocked_query/blocking_query SQL text."),
+        new("pg_buffer_usage", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
+            "Shared-buffer residency per relation (pg_buffercache); numbers and catalog names only. A pool over 16 GB "
+            + "writes one totals row per run with buffers NULL."),
         new("pg_column_stats", Collect, CollectionTime, OptionalTableKind.Window, [], Group7c, OptionalTableStatus.Candidate,
             "Planner column statistics; numeric/state only.")
         {

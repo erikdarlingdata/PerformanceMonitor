@@ -978,7 +978,9 @@ candidates AS
     -- #5630: 100, not 20. The caller drops the queries whose two plans were compiled for different inputs
     -- (PlanInputComparison) and keeps the worst 20 of what is left, so the cut moved after that check.
     -- #7417: by the CPU the regression lost, the factor second. The first row leads the card and its force statement.
-    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @"
+    -- #9353: then the row's own key, so rows that tie on both keys come out in one order and the same 100 stay (Lite's statement ends
+    -- the same way). One row per (database, query, replica). A NULL replica_role, every standalone server, sorts last.
+    ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", database_name, query_id, replica_role NULLS LAST
     LIMIT 100
 ),
 latest_plan AS
@@ -1046,7 +1048,8 @@ LEFT JOIN query_store_text AS x
   ON  x.server_id = $1
   AND x.database_name = c.database_name
   AND x.query_id = c.query_id
-ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql;
+-- #9353: the candidates' tail again, so the rows leave in the order the 100 were cut by.
+ORDER BY " + PerformanceMonitor.Analysis.PlanRegressionRanking.OrderBySql + @", c.database_name, c.query_id, c.replica_role NULLS LAST";
 
     /// <summary>
     /// Detects plan regressions: a query whose currently-active plan has per-execution

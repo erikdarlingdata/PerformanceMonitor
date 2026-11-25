@@ -103,6 +103,7 @@ internal static class DarlingTriageEndpoint
     internal static readonly IReadOnlyList<(string Alias, string Canonical)> ResolutionAliases = new[]
     {
         ("CPU Resolved", "High CPU"),
+        (AlertFamily.CapacityAtCeilingClearedTitle, AlertFamily.CapacityAtCeilingMetric),
         ("Blocking Cleared", "Blocking Detected"),
         ("Blocking Wait Cleared", "Blocking Wait Time"),
         ("Deadlocks Cleared", "Deadlocks Detected"),
@@ -202,6 +203,13 @@ internal static class DarlingTriageEndpoint
                 S("Instance CPU (Performance Insights)", "get_pg_cpu_utilization", ("hours", "4")),
                 S("Top queries by CPU", "get_top_queries_by_cpu", ("hours", "2"), ("top", "10")),
                 S("Scheduler pressure", "get_cpu_scheduler_pressure"),
+            },
+            /* #9501: PostgreSQL only (a serverless target held at its capacity ceiling with low instance CPU), so the reads are the
+               PostgreSQL ones: the Performance Insights samples that hold the ACU, CPU and memory figures, and the query shapes. */
+            [AlertFamily.CapacityAtCeilingMetric] = new[]
+            {
+                S("Instance CPU, capacity and memory (Performance Insights)", "get_pg_cpu_utilization", ("hours", "4")),
+                S("Top queries", "get_pg_top_queries", ("hours", "2"), ("limit", "10")),
             },
             ["Blocking Detected"] = new[]
             {

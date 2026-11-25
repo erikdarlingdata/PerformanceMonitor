@@ -62,7 +62,7 @@ public sealed class DarlingMcpStoreSettingChangesTools
         + "No server_name. Each row: the setting, old and new value, where the new value came from (source, source file and line), pending_restart, "
         + "when it was seen and when the server reloaded its configuration. Status empty: watching, no change. Status unavailable: no baseline yet. "
         + "<<GUIDE>> The service reads pg_settings once a minute on the store host and compares it with the last capture. A row means the value, the source or "
-        + "pending_restart of a setting differed from that capture. The first capture on a store, and the first after an upgrade, stores a baseline and writes no row. "
+        + "pending_restart of a setting differed from that capture. The first capture on a store, including the first after the upgrade that adds this record, stores a baseline and writes no row. A later upgrade keeps the last capture, so changes made around it are still rows. "
         + "A move of the source file or line alone writes no row. Values that can hold a credential are masked. seen_at is when the capture saw the change, up to a minute "
         + "after the reload, and conf_load_time is when the server last loaded its configuration (pg_conf_load_time). A value is in the setting's own unit (the unit field), "
         + "as pg_settings gives it. setting_name filters to one setting, any case. Window is days_back (default 7, max 400, the retention). limit default 50, max 1000, "

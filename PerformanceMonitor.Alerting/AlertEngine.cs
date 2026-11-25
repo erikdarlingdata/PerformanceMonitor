@@ -1094,6 +1094,19 @@ public sealed class AlertEngine
     public const int SqlCpuBreachSamples = 5;
 
     /// <summary>
+    /// Consecutive samples with capacity at or over the bar and instance CPU under it that open a "Capacity at ceiling" incident
+    /// on a serverless PostgreSQL target (#9501). Five, like <see cref="SqlCpuBreachSamples"/>: a touch of one or two minutes
+    /// is how the platform scales and is not worth an alert, a ceiling held for five is. It clears after
+    /// <see cref="CpuClearSamples"/>. The High CPU gate keeps <see cref="CpuBreachSamples"/> for the case where instance CPU is
+    /// also at the bar.
+    /// </summary>
+    public const int PgCapacityCeilingSamples = 5;
+
+    /// <summary>The (server, metric) key the "Capacity at ceiling" gate is persisted under, the same string the mute context and the
+    /// history row use (#9501).</summary>
+    public const string PgCapacityCeilingMetric = AlertFamily.CapacityAtCeilingMetric;
+
+    /// <summary>
     /// How long CPU must stay under the bar, in sample time, before an open SQL Server High CPU incident
     /// clears and CPU Resolved goes out (#7085). Time, not a sample count, so it does not depend on the
     /// collector's cadence. Measured from the first sample under the bar to the sample that completes the

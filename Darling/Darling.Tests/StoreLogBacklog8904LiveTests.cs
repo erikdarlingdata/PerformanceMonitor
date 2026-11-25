@@ -119,7 +119,7 @@ public sealed class StoreLogBacklog8904LiveTests
             var sizes = SlabSizes(file);
             Assert.True(sizes.Count >= 3, "the file has to span several slabs for this to prove anything.");
 
-            var captured = await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, new FixedLogFiles("postgresql-Tue.log", file), ct);
+            var captured = await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, new FixedLogFiles("postgresql-Tue.log", file), TimeSpan.FromHours(1), ct);
 
             var capture = Assert.Single(captured);
             Assert.Equal(sizes.Sum(), capture.BytesRead);
@@ -151,13 +151,13 @@ public sealed class StoreLogBacklog8904LiveTests
             var boundBytes = sizes.Take(StoreLogSweep.MaxSlabsPerCapture).Sum();
             var source = new FixedLogFiles("postgresql-Tue.log", file);
 
-            var first = Assert.Single(await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow.AddHours(-1), null, source, ct));
+            var first = Assert.Single(await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow.AddHours(-1), null, source, TimeSpan.FromHours(1), ct));
             Assert.Equal(boundBytes, first.BytesRead);
             Assert.Equal(file.Length - boundBytes, first.BytesPending);
             Assert.True(first.Census.EntriesRead < entries);
             Assert.Equal(boundBytes, (await MarkerAndRowsAsync(connection, "postgresql-Tue.log", ct)).Offset);
 
-            var second = Assert.Single(await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, source, ct));
+            var second = Assert.Single(await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, source, TimeSpan.FromHours(1), ct));
             Assert.Equal(file.Length - boundBytes, second.BytesRead);
             Assert.Equal(0, second.BytesPending);
             Assert.Equal(entries, first.Census.EntriesRead + second.Census.EntriesRead);
@@ -213,7 +213,7 @@ public sealed class StoreLogBacklog8904LiveTests
             var file = Encoding.UTF8.GetBytes(
                 ExactSlab(Enumerable.Range(0, 15)) + ExactSlab(Enumerable.Range(10, 15)) + ExactSlab(Enumerable.Range(18, 12)));
 
-            var capture = Assert.Single(await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, new FixedLogFiles("postgresql-Tue.log", file), ct));
+            var capture = Assert.Single(await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, null, new FixedLogFiles("postgresql-Tue.log", file), TimeSpan.FromHours(1), ct));
             Assert.Equal(3 * StoreLogSlab.MaxBytesPerRead, capture.BytesRead);
             Assert.Equal(0, capture.BytesPending);
 

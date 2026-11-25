@@ -27,7 +27,21 @@ public sealed record ClientTimeoutSample(
     string? StatementText,
     bool BelowDurationFloor = false,
     bool AzdataMetadata = false,
-    bool DbatoolsMetadata = false);
+    bool DbatoolsMetadata = false,
+    bool MatchedCall = false);
+
+/// <summary>One captured call that ended aborted and matches an attention sample under the duration floor (#9507): the command the client
+/// cancelled. <see cref="ElapsedUs"/> is how long it ran, which is the length of the command timeout. The attention event's own duration
+/// times the cancel, never the command.</summary>
+public sealed record ClientTimeoutMatchedCall(
+    DateTime? EventTime,
+    DateTime CollectionTime,
+    string? DatabaseName,
+    string? ClientAppName,
+    string? ClientHostName,
+    int? SessionId,
+    long? ElapsedUs,
+    string? StatementText);
 
 /// <summary>What <see cref="ClientTimeoutsRead.Classify"/> decided about a window.</summary>
 public enum ClientTimeoutsKind
@@ -155,6 +169,7 @@ public static class ClientTimeoutsRead
                 client_hostname = s.ClientHostName,
                 excluded = AttentionEvaluator.IsExcludedApp(s.ClientAppName),
                 below_duration_floor = s.BelowDurationFloor,
+                matched_call = s.MatchedCall,
                 azdata_metadata = s.AzdataMetadata,
                 dbatools_metadata = s.DbatoolsMetadata,
                 session_id = s.SessionId,
@@ -179,6 +194,20 @@ public static class ClientTimeoutsRead
             top_databases = window.TopDatabases.Select(t => new { database_name = t.Name, sampled_events = t.Samples }).ToList(),
             top_client_apps = window.TopApplications.Select(t => new { client_app_name = t.Name, sampled_events = t.Samples, excluded = AttentionEvaluator.IsExcludedApp(t.Name) }).ToList(),
             excluded_from_alert = Excluded(reading, rate),
+            matched_calls = window.MatchedCalls.Take(limit).Select(c => new
+            {
+                event_time = c.EventTime is null ? null : Stamp(c.EventTime.Value),
+                collected_at = Stamp(c.CollectionTime),
+                database_name = c.DatabaseName,
+                client_app_name = c.ClientAppName,
+                client_hostname = c.ClientHostName,
+                excluded = AttentionEvaluator.IsExcludedApp(c.ClientAppName),
+                session_id = c.SessionId,
+                elapsed_seconds = c.ElapsedUs is null ? (double?)null : Math.Round(c.ElapsedUs.Value / 1_000_000.0, 3, MidpointRounding.AwayFromZero),
+                statement = McpHelpers.TruncateStatement(c.StatementText, statementTextLength),
+            }).ToList(),
+            matched_calls_returned = Math.Min(window.MatchedCalls.Count, limit),
+            matched_calls_truncated = window.MatchedCalls.Count > limit,
             sampled_events_returned = Math.Min(samples.Count, limit),
             sampled_events_truncated = samples.Count > limit,
             sampled_events = events,
@@ -204,15 +233,16 @@ public static class ClientTimeoutsRead
             client_apps = reading.ExcludedApps,
             sampled_events = excluded,
             below_duration_floor_events = reading.ShortSamples,
+            matched_calls = reading.MatchedSamples,
             azdata_metadata_events = reading.AzdataMetadataSamples,
             dbatools_metadata_events = reading.DbatoolsMetadataSamples,
             count_judged = Math.Round(judgedCount, 1, MidpointRounding.AwayFromZero),
             rate_per_minute_judged = leftOut > 0
                 ? Math.Round(judgedCount / reading.CoveredMinutes, 2, MidpointRounding.AwayFromZero)
                 : rate,
-            note = AttentionEvaluator.ExcludedToolNames(true, true) + $" cancel their own metadata queries (language service, Object Explorer, general connection) when the user keeps typing. client_apps lists the exact client_app_name values in this range that the alert leaves out, most sampled events first. It has no cap, so it can name an application that top_client_apps (the top five) or the paged sampled_events do not show. The Client Timeouts alert also leaves out sampled events that lasted under {AttentionWindowSql.MinInterruptDurationText} (below_duration_floor_events, too short to be a client timeout) and Azure Data Studio's own metadata statements (azdata_metadata_events, told apart by statement shape because its query editor uses the same application name) and the dbatools PowerShell module's SMO catalog reads (dbatools_metadata_events, told apart by SMO's @_msparam_ parameter marker in the statement text because the same application name runs people's own scripts). The alert leaves these " +
+            note = AttentionEvaluator.ExcludedToolNames(true, true) + $" cancel their own metadata queries (language service, Object Explorer, general connection) when the user keeps typing. client_apps lists the exact client_app_name values in this range that the alert leaves out, most sampled events first. It has no cap, so it can name an application that top_client_apps (the top five) or the paged sampled_events do not show. The Client Timeouts alert also leaves out sampled events that lasted under {AttentionWindowSql.MinInterruptDurationText} (below_duration_floor_events: too short to be a client timeout, and no captured call that ended aborted matches them. matched_calls is the part under that floor that DOES match such a call, a command the client cancelled while it ran, so it is judged and not left out. The attention event times the cancel, so its length is not the timeout's length. The calls are listed in the top-level matched_calls, with how long each ran) and Azure Data Studio's own metadata statements (azdata_metadata_events, told apart by statement shape because its query editor uses the same application name) and the dbatools PowerShell module's SMO catalog reads (dbatools_metadata_events, told apart by SMO's @_msparam_ parameter marker in the statement text because the same application name runs people's own scripts). The alert leaves these " +
                    "sampled events out of the rate it judges (count_judged is an estimate from the sampled share); they stay listed in sampled_events. " +
-                   "An SSMS IntelliSense or VS Code event shows excluded: true. An event under the duration floor shows below_duration_floor: true, an azdata metadata event shows azdata_metadata: true and a dbatools SMO metadata event shows dbatools_metadata: true, all with excluded: false.",
+                   "An SSMS IntelliSense or VS Code event shows excluded: true. An event under the duration floor that matches a captured call shows matched_call: true. An event under the duration floor that matches none shows below_duration_floor: true, an azdata metadata event shows azdata_metadata: true and a dbatools SMO metadata event shows dbatools_metadata: true, all with excluded: false.",
         };
     }
 

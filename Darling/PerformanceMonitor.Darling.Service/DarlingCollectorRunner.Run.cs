@@ -634,6 +634,7 @@ public sealed partial class DarlingCollectorRunner
             DatabaseScope = databaseScope,
             PerfmonCounterOverride = null,
             LongQuerySessionName = LongQuerySessionName(),
+            PgBufferUsagePoolCapBuffers = PgBufferUsagePoolCapBuffersForTests,
             /* #2862: plan capture is additionally cadence-gated for procedure_stats — see
                ShouldCapturePlanForCollector. Every other collector reads exactly CapturePlansFor(server.CapturePlans) (#6771).
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
