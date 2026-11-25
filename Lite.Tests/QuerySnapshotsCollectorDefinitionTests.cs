@@ -19,8 +19,8 @@ namespace Lite.Tests;
 /// <summary>
 /// Pins the parity contract of the extracted query_snapshots definition: the live-query-plan
 /// version gate (2016 SP1+/MI, never Azure SQL DB — #857), the Azure #req-staging variant, the
-/// CDC-capture detection on boxed vs the constant-0 on Azure, the exclusion clause injected ahead
-/// of the ORDER BY, and the 35-column payload with the #1286 triage columns.
+/// CDC-capture detection on boxed vs the constant-0 on Azure, the exclusion clause injected into
+/// the ranked request set, and the 35-column payload with the #1286 triage columns.
 /// </summary>
 public sealed class QuerySnapshotsCollectorDefinitionTests
 {
@@ -51,7 +51,12 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
         var sql = QuerySnapshotsCollector.BuildSnapshotQuery(supportsLiveQueryPlan: true, isAzureSqlDatabase: false);
 
         Assert.Contains("live_query_plan = deqs.query_plan,", sql, StringComparison.Ordinal);
-        Assert.Contains("OUTER APPLY sys.dm_exec_query_statistics_xml(der.session_id) AS deqs", sql, StringComparison.Ordinal);
+        /* #9529: the live plan is rendered only for the first requests by CPU. */
+        Assert.Contains(
+            "FROM sys.dm_exec_query_statistics_xml(CASE WHEN der.plan_handle IS NOT NULL AND der.live_plan_rank <= 20 THEN der.session_id END) AS qsx",
+            sql,
+            StringComparison.Ordinal);
+        Assert.Contains(") AS deqs", sql, StringComparison.Ordinal);
         Assert.Contains("msdb.dbo.cdc_jobs", sql, StringComparison.Ordinal);
         /* The existence pre-guard, not just the TRY/CATCH: cdc_jobs is created lazily on first CDC
            configuration, and TRY/CATCH suppresses the failure but NOT the server-side error_reported
@@ -141,7 +146,7 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
     }
 
     [Fact]
-    public void BuildQuery_InjectsExclusionClause_BeforeOrderBy()
+    public void BuildQuery_InjectsExclusionClause_InsideTheRankedRequestSet()
     {
         var plan = QuerySnapshotsCollector.Instance.BuildQuery(new CollectorContext
         {
@@ -152,10 +157,15 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
             ExcludedDatabases = new[] { "SO", "AdventureWorks" },
         });
 
-        Assert.Contains(
-            "AND d.name NOT IN (@excl_db_0, @excl_db_1)\nORDER BY der.cpu_time DESC, der.parallel_worker_count DESC",
-            plan.Text,
-            StringComparison.Ordinal);
+        /* #9529: on a boxed target the clause filters the request set the plan ranks are taken over, so an excluded
+           database's request neither takes a plan from a stored one nor has a plan rendered. */
+        var exclusion = plan.Text.IndexOf("AND d.name NOT IN (@excl_db_0, @excl_db_1)", StringComparison.Ordinal);
+        Assert.True(exclusion > 0, "the exclusion clause is in the query");
+        Assert.True(
+            exclusion < plan.Text.IndexOf(") AS der", StringComparison.Ordinal),
+            "the exclusion clause sits inside the ranked request set");
+        Assert.Contains("WHERE dest.text IS NOT NULL", plan.Text, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY der.cpu_time DESC, der.parallel_worker_count DESC", plan.Text, StringComparison.Ordinal);
         Assert.Equal(2, plan.Parameters.Count);
         Assert.Equal("SO", plan.Parameters[0].Value);
         Assert.Equal("AdventureWorks", plan.Parameters[1].Value);

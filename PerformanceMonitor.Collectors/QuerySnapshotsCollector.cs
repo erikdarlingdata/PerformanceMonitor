@@ -28,6 +28,15 @@ namespace PerformanceMonitor.Collectors;
 /// columns, and the exclusion clause injected ahead of the ORDER BY.
 /// <see cref="BuildSnapshotQuery"/> is public because Lite's live-snapshot button builds the
 /// same SQL — the templates are the single source for both paths.
+///
+/// <para><b>Plans are bounded and reused (#9529).</b> A run renders at most <see cref="MaxPlansPerRun"/>
+/// estimated plans and as many live plans, highest CPU first, and it does not render an estimated plan the host
+/// already holds in <see cref="CollectorContext.SnapshotPlanCache"/>: the read fills that row from the held
+/// copy, so the stored row carries the same plan XML a fetch would have returned. The live plan is a reading of
+/// the request at that minute (its operator row counts move), so it is never reused, only capped. A row past
+/// the cap is stored with a NULL plan, and the run's note counts those rows
+/// (<see cref="PlansOverCapMeasurement"/>, <see cref="LivePlansOverCapMeasurement"/>), which is what tells a
+/// plan the cap skipped from a request that has none.</para>
 /// </summary>
 public sealed class QuerySnapshotsCollector : CollectorDefinitionBase<QuerySnapshotsCollector.Row>
 {
@@ -76,6 +85,58 @@ public sealed class QuerySnapshotsCollector : CollectorDefinitionBase<QuerySnaps
         public int RequestId { get; set; }
     }
 
+    /// <summary>
+    /// The most estimated plans, and the most live plans, one run asks the target to render (#9529). Each plan is
+    /// rendered on the monitored server and shipped whole, and with no bound a server running many large queries
+    /// paid for every one of them every minute: in the field about three quarters of the slowest runs was the
+    /// row drain, at roughly 0.8 MB of plan XML per row. Twenty covers every request on a server that is not
+    /// saturated, and on one that is it keeps the plans of the requests using the most CPU, which are the ones a
+    /// reader opens. Estimated plans the host already holds do not count against it, so on the next run the cap
+    /// moves on to requests that have none yet.
+    /// </summary>
+    public const int MaxPlansPerRun = 20;
+
+    /// <summary>Rows whose estimated plan came from the host's held copy instead of the target this run (#9529).</summary>
+    public const string PlansReusedMeasurement = "plans_reused";
+
+    /// <summary>Rows past <see cref="MaxPlansPerRun"/> whose estimated plan was not rendered this run (#9529).</summary>
+    public const string PlansOverCapMeasurement = "plans_over_cap";
+
+    /// <summary>Rows past <see cref="MaxPlansPerRun"/> whose live plan was not rendered this run (#9529).</summary>
+    public const string LivePlansOverCapMeasurement = "live_plans_over_cap";
+
+    /* The plan_state values the query returns at PlanStateOrdinal. */
+    private const int PlanStateFetched = 0;
+    private const int PlanStateHeld = 1;
+    private const int PlanStateOverCap = 2;
+
+    /* The three columns the query returns after the payload. They are read, never stored. */
+    private const int PlanStateOrdinal = 35;
+    private const int LivePlanOverCapOrdinal = 36;
+    private const int PlanKeyOrdinal = 37;
+
+    /* A query built with no held plans: the predicate is constant, so plan_state is never 1 and no parameter is
+       bound. This is the text Lite's live snapshot button and the on-demand live reads run. */
+    private const string NoHeldPlansPredicate = "1 = 0";
+
+    /* The held-plan predicate always names every parameter, the unused ones bound NULL, so the batch text is the
+       same on every run and the target keeps one cached batch instead of one per set of keys. */
+    private static readonly string[] s_heldPlanParameterNames = BuildHeldPlanParameterNames();
+
+    private static readonly string s_heldPlansPredicate =
+        "pk.plan_key IN (" + string.Join(", ", s_heldPlanParameterNames) + ")";
+
+    private static string[] BuildHeldPlanParameterNames()
+    {
+        var names = new string[QuerySnapshotPlanCache.MaxKnownPlansPerServer];
+        for (var i = 0; i < names.Length; i++)
+        {
+            names[i] = "@pm_held_plan_" + i.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return names;
+    }
+
     private const string SnapshotsBase = """
 
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -104,7 +165,7 @@ END CATCH;
 
 SELECT /* PerformanceMonitorLite */
     der.session_id,
-    database_name = d.name,
+    der.database_name,
     elapsed_time_formatted =
         CASE
             WHEN der.total_elapsed_time < 0
@@ -168,14 +229,118 @@ SELECT /* PerformanceMonitorLite */
     tempdb_allocations_mb = tsu.tempdb_allocations_mb,
     tran_log_used_mb = trn.tran_log_used_mb,
     tran_start_time = trn.tran_start_time,
-    der.request_id
-FROM sys.dm_exec_requests AS der
+    der.request_id,
+    plan_state = CASE WHEN der.plan_state = 0 AND der.plan_rank > {3} THEN 2 ELSE der.plan_state END,
+    live_plan_over_cap = {5},
+    der.plan_key
+FROM
+(
+    /* #9529: which requests get a plan this run. The estimated plan of one (plan_handle, statement offsets,
+       query_plan_hash) does not change while it stays cached, so plan_key names it, and a request whose key
+       the host already holds (plan_state 1) is not rendered again: its plan handle reaches
+       sys.dm_exec_text_query_plan as NULL, which returns no row. The rest (plan_state 0) are ranked by CPU
+       and only the first {3} are rendered, and the live plan is rendered for the first {3} requests by CPU.
+       Unbounded, every request had both plans rendered and shipped every minute. A request with no plan
+       handle (plan_state 3: a background task, or a statement still compiling) has no plan to render and is
+       not counted by either rank, and the session and database filters sit in this set, so none of those
+       ever takes a plan from a request that is stored. Both ranks are running counts over one order, which
+       is also the order of the result: one sort of the request rows serves all three, and no sort carries
+       the statement text or a plan. */
+    SELECT
+        r.session_id,
+        r.request_id,
+        r.database_id,
+        r.sql_handle,
+        r.plan_handle,
+        r.statement_start_offset,
+        r.statement_end_offset,
+        r.status,
+        r.blocking_session_id,
+        r.wait_type,
+        r.wait_time,
+        r.wait_resource,
+        r.cpu_time,
+        r.total_elapsed_time,
+        r.reads,
+        r.writes,
+        r.logical_reads,
+        r.granted_query_memory,
+        r.transaction_isolation_level,
+        r.dop,
+        r.parallel_worker_count,
+        r.percent_complete,
+        r.query_hash,
+        database_name = d.name,
+        pk.plan_key,
+        ps.plan_state,
+        plan_rank =
+            SUM(CASE WHEN ps.plan_state = 0 THEN 1 ELSE 0 END) OVER
+            (
+                ORDER BY
+                    r.cpu_time DESC,
+                    r.parallel_worker_count DESC,
+                    r.session_id,
+                    r.request_id
+                ROWS UNBOUNDED PRECEDING
+            ),
+        live_plan_rank =
+            SUM(CASE WHEN r.plan_handle IS NOT NULL THEN 1 ELSE 0 END) OVER
+            (
+                ORDER BY
+                    r.cpu_time DESC,
+                    r.parallel_worker_count DESC,
+                    r.session_id,
+                    r.request_id
+                ROWS UNBOUNDED PRECEDING
+            )
+    FROM sys.dm_exec_requests AS r
+    LEFT JOIN sys.databases AS d
+      ON d.database_id = r.database_id
+    CROSS APPLY
+    (
+        SELECT
+            plan_key =
+                CONVERT(nvarchar(130), r.plan_handle, 1) + N'|' +
+                CONVERT(nvarchar(11), r.statement_start_offset) + N'|' +
+                CONVERT(nvarchar(11), r.statement_end_offset) + N'|' +
+                ISNULL(CONVERT(nvarchar(18), r.query_plan_hash, 1), N'')
+    ) AS pk
+    CROSS APPLY
+    (
+        SELECT
+            plan_state =
+                CASE
+                    WHEN r.plan_handle IS NULL
+                    THEN 3
+                    WHEN {2}
+                    THEN 1
+                    ELSE 0
+                END
+    ) AS ps
+    WHERE r.session_id <> @@SPID
+    AND   r.session_id >= 50
+    AND   r.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
+    {4}
+) AS der
 JOIN sys.dm_exec_sessions AS des
     ON des.session_id = der.session_id
 OUTER APPLY sys.dm_exec_sql_text(COALESCE(der.sql_handle, der.plan_handle)) AS dest
-OUTER APPLY sys.dm_exec_text_query_plan(der.plan_handle, der.statement_start_offset, der.statement_end_offset) AS deqp
-LEFT JOIN sys.databases AS d
-  ON d.database_id = der.database_id
+OUTER APPLY
+(
+    /* The WHERE decides which requests have a plan, so a request past the cap or already held reads NULL
+       whatever the function returns for it. The NULL handle is what keeps the function from rendering a
+       plan for a row the WHERE is about to drop. */
+    SELECT
+        tqp.query_plan
+    FROM sys.dm_exec_text_query_plan
+    (
+        CASE WHEN der.plan_state = 0 AND der.plan_rank <= {3} THEN der.plan_handle END,
+        der.statement_start_offset,
+        der.statement_end_offset
+    ) AS tqp
+    WHERE der.plan_state = 0
+    AND   der.plan_rank <= {3}
+) AS deqp
 LEFT JOIN sys.dm_exec_query_memory_grants AS deqmg
   ON  deqmg.session_id = der.session_id
   AND deqmg.request_id = der.request_id
@@ -221,10 +386,7 @@ OUTER APPLY
     WHERE dst.session_id = der.session_id
 ) AS trn
 {1}
-WHERE der.session_id <> @@SPID
-AND   der.session_id >= 50
-AND   dest.text IS NOT NULL
-AND   der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
+WHERE dest.text IS NOT NULL
 ORDER BY der.cpu_time DESC, der.parallel_worker_count DESC
 OPTION(MAXDOP 1, RECOMPILE);
 """;
@@ -270,13 +432,64 @@ SELECT
     der.parallel_worker_count,
     der.percent_complete,
     der.query_hash,
-    der.request_id
+    der.request_id,
+    /* #9529: which requests get a plan this run. The estimated plan of one (plan_handle, statement offsets,
+       query_plan_hash) does not change while it stays cached, so plan_key names it, and a request whose key
+       the host already holds (plan_state 1) is not rendered again: its plan handle reaches
+       sys.dm_exec_text_query_plan as NULL, which returns no row. The rest (plan_state 0) are ranked by CPU
+       and only the first {3} are rendered. Unbounded, every request had its plan rendered and shipped
+       every minute. A request with no plan handle (plan_state 3) has no plan to render and is not counted
+       by either rank, so it never takes a plan from a request that is stored. */
+    pk.plan_key,
+    ps.plan_state,
+    plan_rank =
+        SUM(CASE WHEN ps.plan_state = 0 THEN 1 ELSE 0 END) OVER
+        (
+            ORDER BY
+                der.cpu_time DESC,
+                der.parallel_worker_count DESC,
+                der.session_id,
+                der.request_id
+            ROWS UNBOUNDED PRECEDING
+        ),
+    live_plan_rank =
+        SUM(CASE WHEN der.plan_handle IS NOT NULL THEN 1 ELSE 0 END) OVER
+        (
+            ORDER BY
+                der.cpu_time DESC,
+                der.parallel_worker_count DESC,
+                der.session_id,
+                der.request_id
+            ROWS UNBOUNDED PRECEDING
+        )
 INTO #req
 FROM sys.dm_exec_requests AS der
+CROSS APPLY
+(
+    SELECT
+        plan_key =
+            CONVERT(nvarchar(130), der.plan_handle, 1) + N'|' +
+            CONVERT(nvarchar(11), der.statement_start_offset) + N'|' +
+            CONVERT(nvarchar(11), der.statement_end_offset) + N'|' +
+            ISNULL(CONVERT(nvarchar(18), der.query_plan_hash, 1), N'')
+) AS pk
+CROSS APPLY
+(
+    SELECT
+        plan_state =
+            CASE
+                WHEN der.plan_handle IS NULL
+                THEN 3
+                WHEN {2}
+                THEN 1
+                ELSE 0
+            END
+) AS ps
 WHERE der.session_id <> @@SPID
 AND   der.session_id >= 50
 AND   der.database_id = DB_ID()
-AND   der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0);
+AND   der.database_id <> ISNULL(DB_ID(N'PerformanceMonitor'), 0)
+OPTION(RECOMPILE);
 
 SELECT /* PerformanceMonitorLite */
     der.session_id,
@@ -332,12 +545,30 @@ SELECT /* PerformanceMonitorLite */
     tempdb_allocations_mb = tsu.tempdb_allocations_mb,
     tran_log_used_mb = trn.tran_log_used_mb,
     tran_start_time = trn.tran_start_time,
-    der.request_id
+    der.request_id,
+    plan_state = CASE WHEN der.plan_state = 0 AND der.plan_rank > {3} THEN 2 ELSE der.plan_state END,
+    live_plan_over_cap = {5},
+    der.plan_key
 FROM #req AS der
 JOIN sys.dm_exec_sessions AS des
     ON des.session_id = der.session_id
 OUTER APPLY sys.dm_exec_sql_text(COALESCE(der.sql_handle, der.plan_handle)) AS dest
-OUTER APPLY sys.dm_exec_text_query_plan(der.plan_handle, der.statement_start_offset, der.statement_end_offset) AS deqp
+OUTER APPLY
+(
+    /* The WHERE decides which requests have a plan, so a request past the cap or already held reads NULL
+       whatever the function returns for it. The NULL handle is what keeps the function from rendering a
+       plan for a row the WHERE is about to drop. */
+    SELECT
+        tqp.query_plan
+    FROM sys.dm_exec_text_query_plan
+    (
+        CASE WHEN der.plan_state = 0 AND der.plan_rank <= {3} THEN der.plan_handle END,
+        der.statement_start_offset,
+        der.statement_end_offset
+    ) AS tqp
+    WHERE der.plan_state = 0
+    AND   der.plan_rank <= {3}
+) AS deqp
 LEFT JOIN sys.databases AS d
   ON d.database_id = der.database_id
 LEFT JOIN sys.dm_exec_query_memory_grants AS deqmg
@@ -386,6 +617,7 @@ OUTER APPLY
 ) AS trn
 {1}
 WHERE dest.text IS NOT NULL
+{4}
 ORDER BY der.cpu_time DESC, der.parallel_worker_count DESC
 OPTION(MAXDOP 1, RECOMPILE);
 
@@ -394,21 +626,45 @@ DROP TABLE #req;
 
     private static readonly CompositeFormat s_snapshotsAzureBaseFormat = CompositeFormat.Parse(SnapshotsAzureBase);
 
+    /* The live plan of the first {cap} requests by CPU. The WHERE decides which requests have one. It has to:
+       inside an APPLY, sys.dm_exec_query_statistics_xml given a NULL session id answers with the plan of the last
+       session it was asked for, so the NULL alone would store another session's plan on the row. The NULL is
+       still passed, because the function renders nothing for it. */
+    private const string LivePlanApply = """
+OUTER APPLY
+(
+    SELECT
+        qsx.query_plan
+    FROM sys.dm_exec_query_statistics_xml(CASE WHEN der.plan_handle IS NOT NULL AND der.live_plan_rank <= {cap} THEN der.session_id END) AS qsx
+    WHERE der.plan_handle IS NOT NULL
+    AND   der.live_plan_rank <= {cap}
+) AS deqs
+""";
+
     /// <summary>
     /// Builds the query snapshots SQL with or without live query plan support — the single
     /// source for both the scheduled collector and Lite's live snapshot button (#857 for the
     /// Azure #req staging).
     /// </summary>
     public static string BuildSnapshotQuery(bool supportsLiveQueryPlan, bool isAzureSqlDatabase)
+        => BuildSnapshotQuery(supportsLiveQueryPlan, isAzureSqlDatabase, NoHeldPlansPredicate, exclusionClause: "");
+
+    private static string BuildSnapshotQuery(
+        bool supportsLiveQueryPlan, bool isAzureSqlDatabase, string heldPlansPredicate, string exclusionClause)
     {
+        var cap = MaxPlansPerRun.ToString(CultureInfo.InvariantCulture);
         var liveQueryPlanColumn = supportsLiveQueryPlan
             ? "live_query_plan = deqs.query_plan,"
             : "live_query_plan = CONVERT(xml, NULL),";
         var liveQueryPlanApply = supportsLiveQueryPlan
-            ? "OUTER APPLY sys.dm_exec_query_statistics_xml(der.session_id) AS deqs"
+            ? LivePlanApply.Replace("{cap}", cap, StringComparison.Ordinal)
             : "";
+        var livePlanOverCap = supportsLiveQueryPlan
+            ? "CONVERT(bit, CASE WHEN der.plan_handle IS NOT NULL AND der.live_plan_rank > " + cap + " THEN 1 ELSE 0 END)"
+            : "CONVERT(bit, 0)";
         var template = isAzureSqlDatabase ? s_snapshotsAzureBaseFormat : s_snapshotsBaseFormat;
-        return string.Format(null, template, liveQueryPlanColumn, liveQueryPlanApply);
+        return string.Format(
+            null, template, liveQueryPlanColumn, liveQueryPlanApply, heldPlansPredicate, cap, exclusionClause, livePlanOverCap);
     }
 
     /// <summary>The live-plan gate: 2016 SP1+/version-unknown/MI; never on Azure SQL DB (#857).</summary>
@@ -439,22 +695,42 @@ DROP TABLE #req;
 
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
-        var query = BuildSnapshotQuery(SupportsLiveQueryPlan(context.Target), context.Target.IsAzureSqlDb);
+        /* The per-database exclusion filter. Both variants join sys.databases AS d, so it filters on d.name, and
+           an empty ExcludedDatabases gives an empty clause. On a boxed target it sits inside the ranked request
+           set, so an excluded database's request neither takes a plan from a stored one nor has a plan rendered.
+           On Azure SQL Database the staged set is one database, and the clause sits in the final WHERE. */
+        var (exclusionClause, parameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
 
-        /* Append the per-database exclusion filter to the WHERE clause. The base query joins
-           sys.databases AS d, so we filter on d.name. When ExcludedDatabases is empty the
-           clause is "" so nothing changes. */
-        var (exclusionClause, exclusionParameters) = DatabaseExclusionFilter.Build(context.ExcludedDatabases, "d.name");
-        if (!string.IsNullOrEmpty(exclusionClause))
+        var heldPlansPredicate = NoHeldPlansPredicate;
+        if (context.SnapshotPlanCache is { } cache)
         {
-            /* Inject just before the OPTION clause so it lands inside the WHERE. */
-            query = query.Replace(
-                "ORDER BY der.cpu_time DESC",
-                exclusionClause + "\nORDER BY der.cpu_time DESC",
-                StringComparison.Ordinal);
+            /* #9529: name the plans the host holds, so the target renders none of them. The same set goes on the
+               context for the read, which fills those rows from it. */
+            var held = cache.Known(context.ServerId, context.CollectionTime);
+            context.SnapshotKnownPlans = held;
+            heldPlansPredicate = s_heldPlansPredicate;
+
+            var bound = 0;
+            foreach (var planKey in held.Keys)
+            {
+                if (bound == s_heldPlanParameterNames.Length)
+                {
+                    break;
+                }
+
+                parameters.Add(new CollectorParameter(s_heldPlanParameterNames[bound++], planKey, CollectorParameterType.NVarChar260));
+            }
+
+            for (; bound < s_heldPlanParameterNames.Length; bound++)
+            {
+                parameters.Add(new CollectorParameter(s_heldPlanParameterNames[bound], null, CollectorParameterType.NVarChar260));
+            }
         }
 
-        return new CollectorQuery(query, exclusionParameters);
+        var query = BuildSnapshotQuery(
+            SupportsLiveQueryPlan(context.Target), context.Target.IsAzureSqlDb, heldPlansPredicate, exclusionClause);
+
+        return new CollectorQuery(query, parameters);
     }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -504,15 +780,61 @@ DROP TABLE #req;
            the live Active Queries read (which shares this ReadAsync) both carry the filtered values. */
         var scrub = context.BeginStatementScrub();
 
+        /* #9529: the plan bookkeeping columns follow the payload. A reader without them is read as before. */
+        var hasPlanState = reader.FieldCount > PlanKeyOrdinal;
+        var cache = context.SnapshotPlanCache;
+        var held = context.SnapshotKnownPlans;
+        long plansReused = 0;
+        long plansOverCap = 0;
+        long livePlansOverCap = 0;
+
         while (await reader.ReadAsync(cancellationToken))
         {
+            var queryPlan = reader.IsDBNull(4) ? null : reader.GetString(4);
+            if (hasPlanState)
+            {
+                var planState = reader.IsDBNull(PlanStateOrdinal)
+                    ? PlanStateFetched
+                    : Convert.ToInt32(reader.GetValue(PlanStateOrdinal), CultureInfo.InvariantCulture);
+                var planKey = reader.IsDBNull(PlanKeyOrdinal) ? null : reader.GetString(PlanKeyOrdinal);
+
+                if (planState == PlanStateHeld)
+                {
+                    /* The target rendered nothing for this row because the query named its plan as held. The
+                       held copy is the plan an earlier run fetched for the same key, so the row is stored with
+                       the plan it would have carried. */
+                    if (planKey is not null && held is not null && held.TryGetValue(planKey, out var heldPlan))
+                    {
+                        queryPlan = heldPlan;
+                        plansReused++;
+                        cache?.Touch(context.ServerId, planKey, context.CollectionTime);
+                    }
+                }
+                else if (planState == PlanStateOverCap)
+                {
+                    plansOverCap++;
+                }
+                else if (planState == PlanStateFetched && queryPlan is not null && planKey is not null)
+                {
+                    /* Held as fetched, before the statement filter: the filter judges it on every run, as it
+                       does a plan the target sent. */
+                    cache?.Store(context.ServerId, planKey, queryPlan, context.CollectionTime);
+                }
+
+                if (!reader.IsDBNull(LivePlanOverCapOrdinal)
+                    && Convert.ToBoolean(reader.GetValue(LivePlanOverCapOrdinal), CultureInfo.InvariantCulture))
+                {
+                    livePlansOverCap++;
+                }
+            }
+
             rows.Add(new Row
             {
                 SessionId = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture),
                 DatabaseName = reader.IsDBNull(1) ? null : reader.GetString(1),
                 ElapsedTimeFormatted = reader.IsDBNull(2) ? null : reader.GetString(2),
                 QueryText = reader.IsDBNull(3) ? null : scrub.Text(reader.GetString(3)),
-                QueryPlan = reader.IsDBNull(4) ? null : scrub.Xml(reader.GetString(4)),
+                QueryPlan = queryPlan is null ? null : scrub.Xml(queryPlan),
                 LiveQueryPlan = reader.IsDBNull(5) ? null : scrub.Xml(reader.GetValue(5)?.ToString()),
                 Status = reader.IsDBNull(6) ? null : reader.GetString(6),
                 BlockingSessionId = reader.IsDBNull(7) ? 0 : Convert.ToInt32(reader.GetValue(7), CultureInfo.InvariantCulture),
@@ -545,6 +867,22 @@ DROP TABLE #req;
                 TranStartTime = reader.IsDBNull(33) ? null : reader.GetDateTime(33),
                 RequestId = reader.IsDBNull(34) ? 0 : Convert.ToInt32(reader.GetValue(34), CultureInfo.InvariantCulture),
             });
+        }
+
+        /* Only a run that reused or skipped something says so: a run that fetched every plan keeps a NULL note. */
+        if (plansReused > 0)
+        {
+            context.Measure(PlansReusedMeasurement, plansReused);
+        }
+
+        if (plansOverCap > 0)
+        {
+            context.Measure(PlansOverCapMeasurement, plansOverCap);
+        }
+
+        if (livePlansOverCap > 0)
+        {
+            context.Measure(LivePlansOverCapMeasurement, livePlansOverCap);
         }
 
         return rows;
