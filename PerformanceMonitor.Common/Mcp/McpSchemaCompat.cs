@@ -127,14 +127,25 @@ public static class McpSchemaCompat
     public static IMcpServerBuilder WithGeminiCompatibleTools<[DynamicallyAccessedMembers(
         DynamicallyAccessedMemberTypes.PublicMethods |
         DynamicallyAccessedMemberTypes.NonPublicMethods)] TToolType>(
-        this IMcpServerBuilder builder)
+        this IMcpServerBuilder builder) =>
+        builder.WithGeminiCompatibleToolsOf(typeof(TToolType));
+
+    /// <summary>
+    /// <see cref="WithGeminiCompatibleTools{TToolType}(IMcpServerBuilder)"/> for a tool class named by its <see cref="Type"/>, for a host
+    /// that finds its tool classes by their <see cref="McpServerToolTypeAttribute"/> instead of naming each one. Its name differs from the
+    /// generic method's so a lookup of that method by name finds exactly one.
+    /// </summary>
+    public static IMcpServerBuilder WithGeminiCompatibleToolsOf(
+        this IMcpServerBuilder builder,
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicMethods | DynamicallyAccessedMemberTypes.NonPublicMethods)] Type toolType)
     {
         ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(toolType);
 
         var catalog = GuideCatalogOf(builder.Services);
         var parameterTypes = ParameterTypesOf(builder.Services);
 
-        foreach (var toolMethod in typeof(TToolType).GetMethods(
+        foreach (var toolMethod in toolType.GetMethods(
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance))
         {
             if (toolMethod.GetCustomAttribute<McpServerToolAttribute>() is not { } toolAttribute)
@@ -148,7 +159,7 @@ public static class McpSchemaCompat
             if (!toolMethod.IsStatic)
             {
                 throw new InvalidOperationException(
-                    $"{typeof(TToolType).FullName}.{toolMethod.Name} is an instance method; " +
+                    $"{toolType.FullName}.{toolMethod.Name} is an instance method; " +
                     $"{nameof(WithGeminiCompatibleTools)} only supports static tool methods.");
             }
 

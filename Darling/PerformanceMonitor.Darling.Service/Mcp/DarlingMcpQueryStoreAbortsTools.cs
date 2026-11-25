@@ -38,6 +38,7 @@ public sealed class DarlingMcpQueryStoreAbortsTools
     /// <summary>The query_text preview length, the one <c>get_query_store_top</c> uses.</summary>
     private const int QueryTextPreviewLength = 400;
 
+    [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_store_aborts"), Description(
         "Queries ranked by Query Store runs that ended aborted (a client timeout or cancel) or with an exception. A cheap query that times out often ranks low in get_query_store_top (ranked by cost) but first here. " +
         "Each row: run counts by outcome, failed_share (failed runs over the query's own total runs), avg_aborted_duration_ms (aborted runs only), last_failed_time. " +

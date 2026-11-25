@@ -41,6 +41,7 @@ public sealed partial class DarlingMcpAlertTools
 {
     private const string SigningKeyScopeHelp = "Omit for the default destination's key (Settings > Notifications); a route_id (from get_notification_routes) for that route's own generic webhook.";
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "generate_webhook_signing_key"), Description(
         "Makes (or rotates) the signing key of a generic webhook destination, the default one or one route's, and returns the new key ONCE. Needs a named operator token, or a token with mcp.allowWrites. " +
         "<<GUIDE>>" +
@@ -65,6 +66,7 @@ public sealed partial class DarlingMcpAlertTools
         GenerateWebhookSigningKeyAsync(postgres, ownerSource?.Read(), route_id, replace_pending_rotation, httpContextAccessor?.HttpContext, DarlingPasswordKey.Current, logger, cancellationToken,
             StoreRolesAreRunByOperator(postgresConfig));
 
+    [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "remove_webhook_signing_key"), Description(
         "Removes the signing key of a generic webhook destination, the default one or one route's, with its previous key. Needs a named operator token, or a token with mcp.allowWrites. " +
         "<<GUIDE>>" +
