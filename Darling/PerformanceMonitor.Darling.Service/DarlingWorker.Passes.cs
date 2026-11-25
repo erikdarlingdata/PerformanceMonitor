@@ -531,6 +531,12 @@ public sealed partial class DarlingWorker
     {
             await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
 
+            /* #9549: which store operations suffered inside a checkpoint sync of the window the launch just took. Judged
+               once, after the sweep stored the hour's checkpointer row (so a read that began inside the window's last
+               sync has had its deadline to land), with or without the alert engine, and kept where get_store_metrics
+               reads it: the Store Checkpointer Pressure check below and that tool are handed one verdict. */
+            var checkpointHarm = StoreHarmLog.Shared.JudgeAndKeep(DateTime.UtcNow, _checkpointSyncSampler.TakenSyncs(), _readFailures);
+
             /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
                regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
             if (_selfAlerts is not null)
@@ -551,11 +557,12 @@ public sealed partial class DarlingWorker
                    the alert judges the hour the sweep measured rather than the one before it. Both
                    master-gated inside and failure-isolated inside; the outer catch is the belt.
                    #4834: the checkpointer check reads the hour's longest single sync from the row the
-                   sweep just wrote, the same value get_store_metrics publishes. */
+                   sweep just wrote, the same value get_store_metrics publishes. #9549: it fires on the
+                   harm verdict above (or a requested checkpoint), and the sync figures are its attribution. */
                 try
                 {
                     await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
-                    await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);
+                    await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken, checkpointHarm);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

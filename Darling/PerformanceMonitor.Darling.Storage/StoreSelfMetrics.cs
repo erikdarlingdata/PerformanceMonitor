@@ -852,10 +852,11 @@ FROM pg_stat_bgwriter AS b";
 
     /// <summary>
     /// The checkpointer's CUMULATIVE sync time alone, in milliseconds, PostgreSQL 17+ (#4823): the one-column read
-    /// the worker takes once a minute so the longest SINGLE checkpoint sync inside an hour can be found. The hourly
-    /// checkpointer row (<see cref="CheckpointerInsertSql"/>) cannot show it: two cumulative counters an hour apart
-    /// difference to the hour's TOTAL sync time, and the Store Checkpointer Pressure alert divides that by the
-    /// hour's checkpoint count, so one 23.5 s sync among four checkpoints averaged 5.9 s and read as clean. Rounded
+    /// the worker takes once a minute so each SINGLE checkpoint sync inside an hour can be found, with the minute it
+    /// finished in (#9549 looks for a store read or write that suffered in such a minute). The hourly checkpointer row
+    /// (<see cref="CheckpointerInsertSql"/>) cannot show it: two cumulative counters an hour apart difference to the
+    /// hour's TOTAL sync time, which over the hour's checkpoint count is an average, so one 23.5 s sync among four
+    /// checkpoints reads as 5.9 s. Rounded
     /// the way the hourly row rounds it (<c>sync_time</c> is <c>double precision</c> milliseconds), so a minute's
     /// difference and the hour's compare. Nothing is written: <c>CheckpointSyncSampler</c> keeps the previous value
     /// in memory.

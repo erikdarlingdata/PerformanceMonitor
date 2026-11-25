@@ -1190,15 +1190,17 @@ internal sealed class DarlingSelfAlertEvaluator
        key, STANDING like Store Job Over Cadence: active flag + shared-cooldown re-fire while each new hourly
        interval keeps breaching, one "Store Checkpointer Pressure Recovered" resolution when an interval comes
        back clean. The shared cooldown rather than a daily interval, deliberately: every breaching hour is a NEW
-       hour of fsync storms the store's readers sat inside, not a restatement of a standing fact. */
+       hour in which a store read or write suffered inside a checkpoint sync (#9549), or a checkpoint was requested,
+       not a restatement of a standing fact. */
     private readonly ConcurrentDictionary<string, bool> _activeCheckpointerPressure = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTime> _lastCheckpointerPressureAlert = new(StringComparer.Ordinal);
 
     /// <summary>The #3783 checkpointer metric name. A WEBHOOK AUTOMATION KEY like its siblings. Fired with NO
     /// severity override so the declared INFO arm styles it, for <see cref="ToastSlackMetric"/>'s reason: the
-    /// two levers are configuration the maintainer weighs, not a page. The value it carries is the interval's
-    /// average sync milliseconds PER CHECKPOINT (#4037), not the interval's summed sync milliseconds - or, when the
-    /// longest single sync in the interval is what breached, that sync's milliseconds (#4823).</summary>
+    /// two levers are configuration the maintainer weighs, not a page. The value it carries is how many store
+    /// operations suffered inside a checkpoint sync, against a threshold of one (#9549). A fire on the requested arm
+    /// alone carries the interval's average sync milliseconds PER CHECKPOINT (#4037) against
+    /// <see cref="CheckpointSyncBarMs"/>, as attribution.</summary>
     internal const string CheckpointerPressureMetric = "Store Checkpointer Pressure";
 
     /// <summary>The resolution title when an interval reads clean again. "Recovered" for the classifier.</summary>
@@ -1209,27 +1211,23 @@ internal sealed class DarlingSelfAlertEvaluator
     private const string CheckpointerKey = "checkpointer";
 
     /// <summary>
-    /// Milliseconds PER CHECKPOINT (#4037; originally #3783) past which the checkpointer's sync (fsync) phase
-    /// is PRESSURE: 10,000. The MCP host's read deadline is the bound this is derived from — a checkpoint
-    /// whose fsync phase runs past ten seconds is one whose I/O stall can outlast a read the deadline kills,
-    /// which is exactly what happened: three unattributed read kills on a production store in one day all sat
-    /// inside sync phases of 25.2 s and 14.0 s. Judged on <c>SyncMs / (timed + requested)</c> — the interval's
-    /// AVERAGE sync milliseconds per checkpoint — rather than the interval's summed sync milliseconds: the
-    /// series stores the cumulative counter and an hourly interval on the default five-minute
-    /// <c>checkpoint_timeout</c> covers about twelve timed checkpoints, so judging the sum against a
-    /// per-checkpoint bar breached on a healthy store whose checkpoints each synced five to eight seconds and
-    /// never recovered (#4037's own measured population). The second arm, <c>checkpoints_requested &gt; 0</c>,
-    /// has no threshold to tune: one requested checkpoint in an hour is worth a look, and it is a look, not a
-    /// verdict, because a requested checkpoint comes from WAL volume reaching <c>max_wal_size</c>, a base backup,
-    /// or a <c>CHECKPOINT</c> statement and the counters do not say which (#4758).
-    /// Both arms are judged on an interval with no postmaster restart inside it: across one, the shutdown
-    /// checkpoint is in the requested count and in the phase times alike, so neither is judged (#3955); and the
-    /// average arm needs a TIMED count on both samples of the pair (V140), so a row from before that rung
-    /// leaves the average unmeasured rather than falling back to the old sum.
-    /// Not a knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.
+    /// The read deadline a checkpoint sync is set against, in milliseconds: 10,000 (#3783, #4037). It is the MCP
+    /// host's read deadline and the alert pass's, so a checkpoint whose sync (fsync) phase runs past it is one whose
+    /// I/O stall can outlast a read that started inside it: three read kills on a production store in one day all sat
+    /// inside sync phases of 25.2 s and 14.0 s.
     ///
-    /// <para>The same bar judges the longest SINGLE sync too (#4823): an average over several checkpoints hides one
-    /// long sync among short ones, and the once-a-minute samples of the cumulative sync time find it.</para>
+    /// <para><b>It is attribution and breaches nothing (#9549).</b> The Store Checkpointer Pressure self-alert fires
+    /// when a store read or a collector store write suffered while a sync ran, or a checkpoint was requested; the
+    /// text and <c>get_store_metrics</c> state the interval's average sync per checkpoint
+    /// (<c>SyncMs / (timed + requested)</c>, #4037) and its longest single sync (#4823) beside this line to say why
+    /// the operation suffered. A sync past it with nothing suffering inside is not a finding: on a store where
+    /// PostgreSQL cannot flush early (every <c>*_flush_after</c> setting is 0 and has no effect, as on Windows) a
+    /// checkpoint's whole write lands on its fsync, and long syncs are normal there. The requested arm,
+    /// <c>checkpoints_requested &gt; 0</c>, has no threshold to tune: one requested checkpoint in an hour is worth a
+    /// look, and it is a look, not a verdict, because a requested checkpoint comes from WAL volume reaching
+    /// <c>max_wal_size</c>, a base backup, or a <c>CHECKPOINT</c> statement and the counters do not say which
+    /// (#4758). Both arms are judged on an interval with no postmaster restart inside it (#3955).
+    /// Not a knob, for <see cref="ToastSlackUtilisationBarPercent"/>'s reason.</para>
     /// </summary>
     internal const long CheckpointSyncBarMs = 10_000;
 
@@ -9597,9 +9595,15 @@ WHERE c.is_enabled";
     ///
     /// <para>The hour's longest single checkpoint sync (#4823) is on the reading: the worker's once-a-minute sampler
     /// finds it, the sweep stores it on the hour's checkpointer row (#4834), and the reader returns it with the
-    /// interval, so this check and <c>get_store_metrics</c> judge one stored value.</para>
+    /// interval, so this check and <c>get_store_metrics</c> state one stored value.</para>
+    ///
+    /// <para><paramref name="harm"/> (#9549) is the tick's judgment of the same window from process memory: the syncs
+    /// the minute samples saw and the store operations that suffered inside one. The worker judges it once and keeps
+    /// it where <c>get_store_metrics</c> reads it, so both are handed one verdict. Null judges the requested arm
+    /// alone.</para>
     /// </summary>
-    public async Task EvaluateCheckpointerPressureAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    public async Task EvaluateCheckpointerPressureAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken, CheckpointHarmVerdict? harm = null)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -9619,25 +9623,22 @@ WHERE c.is_enabled";
             return;
         }
 
-        await ApplyCheckpointerPressureAsync(reading, cancellationToken);
+        await ApplyCheckpointerPressureAsync(reading, cancellationToken, harm);
     }
 
     /// <summary>
     /// Applies the fleet-level Store Checkpointer Pressure condition (#3783) from the store's last measured
-    /// checkpointer interval: the sync (fsync) phase averaged more than <see cref="CheckpointSyncBarMs"/> per
-    /// checkpoint (#4037), OR the interval's longest single sync was over it (#4823), OR at least one checkpoint
-    /// was REQUESTED — started by WAL volume reaching <c>max_wal_size</c>, a base backup, or a <c>CHECKPOINT</c>
-    /// statement rather than by the clock. PostgreSQL's counters do not record
-    /// which, only its <c>log_checkpoints</c> lines do, so the text names all three causes and offers raising
-    /// <c>max_wal_size</c> as the remedy for the first only (#4758). Three unattributed read kills on a
-    /// production store in one day all sat inside checkpoint sync phases of 25.2 s and 14.0 s with nothing
-    /// recording that the checkpointer had been there; this is that record, as an alert. A STANDING condition (the Store Job Over Cadence idiom): fire once on
-    /// breach, re-fire on the shared alert cooldown while each new interval keeps breaching, one "Store
-    /// Checkpointer Pressure Recovered" resolution when an interval reads clean. INFORMATIONAL, fired with no
-    /// severity override: the two levers are configuration — #3802's WAL sizing (<c>max_wal_size</c> /
-    /// <c>checkpoint_completion_target</c>, landed for the managed store as the v12 postgresql.conf block) and
-    /// #3745's refresh slicing (smaller aggregate refreshes write less WAL per tick) — which the maintainer
-    /// weighs against the store's disk, not a page.
+    /// checkpointer interval. It fires on HARM, not on how long a sync took (#9549): at least one store operation
+    /// suffered while a checkpoint sync ran, OR at least one checkpoint was REQUESTED — started by WAL volume
+    /// reaching <c>max_wal_size</c>, a base backup, or a <c>CHECKPOINT</c> statement rather than by the clock.
+    /// PostgreSQL's counters do not record which, only its <c>log_checkpoints</c> lines do, so the text names all
+    /// three causes and offers raising <c>max_wal_size</c> as the remedy for the first only (#4758). A STANDING
+    /// condition (the Store Job Over Cadence idiom): fire once on breach, re-fire on the shared alert cooldown while
+    /// each new interval keeps breaching, one "Store Checkpointer Pressure Recovered" resolution when an interval
+    /// reads clean. INFORMATIONAL, fired with no severity override: the levers are configuration — #3802's WAL
+    /// sizing (<c>max_wal_size</c> / <c>checkpoint_completion_target</c>, landed for the managed store as the v12
+    /// postgresql.conf block), #3745's refresh slicing (smaller aggregate refreshes write less WAL per tick) and the
+    /// store host's disk — which the maintainer weighs, not a page.
     ///
     /// <para><b>Only an Observed interval is judged.</b> <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Absent"/>
     /// (no row yet), <c>NoPrevious</c> (one row, nothing to subtract), <c>Reset</c> (the counters went
@@ -9646,20 +9647,30 @@ WHERE c.is_enabled";
     /// agent-status discipline. Gated on the master alerts switch. Internal so it pins directly with a recording
     /// deliverer and a controllable clock.</para>
     ///
-    /// <para><b>The longest single sync is judged beside the average (#4823).</b> The average divides the hour's
-    /// sync time by its checkpoint count, so one long sync among several short ones hides inside it: in the field one
-    /// checkpoint synced for 23.5 s among four in the hour, the average stayed near 5.9 s, and the alert stayed quiet
-    /// while collection stalled on every server. The worker therefore reads the checkpointer's cumulative
-    /// <c>sync_time</c> once a minute; PostgreSQL adds a checkpoint's whole sync time to it when the checkpoint ends,
-    /// so a minute's difference is one checkpoint's sync (or two that ended in the same minute, which can only
-    /// over-report). The largest such difference in the hour is stored on the hour's checkpointer row by the sweep
-    /// (#4834), and the reading carries it as
-    /// <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerReading.LongestSyncMs"/>, the value
-    /// <c>get_store_metrics</c> publishes. The condition breaches when the average arm or the requested arm does,
-    /// OR when that longest sync is over <see cref="CheckpointSyncBarMs"/>, and the text names how long it took and
-    /// in which minute (UTC). The edge state, cooldown and Recovered resolution are unchanged, so an hour reads
-    /// clean only when the longest sync is under the bar as well. A null stored longest sync (no sample yet, a row
-    /// from before the rung, or every read of the window failed) leaves the other two arms to decide alone.</para>
+    /// <para><b>What harm is, and where it comes from (#9549).</b> Four kinds of store operation, each recorded in
+    /// process memory with the time it ran: an alert pass's store read that failed, one that crossed its deadline and
+    /// was retried (both from <see cref="AlertReadFailureCounter.RecentReads"/>), a read the MCP host, the web API or
+    /// a composed panel served that ended at its deadline, and a collector store write that ended in a transport
+    /// fault (both from <see cref="StoreHarmLog"/>). The worker's once-a-minute sampler keeps every sync it saw
+    /// finish, as the two sample times it finished between and its length, and
+    /// <see cref="StoreHarmLog.Judge"/> pairs each operation with a sync it overlapped. The worker hands the result
+    /// here as <paramref name="harm"/>, and <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerReading.WithHarm"/>
+    /// applies it to the reading only when it describes this interval. A sync that nothing suffered inside does not
+    /// breach, however long it took: on a store where PostgreSQL cannot flush early (every <c>*_flush_after</c>
+    /// setting is 0 and has no effect, as on Windows) a checkpoint's whole write lands on its fsync, so a sync past
+    /// <see cref="CheckpointSyncBarMs"/> is normal there.</para>
+    ///
+    /// <para><b>Sync length is the attribution.</b> The average sync per checkpoint (#4037), the hour's longest single
+    /// sync and its minute (#4823, stored on the row by #4834) are in the text of every fire and of the recovery, to
+    /// say why the read or the write suffered. No judgment for the interval (a null <paramref name="harm"/>, or one
+    /// for another hour, which is what a service that started inside the interval has) is no evidence, and leaves
+    /// the requested arm to decide alone.</para>
+    ///
+    /// <para><b>One harm, one alert.</b> A failed or retried alert read and a served read cut off at its deadline
+    /// raise no alert of their own: they are counted on <c>get_collection_health</c> and stored in
+    /// <c>collect.slow_reads</c>. A collector whose store writes keep failing does: Collection Stopped for its server,
+    /// or Collection Falling Behind for the fleet. While either stands, collector store writes are left out of the
+    /// harm this condition counts, so the same failure is not announced twice; the reads still count.</para>
     ///
     /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
     /// shutdown checkpoint as requested and keeps the count across the restart, so every service restart that
@@ -9669,11 +9680,11 @@ WHERE c.is_enabled";
     /// long one is not a stall anyone's read sat inside). The reader therefore calls such an interval
     /// <see cref="Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted"/> and states no delta, and the
     /// gate below treats it like every other non-measurement. The cost is one skipped hourly interval after each
-    /// restart; the next interval is judged normally. The minute samples difference the same counters, so the
-    /// shutdown checkpoint's sync sits inside the stored longest sync too, and the same gate keeps it unjudged.</para>
+    /// restart; the next interval is judged normally.</para>
     /// </summary>
     internal async Task ApplyCheckpointerPressureAsync(
-        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken)
+        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken,
+        CheckpointHarmVerdict? harm = null)
     {
         if (reading is null)
         {
@@ -9683,6 +9694,22 @@ WHERE c.is_enabled";
         if (!_settings.AlertsEnabled || reading.Status != Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed)
         {
             return;
+        }
+
+        /* #9549: the harm arm. WithHarm keeps the verdict only when it describes this interval, so a null count below
+           means the running service holds no judgment for it. */
+        reading = reading.WithHarm(harm);
+        IReadOnlyList<CheckpointHarmFinding> suffered = reading.HarmInsideSync is null || harm is null
+            ? Array.Empty<CheckpointHarmFinding>()
+            : harm.Findings;
+        var harmJudged = reading.HarmInsideSync is not null;
+
+        /* One harm, one alert: a collector store write that a standing collection alert already announced is not
+           counted here a second time. */
+        if (suffered.Count > 0 && CollectionAlertStanding())
+        {
+            suffered = suffered.Where(finding => finding.Harm.Kind != StoreHarmKind.CollectorWriteStalled).ToList();
+            reading = reading with { HarmInsideSync = suffered.Count };
         }
 
         var now = _utcNow();
@@ -9698,10 +9725,7 @@ WHERE c.is_enabled";
         CheckpointSyncMax? longestSync = reading.LongestSyncMs is long longestMs && reading.LongestSyncAtUtc is DateTime longestAt
             ? new CheckpointSyncMax(longestAt, longestMs)
             : null;
-        var longestOverBar = longestSync is CheckpointSyncMax overBar && overBar.SyncMs > CheckpointSyncBarMs;
 
-        /* IsPressure already carries the longest-sync arm (Observed only, which the gate above guarantees), so
-           longestOverBar is not repeated here; it only names that arm in the text below. */
         if (reading.IsPressure)
         {
             _activeCheckpointerPressure[CheckpointerKey] = true;
@@ -9719,21 +9743,13 @@ WHERE c.is_enabled";
                 }
 
                 var writeSeconds = (writeMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
-                var averageOverBar = averageSyncMs is double avg && avg > CheckpointSyncBarMs;
                 var averageSecondsText = averageSyncMs is double a ? (a / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) : "unmeasured";
 
-                /* Each arm that breached, in the order average, longest single sync, requested. One arm reads as
-                   itself, two as "a and b", three as "a, b and c" - the first two shapes are the ones the text
-                   had before the longest-sync arm, unchanged. */
-                var armParts = new List<string>(3);
-                if (averageOverBar)
+                /* Each arm that breached, harm first. One arm reads as itself, two as "a and b". */
+                var armParts = new List<string>(2);
+                if (suffered.Count > 0)
                 {
-                    armParts.Add($"average sync {averageSecondsText}s per checkpoint");
-                }
-
-                if (longestOverBar && longestSync is CheckpointSyncMax named)
-                {
-                    armParts.Add($"longest single sync {FormatSyncSeconds(named.SyncMs)}s in the minute ending {FormatSyncMinute(named.SampledUtc)}");
+                    armParts.Add($"{StoreHarmLog.CountText(suffered.Count)} suffered inside a checkpoint sync");
                 }
 
                 if (requested > 0 || armParts.Count == 0)
@@ -9741,28 +9757,41 @@ WHERE c.is_enabled";
                     armParts.Add($"{requested} requested {(requested == 1 ? "checkpoint" : "checkpoints")}");
                 }
 
-                var arms = armParts.Count == 1
-                    ? armParts[0]
-                    : string.Join(", ", armParts.Take(armParts.Count - 1)) + " and " + armParts[^1];
+                var arms = string.Join(" and ", armParts);
 
-                /* The sentence for a sample that exists, breaching or not: what the minute samples saw is part of
-                   the evidence either way. Empty with no sample, which keeps the text of an unsampled hour as it was. */
+                /* The attribution: what the minute samples saw is part of the evidence on every fire. Empty with no
+                   sample, which keeps the text of an unsampled hour to the counters alone. */
                 var longestDetail = longestSync is CheckpointSyncMax seen
                     ? $"The longest single checkpoint sync a once-a-minute sample of the counter saw in that interval was {FormatSyncSeconds(seen.SyncMs)}s, " +
                       $"in the minute ending {FormatSyncMinute(seen.SampledUtc)}. "
                     : "";
 
-                var thresholdText = longestSync is null
-                    ? $"average sync > {barSeconds}s per checkpoint, or any requested checkpoint"
-                    : $"average sync > {barSeconds}s per checkpoint, any single checkpoint sync > {barSeconds}s, or any requested checkpoint";
+                /* What suffered and the sync it sat inside: up to three by name, the rest as a count. */
+                var named = suffered.Take(MaxNamedHarm)
+                    .Select(finding => $"{finding.Harm.Describe()}, inside the {FormatSyncSeconds(finding.Sync.SyncMs)}s sync " +
+                                       $"that finished in the minute ending {FormatSyncMinute(finding.Sync.SampledUtc)}")
+                    .ToList();
+                var harmDetail = suffered.Count == 0
+                    ? harmJudged
+                        ? "No store read or collector store write suffered while a checkpoint sync ran in this interval. "
+                        : "Whether a store read or a collector store write suffered inside a sync is judged from the running service's " +
+                          "own record, which does not cover this interval. "
+                    : $"{StoreHarmLog.CountText(suffered.Count)} suffered while a checkpoint sync ran: {string.Join("; ", named)}" +
+                      (suffered.Count > named.Count ? $"; and {suffered.Count - named.Count} more" : "") + ". " +
+                      "A sync is an I/O stall every reader and writer on the store shares, which is why this alert names the sync: " +
+                      $"one that runs past {barSeconds}s outlasts the deadline of an alert-pass read and of a read the MCP host serves. " +
+                      "How long a sync takes is a property of the store host's disk and of how much each checkpoint has to write. ";
 
-                /* The value the alert carries is the figure that breached: the average when the average did, the
-                   longest single sync when that did (the larger when both did). */
-                var currentValue = averageSyncMs is double current ? (long)Math.Round(current) : syncMs;
-                if (longestOverBar && longestSync is CheckpointSyncMax peak && (!averageOverBar || peak.SyncMs > currentValue))
-                {
-                    currentValue = peak.SyncMs;
-                }
+                var thresholdText = "any store read or collector store write that failed, was retried, was cut off or stalled inside a " +
+                                    "checkpoint sync, or any requested checkpoint";
+
+                /* The value the alert carries: how many store operations suffered inside a sync, against the one that
+                   breaches. A fire on the requested arm alone carries the interval's average sync per checkpoint
+                   against the read deadline, as attribution. */
+                long currentValue = suffered.Count > 0
+                    ? suffered.Count
+                    : averageSyncMs is double current ? (long)Math.Round(current) : syncMs;
+                long thresholdValue = suffered.Count > 0 ? 1 : CheckpointSyncBarMs;
 
                 var delivery = await FireAsync(
                     StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
@@ -9774,28 +9803,22 @@ WHERE c.is_enabled";
                         $"per checkpoint), and {requested} of those checkpoints were REQUESTED, meaning started by something other than " +
                         "checkpoint_timeout: WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement. " +
                         longestDetail +
-                        (averageOverBar
-                            ? $"A per-checkpoint sync average past {barSeconds}s means at least some of this interval's checkpoints ran " +
-                              "an I/O stall every reader on the store shares: on one production store, three read kills in a day that " +
-                              "nothing else explained all sat inside 25.2 s and 14.0 s sync phases, and the MCP host's read deadline is " +
-                              $"the {barSeconds}s this line is drawn at. "
-                            : longestOverBar
-                            ? $"A single checkpoint whose sync phase ran past {barSeconds}s is an I/O stall every reader on the store shares, " +
-                              $"even though this interval's average per checkpoint ({averageSecondsText}s) stayed under the line: an average " +
-                              "spreads one long sync over the interval's short ones, which is why the sync time is also read once a minute. "
-                            : "PostgreSQL's counters do not say which of those started a requested checkpoint; the log_checkpoints " +
+                        harmDetail +
+                        (requested > 0
+                            ? "PostgreSQL's counters do not say which of those started a requested checkpoint; the log_checkpoints " +
                               "lines do. Raising max_wal_size is the remedy only for the first cause: when WAL volume did it, the " +
                               "store wrote more WAL between checkpoints than max_wal_size allows, so the checkpointer ran early and " +
-                              "the next one is closer. Checkpoint pressure compounds. ") +
+                              "the next one is closer. Checkpoint pressure compounds. "
+                            : "") +
                         "The interval series is collect.store_metrics (object_kind = 'checkpointer'; the stored columns are the " +
                         "server's cumulative counters, and get_store_metrics' checkpointer block publishes the per-interval " +
-                        "differences and the same per-checkpoint average). This alert re-fires on the alert cooldown while each " +
-                        "new interval breaches and recovers when one reads clean.",
+                        "differences, the same per-checkpoint average and the same count of operations that suffered inside a sync). " +
+                        "This alert re-fires on the alert cooldown while each new interval breaches and recovers when one reads clean.",
                     /* No override: the per-metric map's declared INFO arm decides (the digest reasoning). */
                     severity: null,
                     shortMessage: $"store checkpointer: {arms} over {checkpointCount} {(checkpointCount == 1 ? "checkpoint" : "checkpoints")} in the last {intervalMinutes} min",
                     numericCurrentValue: currentValue,
-                    numericThresholdValue: CheckpointSyncBarMs,
+                    numericThresholdValue: thresholdValue,
                     cancellationToken,
                     hold: hold);
                 if (hold is null)
@@ -9817,9 +9840,19 @@ WHERE c.is_enabled";
                 $"{_storeLabel}: checkpointer {recoveredAverageText} and {requested} requested {(requested == 1 ? "checkpoint" : "checkpoints")} over {checkpointCount} " +
                 $"{(checkpointCount == 1 ? "checkpoint" : "checkpoints")} in the last {intervalMinutes} min" +
                 (longestSync is CheckpointSyncMax recoveredLongest ? $", longest single sync {FormatSyncSeconds(recoveredLongest.SyncMs)}s" : "") +
-                ". Under the line again"), cancellationToken);
+                (harmJudged ? ", and no store operation suffered inside a checkpoint sync" : "") +
+                ". Clean again"), cancellationToken);
         }
     }
+
+    /// <summary>(#9549) How many suffering operations the Store Checkpointer Pressure text names before it counts the rest.</summary>
+    internal const int MaxNamedHarm = 3;
+
+    /// <summary>(#9549) True while a collection alert stands that announces failing collector store writes on its own:
+    /// Collection Stopped for any server, or the fleet's Collection Falling Behind.</summary>
+    private bool CollectionAlertStanding() =>
+        _activeCollectionStopped.Values.Any(standing => standing)
+        || (_activeFleetGate.TryGetValue(FleetGateKey, out var gateActive) && gateActive);
 
     /// <summary>(#4823) Milliseconds as seconds to one decimal, invariant culture: the form every checkpointer figure in
     /// the alert text takes ("23.5s").</summary>

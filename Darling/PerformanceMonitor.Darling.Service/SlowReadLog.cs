@@ -121,6 +121,9 @@ WHERE slow_read_id IN
     /// <summary>A read at or over this many milliseconds is recorded whatever its outcome.</summary>
     internal int ThresholdMs { get; }
 
+    /// <summary>(#9549) Where a read that ended at its deadline is recorded as harm: the process's log, or a test's own.</summary>
+    internal StoreHarmLog Harm { get; init; } = StoreHarmLog.Shared;
+
     /// <summary>Records dropped because the channel was full.</summary>
     internal long Dropped => Interlocked.Read(ref _dropped);
 
@@ -149,6 +152,14 @@ WHERE slow_read_id IN
     {
         try
         {
+            /* #9549: a read that ended at its deadline is harm the Store Checkpointer Pressure self-alert looks for inside
+               a checkpoint sync. Kept in process memory with its time, since the row below reaches the store later and by
+               another task. */
+            if (outcome == ReadOutcome.Timeout)
+            {
+                Harm.Record(StoreHarmKind.HostReadDeadline, route, DateTime.UtcNow, totalMs);
+            }
+
             if (!ShouldRecord(outcome, totalMs))
             {
                 return;

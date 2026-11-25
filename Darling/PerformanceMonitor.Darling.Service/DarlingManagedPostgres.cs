@@ -559,11 +559,11 @@ public sealed class DarlingManagedPostgres
     /// <para><b>The checkpoint interval ships separately, in v16.</b> A longer <c>checkpoint_timeout</c> would
     /// cut WAL further by re-imaging each hot page less often — #4246 found roughly two-thirds of one
     /// 5-minute cycle's images repeated the previous cycle's — but it risks the store's own checkpointer
-    /// self-alert: <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a
-    /// checkpoint's sync phase averages more than 10 seconds, a bar that exists because sync phases of 14.0s
-    /// and 25.2s killed reads on a production store. #3892 found that a longer interval puts more files into
-    /// each checkpoint, which makes each sync phase longer, so a 15-minute interval risks trading WAL volume
-    /// for killed reads and for alerts firing on a healthy store. One production store measured the interval
+    /// self-alert: <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) is the 10-second read
+    /// deadline a sync is set against, a line that exists because sync phases of 14.0s and 25.2s killed reads
+    /// on a production store, and the alert fires when a read or a write suffers inside a sync (#9549). #3892
+    /// found that a longer interval puts more files into each checkpoint, which makes each sync phase longer,
+    /// so a 15-minute interval risks trading WAL volume for killed reads. One production store measured the interval
     /// first, through <c>ALTER SYSTEM</c> and a reload rather than this block; it now ships as
     /// <see cref="ConfMarkerV16"/>, its own marker, gated on that measurement staying under the sync bar.</para>
     ///
@@ -595,9 +595,10 @@ public sealed class DarlingManagedPostgres
     ///
     /// <para><b>The risk this carries.</b> A longer interval puts more dirty pages, and so more files, into
     /// each checkpoint's sync phase, which is what makes the phase take longer.
-    /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a checkpoint's sync
-    /// phase averages more than 10 seconds — the bar #3892 traced to sync phases of 14.0s and 25.2s that
-    /// killed reads on a production store. This block ships only because the trial's measurement stayed
+    /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) is the 10-second read deadline a
+    /// sync is set against — the line #3892 traced to sync phases of 14.0s and 25.2s that killed reads on a
+    /// production store; the self-alert fires when a read or a write suffers inside a sync (#9549), not on the
+    /// length alone. This block ships only because the trial's measurement stayed
     /// under that bar; a store that regresses past it needs a shorter interval, not a self-alert override.</para>
     ///
     /// <para><b>Does not touch <c>max_wal_size</c>.</b> <see cref="ConfMarkerV12"/> (#3802) already bounds it
