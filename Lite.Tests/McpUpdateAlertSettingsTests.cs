@@ -265,21 +265,10 @@ public sealed class McpUpdateAlertSettingsTests : IDisposable
     [Fact]
     public void AToolWrite_AndAnotherKeysWriteOnTheUiThread_BothSurvive()
     {
-        Dispatcher? dispatcher = null;
-        using var started = new ManualResetEventSlim();
-        var thread = new Thread(() =>
+        /* The shared STA thread is the UI thread here: its body awaits the tool call, which runs on a pool thread as an MCP call does. */
+        StaTestThread.Run(async () =>
         {
-            dispatcher = Dispatcher.CurrentDispatcher;
-            started.Set();
-            Dispatcher.Run();
-        })
-        { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        started.Wait();
-
-        try
-        {
+            var dispatcher = Dispatcher.CurrentDispatcher;
             using var otherWriterDone = new ManualResetEventSlim();
             var gate = new object();
 
@@ -311,32 +300,27 @@ public sealed class McpUpdateAlertSettingsTests : IDisposable
                 otherWriterDone.Set();
             }
 
-            var result = JsonNode.Parse(McpAlertSettingsWriteTools.UpdateAlertSettingsCore(
+            var json = await Task.Run(() => McpAlertSettingsWriteTools.UpdateAlertSettingsCore(
                 """{"cpu":{"threshold_percent":42}}""",
                 readRoot: () =>
                 {
                     var stale = Read();
                     /* The other writer arrives while the tool holds its copy. On the UI thread it queues behind the tool and this wait
                        times out; anywhere else it runs now and finishes inside the wait. */
-                    dispatcher!.BeginInvoke(OtherWriter);
+                    dispatcher.BeginInvoke(OtherWriter);
                     otherWriterDone.Wait(TimeSpan.FromMilliseconds(500));
                     return stale;
                 },
                 write: Write,
-                dispatcher: dispatcher))!;
+                dispatcher: dispatcher));
 
-            Assert.Equal("updated", result["status"]!.GetValue<string>());
-            Assert.True(otherWriterDone.Wait(TimeSpan.FromSeconds(10)), "the other writer never ran");
+            Assert.Equal("updated", JsonNode.Parse(json)!["status"]!.GetValue<string>());
+            await Task.Run(() => Assert.True(otherWriterDone.Wait(TimeSpan.FromSeconds(10)), "the other writer never ran"));
 
             var final = Read();
             Assert.Equal(42, final["alert_cpu_threshold"]!.GetValue<int>());
             Assert.Equal("collapsed", final["sidebar_collapse_state"]!.GetValue<string>());
-        }
-        finally
-        {
-            dispatcher!.InvokeShutdown();
-            thread.Join(TimeSpan.FromSeconds(5));
-        }
+        });
     }
 
     [Fact]
