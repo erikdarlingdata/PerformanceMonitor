@@ -36,7 +36,7 @@ public sealed class WebAccessGroupAdmin(WebAccessGroupStore store, Func<string, 
         var token = NewToken(Guid.NewGuid());
         var sealedToken = seal(token.Plain, token.GroupId, token.Generation);
         await WriteAsync(() => store.CreateAsync(token.GroupId, name.Trim(), scope, tags.Distinct().ToArray(),
-            token.Generation, sealedToken, true, actor, ct));
+            token.Generation, sealedToken, true, actor, ct), conflictMeansDuplicateName: true);
         return token;
     }
 
@@ -57,7 +57,9 @@ public sealed class WebAccessGroupAdmin(WebAccessGroupStore store, Func<string, 
     private static WebAccessGroupToken NewToken(Guid id) =>
         new(id, Guid.NewGuid(), Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_'));
 
-    private static async Task WriteAsync(Func<Task<long>> write)
+    /// <summary>A create that hits WG409 collided with an existing group (the function raises it for a name or id that exists), which is not
+    /// the "changed in another window" an update or a delete reports for a stale revision.</summary>
+    private static async Task WriteAsync(Func<Task<long>> write, bool conflictMeansDuplicateName = false)
     {
         try { await write(); }
         catch (PostgresException ex)
@@ -65,6 +67,7 @@ public sealed class WebAccessGroupAdmin(WebAccessGroupStore store, Func<string, 
             // Do not display database detail: a failed write may carry the sealed credential.
             throw new InvalidOperationException(ex.SqlState switch
             {
+                "WG409" when conflictMeansDuplicateName => "A group with this name already exists.",
                 "WG409" => "This group changed in another window or in the service. Refresh and retry.",
                 "WG404" => "This group was deleted. Refresh the group list.",
                 "WG429" => "A store holds at most 256 web access groups.",
