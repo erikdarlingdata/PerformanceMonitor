@@ -74,6 +74,34 @@ internal static class ServerResolver
         return holders == 1 ? display : storageName;
     }
 
+    /// <summary>
+    /// The one list entry a resolved storage name picks, or the refusal to return (#9640). Two entries can share a
+    /// storage name (a pair saved before #4789) or share one <c>Id</c>, and the credential, the schedule and the
+    /// collection state all key on that value, so a call that picked the first of them could change or remove the
+    /// other server's. Either duplicate refuses the call, and the caller changes nothing.
+    /// </summary>
+    internal static (ServerConnection? Server, string? Error) PickByStorageName(IReadOnlyList<ServerConnection> servers, string storageName)
+    {
+        var named = servers.Where(s => RemoteCollectorService.GetServerNameForStorage(s) == storageName).ToList();
+        if (named.Count == 0)
+        {
+            return (null, McpHelpers.Refusal("server_name", $"'{storageName}' is no longer in the server list. Nothing was changed."));
+        }
+
+        var picked = named[0];
+        var sharesName = named.Count > 1;
+        if (!sharesName && servers.Count(s => string.Equals(s.Id, picked.Id, StringComparison.Ordinal)) <= 1)
+        {
+            return (picked, null);
+        }
+
+        var what = sharesName ? "more than one entry in the server list holds the storage name" : "another entry in the server list shares the id of";
+        return (null, McpHelpers.Refusal(
+            "server_name",
+            $"Nothing was changed: {what} '{storageName}', so Lite cannot tell which one this call means. " +
+            "The duplicate entries must be fixed in the Lite window (Manage Servers) first."));
+    }
+
     private static string Miss(IReadOnlyList<ServerConnection> servers, string? serverName) =>
         McpHelpers.Refusal("server_name", MissSentence(servers, serverName));
 

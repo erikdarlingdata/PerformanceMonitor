@@ -1051,28 +1051,8 @@ public partial class AddServerDialog : Window
 
                 AddedServer.CredentialProfileId = useProfile ? selectedProfile!.Id : null;
 
-                if (useProfile)
-                {
-                    // M-3: assigning a profile unconditionally scrubs the per-server identity REGARDLESS
-                    // of AuthenticationType — delete the per-server secret and null the per-server Azure/MI
-                    // fields, so a later "switch back to inline" can't silently resurrect a stale secret.
-                    AddedServer.AzureClientId = null;
-                    AddedServer.AzureTenantId = null;
-                    AddedServer.ManagedIdentityClientId = null;
-                    _serverManager.UpdateServer(AddedServer, null, null);
-                    if (ServerCredentialIds.Allows(AddedServer.Id, AddedServer.DisplayName))
-                    {
-                        _serverManager.CredentialService.DeleteCredential(AddedServer.Id);
-                    }
-                }
-                else
-                {
-                    _serverManager.UpdateServer(AddedServer, username, password);
-                }
-
-                /* Saving the dialog (with the password entered again where the server has one) confirms the host it
-                   names now, for this user. */
-                _serverManager.ConfirmHost(AddedServer);
+                /* #9640: the write Save makes is shared with the edit_server MCP tool, so the two store an edit the same way. */
+                ServerEditSave.Persist(_serverManager, AddedServer, useProfile, username, password);
             }
             else
             {

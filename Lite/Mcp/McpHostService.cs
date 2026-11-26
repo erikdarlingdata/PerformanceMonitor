@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.AspNetCore;
@@ -27,6 +28,7 @@ public sealed class McpHostService : BackgroundService
     private readonly ScheduleManager? _scheduleManager;
     private readonly int _port;
     private readonly McpServing _serving;
+    private readonly McpServerAdminHooks? _serverAdminHooks;
     private string? _currentToken;
     private readonly McpDataDetail _dataDetail;
     private readonly IPseudonymKeySource? _pseudonymKeys;
@@ -49,15 +51,20 @@ public sealed class McpHostService : BackgroundService
     /// no gate by leaving it out.</param>
     /// <param name="allowTokenlessLoopback">The explicit opt-out (<see cref="McpSettings.AllowTokenlessLoopback"/>): no gate is
     /// installed, only the read tools are served, and <paramref name="bearerToken"/> is ignored. See <see cref="DecideServing"/>.</param>
+    /// <param name="allowServerAdmin">Whether the server admin tools (<see cref="McpWritePolicy.ServerAdminTools"/>) are asked for as well
+    /// (<see cref="McpSettings.AllowServerAdmin"/>, #9640). They need <paramref name="allowWrites"/> and a usable token too.</param>
+    /// <param name="serverAdminHooks">The running Lite's own server removal and list refresh, for the server admin tools (#9640). Null in a host with no window.</param>
     /// <param name="allowWrites">Whether the write tools are asked for (<see cref="McpSettings.AllowWrites"/>, the
     /// <c>mcp_allow_writes</c> setting). Default off: a write tool is then absent from the served set and a call
     /// to it fails as an unknown tool. They are served only with a usable token too. See <see cref="McpWritePolicy"/>.</param>
     public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, IInvestigationRequestStore investigationStore,
         string? bearerToken, bool allowTokenlessLoopback, ScheduleManager? scheduleManager = null, bool allowWrites = false,
         bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full,
-        IPseudonymKeySource? pseudonymKeys = null)
+        IPseudonymKeySource? pseudonymKeys = null, bool allowServerAdmin = false,
+        McpServerAdminHooks? serverAdminHooks = null)
     {
-        _serving = DecideServing(bearerToken, allowTokenlessLoopback, allowWrites, allowInvestigations);
+        _serverAdminHooks = serverAdminHooks;
+        _serving = DecideServing(bearerToken, allowTokenlessLoopback, allowWrites, allowInvestigations, allowServerAdmin);
         _currentToken = _serving.Token;
         _pseudonymKeys = pseudonymKeys;
         _dataService = dataService;
@@ -128,7 +135,10 @@ public sealed class McpHostService : BackgroundService
     /// <param name="Investigations">The investigation tools are served.</param>
     /// <param name="AskedWrites">The settings asked for the write tools.</param>
     /// <param name="AskedInvestigations">The settings asked for the investigation tools.</param>
-    internal readonly record struct McpServing(string? Token, bool Writes, bool Investigations, bool AskedWrites, bool AskedInvestigations)
+    /// <param name="ServerAdmin">The server admin tools are served (#9640): the writes are served and the setting is on.</param>
+    /// <param name="AskedServerAdmin">The settings asked for the server admin tools.</param>
+    internal readonly record struct McpServing(string? Token, bool Writes, bool Investigations, bool AskedWrites, bool AskedInvestigations,
+        bool ServerAdmin = false, bool AskedServerAdmin = false)
     {
         /// <summary>The compiler-made <c>ToString</c> would print the token, so it shows only whether there is one.</summary>
         private bool PrintMembers(System.Text.StringBuilder builder)
@@ -137,7 +147,9 @@ public sealed class McpHostService : BackgroundService
                 .Append(", Writes = ").Append(Writes)
                 .Append(", Investigations = ").Append(Investigations)
                 .Append(", AskedWrites = ").Append(AskedWrites)
-                .Append(", AskedInvestigations = ").Append(AskedInvestigations);
+                .Append(", AskedInvestigations = ").Append(AskedInvestigations)
+                .Append(", ServerAdmin = ").Append(ServerAdmin)
+                .Append(", AskedServerAdmin = ").Append(AskedServerAdmin);
             return true;
         }
     }
@@ -151,7 +163,8 @@ public sealed class McpHostService : BackgroundService
     /// <paramref name="allowWrites"/> off (the writes SETTING, not whether they are served). It lives here, in the host's own
     /// constructor path, so no caller can skip it.
     /// </summary>
-    internal static McpServing DecideServing(string? bearerToken, bool allowTokenlessLoopback, bool allowWrites, bool allowInvestigations)
+    internal static McpServing DecideServing(string? bearerToken, bool allowTokenlessLoopback, bool allowWrites, bool allowInvestigations,
+        bool allowServerAdmin = false)
     {
         if (!allowTokenlessLoopback && string.IsNullOrEmpty(bearerToken))
         {
@@ -167,7 +180,9 @@ public sealed class McpHostService : BackgroundService
             Writes: allowWrites && usable,
             Investigations: allowInvestigations && usable && !allowWrites,
             AskedWrites: allowWrites,
-            AskedInvestigations: allowInvestigations);
+            AskedInvestigations: allowInvestigations,
+            ServerAdmin: allowWrites && allowServerAdmin && usable,
+            AskedServerAdmin: allowServerAdmin);
     }
 
     /// <summary>
@@ -261,10 +276,12 @@ public sealed class McpHostService : BackgroundService
     /// </summary>
     internal static void RegisterMcpServer(IServiceCollection services, bool allowWrites,
         bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full, IPseudonymKeySource? pseudonymKeys = null,
-        McpServing? serving = null)
+        McpServing? serving = null, bool allowServerAdmin = false)
     {
         /* #6066: Lite's pseudonym key (Credential Manager), for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
+        /* #9640: a host that registered no hooks (a test) gets none, so the server admin tools still resolve and remove_server says it cannot remove. */
+        services.TryAddSingleton(new McpServerAdminHooks());
         /* #5820, #8461: the tools that claim and report on investigation requests are served only with mcp_allow_investigations on
            AND the writes off (McpInvestigationPolicy); the two investigation reads are ordinary reads. Registered BEFORE the write
            policy so its instructions census (built there) counts only the tools this start offers. */
@@ -282,7 +299,7 @@ public sealed class McpHostService : BackgroundService
         /* The write switch (McpWritePolicy): once the SDK has gathered every registered tool, drop the writes
            unless mcp_allow_writes is on and stamp the annotation hints. Registered here, ahead of AddMcpServer,
            so it is a PostConfigure over the SDK's own options and sees the full tool set. */
-        services.AddMcpWritePolicy(allowWrites, serving);
+        services.AddMcpWritePolicy(allowWrites, serving, allowServerAdmin);
 
         /* Register MCP server with all tool classes */
         services
@@ -303,6 +320,7 @@ public sealed class McpHostService : BackgroundService
                the subset Gemini/Antigravity accepts — collapsing nullable type unions and
                dropping the default keyword. The companion to stateless transport for issue #1074. */
             .WithGeminiCompatibleTools<McpDiscoveryTools>()
+            .WithGeminiCompatibleTools<McpServerAdminTools>()
             .WithGeminiCompatibleTools<McpHealthTools>()
             /* #8788: get_store_health, the health of Lite's own DuckDB store. */
             .WithGeminiCompatibleTools<McpStoreHealthTools>()
@@ -339,10 +357,14 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpObjectUsageTools>()
             .WithGeminiCompatibleTools<McpLatchSpinlockTools>()
             .WithGeminiCompatibleTools<McpPlanCacheSchedulerTools>()
+            /* #9640: get_collector_schedules and reset_collector_schedules. */
+            .WithGeminiCompatibleTools<McpCollectorScheduleTools>()
             .WithGeminiCompatibleTools<McpConfigHistoryTools>()
             .WithGeminiCompatibleTools<McpDefaultTraceTools>()
             /* #5991: the query-tag and query-tag-rule tools; twin of Darling's DarlingMcpQueryTagTools and DarlingMcpQueryTagRuleTools. */
             .WithGeminiCompatibleTools<McpQueryTagTools>()
+            /* #9640: add_servers and remove_server, Darling's twins, served only with mcp_allow_server_admin as well as mcp_allow_writes. */
+            .WithGeminiCompatibleTools<McpServerRegistryTools>()
             .WithGeminiCompatibleTools<McpHealthParserTools>()
             .WithGeminiCompatibleTools<McpAnalysisTools>()
             /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off
@@ -433,7 +455,8 @@ public sealed class McpHostService : BackgroundService
     internal static List<(LogLevel Level, string Message)> StartupLines(McpServing serving)
     {
         var lines = new List<(LogLevel, string)>();
-        var writeTools = $"{McpWritePolicy.WriteTools.Count} write tools";
+        /* The server admin tools are in WriteTools too, but this line is about the writes switch alone: they have their own line below. */
+        var writeTools = $"{McpWritePolicy.WriteTools.Count(tool => !McpWritePolicy.IsServerAdmin(tool))} write tools";
         if (serving.Token is null)
         {
             lines.Add((LogLevel.Warning,
@@ -456,6 +479,21 @@ public sealed class McpHostService : BackgroundService
         {
             lines.Add((LogLevel.Information,
                 $"MCP write tools are off (the default): the {writeTools} are not served. To serve them set {McpWritePolicy.WritesSetting} to true in settings.json (a token is needed too)."));
+        }
+
+        /* #9640: the server admin tools' own line, one per start. Served is a Warning, asked for but held off is Critical, and the
+           nothing is logged when it is not asked for. */
+        var adminTools = McpWritePolicy.ServerAdminToolList;
+        if (serving.ServerAdmin)
+        {
+            lines.Add((LogLevel.Warning,
+                $"MCP server admin tools are ON ({McpWritePolicy.ServerAdminSetting}): {adminTools} are served to any client that has the MCP token. They change which servers Lite monitors and store a login. add_servers defaults to Windows authentication, so an entry with only a host connects with Lite's own Windows sign-in."));
+        }
+        else if (serving.AskedServerAdmin)
+        {
+            lines.Add((LogLevel.Critical,
+                $"{McpWritePolicy.ServerAdminSetting} is on but the MCP server admin tools stay OFF: they need {McpWritePolicy.WritesSetting} on and served as well ("
+                + $"{McpTokenStore.TokenRequirement}, and {McpSettings.AllowTokenlessLoopbackSetting} off). {adminTools} are not served."));
         }
 
         if (McpInvestigationPolicy.StartupLine(serving.AskedInvestigations, serving.AskedWrites, usable) is { } line)
@@ -484,7 +522,14 @@ public sealed class McpHostService : BackgroundService
             /* Register services that MCP tools need via dependency injection */
             builder.Services.AddSingleton(_dataService);
             builder.Services.AddSingleton(_serverManager);
+            /* #9640: add_servers and remove_server (served only with mcp_allow_server_admin) use the app's own removal and list refresh. */
+            builder.Services.AddSingleton(_serverAdminHooks ?? new McpServerAdminHooks());
             builder.Services.AddSingleton(_muteRuleService);
+            /* #9640: the schedule tools take the one manager the editor and the collection loop use; with none they answer unavailable. */
+            if (_scheduleManager is not null)
+            {
+                builder.Services.AddSingleton(_scheduleManager);
+            }
             /* #4938: get_collection_health shows each collector's run time and next run, from the schedule the sweep reads.
                Registered through the method a test also calls (see RegisterCollectorRunTimes). */
             RegisterCollectorRunTimes(builder.Services, _scheduleManager, _serverManager);
@@ -502,7 +547,7 @@ public sealed class McpHostService : BackgroundService
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
-            RegisterMcpServer(builder.Services, _serving.Writes, _serving.Investigations, _dataDetail, _pseudonymKeys, _serving);
+            RegisterMcpServer(builder.Services, _serving.Writes, _serving.Investigations, _dataDetail, _pseudonymKeys, _serving, _serving.ServerAdmin);
 
             _app = builder.Build();
 
