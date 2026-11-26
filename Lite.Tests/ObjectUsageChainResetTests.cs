@@ -122,4 +122,52 @@ public sealed class ObjectUsageChainResetTests : IDisposable
             Assert.Equal(Json(full), Json(persisted));
         }
     }
+
+    [Fact]
+    public async Task AResetBetweenTwoStepsOfOnePass_StopsThePair_AndTheNextPassRebuildsTheChainWhole()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var rows = ObjectUsageChainHistory.Generate();
+        var beforeNewest = rows.Where(r => r.CollectionTime < Now).ToList();
+        var newest = rows.Where(r => r.CollectionTime >= Now).ToList();
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, ServerId, "ResetSrv", Database, beforeNewest);
+        var snapshots = ObjectUsageChainHistory.SnapshotDays().Count() - 1;
+
+        /* The size reset runs between the 40th and the 41st step of one pass, the way the housekeeping reset can during a backfill of minutes. */
+        const int ResetAfterStep = 40;
+        var completed = 0;
+        var resets = 0;
+        var archive = new ArchiveService(_duckDb, _archiveDir, NullLogger<ArchiveService>.Instance);
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now)
+        {
+            StepCompletedForTests = async _ =>
+            {
+                if (++completed == ResetAfterStep)
+                {
+                    Assert.True(await archive.ArchiveAllAndResetAsync());
+                    resets++;
+                }
+            },
+        };
+        Assert.Equal(ResetAfterStep, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(1, resets);
+
+        /* The 41st step found the chain cleared and wrote nothing, so no step of the pair sits in the new store without the runs it needs. */
+        Assert.Equal(0L, await CountAsync("object_usage_snapshots"));
+        Assert.Equal(0L, await CountAsync("object_usage_deltas"));
+        Assert.Equal(0L, await CountAsync("object_usage_runs"));
+
+        builder.StepCompletedForTests = null;
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, ServerId, "ResetSrv", Database, newest, firstId: -1_000_000);
+        Assert.Equal(snapshots + 1, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        var service = new LocalDataService(_duckDb);
+        foreach (var daysBack in new[] { 7, 90 })
+        {
+            var full = await service.GetObjectUsageWindowFullAsync(ServerId, Database, Start(daysBack));
+            var (persisted, reason) = await service.TryReadObjectUsageChainAsync(ServerId, Database, Start(daysBack));
+            Assert.Null(reason);
+            Assert.NotNull(persisted);
+            Assert.Equal(Json(full), Json(persisted));
+        }
+    }
 }

@@ -222,6 +222,10 @@ internal sealed class ObjectUsageChainBuilder
         _resetPointMb = resetPointMb ?? (() => HotStoreResetLimit.Current.Mb);
     }
 
+    /// <summary>Test seam (#9596): awaited with the snapshot's time after each step, outside every lock, so a test can run a size reset or a
+    /// collector write between two steps of one pass. Null in the shipped app.</summary>
+    internal Func<DateTime, Task>? StepCompletedForTests { get; set; }
+
     /// <summary>The most chain rows (all three tables) the cap allows.</summary>
     internal long CapRows => (long)(_resetPointMb() * 1048576.0 * CapShareOfResetPoint / EstimatedBytesPerRow);
 
@@ -380,8 +384,19 @@ internal sealed class ObjectUsageChainBuilder
                 continue;
             }
 
-            await StepAsync(serverId, databaseName, stepper, open, time, rows, cancellationToken);
+            if (!await StepAsync(serverId, databaseName, stepper, open, time, rows, watermark, cancellationToken))
+            {
+                AppLogger.Info("ObjectUsage", $"The object usage chain of server {serverId} database '{databaseName}' changed under the pass (a size reset cleared it), so the pass stopped on it. The next pass starts again from what the store holds.");
+                break;
+            }
+
+            watermark = time;
             steps++;
+            if (StepCompletedForTests is { } stepCompleted)
+            {
+                await stepCompleted(time);
+            }
+
             if (await CountChainRowsAsync(cancellationToken) is var chainRows && chainRows.Deltas + chainRows.Other >= CapRows)
             {
                 _capHit = (serverId, databaseName);
@@ -392,10 +407,16 @@ internal sealed class ObjectUsageChainBuilder
         return steps;
     }
 
-    /// <summary>One snapshot: step the shared stepper, then write the snapshots row, the delta rows and the run changes in one transaction.</summary>
-    private async Task StepAsync(
+    /// <summary>
+    /// One snapshot: step the shared stepper, then write the snapshots row, the delta rows and the run changes in one transaction. The stepper and
+    /// the open runs live in memory for the whole pair, so the transaction first checks that the pair's stored chain still ends where this pass left
+    /// it, <paramref name="storedLast"/>. A size reset between two steps recreates the store with the chain tables empty, and a step written into
+    /// that would leave runs missing for every index that stayed open. The check and the writes sit under one read lock, which a reset cannot take.
+    /// Returns false, having written nothing, when the chain no longer ends there.
+    /// </summary>
+    private async Task<bool> StepAsync(
         int serverId, string databaseName, ObjectUsageStepper stepper, Dictionary<(int ObjectId, int IndexId), RunIdentity> open, DateTime time,
-        List<ObjectUsageSample> rows, CancellationToken cancellationToken)
+        List<ObjectUsageSample> rows, DateTime? storedLast, CancellationToken cancellationToken)
     {
         var previousTime = stepper.Nodes.PreviousTime;
         var step = stepper.Step(time, rows);
@@ -444,6 +465,19 @@ internal sealed class ObjectUsageChainBuilder
             using var transaction = connection.BeginTransaction();
             try
             {
+                using (var check = connection.CreateCommand())
+                {
+                    check.CommandText = "SELECT max(collection_time) FROM object_usage_snapshots WHERE server_id = $1 AND database_name = $2";
+                    check.Parameters.Add(new DuckDBParameter { Value = serverId });
+                    check.Parameters.Add(new DuckDBParameter { Value = databaseName });
+                    var stored = await check.ExecuteScalarAsync(cancellationToken) as DateTime?;
+                    if (stored != storedLast)
+                    {
+                        transaction.Rollback();
+                        return false;
+                    }
+                }
+
                 using (var insert = connection.CreateCommand())
                 {
                     insert.CommandText = InsertSnapshotSql;
@@ -541,6 +575,8 @@ internal sealed class ObjectUsageChainBuilder
         {
             open[key] = identity;
         }
+
+        return true;
     }
 
     private static void AppendTime(IDuckDBAppenderRow row, DateTime? value)
