@@ -62,6 +62,9 @@ internal static class McpWritePolicy
         "create_query_tag_rule",
         "update_query_tag_rule",
         "delete_query_tag_rule",
+
+        /* #9639: the alert-settings update, Darling's twin. get_alert_settings is a read. */
+        "update_alert_settings",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);

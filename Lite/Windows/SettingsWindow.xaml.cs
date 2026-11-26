@@ -1204,6 +1204,16 @@ public partial class SettingsWindow : Window
             : FindingRoute.Page;
 
         root["minimize_to_tray"] = App.MinimizeToTray;
+        /* #9639: the keys are written by WriteAlertKeys, the method update_alert_settings calls over MCP too. */
+        WriteAlertKeys(root, alertCooldownToSave);
+    }
+
+    /// <summary>The one writer of the alert and analysis keys in settings.json (#9639). Save (through <see cref="ApplyAlertSettings"/>)
+    /// and the MCP <c>update_alert_settings</c> tool both set the <see cref="App"/> statics and then call this, so the two cannot
+    /// disagree about which keys exist. <paramref name="alertCooldownMinutes"/> is the value the caller just set, passed in rather than
+    /// re-read from the static (#5881: another thread can rewrite the static between the set and this write).</summary>
+    internal static void WriteAlertKeys(JsonNode root, int alertCooldownMinutes)
+    {
         root["alerts_enabled"] = App.AlertsEnabled;
         root["notify_connection_changes"] = App.NotifyConnectionChanges;
         root["notify_connection_down_at_startup"] = App.NotifyConnectionDownAtStartup;
@@ -1275,7 +1285,7 @@ public partial class SettingsWindow : Window
         root["alert_long_running_job_multiplier"] = App.AlertLongRunningJobMultiplier;
         root["alert_failed_job_enabled"] = App.AlertFailedJobEnabled;
         root["alert_failed_job_lookback_minutes"] = App.AlertFailedJobLookbackMinutes;
-        root["alert_cooldown_minutes"] = alertCooldownToSave;
+        root["alert_cooldown_minutes"] = alertCooldownMinutes;
         root["email_cooldown_minutes"] = App.EmailCooldownMinutes;
         root["alert_delivery_mode"] = App.AlertDeliveryMode.ToString();
         root["alert_per_event_max_per_cycle"] = App.AlertPerEventMaxPerCycle;
