@@ -131,6 +131,58 @@ public sealed class NonSuperuserStoreOwnerLiveTests
         }
     }
 
+    /// <summary>
+    /// The capture lists the log with <c>pg_ls_logdir()</c> and builds each file's path from the <c>log_directory</c> setting, which a plain
+    /// login can read only through <c>pg_read_all_settings</c>. A login granted EXECUTE on <c>pg_ls_logdir()</c> alone lists the folder and
+    /// then fails at the setting, so the probe must not count it as able to list; <c>pg_monitor</c> covers both.
+    /// </summary>
+    [Fact]
+    public async Task ALoginGrantedOnlyTheLogListing_IsNotCountedAsAbleToList_UntilItHoldsPgMonitor()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live store login readiness test (it mints its own scratch database and login).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var owner = "byo_login_" + Guid.NewGuid().ToString("N")[..8];
+        var bodySucceeded = false;
+        try
+        {
+            await using (var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct, emptyStore: true))
+            {
+                await CreateOwnerAsync(scratch, owner, ct);
+                await using var superuser = new NpgsqlConnection(scratch.ConnectionString);
+                await superuser.OpenAsync(ct);
+                await ExecAsync(superuser, $"GRANT EXECUTE ON FUNCTION pg_catalog.pg_ls_logdir() TO {owner}", ct);
+
+                await using var asOwner = new NpgsqlConnection(OwnerConnectionString(scratch, owner));
+                await asOwner.OpenAsync(ct);
+                Assert.False(await CanListLogAsync(asOwner, ct), "a login with EXECUTE on pg_ls_logdir() alone was counted as able to list the log");
+                var denied = await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(asOwner, "SELECT pg_catalog.current_setting('log_directory')", ct));
+                Assert.Equal(PostgresErrorCodes.InsufficientPrivilege, denied.SqlState);
+
+                await ExecAsync(superuser, $"GRANT pg_monitor TO {owner}", ct);
+                Assert.True(await CanListLogAsync(asOwner, ct), "a login holding pg_monitor was not counted as able to list the log");
+                await ExecAsync(asOwner, "SELECT pg_catalog.current_setting('log_directory')", ct);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(baseConnectionString!, bodySucceeded, (cleanup, _) => ExecAsync(cleanup, $"DROP ROLE IF EXISTS {owner}", CancellationToken.None));
+        }
+    }
+
+    /// <summary>The probe's log-listing column, read through the product's own statement.</summary>
+    private static async Task<bool> CanListLogAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(StoreLoginReadiness.LoginPrivilegesSql, connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return reader.GetBoolean(3);
+    }
+
     /// <summary>The migrations, TimescaleDB and every convergence step on one connection string, the way the service's start path runs them. Returns the aggregate step's count.</summary>
     private static async Task<int> BuildStoreAsync(string connectionString, ILogger logger, CancellationToken ct)
     {

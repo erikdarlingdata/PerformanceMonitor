@@ -116,7 +116,6 @@ sudo -u postgres psql -X -d darling
 CREATE EXTENSION IF NOT EXISTS timescaledb;
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public;
 GRANT pg_monitor TO darling;
-GRANT CREATE ON SCHEMA _timescaledb_internal TO darling;
 REVOKE SELECT ON public.pg_stat_statements FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.pg_stat_statements(boolean) FROM PUBLIC;
 GRANT SELECT ON public.pg_stat_statements TO pg_read_all_stats, darling;
@@ -129,13 +128,12 @@ GRANT EXECUTE ON FUNCTION public.pg_stat_statements_info() TO pg_read_all_stats,
 
 What each one is for:
 
-- **`timescaledb`.** The service can create this extension itself, and a superuser can create it first. Creating it here lets the `_timescaledb_internal` grant below happen before the first start.
+- **`timescaledb`.** The service can create this extension itself, and a superuser can create it first. The owner role builds every continuous aggregate and its indexes with no grant on TimescaleDB's `_timescaledb_internal` schema.
 - **`pg_stat_statements`.** This extension is not trusted, so only a superuser can create it. The service does not try, and it logs nothing while the extension is missing. Name `SCHEMA public`. After its first start the service sets the database `search_path` to `collect, config, public`, so a later `CREATE EXTENSION pg_stat_statements` without a schema lands in `collect`, and the service then warns that `PUBLIC can still read collect.pg_stat_statements`. The statements in [Security](security.md#security--least-privilege-roles) are written for `public`.
-- **`pg_monitor`.** Without it the service logs `The store's role cannot read pg_wal's size (pg_ls_waldir)` and records the WAL figures without that size.
-- **CREATE on `_timescaledb_internal`.** Without it, some continuous aggregates and one rollup fail to set up on every start with `42501: permission denied for schema _timescaledb_internal`. The summary line then reads `24/32 continuous aggregate(s) ready`, and reads over those rollups fall back to raw scans. This is a defect, [#9691](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9691), and the grant is the workaround today. If a first start has already run without it, run the grant and restart the service.
+- **`pg_monitor`.** Without it the service logs `The store's role cannot read pg_wal's size (pg_ls_waldir)` and records the WAL figures without that size. The [store log capture](#store-log-capture) needs it too.
 - **The `pg_stat_statements` revokes and grants.** They stop every login in the database from reading the statement statistics of every role. Without them the service warns `PUBLIC can still read public.pg_stat_statements` and names these statements. Only the owner of the extension or a superuser can run them.
 
-A superuser login for the service also clears all of this, and [Security](security.md#security--least-privilege-roles) describes the store that way. The grants above are the smaller choice. [#9698](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9698) tracks what the service says when a right is missing.
+A superuser login for the service also clears all of this, and [Security](security.md#security--least-privilege-roles) describes the store that way. The grants above are the smaller choice. When the owner role lacks a right the service uses, the service logs one warning at each start that begins `The store login "darling" is not a superuser and lacks privileges the service uses`. It says what each missing right costs and gives the statements that grant it, to run as a superuser in the `darling` database.
 
 **Proof:** `sudo -u postgres psql -X -d darling -c "\dx"` lists `timescaledb` and `pg_stat_statements`, and `SHOW shared_preload_libraries` returns both names.
 
@@ -147,12 +145,18 @@ Custom alerts do not run on this shape today. The service logs `Custom alert eva
 
 ### Store log capture
 
-The service reads the store's own PostgreSQL log into the store. A Debian or Ubuntu package logs to `/var/log/postgresql` with `logging_collector = off`, which is a healthy setup, and the service cannot read that. It logs one of these two warnings every hour ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)):
+The service reads the store's own PostgreSQL log into the store. A Debian or Ubuntu package logs to `/var/log/postgresql` with `logging_collector = off`, which is a healthy setup, and the service cannot read that. It logs one of these two warnings once, and repeats the same cause only at Debug until the cause changes:
 
 - `Store log capture failed ... The store keeps no log files to read (logging_collector is off or the log folder is missing)`
-- `Store log capture failed ... Reading the store's own log needs pg_read_server_files and EXECUTE on pg_read_binary_file`
+- `Store log capture failed ... Reading the store's own log needs pg_monitor and EXECUTE on pg_read_binary_file`
 
-Both are safe to leave. Collection from your monitored servers is not affected, and PostgreSQL's log is still in `/var/log/postgresql`. Capture needs `logging_collector = on`, a `log_directory` inside the data directory (the PostgreSQL default, `log`), and `pg_read_server_files` plus EXECUTE on `pg_read_binary_file` for the owner role. `pg_read_server_files` lets the role read any file the PostgreSQL server can read, so grant it only when you want the capture.
+Both are safe to leave. Collection from your monitored servers is not affected, and PostgreSQL's log is still in `/var/log/postgresql`. Capture needs `logging_collector = on`, `pg_monitor` for the owner role (granted above), and this grant, run as `postgres` in the `darling` database:
+
+```sql
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint) TO darling;
+```
+
+That lets the role read any file in the data directory and in `log_directory`, so grant it only when you want the capture. `pg_read_server_files` is not needed, wherever `log_directory` points.
 
 ## Step 4: Download and verify
 

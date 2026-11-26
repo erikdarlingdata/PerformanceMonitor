@@ -26,9 +26,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// it for the real role name, and the caller logs that as one Warning per start. A login that holds every privilege, a superuser included, logs nothing.
 ///
 /// <para><b>Only what is measured to matter.</b> The log capture is named only when the store writes log files (<c>logging_collector</c> is on):
-/// a store that keeps none has nothing for a grant to open. It asks for <c>pg_monitor</c> (which carries <c>pg_ls_logdir()</c> and
-/// <c>pg_ls_waldir()</c>) and an explicit EXECUTE on the three-argument <c>pg_read_binary_file</c>, the call the capture makes; a log folder inside
-/// the data directory, the default, needs no <c>pg_read_server_files</c>. The aggregates are named only when a declared aggregate is absent from the
+/// a store that keeps none has nothing for a grant to open. It asks for <c>pg_monitor</c> (which carries <c>pg_ls_logdir()</c>, <c>pg_ls_waldir()</c>
+/// and, through <c>pg_read_all_settings</c>, the <c>log_directory</c> setting the capture builds its path from) and an explicit EXECUTE on the
+/// three-argument <c>pg_read_binary_file</c>, the call the capture makes. A login granted EXECUTE on <c>pg_ls_logdir()</c> alone can list the folder
+/// and still fails at the setting, so listing counts only with both. No <c>pg_read_server_files</c>: PostgreSQL lets EXECUTE read any file under
+/// <c>log_directory</c>, inside the data directory or not. The aggregates are named only when a declared aggregate is absent from the
 /// catalog and the login cannot create in <c>_timescaledb_internal</c>: with the schema right missing but every aggregate built, nothing is degraded.
 /// Function grants are per database, so the line names the database the statements run in.</para>
 /// </summary>
@@ -49,7 +51,8 @@ public static class StoreLoginReadiness
 SELECT current_user::text,
        current_database()::text,
        COALESCE(has_function_privilege(current_user, to_regprocedure('pg_catalog.pg_ls_waldir()')::oid, 'EXECUTE'), true),
-       COALESCE(has_function_privilege(current_user, to_regprocedure('pg_catalog.pg_ls_logdir()')::oid, 'EXECUTE'), true),
+       COALESCE(has_function_privilege(current_user, to_regprocedure('pg_catalog.pg_ls_logdir()')::oid, 'EXECUTE'), true)
+           AND pg_has_role(current_user, 'pg_read_all_settings', 'USAGE'),
        COALESCE(has_function_privilege(current_user, to_regprocedure('pg_catalog.pg_read_binary_file(text, bigint, bigint)')::oid, 'EXECUTE'), true),
        COALESCE(current_setting('logging_collector', true), 'off') = 'on',
        COALESCE(has_schema_privilege(current_user, to_regnamespace('_timescaledb_internal')::oid, 'CREATE'), true)";
@@ -120,7 +123,7 @@ WHERE view_schema = 'collect' AND view_name = ANY($1)";
                 statements.Add($"GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint) TO {login}");
             }
 
-            items.Add("the store's own log is not captured (needs pg_ls_logdir and pg_read_binary_file)");
+            items.Add("the store's own log is not captured (needs pg_ls_logdir, the log_directory setting and pg_read_binary_file)");
         }
 
         if (items.Count == 0)
