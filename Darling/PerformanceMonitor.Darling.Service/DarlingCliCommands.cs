@@ -4770,7 +4770,7 @@ public static partial class DarlingCliCommands
                     ? $"Firewall: cleared any previous {surface} rule matching '{wildcard}'."
                     : $"Firewall: removed every {surface} rule matching '{wildcard}'.",
                 $"Firewall: could not remove the rule(s) matching '{wildcard}'",
-                output, error, cancellationToken);
+                output, error, FirewallShell.Machine, cancellationToken);
 
             if (openCommand is not null)
             {
@@ -4778,7 +4778,7 @@ public static partial class DarlingCliCommands
                     openCommand,
                     $"Firewall rule '{ruleName}' opened (TCP {port}, inbound, from {canonicalCidr}).",
                     $"Firewall rule open did not confirm for '{ruleName}'",
-                    output, error, cancellationToken);
+                    output, error, FirewallShell.Machine, cancellationToken);
             }
 
             return;
@@ -5899,11 +5899,11 @@ public static partial class DarlingCliCommands
     /// a path <c>install-darling.ps1</c> cannot take, since it refuses to run unelevated at all.</para>
     /// </summary>
     [SupportedOSPlatform("windows")]
-    private static async Task<bool?> ProbeSurfaceRulesAsync(string wildcard, CancellationToken cancellationToken)
+    private static async Task<bool?> ProbeSurfaceRulesAsync(string wildcard, FirewallShell shell, CancellationToken cancellationToken)
     {
         try
         {
-            var (exitCode, psOutput) = await DarlingManagedPostgres.RunPowerShellAsync(
+            var (exitCode, psOutput) = await shell.RunPowerShell(
                 DarlingFirewallCheck.BuildProbeCommand(wildcard), cancellationToken);
 
             /* The probe exits 0 for BOTH answers, so a non-zero exit means the probe itself broke; do not read
@@ -5943,6 +5943,38 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
+        return await ConfigureFirewallAsync(config, output, error, FirewallShell.Machine, cancellationToken);
+    }
+
+    /// <summary>
+    /// What <c>--configure-firewall</c> asks of the machine, as one seam (#9788): whether the shell is elevated,
+    /// how a PowerShell command runs, and how the control plane's endpoint toggles are read. The verb runs
+    /// through <see cref="Machine"/>. <c>Darling.Tests</c> passes a recording shell instead, so the verb's
+    /// behaviour (which commands run, in which order, and what it prints and returns) is observable without an
+    /// elevated Windows host, a live firewall or a store.
+    /// </summary>
+    internal sealed class FirewallShell
+    {
+        public required Func<bool> IsElevated { get; init; }
+
+        public required Func<string, CancellationToken, Task<(int ExitCode, string Output)>> RunPowerShell { get; init; }
+
+        public required Func<DarlingConfig, CancellationToken, Task<((bool Enabled, int Port)? Mcp, (bool Enabled, int Port)? Web, string? Unavailable)>> ReadEndpointToggles { get; init; }
+
+        /// <summary>The real machine: this process's token, powershell.exe, and the managed store.</summary>
+        [SupportedOSPlatform("windows")]
+        public static FirewallShell Machine => new()
+        {
+            IsElevated = () => DarlingCliCommands.IsElevated(),
+            RunPowerShell = (command, token) => DarlingManagedPostgres.RunPowerShellAsync(command, token),
+            ReadEndpointToggles = (config, token) => DarlingCliCommands.TryReadEndpointTogglesAsync(config, token),
+        };
+    }
+
+    [SupportedOSPlatform("windows")]
+    internal static async Task<int> ConfigureFirewallAsync(
+        DarlingConfig config, TextWriter output, TextWriter error, FirewallShell shell, CancellationToken cancellationToken)
+    {
         /* #2414: ask the control plane which ports the MCP/web endpoints are actually bound to, because that —
            not darling.json's seed — is what the rule has to be named for. BEST EFFORT on purpose. This verb is
            called by install-darling.ps1 before the service has ever run, when there is no store to ask and
@@ -5950,7 +5982,7 @@ public static partial class DarlingCliCommands
            reachable store would fail every fresh install. What it must not do is fall back QUIETLY: the plan
            carries a PortNote that names the port it used, why it could not do better, and what makes that port
            wrong, printed below on the same footing as the rules themselves. */
-        var (mcpStore, webStore, storeUnavailable) = await TryReadEndpointTogglesAsync(config, cancellationToken);
+        var (mcpStore, webStore, storeUnavailable) = await shell.ReadEndpointToggles(config, cancellationToken);
         var plans = PlanFirewallRules(config, mcpStore, webStore, storeUnavailable);
         var toOpen = plans.Count(p => p.Action == FirewallRuleAction.Open);
 
@@ -5973,7 +6005,7 @@ public static partial class DarlingCliCommands
             output.WriteLine();
         }
 
-        if (!IsElevated())
+        if (!shell.IsElevated())
         {
             /* Not elevated. When nothing is exposed there is genuinely nothing to do and a hard failure would
                be a lie (and would fail an otherwise fine loopback install); when something IS exposed this is a
@@ -6013,7 +6045,7 @@ public static partial class DarlingCliCommands
                 if (plan.Action == FirewallRuleAction.Remove && plan.SweepOtherPorts)
                 {
                     rulesFound = await ProbeSurfaceRulesAsync(
-                        DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName), cancellationToken);
+                        DarlingFirewallCheck.SurfaceRuleWildcard(plan.RuleName), shell, cancellationToken);
                 }
 
                 handoffs.Add((plan, ClassifyNotElevatedHandoff(plan.Action, plan.SweepOtherPorts, rulesFound)));
@@ -6110,7 +6142,7 @@ public static partial class DarlingCliCommands
                         ? $"{plan.Surface}: no rule belongs on any port (removed any '{wildcard}')."
                         : $"{plan.Surface}: cleared any previous rule matching '{wildcard}'.",
                     $"{plan.Surface}: could not remove the rule(s) matching '{wildcard}'",
-                    output, error, cancellationToken))
+                    output, error, shell, cancellationToken))
                 {
                     failures++;
                 }
@@ -6138,7 +6170,7 @@ public static partial class DarlingCliCommands
                 DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!),
                 $"{plan.Surface}: opened '{plan.RuleName}' (TCP {plan.Port}, inbound, from {plan.Cidr}).",
                 $"{plan.Surface}: could not open the rule '{plan.RuleName}'",
-                output, error, cancellationToken))
+                output, error, shell, cancellationToken))
             {
                 failures++;
             }
@@ -6250,11 +6282,11 @@ public static partial class DarlingCliCommands
     /// command so an operator can finish by hand. Never throws except on cancellation.</summary>
     [SupportedOSPlatform("windows")]
     private static async Task<bool> TryRunFirewallStepAsync(
-        string command, string successLine, string failurePrefix, TextWriter output, TextWriter error, CancellationToken cancellationToken)
+        string command, string successLine, string failurePrefix, TextWriter output, TextWriter error, FirewallShell shell, CancellationToken cancellationToken)
     {
         try
         {
-            var (exitCode, psOutput) = await DarlingManagedPostgres.RunPowerShellAsync(command, cancellationToken);
+            var (exitCode, psOutput) = await shell.RunPowerShell(command, cancellationToken);
             if (exitCode == 0)
             {
                 output.WriteLine(successLine);
