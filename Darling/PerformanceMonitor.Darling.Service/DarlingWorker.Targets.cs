@@ -2247,6 +2247,11 @@ LIMIT 1";
         => CollectorCatalog.Find(collectorName)?.RunsPerDatabase(
             new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql }) == true;
 
+    /// <summary>The start of the words PostgreSQL's file read refuses a relative path outside the data directory with
+    /// (genfile.c), for a role without pg_read_server_files: "path must be in or below the data directory" on PostgreSQL 16,
+    /// "path must be in or below the current directory" on PostgreSQL 13, both measured. A target can run either.</summary>
+    internal const string TargetLogRelativePathRefusalPrefix = "path must be in or below the ";
+
     /// <summary>
     /// The self-hosted log readers (#3239; three since #3601). Their dispatch entries send Aurora and RDS to
     /// the log-API ingestors, so a target-side PostgresException under any of the names comes from the
@@ -2260,7 +2265,7 @@ LIMIT 1";
     /// <summary>
     /// Where the pg_read_file grants have to be issued, named when we know it (#3239) — function ACLs are
     /// per-database catalogs, the same fact <see cref="WhereToCreateIt"/> names for extensions. Measured
-    /// on the 20260910 dogfood soak: the pair issued in the wrong database leaves a failure identical to
+    /// on the 20260910 dogfood soak: the grants issued in the wrong database leave a failure identical to
     /// no grant at all.
     /// </summary>
     private static string WhereToGrantIt(string? connectedDatabase)
@@ -2612,19 +2617,32 @@ LIMIT 1";
 
         return fault switch
         {
-            /* #3239: the two self-hosted log readers are the exception the general sentence below used to
-               deny to their faces. Reading the log with pg_read_file needs the pg_read_server_files role
-               AND an explicit EXECUTE grant — measured on #2566, the role alone does NOT carry it, because
-               the function's ACL is postgres=X/postgres — and the EXECUTE half lives in each database's
-               own catalog, so the grants only count in the database this collector connects to. The old
-               hint said pg_monitor covers everything, which sent an operator in a circle: the product's
-               own changelog knew better. */
+            /* #3239: the self-hosted log readers are the exception to the general sentence below, which
+               says pg_monitor covers every collector and would send an operator in a circle. Reading the
+               log with pg_read_file needs an explicit EXECUTE grant, because the function's ACL is
+               postgres=X/postgres and pg_monitor does not carry it. That grant alone reads any file under
+               the data directory or under an absolute log_directory, so the pg_read_server_files role, which
+               widens the login to every file the server's OS user can read, is not asked for (#9723).
+               EXECUTE grants live in each database's own catalog, so they only count in the database this
+               collector connects to. The one refusal no EXECUTE grant answers is a relative log_directory
+               that leads out of the data directory (genfile.c's "path must be in or below the data
+               directory"), and it gets its own arm. */
+            CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName)
+                && ex.MessageText.Contains(TargetLogRelativePathRefusalPrefix, StringComparison.Ordinal) => ("PERMISSIONS",
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this collector reads the server log under "
+                + "log_directory, and on this server log_directory is a relative path that leads out of the "
+                + "data directory. PostgreSQL reads a file there only for a role that holds "
+                + "pg_read_server_files, whatever EXECUTE grants the login has. Set log_directory to an "
+                + "absolute path, which the EXECUTE grants on pg_read_file(text, bigint, bigint) and "
+                + "pg_read_binary_file(text, bigint, bigint) read, or grant pg_read_server_files to the "
+                + "monitoring login, knowing that it reads every file the server's OS user can."),
             CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName) => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this collector reads the server log with "
-                + "pg_read_file(), which pg_monitor does NOT cover. The monitoring login needs BOTH the "
-                + "pg_read_server_files role AND an explicit GRANT EXECUTE ON FUNCTION pg_read_file(text), "
-                + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean): the "
-                + "role alone does not carry EXECUTE, because the function's ACL is postgres=X/postgres. "
+                + "pg_read_file(), which pg_monitor does NOT cover. The monitoring login needs, on top of "
+                + "pg_monitor, an explicit GRANT EXECUTE ON FUNCTION pg_read_file(text, bigint, bigint), "
+                + "because the function's ACL is postgres=X/postgres. pg_read_server_files is not needed "
+                + "while log_directory is absolute or inside the data directory: EXECUTE alone reads any "
+                + "file there. "
                 + "EXECUTE grants live in each database's own catalog, so issue them "
                 + WhereToGrantIt(connectedDatabase)
                 + " While issuing that grant, also GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, "

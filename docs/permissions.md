@@ -291,7 +291,7 @@ Only Darling monitors PostgreSQL servers. Lite does not. The SQL Server grants a
 
 - `pg_monitor` on the monitoring role.
 - `pg_read_all_data` on PostgreSQL 14 and later.
-- `pg_read_server_files`, and `EXECUTE` on `pg_read_file` and on `pg_read_binary_file(text, bigint, bigint)`, on self-hosted targets only. Three collectors read the server log with them. With the binary form granted, they switch to it on their own, and one byte in the log tail that is not valid UTF-8 no longer fails the whole read.
+- `EXECUTE` on `pg_read_file(text, bigint, bigint)` and on `pg_read_binary_file(text, bigint, bigint)`, on self-hosted targets only. Three collectors read the server log with them. With the binary form granted, they switch to it on their own, and one byte in the log tail that is not valid UTF-8 no longer fails the whole read. `pg_read_server_files` is not needed, because `EXECUTE` reads any file under the data directory or under an absolute `log_directory`. The one exception is a relative `log_directory` that leads out of the data directory, such as `../pglog`. PostgreSQL refuses a read there with `path must be in or below the data directory` (`the current directory` on PostgreSQL 13) to any login without the role, so give such a server an absolute `log_directory`.
 - The `pg_stat_statements` extension, for the `pg_statement_stats` collector.
 
 The exact statements are in the Darling operator guide, in [Permissions on a PostgreSQL target](darling/postgresql-targets.md#permissions-on-a-postgresql-target).

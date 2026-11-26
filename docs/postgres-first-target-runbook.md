@@ -94,18 +94,14 @@ installing the extension let the service reconnect to move up a tier.
 ### Self-hosted: the log-reader grants (plan capture, deadlocks, log events)
 
 `pg_deadlocks`, `pg_plan_capture` and `pg_log_events` read the server log with `pg_read_file()`, and that is the one read
-in this step `pg_monitor` does not cover. It takes BOTH halves — the role does not carry the function's
-EXECUTE, because `pg_read_file`'s ACL is `postgres=X/postgres` (measured on #2566; granting the role
-alone changes nothing) — and the EXECUTE half lives in each database's own catalog, so **run this in the
-database Darling connects to**, not in `postgres` for good measure:
+in this step `pg_monitor` does not cover. It needs an explicit EXECUTE on the function, because `pg_read_file`'s ACL is `postgres=X/postgres` (measured on #2566). `pg_monitor` already covers the `pg_ls_logdir()` listing and the `log_directory` setting the read builds its path from. The `pg_read_server_files` role is not needed: EXECUTE reads any file under the data directory or under an absolute `log_directory`, even one outside the data directory, while the role widens the login to every file the server's OS user can read, so leave it off. A relative `log_directory` that leads out of the data directory, such as `../pglog`, is the one place PostgreSQL refuses the read without the role (`path must be in or below the data directory` (`the current directory` on PostgreSQL 13)), so give such a server an absolute `log_directory`. The EXECUTE grant lives in each database's own catalog, so **run this in the database Darling connects to**, not in `postgres` for good measure:
 
 ```sql
-GRANT pg_read_server_files TO darling_monitor;
-GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean) TO darling_monitor;
+GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_file(text, bigint, bigint) TO darling_monitor;
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint) TO darling_monitor;
 ```
 
-The third grant is not optional in practice ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)):
+The second grant is not optional in practice ([#4046](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4046)):
 `pg_read_file()` returns `text`, which PostgreSQL validates against the database encoding before this
 process ever sees a row, so one byte that is not valid UTF-8 anywhere in the 4 MB tail — which a failed
 login can plant with nothing but a bad role or database name — fails the WHOLE read for as long as that
@@ -120,20 +116,20 @@ still fail it, and the grant does not help there. The fault message says so, and
 [#4062](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4062) tracks a fix.
 
 Issued in a different database on the same cluster, the grants change nothing and the failure looks
-identical — measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from
+identical. This was measured on a live PG18 target, where the in-database grant flipped `pg_deadlocks` from
 `PERMISSIONS` to `SUCCESS` on the next cycle, no restart needed. Self-hosted only: on Aurora/RDS there
-is no filesystem, `pg_read_server_files` is not grantable, and all three collectors take the RDS log API
-route instead — that is the IAM subsection below.
+is no filesystem to read, and all three collectors take the RDS log API
+route instead, which is the IAM subsection below.
 
 **Proof:** as the monitoring login, in the same database, mirror the collectors' own read:
 
 ```sql
-SELECT pg_catalog.pg_read_file('log/' || name, 0, 64) FROM pg_catalog.pg_ls_logdir() ORDER BY modification DESC, name DESC LIMIT 1;
+SELECT pg_catalog.pg_read_file(pg_catalog.current_setting('log_directory') || '/' || name, 0, 64) FROM pg_catalog.pg_ls_logdir() ORDER BY modification DESC, name DESC LIMIT 1;
 ```
 
-A log line comes back. `permission denied for function pg_read_file` means the EXECUTE half is missing
-*in this database*; until both halves are in place, all three collectors fail every cycle as `PERMISSIONS`,
-with an `error_message` naming this exact pair and the database to run it in.
+A log line comes back. `permission denied for function pg_read_file` means the EXECUTE grant is missing
+*in this database*. Until it is in place, all three collectors fail every cycle as `PERMISSIONS`,
+with an `error_message` naming the grant and the database to run it in.
 
 ### Windows only: the pg_file_settings grants (pg_server_config's pending_restart)
 
@@ -824,7 +820,7 @@ says which kind it is. A missing extension a collector declares gets its own `EX
 | `status` | `error_message` says | Actually means | Fix |
 |---|---|---|---|
 | `PERMISSIONS` | a missing grant | it is one | `GRANT pg_monitor` (step 1) |
-| `PERMISSIONS` | `permission denied for function pg_read_file`, names the grant pair | the self-hosted log readers (`pg_deadlocks`, `pg_plan_capture`) lack the log-reader grants | step 1's self-hosted subsection — run it **in the database Darling connects to**; issued elsewhere on the cluster it changes nothing |
+| `PERMISSIONS` | `permission denied for function pg_read_file`, names the grant | the self-hosted log readers (`pg_deadlocks`, `pg_plan_capture`) lack the log-reader grants | step 1's self-hosted subsection — run it **in the database Darling connects to**; issued elsewhere on the cluster it changes nothing |
 | `EXTENSION_MISSING` | names the extension, "NOT a missing grant" | that extension never created where the collector connects | `CREATE EXTENSION` per the message (step 1's optional half), or leave it uninstalled and accept the gap |
 | `PERMISSIONS` | "NOT a missing grant", not implemented | reading something this engine lacks | nothing — expected off Aurora |
 | `PERMISSIONS` | "NOT a missing grant", feature disabled | switched off in the parameter group | enable it, or accept the gap |
