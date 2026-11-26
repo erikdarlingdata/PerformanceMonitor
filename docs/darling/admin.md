@@ -12,6 +12,7 @@ To change the list, use one of these:
 
 - The Viewer: **Manage Servers**.
 - The `add_servers`, `edit_server`, `remove_server` and `set_server_action` MCP tools. They need `mcp.allowWrites` and `mcp.allowServerAdmin`.
+- The `mint_personal_token` and `revoke_personal_token` MCP tools, which make and revoke a personal MCP token for a person named in `get_people`. They need `mcp.allowWrites` and `mcp.allowServerAdmin`, and personal tokens on. `get_personal_tokens` lists the tokens and never shows a token value.
 - The `--add-server` command line verb. It can add a server. It cannot remove one.
 
 The web Admin page can edit a server that already exists. It cannot add, remove, enable or disable one. The page says so itself. For the full list of what the file still controls, see [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed).
