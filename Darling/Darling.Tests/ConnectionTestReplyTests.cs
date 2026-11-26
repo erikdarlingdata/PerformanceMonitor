@@ -199,7 +199,9 @@ public sealed class ConnectionTestReplyTests : IDisposable
             awsRoleAllowlist: PerformanceMonitor.Darling.Service.Targets.AwsRoleAllowlist.From(["123456789012"]));
 
         Assert.Equal("connection_failed", JsonNode.Parse(answer)!["results"]![0]!["status"]!.GetValue<string>());
-        Assert.Contains("Distinctive-Driver-Text", log.Joined, StringComparison.Ordinal);
+        /* The driver's text repeats both typed secrets, so the log line names the target and withholds the whole text (#9693). */
+        Assert.Contains(log.Lines, l => l.Contains("sql-test-01,1444", StringComparison.Ordinal));
+        Assert.DoesNotContain("Distinctive-Driver-Text", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain(Password, log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain(externalId, log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain(externalId, answer, StringComparison.Ordinal);

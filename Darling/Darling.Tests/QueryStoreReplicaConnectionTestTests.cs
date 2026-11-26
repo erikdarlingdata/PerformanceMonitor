@@ -290,7 +290,7 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
     }
 
     [Fact]
-    public async Task TheAddServerVerb_ShowsTheDriverTextOfAReplicaThatWillNotOpen_WithThePasswordRemoved()
+    public async Task TheAddServerVerb_ShowsTheDriverTextOfAReplicaThatWillNotOpen()
     {
         var answer = await Core.AddServersAsync(
             new SavingDefinitions(), AddBody(), ReplicaDown, CancellationToken.None, ring: TestKeyRings.Healthy, revealConnectError: true);
