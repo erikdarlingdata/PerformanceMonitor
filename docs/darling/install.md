@@ -61,7 +61,7 @@ PowerShell's `ConvertFrom-Json` fails on this file. Some parsers accept comments
 
 The release also has `PerformanceMonitorDarling-<version>.msi`. To install with the MSI instead of the zip, read [Installing with the MSI](#installing-with-the-msi) and skip to step 7.
 
-Take `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the release (or the nightly) that you were pointed at. Check the hash before you extract anything. Work from an **elevated** PowerShell in the folder that you downloaded to. The next step extracts into Program Files, and only administrators can write there.
+Take `PerformanceMonitorDarling-<version>.zip` and `SHA256SUMS.txt` from the release (or the nightly) that you were pointed at, into a new, empty folder. Every release names its checksum file `SHA256SUMS.txt`, so a download into the folder of an earlier release replaces that release's file. Check the hash before you extract anything. Work from an **elevated** PowerShell in the folder that you downloaded to. The next step extracts into Program Files, and only administrators can write there.
 
 ```powershell
 $zip = 'PerformanceMonitorDarling-<version>.zip'    # the file you downloaded
