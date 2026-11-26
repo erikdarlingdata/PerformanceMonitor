@@ -83,6 +83,13 @@ internal static class ParentConsole
             : TextReader.Null;
     }
 
+    /// <summary>
+    /// #9753: standard input as BYTES, for a piped password. A text reader would take a byte order mark as the first character
+    /// of the password, decode UTF-16 into noise and drop a second line without a word, so the password is read raw and checked
+    /// by <see cref="PerformanceMonitor.Common.StrictStdinPassword"/>. A process with no standard input gets an empty stream.
+    /// </summary>
+    internal static Stream OpenInputBytes() => HasHandle(StdInputHandle) ? Console.OpenStandardInput() : Stream.Null;
+
     private static bool HasHandle(int standardHandle) => IsUsable(GetStdHandle(standardHandle));
 
     private static bool IsUsable(IntPtr handle) =>

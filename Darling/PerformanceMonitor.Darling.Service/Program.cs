@@ -336,7 +336,8 @@ if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
     }
 
     return await DarlingCliCommands.AddServerAsync(
-        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None, addServerFlags);
+        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None, addServerFlags,
+        passwordInput: addServerFlags.Any ? Console.OpenStandardInput() : null);
 }
 
 /* CLI verb: --edit-server <server name> --set <field>=<value> [--set ...] [--config <path>] (#9693) - change a registered

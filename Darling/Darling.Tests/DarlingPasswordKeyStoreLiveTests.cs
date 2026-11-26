@@ -134,7 +134,13 @@ public sealed class DarlingPasswordKeyStoreLiveTests
 
             Assert.Equal("missing", missing.State);
             Assert.False(missing.Ring.Status.CanSeal);
-            Assert.Contains("is missing from the credentials directory", missing.Ring.Status.Reason, StringComparison.Ordinal);
+            // #9750: a host install is told the folder it looked in, and no volume.
+            Assert.Contains(store.Directory, missing.Ring.Status.Reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("volume", missing.Ring.Status.Reason, StringComparison.OrdinalIgnoreCase);
+            var inTheContainer = await store.StartAsync(inContainer: true);
+            Assert.Equal("missing", inTheContainer.State);
+            Assert.Contains(store.Directory, inTheContainer.Ring.Status.Reason, StringComparison.Ordinal);
+            Assert.Contains("credentials volume", inTheContainer.Ring.Status.Reason, StringComparison.Ordinal);
             Assert.Equal("missing", (await store.ReadStateAsync("example-host")).State);
             Assert.False(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName)));
             bodySucceeded = true;
@@ -668,7 +674,7 @@ UPDATE config.config_monitored_servers SET host = 'evil-example', encrypted_pass
             {
                 var server = Assert.Single(view.EnabledServers, s => s.Name == name);
                 Assert.Null(server.SecretPin);
-                Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, store.LastRing!, dpapi));
+                Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, store.LastRing!, dpapi));
             }
 
             bodySucceeded = true;
@@ -1303,7 +1309,8 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
 
         public Task<DarlingPasswordKeyRuntime> StartAsync(
             bool isWindows = false, Func<string, bool>? canOpen = null, Func<PasswordPrivateKey, PublishedKey, bool>? selfTest = null,
-            ILogger? logger = null, string serviceHost = "example-host", string? keySetting = null, string? folderNote = null) =>
+            ILogger? logger = null, string serviceHost = "example-host", string? keySetting = null, string? folderNote = null,
+            bool inContainer = false) =>
             DarlingPasswordKeyRuntime.StartAsync(
                 Directory, Source, logger ?? new ListLogger(), TestContext.Current.CancellationToken,
                 new PasswordKeyStartOptions
@@ -1315,6 +1322,7 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
                     ServiceHost = serviceHost,
                     KeySetting = keySetting,
                     FolderNote = folderNote,
+                    InContainer = inContainer,
                 });
 
         public async Task ExecAsync(string sql, params (string Name, object Value)[] parameters)

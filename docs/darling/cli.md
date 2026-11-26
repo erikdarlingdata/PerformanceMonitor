@@ -133,9 +133,13 @@ The collector verbs differ in one case. A managed credential that was never stor
 `--add-server` and `--add-servers` are the same verb. There are two ways to give it servers.
 
 1. Pipe a JSON array to standard input. The shape is the one the `add_servers` MCP tool takes.
-2. Give one server in flags: `--host`, `--name`, `--auth`, `--username`, `--engine`, `--database`. A SQL login is asked for its password, and the password is hidden.
+2. Give one server in flags: `--host`, `--name`, `--auth`, `--username`, `--engine`, `--database`, `--port`. A SQL login is asked for its password, and the password is hidden.
+
+In the flags form the password is read the way `--set-login-password` reads it. At a terminal it is typed at the prompt, where it is not shown. From a pipe or a file it is one line of UTF-8 text, read as bytes, so the characters saved are the ones sent. A trailing newline is fine. Stdin that holds more than one non-empty line, starts with a byte order mark, holds a NUL byte (UTF-16 does) or a lone carriage return, is not UTF-8, or is longer than a password can be is refused with exit code `1`, and no server is added. A password that starts with `env:` or `file:` is refused the same way, whether it is piped or typed, because the flags form saves a password and does not take a reference. The JSON form still accepts an `env:` or `file:` reference as a server's password.
 
 `--auth` takes `windows` (or `integrated`, the same thing), `sql`, `serviceprincipal` or `managedidentity`. The password is never a flag, so it does not land in the process list or the shell history. Add `--config <path>` to name a `darling.json`. The running service picks up the new servers without a restart.
+
+`--port` takes a whole number from 1 to 65535 and is for a PostgreSQL server that listens on a port other than 5432. It is the `port` of the JSON form, so the same rules apply: a SQL Server target takes its port in the host as `host,port` and refuses `--port`. A value that is not a whole number from 1 to 65535 is refused before anything is added.
 
 Re-running the same file is safe. Servers that are already registered do not count as a failure. A server that collides with another one, a batch where nothing was added, and an entry that was rejected all exit `1`.
 

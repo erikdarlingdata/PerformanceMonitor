@@ -7299,11 +7299,11 @@ public static partial class DarlingCliCommands
     /// </summary>
     public sealed record AddServerFlags(
         string? Host = null, string? DisplayName = null, string? Auth = null, string? Username = null,
-        string? Engine = null, string? Database = null)
+        string? Engine = null, string? Database = null, int? Port = null)
     {
         /// <summary>True when any flag was given, so the verb builds the one entry itself instead of reading JSON from stdin.</summary>
         public bool Any => Host is not null || DisplayName is not null || Auth is not null || Username is not null
-            || Engine is not null || Database is not null;
+            || Engine is not null || Database is not null || Port is not null;
     }
 
     /// <summary>The <c>--auth</c> word <c>--add-server</c> hands on: "integrated" (the word <c>--grant-script</c> takes) is Windows authentication,
@@ -7314,7 +7314,8 @@ public static partial class DarlingCliCommands
     /// <summary>
     /// Parses the arguments after <c>--add-server</c> (#6476): at most one bare argument, the config path (as before), or
     /// <c>--config &lt;path&gt;</c>, and the flags <c>--host</c>, <c>--name</c>, <c>--auth</c>, <c>--username</c> (or <c>--login</c>),
-    /// <c>--engine</c> and <c>--database</c>, each as <c>--flag value</c> or <c>--flag=value</c>. A password flag is refused with the reason.
+    /// <c>--engine</c>, <c>--database</c> and <c>--port</c> (a whole number from 1 to 65535, #9750), each as <c>--flag value</c> or
+    /// <c>--flag=value</c>. A password flag is refused with the reason.
     /// Anything else starting with '-' is refused rather than taken as a path. Pure so the grammar pins.
     /// </summary>
     public static bool TryParseAddServerArgs(string[] rest, out string? configPath, out AddServerFlags flags, out string? errorMessage)
@@ -7322,6 +7323,7 @@ public static partial class DarlingCliCommands
         configPath = null;
         errorMessage = null;
         string? host = null, displayName = null, auth = null, username = null, engine = null, database = null;
+        int? port = null;
 
         for (var i = 0; i < rest.Length; i++)
         {
@@ -7357,7 +7359,8 @@ public static partial class DarlingCliCommands
             if (name.Equals("--config", StringComparison.OrdinalIgnoreCase) || name.Equals("--host", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("--name", StringComparison.OrdinalIgnoreCase) || name.Equals("--auth", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("--username", StringComparison.OrdinalIgnoreCase) || name.Equals("--login", StringComparison.OrdinalIgnoreCase)
-                || name.Equals("--engine", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase))
+                || name.Equals("--engine", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--port", StringComparison.OrdinalIgnoreCase))
             {
                 if (value is null)
                 {
@@ -7379,17 +7382,36 @@ public static partial class DarlingCliCommands
                     case "--username":
                     case "--login": username = value; break;
                     case "--engine": engine = value; break;
+                    case "--port":
+                        /* #9750: the JSON form's range (1 to 65535), refused here with a plain message instead of failing inside the add core.
+                           Invariant culture and integer styles only, so "5432.0", "5,432" and " 5432x" are refused, not guessed at. */
+                        if (!int.TryParse(value.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsedPort)
+                            || parsedPort is < 1 or > 65535)
+                        {
+                            errorMessage = "--port needs a whole number from 1 to 65535.";
+                        }
+                        else
+                        {
+                            port = parsedPort;
+                        }
+
+                        break;
                     default: database = value; break;
+                }
+
+                if (errorMessage is not null)
+                {
+                    break;
                 }
 
                 continue;
             }
 
-            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database and --config.";
+            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database, --port and --config.";
             break;
         }
 
-        flags = new AddServerFlags(host, displayName, auth, username, engine, database);
+        flags = new AddServerFlags(host, displayName, auth, username, engine, database, port);
         return errorMessage is null;
     }
 
@@ -7414,6 +7436,13 @@ public static partial class DarlingCliCommands
         if (!string.IsNullOrWhiteSpace(flags.Database))
         {
             entry["database"] = flags.Database.Trim();
+        }
+
+        /* #9750: the entry's port is the JSON form's "port", so the add core range-checks it, refuses it on a SQL Server target
+           (#6583) and stores it on a PostgreSQL one exactly as it does for the JSON form. */
+        if (flags.Port is { } port)
+        {
+            entry["port"] = port;
         }
 
         var auth = flags.Auth?.Trim();
@@ -7442,6 +7471,13 @@ public static partial class DarlingCliCommands
                 return (null, "No password was entered, so no server was added.");
             }
 
+            /* #9753: a password typed or piped into the flag form is a password, as it is for --set-login-password, so an env: or file:
+               reference is refused with that verb's sentence. The JSON form takes a reference as a documented feature. */
+            if (DarlingSecretSource.IsReference(password))
+            {
+                return (null, LoginPasswordIsReferenceText);
+            }
+
             entry["password"] = password;
         }
 
@@ -7449,17 +7485,12 @@ public static partial class DarlingCliCommands
     }
 
     /// <summary>
-    /// Reads a password without echoing it (#6476). At a keyboard it reads keys with the echo off and ends on Enter; when stdin is a pipe or
-    /// a file there is no screen to hide it from, so it reads one line from <paramref name="input"/>. The prompt goes to
-    /// <paramref name="output"/>, never the typed text.
+    /// Reads a password at a keyboard without echoing it (#6476): it reads keys with the echo off and ends on Enter. The prompt goes to
+    /// <paramref name="output"/>, never the typed text. A pipe or a file is never read here: <see cref="ReadLoginPassword"/> reads one
+    /// with its strict byte reader and calls this only when stdin is a terminal (#9753).
     /// </summary>
-    internal static string? ReadPasswordFromConsole(string prompt, TextReader input, TextWriter output)
+    internal static string? ReadPasswordFromConsole(string prompt, TextWriter output)
     {
-        if (Console.IsInputRedirected)
-        {
-            return input.ReadLine();
-        }
-
         output.Write(prompt);
         output.Flush();
         var typed = new System.Text.StringBuilder();
@@ -7509,7 +7540,8 @@ public static partial class DarlingCliCommands
         Environment.NewLine +
         "For ONE server, no JSON is needed; give the non-secret fields as flags and a SQL login is asked for its password with nothing echoed:" + Environment.NewLine +
         "  " + OperatorVerbForm.EntryPointHere() + " --add-server --host sql01 --auth windows      (integrated means the same)" + Environment.NewLine +
-        "  " + OperatorVerbForm.EntryPointHere() + " --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres]" + Environment.NewLine +
+        "  " + OperatorVerbForm.EntryPointHere() + " --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres] [--port <1-65535>]" + Environment.NewLine +
+        "--port is for a PostgreSQL server on a port other than 5432. A SQL Server target takes its port in the host as host,port." + Environment.NewLine +
         "There is no password flag. A Windows-authentication server is tested by the running service, as the account it runs under." + Environment.NewLine +
         Environment.NewLine +
         "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
@@ -7612,6 +7644,23 @@ public static partial class DarlingCliCommands
     }
 
     /// <summary>
+    /// <see cref="BuildAddServerJson"/> with the password read the way <c>--set-login-password</c> reads it (#9753): at a terminal
+    /// (<paramref name="inputRedirected"/> false) the hidden prompt, from a pipe or a file the strict byte reader
+    /// <see cref="ReadLoginPassword"/>, so a byte order mark, a NUL byte, a lone carriage return, a second non-empty line, a
+    /// password over the cap and bytes that are not UTF-8 are each refused with that reader's sentence, and the characters
+    /// saved are the UTF-8 characters sent. A refusal is the problem, with no JSON. <paramref name="readPassword"/>, when given,
+    /// stands in for the reader.
+    /// </summary>
+    internal static (string? Json, string? Problem) BuildAddServerJsonFromStdin(
+        AddServerFlags flags, Stream stdin, TextWriter output, bool inputRedirected, Func<string, string?>? readPassword = null)
+    {
+        string? refusal = null;
+        var (json, problem) = BuildAddServerJson(
+            flags, readPassword ?? (label => ReadLoginPassword(label, stdin, output, inputRedirected, out refusal)));
+        return refusal is null ? (json, problem) : (null, refusal);
+    }
+
+    /// <summary>
     /// <c>--add-server</c> (#2256): registers monitored server(s) in the store from a JSON array on stdin, through
     /// the SAME core the MCP <c>add_servers</c> tool uses (<see cref="DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync"/>) — so validation, dedupe,
     /// the in-process connection probe, password encryption and the identity computation are shared rather than
@@ -7625,7 +7674,7 @@ public static partial class DarlingCliCommands
     public static async Task<int> AddServerAsync(
         string? configPath, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken,
         AddServerFlags? flags = null, Func<string, string?>? readPassword = null,
-        DarlingServiceConnectionTest.IServiceConnectionTester? serviceTester = null)
+        DarlingServiceConnectionTest.IServiceConnectionTester? serviceTester = null, Stream? passwordInput = null)
     {
         /* #6476: flags name ONE server instead of a JSON array; stdin is then not read as JSON (a password it carries is read as a line). */
         var fromFlags = flags is { Any: true };
@@ -7638,7 +7687,7 @@ public static partial class DarlingCliCommands
 
         if (fromFlags && string.IsNullOrWhiteSpace(flags!.Host))
         {
-            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>]");
+            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>] [--engine postgres] [--port <1-65535>]");
             return 1;
         }
 
@@ -7695,8 +7744,9 @@ public static partial class DarlingCliCommands
         if (fromFlags)
         {
             /* The password is asked for here, after the store is known usable, and only for a login that has one. It is read hidden and goes
-               into the request text and nowhere else: never to the output, the error stream or a log. */
-            var (built, problem) = BuildAddServerJson(flags!, readPassword ?? (label => ReadPasswordFromConsole(label, input ?? TextReader.Null, output)));
+               into the request text and nowhere else: never to the output, the error stream or a log. A pipe or a file is read as bytes
+               from passwordInput (the process's stdin) with the strict reader --set-login-password uses (#9753). */
+            var (built, problem) = BuildAddServerJsonFromStdin(flags!, passwordInput ?? Stream.Null, output, Console.IsInputRedirected, readPassword);
             if (problem is not null)
             {
                 error.WriteLine(problem);
