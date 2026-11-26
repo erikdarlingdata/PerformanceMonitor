@@ -47,7 +47,7 @@ sudo /opt/darling-new/upgrade-darling.sh
 - It moves `/opt/darling` to `/opt/darling.previous`, the rollback copy, and moves the new build into `/opt/darling`. `/etc/darling` is not touched, and the script checks that the config, the secret files and the keys are as they were.
 - It starts the service and runs the health check. When the start or the check fails, it puts the old build back, starts it, and exits with code `1`. The build that failed stays in `/opt/darling.failed`.
 - `--rollback` goes back to `/opt/darling.previous` by hand. The store is not rolled back: read [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) first.
-- A unit that you wrote by hand is kept. `--replace-unit` installs the tarball's unit, and a rollback puts yours back.
+- A unit that you wrote by hand is kept. `--replace-unit` installs the tarball's unit and keeps yours as `darling.service.previous`. When that upgrade fails, the rollback puts yours back. `--rollback` leaves the unit as it is.
 
 **The health check.** With the web dashboard off there is no port to ask, so the scripts watch what systemd and the service give. For 30 seconds after the start (`--health-seconds` changes it), the unit must stay `active`, its main process must stay the same one, and the file `/run/darling/stopped` must not exist. The service keeps that file present while a startup failure has stopped collection for good, such as a `darling.json` that it rejects. Its process stays up in that state, so `active (running)` alone does not show it. The tarball's unit names the file in `DARLING_STOPPED_MARKER`. With a unit that does not, the scripts see only the first two signs and say so. A healthy start is not proof of collection: [step 9](#step-9-proof-that-it-collects) is.
 
