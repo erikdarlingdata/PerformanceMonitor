@@ -109,17 +109,28 @@ public static class QueryStoreRegressionBaseline
         /// (#5506, <see cref="LatestCoversRegularArms"/>). False on every fallback, so the arms read the wide table as before.</summary>
         public bool RegularFromLatest { get; init; }
 
-        /// <summary>The recent window's whole built days read from the daily totals (#5506), one run of consecutive days.
-        /// Empty by default and on every fallback, so the recent arm reads every row live, today's read.</summary>
+        /// <summary>The recent window's days read from the daily totals (#5506): one run of consecutive whole built days, then,
+        /// when <see cref="RecentPartialThrough"/> is set, the partial day that watermark lies in (#9606), always the last entry.
+        /// Empty by default and on every fallback, so the recent arm reads every row live.</summary>
         public DateOnly[] RecentDays { get; init; } = Array.Empty<DateOnly>();
+
+        /// <summary>
+        /// The watermark of the partial day at the end of <see cref="RecentDays"/> (#9606), the value of
+        /// <see cref="RecentThroughToken"/>: the totals of that day hold its rows whose <c>first_execution_time</c> is below this
+        /// instant (<see cref="PlanRegressionDaily.BuildDaySql"/>), and the recent arm reads its rows at or above it live. It lies
+        /// strictly inside the day, so the day is its date. Null when every recent day is a whole build: the statement then keeps
+        /// no row of a recent day live.
+        /// </summary>
+        public DateTime? RecentPartialThrough { get; init; }
 
         /// <summary>The recent arm's live low range is <c>first_execution_time &lt; RecentLowEnd</c>: the first recent day's
         /// midnight. Bound only when <see cref="RecentDays"/> is not empty.</summary>
         public DateTime RecentLowEnd { get; init; }
 
         /// <summary>The recent arm's live high range is <c>first_execution_time &gt;= RecentHighStart</c>: the last recent day's
-        /// midnight, raised by <see cref="WithMeasuredHighStart"/> to the next midnight minus the measured margin. Bound only
-        /// when <see cref="RecentDays"/> is not empty.</summary>
+        /// midnight, raised by <see cref="WithMeasuredHighStart"/> to the next midnight minus the measured margin, and never
+        /// above <see cref="RecentPartialThrough"/>, where the partial day's live rows begin. Bound only when
+        /// <see cref="RecentDays"/> is not empty.</summary>
         public DateTime RecentHighStart { get; init; }
 
         /// <summary>
@@ -368,6 +379,13 @@ public static class QueryStoreRegressionBaseline
         if (plan.RecentDays.Length > 0)
         {
             var raised = plan.RecentHighStart.AddDays(1) - edgeMargin;
+            /* #9606: a partial last day keeps its rows from the watermark on live, so the range never starts above it. The
+               watermark is after that day's midnight, so the range still starts at or after the low range's end. */
+            if (plan.RecentPartialThrough is DateTime through && raised > through)
+            {
+                raised = through;
+            }
+
             if (raised > plan.RecentHighStart)
             {
                 plan = plan with { RecentHighStart = raised };
@@ -412,6 +430,10 @@ public static class QueryStoreRegressionBaseline
     /// or after latest's <c>applied_through</c>, read here in the same snapshot. The daily totals have no upper
     /// <c>collection_time</c> bound, so a window that ends before a row of the day was collected must read that day live.
     /// Any fault leaves no recent day.</para>
+    ///
+    /// <para><b>The open day (#9606).</b> Under the same gates the day after those whole days, or the latest open day when
+    /// there is none, is read from the totals up to its partial build's watermark (<see cref="ChooseRecentPartial"/>,
+    /// <see cref="Plan.RecentPartialThrough"/>), and only its rows from the watermark on are read live.</para>
     /// </summary>
     public static async Task<Plan> ResolveAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, int serverId, DateTime baselineStart, DateTime windowStart,
@@ -508,9 +530,13 @@ public static class QueryStoreRegressionBaseline
             plan = plan with { RegularStart = costStart };
         }
 
-        return recentAllowed && windowEnd is DateTime windowEndValue
-            ? WithRecentDays(plan, ChooseRecent(built, costStart, windowStart, windowEndValue))
-            : plan;
+        if (!recentAllowed || windowEnd is not DateTime windowEndValue)
+        {
+            return plan;
+        }
+
+        var recentDays = ChooseRecent(built, costStart, windowStart, windowEndValue);
+        return WithRecentDays(plan, recentDays, ChooseRecentPartial(built, costStart, windowStart, windowEndValue, recentDays));
     }
 
     /// <summary>
@@ -589,18 +615,81 @@ public static class QueryStoreRegressionBaseline
         })).ToArray();
     }
 
+    /// <summary>
+    /// The partial day the recent arm may read from the daily totals up to its watermark (#9606), after the whole days
+    /// <paramref name="recentDays"/> (<see cref="ChooseRecent"/>'s answer), or null. Without it the recent arm reads every
+    /// open day live: today, and yesterday from midnight until its whole build lands (about three hours later). At 168
+    /// hours that is a day or more of interval rows beside the whole days' totals.
+    ///
+    /// <para><b>Which day.</b> A valid partial build (<see cref="PlanRegressionDaily.BuiltDaysSql"/>: <c>partial_seq =
+    /// late_seq</c>) whose watermark T lies strictly inside its own day D, so its totals hold real rows of D. D passes
+    /// <see cref="ChooseRecent"/>'s lower bounds (at or after the first midnight at or after the window start, and D - 1 day at
+    /// or after the baseline start), and T is at or before the window end, the totals' upper bound in place of D + 1 day. With
+    /// whole days, D must be the day after the last of them, so the live high range has one start; with none, the latest such
+    /// day is taken.</para>
+    ///
+    /// <para><b>Why the seam is exact.</b> The totals of D at T hold the latest rows with <c>last_execution_time</c> in
+    /// [D, D + 1) and <c>first_execution_time</c> in [D - 1, T) (<see cref="PlanRegressionDaily.BuildDaySql"/> and
+    /// <see cref="PlanRegressionDaily.BuildSliceSql"/>), and while the build is valid no such row was written since: V185's
+    /// trigger moves <c>late_seq</c> on every write below a bound that is above every watermark
+    /// (<see cref="PlanRegressionDaily.LateTriggerLagHours"/>). The live ranges keep a row of D only when its
+    /// <c>first_execution_time</c> is at or after T. Each row of D has one <c>first_execution_time</c>, so it is in exactly one
+    /// part. This is the split PLAN_REGRESSION has read by since #5812. Every row of D is in the recent window, because D
+    /// starts at or after the window start.</para>
+    /// </summary>
+    internal static PlanRegressionDaily.BuiltDay? ChooseRecentPartial(
+        IEnumerable<PlanRegressionDaily.BuiltDay> built, DateTime baselineStart, DateTime windowStart, DateTime windowEnd, DateOnly[] recentDays)
+    {
+        var baseline = DateTime.SpecifyKind(baselineStart, DateTimeKind.Unspecified);
+        var start = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified);
+        var end = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified);
+        var firstMidnight = start == start.Date ? start : start.Date.AddDays(1);
+        PlanRegressionDaily.BuiltDay? chosen = null;
+        foreach (var candidate in built)
+        {
+            if (candidate.Through is not DateTime through)
+            {
+                continue;
+            }
+
+            var midnight = candidate.Day.ToDateTime(TimeOnly.MinValue);
+            var usable = through > midnight && through < midnight.AddDays(1) && through <= end
+                && midnight >= firstMidnight && midnight.AddDays(-1) >= baseline
+                && (recentDays.Length == 0 || candidate.Day == recentDays[^1].AddDays(1));
+            if (usable && (chosen is not { } best || candidate.Day > best.Day))
+            {
+                chosen = candidate;
+            }
+        }
+
+        return chosen;
+    }
+
     /// <summary>The plan with <paramref name="recentDays"/> as its recent days and their live range bounds: the low range ends
     /// at the first day's midnight, the high range starts at the last day's midnight (a row of a later day has its first
-    /// execution within a day before its last, at or after the last day's next midnight).</summary>
-    internal static Plan WithRecentDays(Plan plan, DateOnly[] recentDays) =>
-        recentDays.Length == 0
-            ? plan with { RecentDays = Array.Empty<DateOnly>() }
+    /// execution within a day before its last, at or after the last day's next midnight). #9606: <paramref name="partial"/>
+    /// (<see cref="ChooseRecentPartial"/>) is added as the last day, with its watermark as
+    /// <see cref="Plan.RecentPartialThrough"/>; the high range then starts at that day's midnight, which is below the
+    /// watermark, until <see cref="WithMeasuredHighStart"/> raises it.</summary>
+    internal static Plan WithRecentDays(Plan plan, DateOnly[] recentDays, PlanRegressionDaily.BuiltDay? partial = null)
+    {
+        DateTime? through = null;
+        if (partial is { Through: DateTime watermark } day)
+        {
+            recentDays = [.. recentDays, day.Day];
+            through = DateTime.SpecifyKind(watermark, DateTimeKind.Unspecified);
+        }
+
+        return recentDays.Length == 0
+            ? plan with { RecentDays = Array.Empty<DateOnly>(), RecentPartialThrough = null }
             : plan with
             {
                 RecentDays = recentDays,
+                RecentPartialThrough = through,
                 RecentLowEnd = DateTime.SpecifyKind(recentDays[0].ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified),
                 RecentHighStart = DateTime.SpecifyKind(recentDays[^1].ToDateTime(TimeOnly.MinValue), DateTimeKind.Unspecified),
             };
+    }
 
     /// <summary>The whole builds (no watermark), each day once, in order.</summary>
     private static IEnumerable<DateOnly> WholeDays(IEnumerable<PlanRegressionDaily.BuiltDay> built) =>
@@ -676,6 +765,21 @@ public static class QueryStoreRegressionBaseline
     public const string RecentLowEndToken = "@@RLOW";
     public const string RecentHighStartToken = "@@RHIGH";
 
+    /// <summary>The watermark of the recent days' partial last day (#9606, <see cref="Plan.RecentPartialThrough"/>): a
+    /// timestamp, NULL when every recent day is a whole build. Only the recent-days form names it, right after the three
+    /// tokens above (MCP <c>$17</c>, viewer <c>$16</c>).</summary>
+    public const string RecentThroughToken = "@@RTHRU";
+
+    /// <summary>
+    /// The recent arm's test that a live row is not already in the daily totals (#9606). A row dated on a recent day is in
+    /// them, except a row of the partial day whose <c>first_execution_time</c> is at or after the watermark. With a NULL
+    /// watermark <c>IS DISTINCT FROM</c> is true for every row, so the test is the whole-day one,
+    /// <c>NOT (date = ANY(days))</c>, and never NULL.
+    /// </summary>
+    private const string RecentNotInTotalsSql =
+        "NOT (CAST(last_execution_time AS date) = ANY(@@RDAYS)"
+        + " AND (CAST(last_execution_time AS date) IS DISTINCT FROM CAST(@@RTHRU AS date) OR first_execution_time < @@RTHRU))";
+
     /// <summary>The row cap: <c>$5</c> in the MCP read (a parameter), the literal 50 in the viewer's (#5506).</summary>
     public const string LimitToken = "@@LIMIT";
 
@@ -688,13 +792,14 @@ public static class QueryStoreRegressionBaseline
     public static string Bind(
         string sql, string baselineStart, string runDays, string lowEnd, string highStart, string limit, string exclude,
         string hoursHeldStart, string failureBaselineStart, string failureHoursHeldStart,
-        string? recentDays = null, string? recentLowEnd = null, string? recentHighStart = null)
+        string? recentDays = null, string? recentLowEnd = null, string? recentHighStart = null, string? recentThrough = null)
     {
-        if (recentDays is not null && recentLowEnd is not null && recentHighStart is not null)
+        if (recentDays is not null && recentLowEnd is not null && recentHighStart is not null && recentThrough is not null)
         {
             sql = sql.Replace(RecentDaysToken, "(" + recentDays + "::date[])", StringComparison.Ordinal)
                      .Replace(RecentLowEndToken, "(" + recentLowEnd + "::timestamp)", StringComparison.Ordinal)
-                     .Replace(RecentHighStartToken, "(" + recentHighStart + "::timestamp)", StringComparison.Ordinal);
+                     .Replace(RecentHighStartToken, "(" + recentHighStart + "::timestamp)", StringComparison.Ordinal)
+                     .Replace(RecentThroughToken, "(" + recentThrough + "::timestamp)", StringComparison.Ordinal);
         }
 
         return sql.Replace(LimitToken, limit, StringComparison.Ordinal)
@@ -834,7 +939,7 @@ public static class QueryStoreRegressionBaseline
             AND   first_execution_time >= $2 - {{QueryStoreIntervalWide.PurgeEdgeMarginSql}}
             AND   first_execution_time < @@RLOW
             AND   last_execution_time >= $2
-            AND   NOT (CAST(last_execution_time AS date) = ANY(@@RDAYS))
+            AND   {{RecentNotInTotalsSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
 
             UNION ALL
@@ -848,7 +953,7 @@ public static class QueryStoreRegressionBaseline
             AND   first_execution_time >= @@RHIGH
             AND   first_execution_time <= $3 + {{QueryStoreIntervalWide.FirstExecUpperSlackSql}}
             AND   last_execution_time >= $2
-            AND   NOT (CAST(last_execution_time AS date) = ANY(@@RDAYS))
+            AND   {{RecentNotInTotalsSql}}
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
 
             UNION ALL

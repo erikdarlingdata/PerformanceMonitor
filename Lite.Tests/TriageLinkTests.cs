@@ -106,15 +106,15 @@ public class TriageLinkTests
     /* ---------------- per-channel wiring: link present when passed ---------------- */
 
     [Fact]
-    public void TeamsPayload_CarriesAnOpenUriPotentialAction_WhenATriageUrlIsPassed()
+    public void TeamsPayload_CarriesAnOpenUrlAction_WhenATriageUrlIsPassed()
     {
         var url = TriageLink.Build("http://box:5153", "SRV", "High CPU", Fired, "k")!;
         var payload = WebhookAlertService.BuildTeamsPayload("High CPU", "SRV", "97%", "90%", Branding, triageUrl: url);
 
-        using var doc = JsonDocument.Parse(payload);
-        var action = doc.RootElement.GetProperty("potentialAction")[0];
-        Assert.Equal("OpenUri", action.GetProperty("@type").GetString());
-        Assert.Equal(url, action.GetProperty("targets")[0].GetProperty("uri").GetString());
+        var card = TeamsCard.Parse(payload);
+        var action = Assert.Single(card.Content.GetProperty("actions").EnumerateArray());
+        Assert.Equal(["type", "title", "url"], action.EnumerateObject().Select(p => p.Name));
+        Assert.Equal(("Action.OpenUrl", TriageLink.LinkLabel(url), url), card.Action);
     }
 
     [Fact]
@@ -199,7 +199,8 @@ public class TriageLinkTests
     public void AllChannelPayloads_OmitEveryLinkAffordance_WhenNoTriageUrlIsPassed()
     {
         var teams = WebhookAlertService.BuildTeamsPayload("High CPU", "SRV", "97%", "90%", Branding);
-        Assert.False(JsonDocument.Parse(teams).RootElement.TryGetProperty("potentialAction", out _));
+        Assert.False(TeamsCard.Parse(teams).Content.TryGetProperty("actions", out _));
+        Assert.DoesNotContain("Action.", teams, StringComparison.Ordinal);
 
         var slack = WebhookAlertService.BuildSlackPayload("High CPU", "SRV", "97%", "90%", Branding);
         Assert.DoesNotContain("\"actions\"", slack, StringComparison.Ordinal);
