@@ -630,7 +630,7 @@ public sealed class StoreConfigProvider
                 + "or the MCP add_servers tool. Note --test-connection reads darling.json, so it will keep "
                 + "reporting them as PASS while they collect nothing.",
                 neverRegistered.Count,
-                string.Join(", ", neverRegistered));
+                string.Join(", ", neverRegistered.Select(ServerFieldText.Escape)));
         }
 
         /* Cause 2 — monitored once, then removed, and the file was left alone. A CORRECT state, so this is
@@ -645,7 +645,7 @@ public sealed class StoreConfigProvider
                 + "the file. Delete them from darling.json to silence this line; their collected history is "
                 + "kept either way.",
                 deliberatelyRemoved.Count,
-                string.Join(", ", deliberatelyRemoved));
+                string.Join(", ", deliberatelyRemoved.Select(ServerFieldText.Escape)));
         }
     }
 
@@ -738,7 +738,7 @@ public sealed class StoreConfigProvider
         }
 
         var shown = maxServers > 0 && names.Count > maxServers ? maxServers : names.Count;
-        var listed = string.Join(", ", names.Take(shown)) + (shown < names.Count ? $" and {names.Count - shown} more" : "");
+        var listed = string.Join(", ", names.Take(shown).Select(ServerFieldText.Escape)) + (shown < names.Count ? $" and {names.Count - shown} more" : "");
         return $" For a drifted connection setting on an entry that carries a password or a reference ({listed}), "
             + "its password from darling.json is not used until the two agree.";
     }
@@ -1295,8 +1295,9 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
         for (int i = 0; i < shown; i++)
         {
             var server = drifted[i];
-            var fields = server.Fields.Select(f => $"{f.Field} (file={f.FileValue}, store={f.StoreValue})");
-            parts.Add($"{server.Server}: {string.Join(", ", fields)}");
+            /* #9787: a row saved before the control-character rule can hold one in any of these values; it prints as \uXXXX text. */
+            var fields = server.Fields.Select(f => $"{f.Field} (file={ServerFieldText.Escape(f.FileValue)}, store={ServerFieldText.Escape(f.StoreValue)})");
+            parts.Add($"{ServerFieldText.Escape(server.Server)}: {string.Join(", ", fields)}");
         }
 
         if (shown < drifted.Count)

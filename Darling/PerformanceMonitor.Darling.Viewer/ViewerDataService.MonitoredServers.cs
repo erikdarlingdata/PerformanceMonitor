@@ -585,6 +585,12 @@ GROUP BY s.server_id";
     {
         ArgumentNullException.ThrowIfNull(row);
 
+        /* #9787: the save holds the same four-field rule the web and MCP writers apply, ahead of any connection. */
+        if (ServerFieldText.FirstRefusal(row.Name, row.Host, row.Database, row.Username) is { } fieldRefusal)
+        {
+            throw new MonitoredServerFieldRefusedException(fieldRefusal);
+        }
+
         await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -1298,6 +1304,13 @@ public sealed class MonitoredServerPasswordNeededException : InvalidOperationExc
 /// save handler shows the message as it is. Nothing was written.
 /// </summary>
 public sealed class MonitoredServerHostRefusedException(string message) : InvalidOperationException(message);
+
+/// <summary>
+/// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused a display name, host, database or login that holds a
+/// control character (#9787, <see cref="ServerFieldText.Refusal"/>). The dialog's save handler shows the message as it is.
+/// Nothing was written.
+/// </summary>
+public sealed class MonitoredServerFieldRefusedException(string message) : InvalidOperationException(message);
 
 /// <summary>
 /// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): under the identity lock,

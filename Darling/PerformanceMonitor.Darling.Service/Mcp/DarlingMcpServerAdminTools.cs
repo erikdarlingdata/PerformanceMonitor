@@ -1034,6 +1034,13 @@ ORDER BY d.host, d.database";
             username = TryGetString(obj, "username") is { Length: > 0 } miClientId ? miClientId.Trim() : null;
         }
 
+        /* #9787: the four text fields every later log line, drift warning and printed command repeats hold no control character.
+           The sentence names the field and the class, never the value. */
+        if (ServerFieldText.FirstRefusal(displayName, host, database, username) is { } fieldRefusal)
+        {
+            return (null, Invalid(fieldRefusal));
+        }
+
         /* encrypt_mode + trust_server_certificate are deliberately EXPOSED (per Erik) — a headless caller sets the
            TLS posture explicitly. Optional with the fail-closed MonitoredServer defaults (Mandatory / no trust). */
         var (encryptMode, encryptError) = ResolveEncryptMode(TryGetString(obj, "encrypt_mode"));
