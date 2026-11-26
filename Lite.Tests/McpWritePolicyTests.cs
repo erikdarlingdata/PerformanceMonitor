@@ -147,7 +147,7 @@ public sealed class McpWritePolicyTests
             builder.Services.AddSingleton(serviceType, _ => null!);
         }
 
-        McpHostService.RegisterMcpServer(builder.Services, allowWrites, serving: serving);
+        McpHostService.RegisterMcpServer(builder.Services, allowWrites, serving: serving, allowServerAdmin: allowWrites);
 
         var app = builder.Build();
         McpHostService.UseJsonPostGuard(app);
@@ -383,7 +383,7 @@ public sealed class McpWritePolicyTests
     public void WritesOn_ServesTheMuteAndItsUndo()
     {
         var all = RegisteredTools();
-        var served = McpWritePolicy.FilterToolCollection(all, allowWrites: true);
+        var served = McpWritePolicy.FilterToolCollection(all, allowWrites: true, allowServerAdmin: true);
 
         Assert.Equal(all.Count, served.Count);
         Assert.Contains("mute_analysis_finding", Names(served));
@@ -406,7 +406,7 @@ public sealed class McpWritePolicyTests
         });
 
         var full = RegisteredTools();
-        McpWritePolicy.Apply(full, allowWrites: true);
+        McpWritePolicy.Apply(full, allowWrites: true, allowServerAdmin: true);
         Assert.Equal(before, full.Count);
         foreach (var tool in full.Where(t => McpWritePolicy.IsWrite(t.ProtocolTool.Name)))
         {
