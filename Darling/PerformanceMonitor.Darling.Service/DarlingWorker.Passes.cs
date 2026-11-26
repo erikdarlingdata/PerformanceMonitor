@@ -1355,8 +1355,9 @@ public sealed partial class DarlingWorker
         await RunQueryStoreClosedDayTickAsync(stoppingToken);
 
         /* #9164: the hourly host rollup of query_stats the top-queries read ranks whole hours from. It reads query_stats and the count ledger,
-           and writes its own two tables, so it has its own catch and a failure leaves the passes above standing. Its prune follows the retention
-           query_stats' raw rows are purged on, resolved the way the purge resolves it. */
+           and writes its own two tables, so it has its own catch and a failure leaves the passes above standing. It takes the retention
+           query_stats' raw rows are purged on, resolved the way the purge resolves it, and takes the gated raw horizon instead on a store where
+           raw is a raw hypertable (#9684). Its prune runs in slices under the retention purge's WAL pacer. */
         try
         {
             await PassSteps.StepAsync(StorePassSteps.StoreMaintenancePass, "query_stats_host_hourly", async () =>
@@ -1366,7 +1367,8 @@ public sealed partial class DarlingWorker
                     DateTime.UtcNow,
                     DarlingRetention.EffectivePurgeRetentionDays("query_stats", StoreConfigProvider.ResolveFleetRetentionDays("query_stats", _scheduleOverrides)),
                     _logger,
-                    stoppingToken);
+                    stoppingToken,
+                    async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(_postgres!, _logger, token)));
                 return new StorePassSteps.StepCounts(Built: tick.HoursBuilt, Removed: tick.RowsRemoved, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
             });
         }
