@@ -559,6 +559,50 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.query_stats_host_hourly_built AS b WHERE
         });
 
     /// <summary>
+    /// #9711: a prune slice that fails does not stop the tick. The second one-hour slice raises, the first slice's rows are gone and counted, the failing
+    /// slice rolls back, one warning names its hours, and the tick still builds the planned hours on the same connection. Once the failure is gone the
+    /// next tick finishes the prune.
+    /// </summary>
+    [Fact]
+    public Task AFailedPruneSlice_DoesNotStopTheBuilds_AndIsLoggedOnce() =>
+        WithStoreAsync(tiered: false, async (scratch, connection, ct) =>
+        {
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var oldFrom = new DateTime(2026, 8, 1, 0, 0, 0, DateTimeKind.Unspecified);
+            await SeedBuiltHoursAsync(connection, oldFrom, 3, ct);
+
+            var seeder = new RawSeeder(connection, ct);
+            foreach (var serverId in new[] { ServerId, OtherServerId })
+            {
+                await seeder.SeedHourAsync(serverId, Hour9);
+            }
+
+            await QueryStatsLedgerSeed.SeedAsync(connection, Hour8, Hour10.AddHours(1), ct);
+            await ExecuteAsync(connection, @"
+CREATE FUNCTION collect.fail_prune_9711() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'prune blocked'; END $$;
+CREATE TRIGGER fail_prune_9711 BEFORE DELETE ON collect.query_stats_host_hourly FOR EACH ROW
+WHEN (OLD.bucket = '2026-08-01 01:00'::timestamp) EXECUTE FUNCTION collect.fail_prune_9711()", ct);
+
+            var logger = new CapturingTestLogger();
+            var result = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, logger, ct);
+
+            Assert.Equal(1, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
+            Assert.Contains("2026-08-01 01:00", logger.Lines.Single(l => l.StartsWith("Warning:", StringComparison.Ordinal)), StringComparison.Ordinal);
+            Assert.Equal(0, result.Failed);
+            Assert.Equal(2L * RowsPerServerHour, result.RowsRemoved);
+            Assert.True(result.HoursBuilt > 0);
+            Assert.Equal(2L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly_built WHERE bucket = @b", ct, ("b", Hour9)));
+            Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE bucket = @b", ct, ("b", oldFrom)));
+            Assert.Equal(2L * 2 * RowsPerServerHour, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE bucket >= @b AND bucket < @c", ct, ("b", oldFrom.AddHours(1)), ("c", oldFrom.AddHours(3))));
+
+            await ExecuteAsync(connection, "DROP TRIGGER fail_prune_9711 ON collect.query_stats_host_hourly", ct);
+            var next = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
+
+            Assert.Equal(2L * 2 * RowsPerServerHour, next.RowsRemoved);
+            Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE bucket < @b", ct, ("b", Hour8)));
+        });
+
+    /// <summary>
     /// The tick prunes and plans at the horizon <see cref="QueryStatsHostHourly.HorizonDaysAsync"/> resolves. Where raw is a raw hypertable
     /// that is four days, and a tick removes the older rollup and built rows, builds nothing older, and builds every hour inside. Where raw
     /// is a plain table the collector's thirty days stand and the older rows stay.
