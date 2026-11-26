@@ -30,7 +30,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// and, through <c>pg_read_all_settings</c>, the <c>log_directory</c> setting the capture builds its path from) and an explicit EXECUTE on the
 /// three-argument <c>pg_read_binary_file</c>, the call the capture makes. A login granted EXECUTE on <c>pg_ls_logdir()</c> alone can list the folder
 /// and still fails at the setting, so listing counts only with both. No <c>pg_read_server_files</c>: PostgreSQL lets EXECUTE read any file under
-/// <c>log_directory</c>, inside the data directory or not. The aggregates are named only when a declared aggregate is absent from the
+/// the data directory or an absolute <c>log_directory</c>. A relative <c>log_directory</c> that leads out of the data directory
+/// is refused without that role, which no privilege probe here can grant, and the capture's own warning names it. The aggregates are named only when a declared aggregate is absent from the
 /// catalog and the login cannot create in <c>_timescaledb_internal</c>: with the schema right missing but every aggregate built, nothing is degraded.
 /// Function grants are per database, so the line names the database the statements run in.</para>
 /// </summary>

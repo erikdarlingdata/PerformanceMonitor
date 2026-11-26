@@ -150,13 +150,13 @@ The service reads the store's own PostgreSQL log into the store. A Debian or Ubu
 - `Store log capture failed ... The store keeps no log files to read (logging_collector is off or the log folder is missing)`
 - `Store log capture failed ... Reading the store's own log needs pg_monitor and EXECUTE on pg_read_binary_file`
 
-Both are safe to leave. Collection from your monitored servers is not affected, and PostgreSQL's log is still in `/var/log/postgresql`. Capture needs `logging_collector = on`, `pg_monitor` for the owner role (granted above), and this grant, run as `postgres` in the `darling` database:
+Both are safe to leave. Collection from your monitored servers is not affected, and PostgreSQL's log is still in `/var/log/postgresql`. Capture needs `logging_collector = on`, a `log_directory` that is absolute or inside the data directory (the default, `log`, is inside), `pg_monitor` for the owner role (granted above), and this grant, run as `postgres` in the `darling` database:
 
 ```sql
 GRANT EXECUTE ON FUNCTION pg_catalog.pg_read_binary_file(text, bigint, bigint) TO darling;
 ```
 
-That lets the role read any file in the data directory and in `log_directory`, so grant it only when you want the capture. `pg_read_server_files` is not needed, wherever `log_directory` points.
+That lets the role read any file in the data directory and in an absolute `log_directory`, so grant it only when you want the capture. `pg_read_server_files` is not needed. A relative `log_directory` that leads out of the data directory, such as `../pglog`, is the one place PostgreSQL refuses the read without that role, and the warning then says to set an absolute path.
 
 ## Step 4: Download and verify
 
