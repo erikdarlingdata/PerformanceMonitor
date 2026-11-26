@@ -898,8 +898,10 @@ FROM pg_catalog.pg_control_system() AS s";
                 IsAwsRds: false,
                 HasMsdbAccess: false,
                 /* #6183: SqlClient's native library failing to load reads "The type initializer for ... TdsParser
-                   threw an exception" and says nothing about why. One shared explanation, for every caller. */
-                Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
+                   threw an exception" and says nothing about why. One shared explanation, for every caller.
+                   #9692: a server certificate this machine rejects reads "error occurred during the pre-login handshake", so
+                   the shared sentence that says so follows the driver's text. */
+                Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex, ConnectsStrict(config)),
                 SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex),
                 TransportFailure: IsTransportFailure(ex));
         }
@@ -1077,9 +1079,17 @@ FROM pg_catalog.pg_control_system() AS s";
         }
         catch (Exception ex)
         {
-            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message);
+            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex, ConnectsStrict(config)));
         }
     }
+
+    /// <summary>
+    /// True when the service connects to <paramref name="server"/> with <c>encrypt_mode</c> Strict, which ignores
+    /// <c>trust_server_certificate</c>: a SQL Server target whose stored mode folds to Strict. A PostgreSQL target reads Strict as
+    /// Mandatory and honours the trust setting. The certificate sentence (<see cref="ServerCertificateTrustFailure"/>) and the
+    /// Strict line (<see cref="StrictEncryptionHint"/>) read the mode the same way, so a Strict entry gets one piece of advice.
+    /// </summary>
+    internal static bool ConnectsStrict(MonitoredServer server) => !server.IsPostgres && StrictEncryptionHint.IsStrict(server.EncryptMode);
 
     /// <summary>
     /// #6459: the Query Store replica a SQL Server target has set and an Azure SQL Database will never read, or null (no replica set,

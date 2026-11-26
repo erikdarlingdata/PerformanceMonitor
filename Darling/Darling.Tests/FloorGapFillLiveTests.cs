@@ -147,8 +147,9 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         NpgsqlConnection connection, int lateRows, TimeSpan? intervalRefreshOffset, CancellationToken ct, int hours = 30)
     {
         var totalHours = hours;
-        /* #5608: the timeline ends at LiveClock.AnchoredEnd(), so its chunk layout is the same at any hour the test runs. */
-        var end = TimescaleSupport.AlignDown(LiveClock.AnchoredEnd(), TimeSpan.FromHours(1)) - TimeSpan.FromHours(1);
+        /* #5608: the timeline ends at 22:00 UTC the day before, so its chunk layout is the same at any hour the test runs. The retention
+           sweep ages the oldest row against the store's own clock, so the anchor is the one that clock has passed (#9695). */
+        var end = TimescaleSupport.AlignDown(LiveClock.AnchoredEndNotAfterNow(), TimeSpan.FromHours(1)) - TimeSpan.FromHours(1);
         var b0 = end - TimeSpan.FromHours(totalHours);
         var b1 = b0 + TimeSpan.FromHours(1);
 
@@ -166,8 +167,56 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         => TimescaleSupport.EnsureRetentionPoliciesAsync(
             connection, logger, TimescaleSupport.RetentionSweepPass.Periodic, otherRepairRunning, ct);
 
+    /// <summary>#9695: raw that starts more than its 4-day horizon back (the seed's oldest row is 98 to 123 hours old by the store's clock,
+    /// whatever the hour the test runs or the test clock it runs under), past the two hours in which a hold that just crossed its horizon
+    /// warns on the hourly pass. A hold can still drop history there and its line names the remedies. A younger seed gets the line a new
+    /// install gets.</summary>
+    private const int OldStoreHours = 96;
+
     private static string HeldLine(CapturingTestLogger logger)
         => logger.Lines.Single(l => l.Contains($"Retention policy for {Raw} HELD PAUSED", StringComparison.Ordinal));
+
+    /// <summary>
+    /// #9695: a store whose raw starts 30 hours back is younger than the 4-day purge horizon, so the hold stops nothing. The line is
+    /// Information at the start pass and Debug on the hourly one, and names no remedy, but the hourly pass still fills the gap and the
+    /// next pass still arms the purge: only the wording changed.
+    /// </summary>
+    [Fact]
+    public async Task AHoldOnAStoreYoungerThanItsHorizon_IsNotAWarning_AndNamesNoRemedy()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var (connection, scratch) = await OpenAsync(ct);
+        try
+        {
+            var t = await SeedAsync(connection, LateRows, null, ct);
+
+            var start = new CapturingTestLogger();
+            await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, start, TimescaleSupport.RetentionSweepPass.Startup, null, ct);
+            var startHeld = HeldLine(start);
+            Assert.StartsWith("Information: ", startHeld, StringComparison.Ordinal);
+            Assert.Contains("nothing to drop yet", startHeld, StringComparison.Ordinal);
+            Assert.DoesNotContain("--backfill-rollups", startHeld, StringComparison.Ordinal);
+            Assert.DoesNotContain(start.Lines, l => l.StartsWith("Warning: ", StringComparison.Ordinal)
+                && (l.Contains("HELD PAUSED", StringComparison.Ordinal) || l.Contains("RE-HELD", StringComparison.Ordinal)));
+
+            var hourly = new CapturingTestLogger();
+            await PeriodicPassAsync(connection, hourly, () => false, ct);
+            var hourlyHeld = HeldLine(hourly);
+            Assert.StartsWith("Debug: ", hourlyHeld, StringComparison.Ordinal);
+            Assert.DoesNotContain("--backfill-rollups", hourlyHeld, StringComparison.Ordinal);
+            Assert.Equal(t.B0, await FloorAsync(connection, Hourly, ct));
+            Assert.False(await ArmedAsync(connection, ct), "the hold is the same hold: this pass measured the gap before it filled it");
+
+            var next = new CapturingTestLogger();
+            await PeriodicPassAsync(connection, next, () => false, ct);
+            Assert.True(await ArmedAsync(connection, ct), $"the next pass arms the purge; log: {next.Joined}");
+        }
+        finally
+        {
+            await connection.DisposeAsync();
+            await scratch.DisposeAsync();
+        }
+    }
 
     /// <summary>
     /// The case #6071 measured, scaled down: late raw rows one bucket below both hourly consumers' floors. The pass
@@ -223,7 +272,7 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         var (connection, scratch) = await OpenAsync(ct);
         try
         {
-            var t = await SeedAsync(connection, LateRows, TimeSpan.FromHours(26), ct);
+            var t = await SeedAsync(connection, LateRows, TimeSpan.FromHours(26), ct, hours: OldStoreHours);
             var intervalFloor = await FloorAsync(connection, IntervalHourly, ct);
             Assert.Equal(t.B1 + TimeSpan.FromHours(26), intervalFloor);
 
@@ -265,7 +314,7 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         try
         {
             var lateRows = TimescaleSupport.FloorGapFillMaxRows + 5_000;
-            var t = await SeedAsync(connection, lateRows, null, ct);
+            var t = await SeedAsync(connection, lateRows, null, ct, hours: OldStoreHours);
 
             var log = new CapturingTestLogger();
             await PeriodicPassAsync(connection, log, () => false, ct);
@@ -343,7 +392,7 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         var (connection, scratch) = await OpenAsync(ct);
         try
         {
-            var t = await SeedAsync(connection, LateRows, null, ct);
+            var t = await SeedAsync(connection, LateRows, null, ct, hours: OldStoreHours);
 
             var busy = new CapturingTestLogger();
             await PeriodicPassAsync(connection, busy, () => true, ct);
@@ -376,7 +425,7 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         var (connection, scratch) = await OpenAsync(ct);
         try
         {
-            var t = await SeedAsync(connection, LateRows, null, ct);
+            var t = await SeedAsync(connection, LateRows, null, ct, hours: OldStoreHours);
 
             var log = new CapturingTestLogger();
             await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, log, ct);

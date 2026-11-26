@@ -59,7 +59,24 @@ internal static class QueryStoreReplicaConnectionTest
         }
         catch (Exception ex)
         {
-            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message);
+            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory)
+                ?? ServerCertificateTrustFailure.Append(ex.Message, ex, BuildsStrict(primaryConnectionString)));
+        }
+    }
+
+    /// <summary>
+    /// True when <paramref name="connectionString"/> sets <c>Encrypt=Strict</c>, which ignores <c>TrustServerCertificate</c> (#9692).
+    /// The replica connection keeps the primary's encryption. A string the builder cannot read is not Strict, so this never throws.
+    /// </summary>
+    private static bool BuildsStrict(string connectionString)
+    {
+        try
+        {
+            return new SqlConnectionStringBuilder(connectionString).Encrypt == SqlConnectionEncryptOption.Strict;
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException)
+        {
+            return false;
         }
     }
 

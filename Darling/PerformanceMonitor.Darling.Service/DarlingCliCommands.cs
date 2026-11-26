@@ -339,7 +339,7 @@ public static partial class DarlingCliCommands
     public static bool IsNewPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--new-password-key", StringComparison.OrdinalIgnoreCase);
 
-    private const string NewPasswordKeyUsage = "Usage: PerformanceMonitor.Darling.Service.exe --new-password-key <path>";
+    private const string NewPasswordKeyUsage = "Usage: --new-password-key <path>";
 
     /// <summary>
     /// <c>--new-password-key &lt;path&gt;</c> (#8006): generates a password key and writes it to <paramref name="rest"/>'s one
@@ -1197,7 +1197,7 @@ public static partial class DarlingCliCommands
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            output.WriteLine($"NOTE: could not read the store's registry ({ex.Message}), so {wording.WhenFileListIsUsed}");
+            output.WriteLine(RegistryReadFailureNote(ex, wording.WhenFileListIsUsed));
             return config.Servers;
         }
 
@@ -1260,6 +1260,16 @@ public static partial class DarlingCliCommands
             return false;
         }
     }
+
+    /// <summary>
+    /// #9695: the note printed when the store's registry cannot be read. A store that has never been started has no registry
+    /// table yet (42P01), which is a state and not a failure, so it gets one plain sentence. Any other fault keeps its
+    /// own text.
+    /// </summary>
+    internal static string RegistryReadFailureNote(Exception ex, string whenFileListIsUsed)
+        => ex is PostgresException { SqlState: PostgresErrorCodes.UndefinedTable }
+            ? $"NOTE: the store has no server registry yet, so {whenFileListIsUsed}"
+            : $"NOTE: could not read the store's registry ({ex.Message}), so {whenFileListIsUsed}";
 
     /// <summary>What <see cref="ResolveValidationTargetsAsync"/> tells the operator about the list it settled on, worded for the
     /// verb that asked: <see cref="WhenFileListIsUsed"/> finishes "so ..." when the store's registry cannot be read and
@@ -10050,7 +10060,8 @@ AND   cst.collector_name = ANY($2)", connection) { CommandTimeout = ServiceComma
 
         output.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"Free space on the store volume: {RollupBackfillPlan.FormatBytes(freeBytes)}; required: {RollupBackfillPlan.FormatBytes(RollupBackfill.RequiredBytes(totalEstimate))}."));
+            $"Free space on the store volume: {RollupBackfillPlan.FormatBytes(freeBytes)}; required: {RollupBackfillPlan.FormatBytes(RollupBackfill.RequiredBytes(totalEstimate))} " +
+            $"(a fixed {RollupBackfillPlan.FormatBytes(RollupBackfill.ReserveBytes)} free-space floor that is never touched, plus this plan's own estimate of {RollupBackfillPlan.FormatBytes(totalEstimate)} with {RollupBackfill.SafetyFactor:0.##}x headroom)."));
         if (freeSpaceBytes is not null)
         {
             output.WriteLine("The free space above came from --free-space; it was not measured.");

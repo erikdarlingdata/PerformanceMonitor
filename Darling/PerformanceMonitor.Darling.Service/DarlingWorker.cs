@@ -1360,11 +1360,12 @@ public sealed partial class DarlingWorker : BackgroundService
        has none; every other stage runs without it (#4012's review, finding 1). */
     private PgLogHashKey? _pgDeadlockRemaskKey;
 
-    /* #3971: a store-log capture that fails for a reason the store will not change on its own warns once per
-       process, then logs at Debug: 58P01, no log directory (the Linux compose store logs to stderr and has
-       none), and 42501, a login without the log read. get_store_log already reports the gap on the read
-       surface, so the hourly Warning only repeated what nobody was going to change. */
-    private bool _storeLogCaptureUnavailableWarned;
+    /* #3971, #9695: a store-log capture that fails for a reason the store will not change on its own warns once per
+       process, then logs at Debug until the cause changes or a capture works: 58P01, no log directory (a stock
+       Debian or Ubuntu PostgreSQL and the Linux compose store log to stderr and have none), and 42501, a login
+       without the log read. get_store_log already reports the gap on the read surface, so the hourly Warning only
+       repeated what nobody was going to change. */
+    private readonly StoreLogCaptureNotice _storeLogCaptureNotice = new();
     private bool _storeStatementHistoryWarned;
 
     /* Stage 4 service self-alerts (collection-stopped, connection lost/restored, capture-down). Built

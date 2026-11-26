@@ -1133,6 +1133,17 @@ public sealed partial class DarlingWorker
     private static string? DeferredText(int deferred) => deferred > 0 ? $"{deferred} left for the next tick" : null;
 
     /// <summary>
+    /// #9711: the host hourly rollup tick as step counts. A prune slice that failed is caught inside the tick so the builds still run. It counts as
+    /// one failure here and its text leads the detail, ahead of the deferred note, so the step records as failed while the rollup grows past its horizon.
+    /// </summary>
+    internal static StorePassSteps.StepCounts HostHourlyStepCounts(QueryStatsHostHourly.TickResult tick)
+    {
+        var deferred = DeferredText(tick.Deferred);
+        var detail = tick.PruneFailure is null ? deferred : deferred is null ? tick.PruneFailure : $"{tick.PruneFailure}; {deferred}";
+        return new StorePassSteps.StepCounts(Built: tick.HoursBuilt, Removed: tick.RowsRemoved, Failed: tick.Failed + (tick.PruneFailure is null ? 0 : 1), Detail: detail);
+    }
+
+    /// <summary>
     /// The hourly store-maintenance tick's sixth tenant (#4605): the incremental module-map refresh, which keeps
     /// the <c>collect.module_map</c> watermark within about an hour of procedure_stats so a reader can trust the
     /// map up to it. Reads only the rows since the last watermark (<see cref="DarlingModuleMap.RefreshRecentAsync"/>),
@@ -1369,13 +1380,26 @@ public sealed partial class DarlingWorker
                     _logger,
                     stoppingToken,
                     async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(_postgres!, _logger, token)));
-                return new StorePassSteps.StepCounts(Built: tick.HoursBuilt, Removed: tick.RowsRemoved, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+                return HostHourlyStepCounts(tick);
             });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning("Query stats host hourly rollup could not run; the next hourly tick retries: {Message}", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// #9690: the step row for one closed-day tick. A prune slice that failed counts as one failure and its text leads the detail, ahead of the deferred
+    /// text: the tick goes on to the builds, but a prune that fails every tick must show as a failed step and not as an ok one.
+    /// </summary>
+    internal static StorePassSteps.StepCounts QueryStoreClosedDayStepCounts(QueryStoreClosedDayRollup.TickResult tick)
+    {
+        var deferred = DeferredText(tick.Deferred + tick.HoursDeferred);
+        var detail = tick.PruneFailure is null ? deferred : deferred is null ? tick.PruneFailure : $"{tick.PruneFailure}. {deferred}";
+        return new StorePassSteps.StepCounts(
+            Built: tick.Built + tick.HoursBuilt + tick.ClutterDaysFolded, Removed: tick.DaysRemoved + tick.HoursRemoved,
+            Failed: tick.Failed + tick.HoursFailed + tick.ClutterDaysFailed + (tick.PruneFailure is null ? 0 : 1), Detail: detail);
     }
 
     /// <summary>
@@ -1392,10 +1416,9 @@ public sealed partial class DarlingWorker
                 var tick = await QueryStoreClosedDayRollup.RunTickAsync(
                     _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays,
                     DarlingRetention.QueryStoreStatsPurgeRetentionDays(_scheduleOverrides),
-                    _logger, stoppingToken);
-                return new StorePassSteps.StepCounts(
-                    Built: tick.Built + tick.HoursBuilt + tick.ClutterDaysFolded, Removed: tick.DaysRemoved + tick.HoursRemoved,
-                    Failed: tick.Failed + tick.HoursFailed, Detail: DeferredText(tick.Deferred + tick.HoursDeferred));
+                    _logger, stoppingToken,
+                    async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(_postgres!, _logger, token)));
+                return QueryStoreClosedDayStepCounts(tick);
             });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

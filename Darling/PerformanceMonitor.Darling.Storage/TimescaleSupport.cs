@@ -9613,7 +9613,68 @@ AND   j.hypertable_name = '{relation}'";
     /// <summary>#7114: what one coverage measure found: the verdict, every short consumer, and every consumer
     /// that covered only within its own retention.</summary>
     internal readonly record struct RetentionCoverageMeasure(
-        RetentionCoverage Verdict, IReadOnlyList<string> ShortConsumers, IReadOnlyList<HorizonCoveredConsumer> HorizonCovered);
+        RetentionCoverage Verdict, IReadOnlyList<string> ShortConsumers, IReadOnlyList<HorizonCoveredConsumer> HorizonCovered)
+    {
+        /// <summary>#9695: the oldest row the relation holds (column 0 of the coverage statement, the same value the
+        /// empty-store check reads), or null when the measure did not reach it: an empty relation, or a probe that
+        /// could not answer.</summary>
+        public DateTime? SourceOldest { get; init; }
+    }
+
+    /// <summary>
+    /// #9695: is the relation's oldest row newer than its retention cutoff, so that no chunk can have expired and
+    /// the purge has nothing to drop yet? True only when the oldest row is known and <paramref name="dropAfter"/>
+    /// reads as a whole number of days (every <see cref="RetentionPolicies"/> horizon does). Anything the check
+    /// cannot read is false, which leaves the hold lines at their Warning level.
+    /// </summary>
+    internal static bool NothingToDropYet(DateTime? sourceOldest, string dropAfter, DateTime utcNow)
+    {
+        if (sourceOldest is not { } oldest || !TryReadWholeDays(dropAfter, out var span))
+        {
+            return false;
+        }
+
+        return oldest >= utcNow - span;
+    }
+
+    /// <summary>
+    /// #9695: how far past its horizon a held relation's oldest row may be and still count as having just crossed it.
+    /// Two hourly passes wide, so a late or skipped pass still sees the crossing. A held policy purges nothing, so the
+    /// oldest row stays where it is while the cutoff moves past it.
+    /// </summary>
+    internal static readonly TimeSpan HorizonCrossingWindow = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// #9695: did the relation's oldest row pass its retention cutoff within <see cref="HorizonCrossingWindow"/>? On the
+    /// hourly pass a held policy logs at Debug, and a young store's hold logs below Warning, so without this a store that
+    /// ages past the horizon while the service runs would never write the Warning that names the remedy until a restart.
+    /// False when the oldest row is unknown or <paramref name="dropAfter"/> is not a whole number of days.
+    /// </summary>
+    internal static bool CrossedHorizonRecently(DateTime? sourceOldest, string dropAfter, DateTime utcNow)
+    {
+        if (sourceOldest is not { } oldest || !TryReadWholeDays(dropAfter, out var span))
+        {
+            return false;
+        }
+
+        var cutoff = utcNow - span;
+        return oldest < cutoff && oldest >= cutoff - HorizonCrossingWindow;
+    }
+
+    private static bool TryReadWholeDays(string interval, out TimeSpan span)
+    {
+        span = default;
+        var parts = interval.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 2
+            || !string.Equals(parts[1], "days", StringComparison.Ordinal)
+            || !int.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var days))
+        {
+            return false;
+        }
+
+        span = TimeSpan.FromDays(days);
+        return true;
+    }
 
     /// <summary>
     /// #7114: the retention of each named consumer whose own <c>policy_retention</c> job is scheduled, with its
@@ -9699,6 +9760,7 @@ AND   j.scheduled";
                 return new RetentionCoverageMeasure(RetentionCoverage.Covered, Array.Empty<string>(), Array.Empty<HorizonCoveredConsumer>());
             }
 
+            var sourceOldestRow = reader.GetDateTime(0);
             var horizonCovered = new List<HorizonCoveredConsumer>();
 
             /* #6081: EVERY short consumer, in the order the coverage list names them (dependency order), not
@@ -9833,8 +9895,8 @@ AND   j.scheduled";
             var shortConsumers = coverageRelations.Where((_, i) => slotShort[i]).ToList();
 
             return shortConsumers.Count > 0
-                ? new RetentionCoverageMeasure(RetentionCoverage.Short, shortConsumers, horizonCovered)
-                : new RetentionCoverageMeasure(RetentionCoverage.Covered, Array.Empty<string>(), horizonCovered);
+                ? new RetentionCoverageMeasure(RetentionCoverage.Short, shortConsumers, horizonCovered) { SourceOldest = sourceOldestRow }
+                : new RetentionCoverageMeasure(RetentionCoverage.Covered, Array.Empty<string>(), horizonCovered) { SourceOldest = sourceOldestRow };
         }
         catch (Exception)
         {
@@ -10140,7 +10202,9 @@ AND   j.hypertable_name = '{relation}'";
                     }
                 }
 
-                var (verdict, shortConsumers, horizonCovered) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, DateTime.UtcNow, cancellationToken);
+                var sweepNow = DateTime.UtcNow;
+                var measure = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, sweepNow, cancellationToken);
+                var (verdict, shortConsumers, horizonCovered) = measure;
                 if (verdict == RetentionCoverage.Covered)
                 {
                     if (isRawRelation)
@@ -10212,7 +10276,27 @@ AND   j.hypertable_name = '{relation}'";
                         connection, logger, relation, timeColumn, shortConsumers, fill: pass == RetentionSweepPass.Periodic, otherRepairRunning, cancellationToken);
                     var (shortNames, remedies) = DescribeShortConsumers(shortConsumers, fills);
 
-                    if (wasScheduled == true)
+                    /* #9695: on a store younger than this policy's horizon no chunk has expired, so the hold stops
+                       nothing and there is no history to protect yet. The hold itself is unchanged; only what the
+                       line says and the level it is written at differ, and no remedy is named because none is
+                       needed. Decided from the oldest row the coverage statement already read. */
+                    var nothingToDrop = NothingToDropYet(measure.SourceOldest, dropAfter, sweepNow);
+
+                    if (wasScheduled == true && nothingToDrop)
+                    {
+                        reHeld++;
+                        logger?.LogInformation(
+                            "Retention policy for {Relation} RE-HELD - it was armed, and its short consumers ({ShortConsumers}) no longer cover everything it holds, so the {DropAfter} purge is stopped. Nothing is lost by the hold: the oldest row it holds ({OldestRow:yyyy-MM-dd HH:mm} UTC) is newer than the {Horizon} horizon, so there is nothing to drop yet. The policy arms itself on the next evaluation once every consumer covers everything it holds (hourly on the running service, and at every start).",
+                            relation, shortNames, dropAfter, measure.SourceOldest, dropAfter);
+                    }
+                    else if (wasScheduled != true && nothingToDrop)
+                    {
+                        logger?.Log(
+                            pass == RetentionSweepPass.Startup ? LogLevel.Information : LogLevel.Debug,
+                            "Retention policy for {Relation} HELD PAUSED - {ShortConsumers} do not yet cover everything it holds. Nothing is lost by the hold: the oldest row it holds ({OldestRow:yyyy-MM-dd HH:mm} UTC) is newer than the {DropAfter} horizon, so there is nothing to drop yet. The policy arms itself on the next evaluation once every consumer covers everything it holds (hourly on the running service, and at every start).",
+                            relation, shortNames, measure.SourceOldest, dropAfter);
+                    }
+                    else if (wasScheduled == true)
                     {
                         /* The #1877 event itself: this policy WAS purging and its coverage is now measurably
                            short — a consumer was added under it by a build, or lost materialization. A WARNING
@@ -10230,9 +10314,14 @@ AND   j.hypertable_name = '{relation}'";
                            Retention Held alert send an operator to, once per start; on the hourly pass the same
                            line 24 times a day per held policy is noise that buries the transitions above and
                            below, so it drops to Debug there — the tally line at the end still counts it every
-                           hour, and the Retention Held self-alert judges its cost on the same tick. */
+                           hour, and the Retention Held self-alert judges its cost on the same tick. The exception
+                           is the pass that finds the oldest row has just aged past the horizon (#9695): until
+                           then the hold was logged as having nothing to drop, so this is the first time it costs
+                           history, and it warns there too. */
                         logger?.Log(
-                            pass == RetentionSweepPass.Startup ? LogLevel.Warning : LogLevel.Debug,
+                            pass == RetentionSweepPass.Startup || CrossedHorizonRecently(measure.SourceOldest, dropAfter, sweepNow)
+                                ? LogLevel.Warning
+                                : LogLevel.Debug,
                             "Retention policy for {Relation} HELD PAUSED - {ShortConsumers} do not yet cover everything it holds, so arming the {DropAfter} purge could drop history those rollups have never materialized. The remedy for each: {Remedies}. The policy arms itself on the next evaluation once every consumer covers everything it holds - the running service re-judges every held policy hourly (#3812), and at every start.",
                             relation, shortNames, dropAfter, remedies);
                     }
@@ -13495,11 +13584,15 @@ LEFT JOIN LATERAL (
     /// </summary>
     private static async Task DrainRollupFloorWorkAsync(NpgsqlDataSource dataSource, RollupFloorCache cache, long databaseOid)
     {
+        /* #9695: the views this drain found empty. Each one's own line is Debug (MeasureOneRollupFloorAsync); the drain says
+           how many there were once, when it ends. */
+        var emptyViews = 0;
         while (true)
         {
             RollupFloorJob job = default;
             DateTime? rawAt = null;
             ILogger? logger;
+            var drained = false;
             lock (cache.Lock)
             {
                 logger = cache.Logger;
@@ -13518,8 +13611,20 @@ LEFT JOIN LATERAL (
                 else
                 {
                     cache.Draining = false;
-                    return;
+                    drained = true;
                 }
+            }
+
+            if (drained)
+            {
+                if (emptyViews > 0)
+                {
+                    logger?.LogInformation(
+                        "Rollup coverage floor: {Count} rollup(s) hold no rows yet, so none has a floor to read. Each is measured again once it gains rows (#5808).",
+                        emptyViews);
+                }
+
+                return;
             }
 
             try
@@ -13551,7 +13656,12 @@ LEFT JOIN LATERAL (
                     continue;
                 }
 
-                await MeasureOneRollupFloorAsync(dataSource, cache, job, logger, CancellationToken.None);
+                var measured = await MeasureOneRollupFloorAsync(dataSource, cache, job, logger, CancellationToken.None);
+                if (measured.NoFloor)
+                {
+                    emptyViews++;
+                }
+
                 lock (cache.Lock)
                 {
                     cache.Measuring = null;
@@ -13638,7 +13748,10 @@ LEFT JOIN LATERAL (
 
         if (measuredCold)
         {
-            logger?.LogInformation(
+            /* #9695: a view with no rows has no floor to report, and a new store has dozens of them: they are Debug, and the drain
+               counts them in its one Information line. A view that found a floor keeps its Information line. */
+            logger?.Log(
+                floor is null ? LogLevel.Debug : LogLevel.Information,
                 "Rollup coverage floor for {View} measured from its data in the background ({Reason}): {Floor} in {ElapsedMs} ms (#5808).",
                 job.View,
                 job.Reason,
