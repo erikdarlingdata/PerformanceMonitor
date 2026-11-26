@@ -29,6 +29,14 @@ public sealed class DailySummaryStoreGateTests
 
     private static NpgsqlDataSource Pool() => NpgsqlDataSource.Create("Host=unused.invalid;Database=none");
 
+    /* Every test gets its own gates (xUnit builds one instance of this class per test). The service's shared set is cleared by
+       DarlingHealthReader.ResetRangeCacheForTests, which the live classes beside this one call at any moment. */
+    private readonly ComposeStoreAvailability.StoreGates _gates = new();
+
+    private ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> Read(
+        object store, NpgsqlDataSource pool, Probe probe, Func<DateTime> clock)
+        => ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, pool, probe.Run, CancellationToken.None, clock, _gates);
+
     private sealed class Probe
     {
         private int _calls;
@@ -51,11 +59,30 @@ public sealed class DailySummaryStoreGateTests
         var now = new DateTime(2026, 11, 17, 12, 0, 0, DateTimeKind.Utc);
         var probe = new Probe(_ => Task.FromResult(First));
 
-        var warmed = await ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, worker, probe.Run, CancellationToken.None, () => now);
-        var visited = await ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, web, probe.Run, CancellationToken.None, () => now.AddMinutes(4));
+        var warmed = await Read(store, worker, probe, () => now);
+        var visited = await Read(store, web, probe, () => now.AddMinutes(4));
 
         Assert.Equal(RollupAvailability.All, warmed.Rollups);
         Assert.Equal(RollupAvailability.All, visited.Rollups);
+        Assert.Equal(1, probe.Calls);
+    }
+
+    [Fact]
+    public async Task AResetOfTheSharedGatesBetweenTwoReads_DoesNotMakeTheSecondReadProbeAgain()
+    {
+        await using var worker = Pool();
+        await using var web = Pool();
+        var store = new object();
+        var now = new DateTime(2026, 11, 17, 12, 0, 0, DateTimeKind.Utc);
+        var probe = new Probe(_ => Task.FromResult(First));
+
+        await Read(store, worker, probe, () => now);
+
+        /* What DarlingHealthReader.ResetRangeCacheForTests does when a live class that runs beside this one calls it. */
+        ComposeStoreAvailability.ResetStoreGatesForTests();
+
+        await Read(store, web, probe, () => now.AddMinutes(4));
+
         Assert.Equal(1, probe.Calls);
     }
 
@@ -70,13 +97,13 @@ public sealed class DailySummaryStoreGateTests
         var gate = new TaskCompletionSource<(RollupAvailability Rollups, RollupCoverage Coverage)>(TaskCreationOptions.RunContinuationsAsynchronously);
         var probe = new Probe(call => call == 1 ? Task.FromResult(First) : gate.Task);
 
-        await ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, worker, probe.Run, CancellationToken.None, () => now);
+        await Read(store, worker, probe, () => now);
 
         /* A visit ten minutes after the pass: older than the five-minute interval, far inside the hour. The probe it starts is held
            open, and the visit still comes back with the answer it has. A second visit beside it starts no second probe. */
         var later = now.AddMinutes(10);
-        var visit = ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, web, probe.Run, CancellationToken.None, () => later).AsTask();
-        var beside = ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, web2, probe.Run, CancellationToken.None, () => later).AsTask();
+        var visit = Read(store, web, probe, () => later).AsTask();
+        var beside = Read(store, web2, probe, () => later).AsTask();
         Assert.True(visit.IsCompleted, "the visit waited for the probe");
         Assert.True(beside.IsCompleted, "the second visit waited for the probe");
         Assert.Equal(RollupAvailability.All, (await visit).Rollups);
@@ -88,7 +115,7 @@ public sealed class DailySummaryStoreGateTests
         var routed = RollupAvailability.All;
         for (var i = 0; i < 400 && routed != RollupAvailability.None; i++)
         {
-            routed = (await ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, web, probe.Run, CancellationToken.None, () => later)).Rollups;
+            routed = (await Read(store, web, probe, () => later)).Rollups;
             await Task.Delay(10, TestContext.Current.CancellationToken);
         }
 
@@ -106,10 +133,10 @@ public sealed class DailySummaryStoreGateTests
         var gate = new TaskCompletionSource<(RollupAvailability Rollups, RollupCoverage Coverage)>(TaskCreationOptions.RunContinuationsAsynchronously);
         var probe = new Probe(call => call == 1 ? Task.FromResult(First) : gate.Task);
 
-        await ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, worker, probe.Run, CancellationToken.None, () => now);
+        await Read(store, worker, probe, () => now);
 
         var later = now + ComposeStoreAvailability.StaleServeLimit + TimeSpan.FromMinutes(1);
-        var visit = ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, web, probe.Run, CancellationToken.None, () => later).AsTask();
+        var visit = Read(store, web, probe, () => later).AsTask();
         await WaitUntilAsync(() => probe.Calls == 2);
         Assert.False(visit.IsCompleted, "an answer older than the limit was served without waiting for the probe");
 
@@ -129,9 +156,9 @@ public sealed class DailySummaryStoreGateTests
             : Task.FromResult(First));
 
         /* The shared probe fails and the measured accessor probes again, which fails too: the caller's error, and nothing kept. */
-        await Assert.ThrowsAsync<NpgsqlException>(() => ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, worker, probe.Run, CancellationToken.None, () => now).AsTask());
+        await Assert.ThrowsAsync<NpgsqlException>(() => Read(store, worker, probe, () => now).AsTask());
 
-        var answer = await ComposeStoreAvailability.GetMeasuredRollupsForStoreAsync(store, web, probe.Run, CancellationToken.None, () => now);
+        var answer = await Read(store, web, probe, () => now);
         Assert.Equal(RollupAvailability.All, answer.Rollups);
     }
 
