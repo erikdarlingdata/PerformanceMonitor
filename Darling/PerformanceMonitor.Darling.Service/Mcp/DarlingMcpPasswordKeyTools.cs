@@ -40,6 +40,8 @@ public sealed class DarlingMcpPasswordKeyTools
     internal const string ResetNeedsFingerprintText =
         "confirm_fingerprint is needed. Call without confirm first: the answer gives the key's fingerprint and how many saved passwords are lost. Nothing was changed.";
 
+    internal const string StartupNotReadyText = "The service has not finished reading its configuration yet. Try again in a moment.";
+
     internal const string StoreNotReadyText = "The service has not opened its store connection yet. Try again in a moment.";
 
     [DarlingToolAccess(ToolAccess.Write)]
@@ -52,11 +54,22 @@ public sealed class DarlingMcpPasswordKeyTools
         "It never writes over anything. It changes nothing else: put the key in your secret store, point passwordKey in darling.json at it, then delete the file. Making a key does not seal or unseal any saved password: " +
         "a saved password is sealed with the key the store publishes, and only reset_password_key replaces that key, after which every saved password must be entered again. " +
         "Returns {status:\"written\"|\"refused\"|\"failed\", message, path, fingerprint}.")]
-    public static string NewPasswordKey(ILogger? logger = null)
+    public static string NewPasswordKey(PasswordKeyStartupFacts? startup = null, ILogger? logger = null)
     {
         try
         {
-            return NewPasswordKeyIn(ResolveCredentialsDirectory(), KeyComesFromSetting(), logger);
+            var facts = startup?.Read();
+            if (facts is null)
+            {
+                return Outcome("refused", StartupNotReadyText);
+            }
+
+            if (facts.CredentialsDirectory is null)
+            {
+                logger?.LogWarning("{Tool} refused: the service could not work out the folder that holds its password key file when it started.", NewKeyToolName);
+            }
+
+            return NewPasswordKeyIn(facts.CredentialsDirectory, facts.KeyFromSetting, logger);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -97,9 +110,10 @@ public sealed class DarlingMcpPasswordKeyTools
         [Description("Must be true to reset. A reset has no undo and makes every saved password be entered again.")] bool confirm = false,
         [Description("The fingerprint the call without confirm answered. Required with confirm: true.")] string? confirm_fingerprint = null,
         StoreOwnerSource? ownerSource = null,
+        PasswordKeyStartupFacts? startup = null,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ResetPasswordKeyAsync(confirm, confirm_fingerprint, ownerSource?.Read(), confirm && KeyComesFromSetting(), logger, cancellationToken);
+        ResetPasswordKeyAsync(confirm, confirm_fingerprint, ownerSource?.Read(), confirm && startup?.Read()?.KeyFromSetting == true, logger, cancellationToken);
 
     /// <summary>The reset behind the tool, with the owner connection and the <c>passwordKey</c> fact handed in.</summary>
     internal static async Task<string> ResetPasswordKeyAsync(
@@ -141,7 +155,15 @@ public sealed class DarlingMcpPasswordKeyTools
                 return Outcome("refused", outcome.Text + " Call without confirm to get the current key's fingerprint.");
             }
 
-            logger?.LogWarning("Password key reset through MCP: {Sealed} saved password(s) now need to be entered again.", outcome.SealedPasswords);
+            if (outcome.Replaced)
+            {
+                logger?.LogWarning("Password key reset through MCP: {Sealed} saved password(s) now need to be entered again.", outcome.SealedPasswords);
+            }
+            else
+            {
+                logger?.LogInformation("{Tool} found no published password key to reset.", ResetKeyToolName);
+            }
+
             return JsonSerializer.Serialize(new
             {
                 status = outcome.Replaced ? "reset" : "nothing_to_reset",
@@ -154,36 +176,6 @@ public sealed class DarlingMcpPasswordKeyTools
             // The log gets the store's own error text, which names no key and no password.
             logger?.LogWarning("{Tool} failed: {Type}: {Message}", ResetKeyToolName, ex.GetType().Name, ex.Message);
             return McpHelpers.FormatError(ResetKeyToolName, ex);
-        }
-    }
-
-    /// <summary>The folder that holds the service's active password key file, from the config the service runs with, or null when
-    /// the config cannot be read or the folder cannot be worked out. There is no fallback to any other folder.</summary>
-    private static string? ResolveCredentialsDirectory()
-    {
-        try
-        {
-            var path = DarlingConfig.ResolveConfigPath();
-            return DarlingLogHashKeyFile.DirectoryFor(DarlingConfig.Load(path), path);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return null;
-        }
-    }
-
-    /// <summary>Whether darling.json sets <c>passwordKey</c>, which changes the closing sentence of a reset and makes
-    /// <c>new_password_key</c> refuse: the same read the verb makes. A config that cannot be read counts as no setting here, and
-    /// <c>new_password_key</c> then refuses on its own because the credentials folder cannot be found.</summary>
-    private static bool KeyComesFromSetting()
-    {
-        try
-        {
-            return !string.IsNullOrWhiteSpace(DarlingConfig.Load().PasswordKey);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return false;
         }
     }
 

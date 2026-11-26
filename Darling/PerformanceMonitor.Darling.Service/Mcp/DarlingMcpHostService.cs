@@ -977,7 +977,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #7041: send_daily_health_report_now sends through the worker's alert evaluator, published on this hub. A host without the
                process services (a test-constructed one) gets an empty hub, so the tool answers not_ready. */
             RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys,
-                _processServices?.GetService<DailyHealthReportHub>());
+                _processServices?.GetService<DailyHealthReportHub>(), _processServices?.GetService<PasswordKeyStartupFacts>());
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -1436,8 +1436,12 @@ public sealed class DarlingMcpHostService : BackgroundService
         BaselineCache baselineCache,
         StoreOwnerSource? ownerSource = null,
         IPseudonymKeySource? pseudonymKeys = null,
-        DailyHealthReportHub? dailyReportHub = null)
+        DailyHealthReportHub? dailyReportHub = null,
+        PasswordKeyStartupFacts? passwordKeyFacts = null)
     {
+        /* #9644: new_password_key and reset_password_key take the startup config's password key facts as a service parameter.
+           Empty until the worker publishes, and the tools refuse until then. */
+        services.AddSingleton(passwordKeyFacts ?? new PasswordKeyStartupFacts());
         /* #7041: send_daily_health_report_now takes the hub as a service parameter. Always registered, so the MCP SDK never advertises it as a
            schema property (and the front door's schema stays the tool's own plus store). */
         services.AddSingleton(dailyReportHub ?? new DailyHealthReportHub());

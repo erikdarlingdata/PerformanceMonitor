@@ -1748,8 +1748,9 @@ LIMIT 1";
        and at each hourly flush); its own reads never go through admission. */
     private readonly ReadAdmission? _readAdmission;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, DailyHealthReportHub? dailyReportHub = null, PerformanceMonitor.Darling.Service.Chat.SlackListenerRuntimeState? slackListenerState = null)
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency, SlowReadLog? slowReads = null, McpTlsCertificateState? mcpTlsCertState = null, ReadAdmission? readAdmission = null, StoreOwnerSource? ownerSource = null, PseudonymKeySource? pseudonymKeys = null, DailyHealthReportHub? dailyReportHub = null, PerformanceMonitor.Darling.Service.Chat.SlackListenerRuntimeState? slackListenerState = null, PerformanceMonitor.Darling.Service.Mcp.PasswordKeyStartupFacts? passwordKeyFacts = null)
     {
+        _passwordKeyFacts = passwordKeyFacts;
         _slackListenerState = slackListenerState;
         _ownerSource = ownerSource;
         _pseudonymKeys = pseudonymKeys;
@@ -1783,6 +1784,7 @@ LIMIT 1";
     /* #7657: where the worker publishes the opened Slack app-level and bot token readers and the live routes for the Socket Mode
        listener's host; null in a test-constructed worker. */
     private readonly PerformanceMonitor.Darling.Service.Chat.SlackListenerRuntimeState? _slackListenerState;
+    private readonly PerformanceMonitor.Darling.Service.Mcp.PasswordKeyStartupFacts? _passwordKeyFacts;
 
     /// <summary>Test hook (#5592): the pressure read the retention drain takes.</summary>
     internal CollectionPressure CollectionPressureForTest => _collectionPressure;

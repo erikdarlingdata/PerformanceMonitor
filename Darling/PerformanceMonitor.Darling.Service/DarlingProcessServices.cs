@@ -51,6 +51,9 @@ internal static class DarlingProcessServices
     /* #5632 step 7: the worker's store owner data source, published for the one MCP tool that reads a remediation slot. */
     services.AddSingleton<StoreOwnerSource>();
 
+    /* #9644: the startup config's password key facts, published by the worker once and read by the password key MCP tools. */
+    services.AddSingleton<PerformanceMonitor.Darling.Service.Mcp.PasswordKeyStartupFacts>();
+
     /* #8737: every personal MCP token row, refreshed over the owner connection; the MCP bearer gate checks it. */
     services.AddSingleton<DarlingPersonalTokenSnapshot>(provider => new DarlingPersonalTokenSnapshot
     {
