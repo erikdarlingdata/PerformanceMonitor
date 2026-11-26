@@ -1532,7 +1532,7 @@ FROM config_monitored_servers WHERE server_id = $1";
 
     /// <summary>The two columns the edit writes by UPDATE instead of through the function (#9635): the function knows neither.</summary>
     private static bool IsSettingColumn(string column) =>
-        column is "capture_plans" or "alert_delivery_mode_override";
+        EditSettingKeys.Contains(column, StringComparer.Ordinal);
 
     /// <summary>#9635: the per-server settings, written under the edit's transaction after the function has locked the row, checked
     /// <c>modified_at</c> and stamped it. The <c>mcp</c> role holds UPDATE on both columns. <c>$2</c>/<c>$3</c> say which column to write.</summary>

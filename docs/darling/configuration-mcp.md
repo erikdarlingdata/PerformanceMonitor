@@ -189,6 +189,4 @@ A person's token has the `reader` role, or the `operator` role when the person h
 Two admin functions have no MCP tool, on purpose.
 
 - **The store maintenance commands.** `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim` check the disk first and can run for a long time, which does not fit a tool call. Run them from the command line on the service host. The `get_store_maintenance_readiness` tool reads their state, so an MCP client can see whether one is due.
-- **`--drop-xe-sessions` on its own.** `remove_server` already drops a server's Extended Events sessions before it removes the server, so a separate tool would only repeat that step.
-
-The credential functions are not on this list. External alert sources, web access groups, personal MCP tokens and the password key get their own tools, served when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on.
+- **`--drop-xe-sessions` on its own.** It drops sessions on the monitored server that other installs may share, so it stays a command-line step. It is the only way to drop the shared sessions. Run it before `remove_server`, because the named form works only while the server is still registered. `remove_server` drops only this install's own sessions.
