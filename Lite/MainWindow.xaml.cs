@@ -803,39 +803,22 @@ public partial class MainWindow : Window
         {
             await Task.Delay(5000); // Don't slow down startup
 
-            if (!App.CheckForUpdatesOnStartup) return;
+            /* #9745: every outcome is one line in the log, which is all a headless instance has to show it. */
+            var outcome = await StartupUpdateCheck.RunAsync(
+                App.CheckForUpdatesOnStartup,
+                App.IsHeadless,
+                BuildHistory.CurrentBuild().FullVersion,
+                CheckVelopackForUpdateAsync,
+                () => UpdateCheckService.CheckForUpdateWithReasonAsync(),
+                message => AppLogger.Info("Update", message),
+                message => AppLogger.Warn("Update", message));
 
-            // Try Velopack first (supports download + apply)
-            try
-            {
-                var mgr = new Velopack.UpdateManager(
-                    new Velopack.Sources.GithubSource(
-                        "https://github.com/erikdarlingdata/PerformanceMonitor", null, false));
-
-                var newVersion = await mgr.CheckForUpdatesAsync();
-                if (newVersion != null)
-                {
-                    Dispatcher.Invoke(() =>
-                    {
-                        Title = $"Performance Monitor Lite: Update v{newVersion.TargetFullRelease.Version} available (About in the sidebar)";
-                        AnnounceUpdate($"v{newVersion.TargetFullRelease.Version}");
-                    });
-                    return;
-                }
-            }
-            catch
-            {
-                // Velopack packages may not exist yet — fall through
-            }
-
-            // Fallback: GitHub Releases API check
-            var result = await UpdateCheckService.CheckForUpdateAsync();
-            if (result?.IsUpdateAvailable == true)
+            if (outcome.Kind == StartupUpdateKind.Available)
             {
                 Dispatcher.Invoke(() =>
                 {
-                    Title = $"Performance Monitor Lite: Update {result.LatestVersion} available (About in the sidebar)";
-                    AnnounceUpdate(result.LatestVersion);
+                    Title = $"Performance Monitor Lite: Update {outcome.Version} available (About in the sidebar)";
+                    AnnounceUpdate(outcome.Version);
                 });
             }
         }
@@ -843,6 +826,17 @@ public partial class MainWindow : Window
         {
             // Never crash on update check failure
         }
+    }
+
+    /// <summary>The newer version Velopack finds, as "v1.2.3", or null when it finds none (supports download + apply).</summary>
+    private static async Task<string?> CheckVelopackForUpdateAsync()
+    {
+        var mgr = new Velopack.UpdateManager(
+            new Velopack.Sources.GithubSource(
+                "https://github.com/erikdarlingdata/PerformanceMonitor", null, false));
+
+        var newVersion = await mgr.CheckForUpdatesAsync();
+        return newVersion == null ? null : $"v{newVersion.TargetFullRelease.Version}";
     }
 
     /// <summary>
@@ -859,10 +853,9 @@ public partial class MainWindow : Window
     /// </summary>
     private void AnnounceUpdate(string? version)
     {
-        /* #9142: a headless instance cannot show the balloon, and nobody could click About. The log carries the news. */
+        /* #9142: a headless instance cannot show the balloon, and nobody could click About. The update check has already logged the news (#9745). */
         if (HeadlessUi.Skips("the update balloon"))
         {
-            AppLogger.Info("Update", $"Performance Monitor Lite {version} is available. This instance runs headless: stop it with --stop, update, and start it again.");
             return;
         }
 

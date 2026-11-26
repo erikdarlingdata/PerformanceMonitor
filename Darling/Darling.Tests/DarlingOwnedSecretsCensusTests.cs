@@ -312,33 +312,16 @@ public sealed class DarlingOwnedSecretsCensusTests
     {
         var cliMembers = new HashSet<string>(StringComparer.Ordinal);
         var types = new HashSet<string>(StringComparer.Ordinal);
+        var spans = new List<(string Name, string Body)>();
         foreach (var file in SourceFiles(s_serviceDir))
         {
-            if (file.Name == "DarlingCliCommands.cs")
+            if (IsCliCommandsFile(file.Name))
             {
                 var declarations = s_memberDeclaration.Matches(file.Text);
-                var spans = new List<(string Name, string Body)>();
                 for (var i = 0; i < declarations.Count; i++)
                 {
                     var end = i + 1 < declarations.Count ? declarations[i + 1].Index : file.Text.Length;
                     spans.Add((declarations[i].Groups[1].Value, file.Text[declarations[i].Index..end]));
-                }
-
-                foreach (var span in spans.Where(s => s_loadsAConfig.IsMatch(s.Body)))
-                {
-                    cliMembers.Add(span.Name);
-                }
-
-                for (var grew = true; grew;)
-                {
-                    grew = false;
-                    foreach (var span in spans.Where(s => !cliMembers.Contains(s.Name)))
-                    {
-                        if (cliMembers.Any(name => Regex.IsMatch(span.Body, $@"(?<![\w.])(?:DarlingCliCommands\s*\.\s*)?{name}\s*\(")))
-                        {
-                            grew = cliMembers.Add(span.Name) || grew;
-                        }
-                    }
                 }
             }
             else if (file.Name != "DarlingConfig.cs" && s_loadsAConfig.IsMatch(file.Text))
@@ -348,8 +331,32 @@ public sealed class DarlingOwnedSecretsCensusTests
             }
         }
 
+        /* #9689: the members of every partial are one class, so a member in one partial reaches a load through a member in another. */
+        foreach (var span in spans.Where(s => s_loadsAConfig.IsMatch(s.Body)))
+        {
+            cliMembers.Add(span.Name);
+        }
+
+        for (var grew = true; grew;)
+        {
+            grew = false;
+            foreach (var span in spans.Where(s => !cliMembers.Contains(s.Name)))
+            {
+                if (cliMembers.Any(name => Regex.IsMatch(span.Body, $@"(?<![\w.])(?:DarlingCliCommands\s*\.\s*)?{name}\s*\(")))
+                {
+                    grew = cliMembers.Add(span.Name) || grew;
+                }
+            }
+        }
+
         return (cliMembers, types);
     }
+
+    /// <summary>#9689: <see cref="DarlingCliCommands"/> is a partial class, one file per verb family (<c>DarlingCliCommands.cs</c>,
+    /// <c>DarlingCliCommands.SetLoginPassword.cs</c>, and so on). Every one of them runs as the CLI process.</summary>
+    private static bool IsCliCommandsFile(string fileName) =>
+        fileName.StartsWith("DarlingCliCommands.", StringComparison.Ordinal)
+        && fileName.EndsWith(".cs", StringComparison.Ordinal);
 
     private static bool ReachesALoad(string text, (HashSet<string> CliMembers, HashSet<string> Types) calls) =>
         s_loadsAConfig.IsMatch(text)
@@ -374,7 +381,7 @@ public sealed class DarlingOwnedSecretsCensusTests
         Assert.Equal(new[] { "DarlingConfig.cs:Load" }, writers);
 
         var serviceLoads = SourceFiles(s_serviceDir)
-            .Where(f => f.Name != "DarlingCliCommands.cs")
+            .Where(f => !IsCliCommandsFile(f.Name))
             .SelectMany(f => s_loadsAConfig.Matches(f.Text).Select(m => (f.Name, Call: f.Text.Substring(m.Index, m.Length + 1))))
             .ToList();
         Assert.NotEmpty(serviceLoads);

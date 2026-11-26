@@ -143,7 +143,23 @@ A superuser login for the service also clears all of this, and [Security](securi
 
 The tarball ships `provision-roles.sql`. It creates the `admin`, `viewer`, `web` and `mcp` logins on a store that you bring. You can skip it while the web dashboard and MCP are both off, which is the default. With either one on and no `postgres.webConnectionString` or `postgres.mcpConnectionString` set, that surface connects as the owner and the service warns about it. When to run the script, its placeholders and what it grants are in [Security](security.md#security--least-privilege-roles).
 
-Custom alerts run on the `web` role, so they need the script and `postgres.webConnectionString`. With the setting unset, the service logs `Custom alert evaluator not started` and names the setting ([#9700](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9700)). The built-in alerts are not affected.
+Custom alerts run on the `web` role, so they need the script and `postgres.webConnectionString`. With the setting unset, the service logs `Custom alert evaluator not started` and names the setting ([#9700](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9700)). With it set, the service signs in with that login once at start. If the store refuses it, the service logs a warning that names the setting, the login and the store's error, and the evaluator stays down until the next start ([#9760](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9760)). The built-in alerts are not affected.
+
+Run the script on the store host as the `postgres` OS user. The `darling` owner from the step above is not a superuser and has no `CREATEROLE`, so the script stops at its guard (`is not a superuser and does not have CREATEROLE`) and changes nothing. Work on a copy, so that the four passwords never sit under `/opt/darling`, where the next [upgrade by hand](#upgrade-by-hand) moves them to `/opt/darling.previous`. The run needs all four placeholders replaced, `web` and `mcp` included, even when only the custom alert evaluator's `web` login is used. Make the copy in a folder that only you can read:
+
+```bash
+work=$(mktemp -d)
+install -m 600 /opt/darling/provision-roles.sql "$work/provision-roles.sql"
+```
+
+Open the copy in an editor and replace every occurrence of `CHANGE_ME_ADMIN_PASSWORD`, `CHANGE_ME_VIEWER_PASSWORD`, `CHANGE_ME_WEB_PASSWORD` and `CHANGE_ME_MCP_PASSWORD` with a long random password. Each one sits in a check and in its `ALTER ROLE` line, so use a find-and-replace. Keep the `web` and `mcp` passwords in the files that `postgres.webConnectionString` and `postgres.mcpConnectionString` read as `file:` references, such as `file:/etc/darling/store_web` in the [Security example](security.md#security--least-privilege-roles). Then run the copy and delete it. The copy goes in on standard input, because the `postgres` user cannot read a file that only you can read. `-q` leaves out the command tags (`DO`, `SET`, `GRANT`), so the run prints only warnings and errors, and each line is worth reading.
+
+```bash
+sudo -u postgres psql -X -q -d darling -f - < "$work/provision-roles.sql"
+rm -rf "$work"
+```
+
+**Proof:** `sudo -u postgres psql -X -d darling -At -c "SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') ORDER BY rolname"` lists all four. Then set `postgres.webConnectionString` in `darling.json`, and `postgres.mcpConnectionString` when MCP is on.
 
 ### Store log capture
 
@@ -162,7 +178,7 @@ That lets the role read any file in the data directory and in an absolute `log_d
 
 ## Step 4: Download and verify
 
-Each release on the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) has `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. Download both into one folder. The checksum file lists the compose archive too, so tell `sha256sum` to skip the file that you did not download:
+Each release on the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) has `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. Download both into a new, empty folder for this release. Every release names its checksum file `SHA256SUMS-linux.txt`, so a download into the folder of an earlier release replaces that release's file, and its archive can no longer be checked. The checksum file lists the compose archive too, so tell `sha256sum` to skip the file that you did not download:
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS-linux.txt
@@ -319,7 +335,7 @@ Know these limits of the unit ([#9702](https://github.com/erikdarlingdata/Perfor
 Read the file log, not the journal:
 
 ```bash
-sudo tail -n 60 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date -u +%Y%m%d).log
+sudo tail -n 60 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date +%Y%m%d).log
 ```
 
 **Proof:** these lines, at the default log level:
@@ -368,7 +384,7 @@ Work the formula with those two numbers and the host's RAM. For host RAM, use th
 
 ## Logs
 
-- **The file log is the one to read.** It is `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, one file for each day, kept 14 days, one line for each event.
+- **The file log is the one to read.** It is `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, one file for each day, kept 14 days, one line for each event. The date in the name is the host's local date, so a command that builds the name uses `date +%Y%m%d`, not `date -u`.
 - **The journal is the noisy one.** `journalctl -u darling` shows one line for each event, as `source[event id] message`, and the log level goes to the journal priority. To list only warnings and errors, run `journalctl -u darling -p warning`. Use the journal for what systemd itself reports: starts, stops and a process that exits.
 - **The log files are mode `644` inside a `700` folder.** The service creates each file with the process umask. The folder's mode is what keeps other users out, so this is harmless. To make the files owner-only as well, add `UMask=0077` to the unit's `[Service]` section and restart the service.
 - **The log level** is set with a standard .NET logging source. In the unit, that is a line such as `Environment=Logging__LogLevel__PerformanceMonitor.Darling.Service=Debug`. See [Logs](operations.md#logs).
@@ -396,6 +412,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `--enable-collector`, `--disable-collector`, `--set-collector-run-at`, `--set-collector-frequency`, `--set-collector-retention` | The same verbs after `darling-verb`. See [Collector settings](cli.md#collector-settings) |
 | `.\PerformanceMonitor.Darling.Service.exe --backfill-rollups` | `darling-verb --backfill-rollups`. Add `--dry-run` to see the plan first |
 | `.\PerformanceMonitor.Darling.Service.exe --reset-password-key` | `darling-verb --reset-password-key`, then `sudo systemctl restart darling` |
+| `.\PerformanceMonitor.Darling.Service.exe --set-login-password --username <login>` | `<command that prints the password> \| darling-verb --set-login-password --username <login>`. Add `--dry-run` first. A sudo policy that records input (`log_input`) records the piped password: see [Set-login-password](cli.md#--set-login-password) |
 | `.\PerformanceMonitor.Darling.Service.exe --diagnostics-bundle` | `darling-verb --diagnostics-bundle`. See [Diagnostics Bundle](cli.md#diagnostics-bundle) |
 | `--add-alert-source`, `--rotate-alert-source`, `--remove-alert-source`, `--list-alert-sources` | The same verbs after `darling-verb` |
 | `--encrypt-password` | Windows only. Use a `file:` or `env:` reference in `darling.json` |
@@ -405,7 +422,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `--print-viewer-connection`, `--export-viewer-config` | Windows only, for the managed store. Write the Viewer's `darling.json` by hand, as [Manual configuration](viewer.md#manual-configuration-fallback) says |
 | `Start-Service`, `Stop-Service` or `Restart-Service 'PerformanceMonitor Darling'` | `sudo systemctl start darling`, `stop` or `restart` |
 | `Get-Service 'PerformanceMonitor Darling'` | `systemctl status darling` |
-| `Get-Content <log> -Wait -Tail 40` | `sudo tail -n 40 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date -u +%Y%m%d).log` |
+| `Get-Content <log> -Wait -Tail 40` | `sudo tail -n 40 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date +%Y%m%d).log` |
 | `install-darling.ps1`, `Install-Darling.cmd`, the MSI | Steps 5 to 8 of this page |
 | `upgrade-darling.ps1` | [Upgrade by hand](#upgrade-by-hand) |
 | `uninstall-darling.ps1` | [Uninstall](#uninstall) |
@@ -431,26 +448,45 @@ The `network` block of each surface (`listen`, `allowFrom`, `token`) is read fro
 There is no upgrade script for Linux ([#9688](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9688)). The config, the secrets and the keys are in `/etc/darling`, outside the service folder, so an upgrade replaces only `/opt/darling`.
 
 1. Read the release notes, and [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) for anything that an older build reads differently.
-2. Back up the store. See [Back up, restore and move the store](../darling-store-backup.md).
-3. Download and verify the new tarball, as in step 4.
-4. Replace the service files and keep the old ones. The service stays stopped until step 5:
+2. Back up the store, as in [Your own PostgreSQL](../darling-store-backup.md#your-own-postgresql). For a store on this host, the `postgres` OS user can run the dump without a password. This writes the dump to the current folder:
+
+   ```bash
+   sudo -u postgres pg_dump --format=custom --no-owner --no-acl darling > darling-store.dump
+   ```
+
+3. Compare the store settings with the block in [Settings](#settings), because a release can add a setting. The file is `/etc/postgresql/18/main/conf.d/darling.conf` on a Debian or Ubuntu package install. A store set up from an earlier quick start can lack `pg_stat_statements.track_utility = off` and `timescaledb.telemetry_level = off`, and the service then warns about `track_utility` at every start. Add what is missing and reload PostgreSQL. A reload is enough for these two. A change to the preload list or the worker settings needs a restart, as [Settings](#settings) says.
+
+   ```bash
+   sudo systemctl reload postgresql@18-main
+   ```
+
+4. Download and verify the new tarball, as in [step 4](#step-4-download-and-verify).
+5. Replace the service files and keep the old ones as the rollback copy. An earlier upgrade can leave an older `/opt/darling.previous`, so the block removes it first. Without that, `mv` moves the folder inside the old copy and reports no error. With `-T`, `mv` stops with an error instead. The service stays stopped until step 6:
 
    ```bash
    sudo systemctl stop darling
-   sudo mv /opt/darling /opt/darling.previous
+   sudo rm -rf /opt/darling.previous
+   sudo mv -T /opt/darling /opt/darling.previous
    sudo mkdir -p /opt/darling
    sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling --no-same-owner
    ```
 
-5. Compare `/etc/systemd/system/darling.service` with the unit in step 8, because a release can change it. For example, 3.14.0 adds `Type=notify`, `postgresql.service` in `After=` and `Wants=network-online.target`. If the files differ, save the unit from step 8 over yours. Then reload systemd and start the service:
+6. Compare `/etc/systemd/system/darling.service` with the unit in step 8, because a release can change it. For example, 3.14.0 adds `Type=notify`, `postgresql.service` in `After=` and `Wants=network-online.target`. To compare them, save the unit from step 8 as `/tmp/darling.service.new`, then run the command below. No output means that the files are the same:
 
    ```bash
+   diff /etc/systemd/system/darling.service /tmp/darling.service.new
+   ```
+
+   If the files differ, install the new unit over yours. Then reload systemd and start the service:
+
+   ```bash
+   sudo install -m 644 /tmp/darling.service.new /etc/systemd/system/darling.service
    sudo systemctl daemon-reload
    sudo systemctl start darling
    ```
 
-6. Check the proof lines of step 9. `Postgres store ready (schema v<version>, <count> migration(s) applied)` shows the store's new schema version.
-7. Read the worker counts again, as in [Size the workers after the first start](#size-the-workers-after-the-first-start).
+7. Check the proof lines of step 9. `Postgres store ready (schema v<version>, <count> migration(s) applied)` shows the store's new schema version.
+8. Read the worker counts again, as in [Size the workers after the first start](#size-the-workers-after-the-first-start).
 
 Nothing checks that the old process is gone or rolls back for you. To go back, stop the unit, move `/opt/darling.previous` back to `/opt/darling` and start the unit. The store's migrations stay applied, so read the rollback list first. Remove `/opt/darling.previous` when you no longer need it.
 

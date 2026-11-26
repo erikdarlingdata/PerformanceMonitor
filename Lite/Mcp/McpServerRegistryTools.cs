@@ -77,9 +77,9 @@ public sealed class McpServerRegistryTools
     [McpServerTool(Name = "add_servers"), Description(
         "Write: adds servers (a JSON ARRAY) to what Lite monitors, through the code behind --add-server: every entry is checked and connection-tested first, " +
         "then saved one at a time. Served only when mcp_allow_server_admin and mcp_allow_writes are both true. One refused or unreachable entry " +
-        "refuses the whole call before anything is saved (unlike Darling, which reports each entry). A server already listed (same host, database and " +
+        "refuses the whole call before anything is saved, and the answer lists every refused entry with its number. A server already listed (same host, database and " +
         "read-only intent) is updated in place, with the new password. A password is stored in Windows Credential Manager and never returned. <<GUIDE>> " +
-        "If a save fails, the entries before it stay saved, the answer names them (remove_server removes one) and the failed entry changes nothing. " +
+        "Darling instead saves the entries that pass. If a save fails, the entries before it stay saved, the answer names them (remove_server removes one) and the failed entry changes nothing. " +
         "Each object: host (REQUIRED); display_name (defaults to host); database; auth (\"Windows\" default, \"SQL\", \"ServicePrincipal\" (username is the " +
         "client id, password the secret), \"ManagedIdentity\" or \"EntraDefault\"); username and password (REQUIRED for \"SQL\" and \"ServicePrincipal\"); " +
         "encrypt_mode (\"Optional\"|\"Mandatory\"|\"Strict\"); trust_server_certificate, read_only_intent, multi_subnet_failover (booleans); engine, " +

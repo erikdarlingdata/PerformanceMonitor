@@ -416,6 +416,15 @@ if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
     return await DarlingCliCommands.ResetPasswordKeyAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --set-login-password --username <login> [--dry-run] [--config <path>] (#9689) - save one password, read from stdin,
+   for every server that uses the login, disabled ones included. A store moved to another machine, or a reset password key, leaves every saved
+   password to be entered again, and a headless host has no Viewer to enter them in. The password is never an argument. Same
+   platform posture as the verbs around it (Windows only for a MANAGED store credential, which the verb checks). */
+if (args.Length > 0 && DarlingCliCommands.IsSetLoginPasswordVerb(args[0]))
+{
+    return await DarlingCliCommands.SetLoginPasswordAsync(args[1..], Console.OpenStandardInput(), Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: --new-password-key <path> (#8006) - write a new password key to a path that holds nothing, for an operator to put in
    the secret store passwordKey reads, and print only its fingerprint, never the key. It reads no configuration and opens no
    store, so it runs anywhere the exe does. */
@@ -560,9 +569,10 @@ builder.Services.AddSystemd();
 
 /* The rolling file log under %ProgramData%\PerformanceMonitorDarling\logs — the service's PRIMARY
    diagnostic surface (see DarlingFileLoggerProvider remarks). Registered unconditionally: console
-   runs get the same file, which is exactly what an operator collecting a bug report wants. */
+   runs get the same file, which is exactly what an operator collecting a bug report wants. The host disposes the provider on
+   its way out, which writes the lines still buffered, the stop line among them (#9747). */
 var fileLoggerProvider = new DarlingFileLoggerProvider();
-builder.Logging.AddProvider(fileLoggerProvider);
+DarlingProcessServices.AddFileLog(builder.Logging, fileLoggerProvider);
 
 /* #9415: counts the service's own ERROR and WARN lines (and keeps the first of each) for the start history row. It writes nothing. */
 builder.Logging.AddProvider(new ServiceLogTallyProvider(ServiceLogTally.Shared));
