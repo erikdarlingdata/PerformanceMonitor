@@ -900,7 +900,8 @@ FROM pg_catalog.pg_control_system() AS s";
                 /* #6183: SqlClient's native library failing to load reads "The type initializer for ... TdsParser
                    threw an exception" and says nothing about why. One shared explanation, for every caller. */
                 Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
-                SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex));
+                SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex),
+                SqlErrorNumber: (ex as SqlException ?? ex.InnerException as SqlException)?.Number);
         }
     }
 
@@ -1230,7 +1231,11 @@ public sealed record ConnectionProbeResult(
     bool QueryStoreReplicaIgnoredOnAzureSqlDb = false,
     /* #6472: the sentence naming each missing base grant with the statement that adds it, or null when none is missing (or the check could
        not read). A warning beside a successful connection. Trailing and defaulted, like the fields above. */
-    string? MissingGrantsNote = null)
+    string? MissingGrantsNote = null,
+    /* #9674: the number of the SqlException a failed SQL Server connect threw, or null (a success, another exception, or a PostgreSQL
+       target). A failed Strict connection test reads it to tell a login failure, which gets no Strict hint, from a transport or
+       certificate failure, which does. Trailing and defaulted, like the fields above. */
+    int? SqlErrorNumber = null)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

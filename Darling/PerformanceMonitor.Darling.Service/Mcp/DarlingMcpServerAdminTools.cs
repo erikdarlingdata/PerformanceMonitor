@@ -119,12 +119,16 @@ public sealed partial class DarlingMcpServerAdminTools
            full redacted text for the person at the service host's own command line. */
         logger?.LogWarning("Connection test to {Target} failed: {DriverText}",
             Hosting.DarlingHttpRefusalLog.Sanitize(target, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
+        /* #9674: a Strict test that failed on something other than a login says what Strict needs, because the driver's text does not. The
+           line is fixed text, with nothing the driver said in it, so every caller gets it, including the ones that never see the driver text. */
+        var strict = server.IsPostgres || probe.SqlClientNativeLoadFailed ? null : StrictEncryptionHint.For(server.EncryptMode, probe.SqlErrorNumber);
+        var strictLine = strict is null ? string.Empty : Environment.NewLine + strict;
         if (revealConnectError && !string.IsNullOrWhiteSpace(probe.Error))
         {
-            return $"Could not connect: {driverText}";
+            return $"Could not connect: {driverText}{strictLine}";
         }
 
-        return $"Could not connect to {target}. The service log has the details.";
+        return $"Could not connect to {target}. The service log has the details.{strictLine}";
     }
 
     private static Task<ConnectionProbeResult> DefaultProbeAsync(MonitoredServer server, CancellationToken cancellationToken) =>
