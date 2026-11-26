@@ -38,7 +38,7 @@ sudo /opt/darling-new/install-darling.sh
 - The scripts run as root, so they refuse to run from a folder that root does not own or that its group or other users can write, and they refuse a `--source` folder like that. The commands above make a folder that passes.
 - The service user gets only the folders it writes. `/usr/share/PerformanceMonitorDarling` stays root's, and the script takes it back when an older install gave it to `darling`. It refuses, and changes no owner, when `logs` or `darling-keys` is a symbolic link.
 
-**Upgrade.** Read the release notes and back up the store first, as [Upgrade by hand](#upgrade-by-hand) says. The script does not read or change the store's PostgreSQL settings, so the compare of the store's settings file with the [Settings](#settings) block, which [Upgrade by hand](#upgrade-by-hand) gives as its own step ([#9752](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9752)), stays with you. Then extract the new tarball into a new folder and run the upgrade script that came out of it:
+**Upgrade.** Read the release notes and back up the store first, as [Upgrade by hand](#upgrade-by-hand) says. The script does not read or change the store's PostgreSQL settings, so the compare of the store's settings file with the [Settings](#settings) block stays with you: it is step 3 of [Upgrade by hand](#upgrade-by-hand). Then extract the new tarball into a new folder and run the upgrade script that came out of it:
 
 ```bash
 sudo rm -rf /opt/darling-new && sudo mkdir /opt/darling-new
@@ -492,7 +492,7 @@ The `network` block of each surface (`listen`, `allowFrom`, `token`) is read fro
 
 ## Upgrade by hand
 
-`upgrade-darling.sh` does the steps below that replace the service files and start the service, and checks them: see [Install and upgrade with the scripts](#install-and-upgrade-with-the-scripts). The release notes, the backup and the store settings stay with you. The config, the secrets and the keys are in `/etc/darling`, outside the service folder, so an upgrade replaces only `/opt/darling`.
+`upgrade-darling.sh` does steps 5 and 6 below and checks the result: see [Install and upgrade with the scripts](#install-and-upgrade-with-the-scripts). Steps 1 to 4 stay with you, the compare of the store settings in step 3 among them, and so do steps 7 and 8. The config, the secrets and the keys are in `/etc/darling`, outside the service folder, so an upgrade replaces only `/opt/darling`.
 
 1. Read the release notes, and [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) for anything that an older build reads differently.
 2. Back up the store. See [Back up, restore and move the store](../darling-store-backup.md).
