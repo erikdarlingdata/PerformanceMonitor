@@ -248,7 +248,16 @@ When all four hold, the action runs at once only on a route with `action_approva
 
 ### Undo and its limits
 
-A person can undo a plan force or unforce from the Agent changes list. A plan eviction has no undo. A session kill has no undo.
+A person can undo some Level 3 actions from the Agent changes list. Each undo runs only inside 365 days of the change and only while that server's switch for the action being undone is on, with its remediation login. An undo of a plan force, an unforce or a plan guide create or drop shows the statement it would run, and a second step confirms it.
+
+- Plan force or unforce: undone. The undo reads the server first. It puts back the plan that was forced before the change, or unforces the plan when none was forced, and it forces the plan again to undo an unforce. It is refused as `changed_since` when another change was made since, and as `nothing_to_undo` when the server shows the change never took effect. It needs the `force_plan` switch.
+- Plan guide create: undone. The undo drops the guide by name, and only while the guide still holds the statement and hints it was created with (`guide_changed` otherwise). A guide that is already gone is refused as `guide_not_found`. It needs the `create_plan_guide` switch.
+- Plan guide drop: undone. The undo re-creates the guide from the definition the drop journaled, as described under `drop_plan_guide`. It needs the `drop_plan_guide` switch.
+- Plan eviction: no undo. An evicted plan cannot be put back. The next run compiles a new plan, and `get_compiles_after_evict` shows what that compile looked like.
+- Module recompile: no undo. The next run compiles a new plan.
+- Session kill: no undo. A killed session cannot be brought back, and its open transaction rolls back.
+
+A call with no recorded result shows **result unknown** and has no Undo button. See "The journal, Agent changes and undo" for the list and the Level 2 undo.
 
 ### The remediation login
 
@@ -327,7 +336,7 @@ Darling journals every request. Each change shows as `action_called` (with the o
 
 The Viewer's Investigations window and the web Admin page each have an **Agent changes** tab. Each row is one agent call, with the time, server, kind, tool, agent, reason and result. A call that has neither a "done" nor a "failed" result shows **result unknown**. It has no Undo button.
 
-To undo a change, select **Undo** on its row. Undo restores what the setting was before the agent's change. It works only when nobody changed the setting after the agent. If someone did, Undo says **changed since** and leaves the setting alone. Undo works for 365 days after the change. Over MCP (`mcp.allowWrites` and a token), `undo_agent_change` does the same for a change that is not a plan force or unforce. It takes the change's `called_id` from `get_agent_changes`.
+To undo a change, select **Undo** on its row. Undo restores what the setting was before the agent's change. It works only when nobody changed the setting after the agent. If someone did, Undo says **changed since** and leaves the setting alone. Undo works for 365 days after the change. Over MCP (`mcp.allowWrites` and a token), `undo_agent_change` does the same for a mute rule, a custom alert rule, a threshold override or a deadlock signature merge, and `undo_plan_change` does it for a plan force, an unforce or a plan guide create or drop. Each takes the change's `called_id` from `get_agent_changes`.
 
 To stop all agent changes at once, use **Turn off agent changes** in the Viewer or the web. The gate then refuses every change as `actions_off`. Nothing already made is undone. Over MCP, `set_agent_actions_enabled` can turn the switch off but never back on. A person turns it on in the Viewer or the web.
 
@@ -337,7 +346,7 @@ The web can undo and switch only under the store's admin login. On a managed or 
 
 A report can carry a `proposed_note`. The note waits until a person approves it. A person approves or rejects it in the Viewer's Investigations window or on the web Admin page, in **Pending Notes**. Once approved, the note reaches later briefs. A pending or rejected note never reaches a brief. A note stops reaching briefs 90 days after it was proposed.
 
-This is the only approval step in agent dispatch. A change an agent makes at Level 2 or 3 needs no approval.
+A Level 2 change needs no approval. A Level 3 server action needs a person's approval on a route whose `action_approval` is `required`, which is where a new route starts, and on any request that a person's chat message opened. The tool stores a proposal that expires after 60 minutes, and the action runs only when a person approves it. See [Action approval](darling/security.md#action-approval).
 
 ## Practice requests
 

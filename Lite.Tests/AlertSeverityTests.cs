@@ -282,8 +282,9 @@ public class AlertSeverityTests
         var payload = WebhookAlertService.BuildTeamsPayload(
             "Volume Free Space", "S1", "E:\\ 2% free (1.0 GB)", "10% / 5 GB", Branding, context: ctx);
 
-        Assert.Contains("CRITICAL", payload);
-        Assert.Contains("DC2626", payload); // themeColor renders without the leading '#'
+        var card = TeamsCard.Parse(payload);
+        Assert.Contains("CRITICAL", card.Title);
+        Assert.Equal("attention", card.Style); /* the red severity color as the nearest Adaptive Card style */
     }
 
     [Fact]
@@ -354,8 +355,9 @@ public class AlertSeverityTests
         var payload = WebhookAlertService.BuildTeamsPayload(
             "Collection Stopped", "S1", "5 runs failing", "collecting", Branding, context: ctx);
 
-        Assert.Contains("CRITICAL", payload);
-        Assert.DoesNotContain("2eaef1", payload);
+        var card = TeamsCard.Parse(payload);
+        Assert.Contains("CRITICAL", card.Title);
+        Assert.Equal("attention", card.Style);
     }
 
 }
