@@ -96,6 +96,19 @@ public sealed class WebAccessGroupStore : IWebAccessGroupMetadata, IWebAccessGro
         await command.ExecuteNonQueryAsync(ct);
     }
 
+    /// <summary>Sets the advanced switch and names <paramref name="actor"/> in the journal row (#9662). The store reads the prior value under
+    /// its row lock and returns it, so the caller builds its answer from what was true when the write ran. A change from off to on happens
+    /// only when <paramref name="confirmed"/> is true: otherwise nothing changes and the prior value (false) comes back.</summary>
+    public async Task<bool?> SetAdvancedEnabledAsync(bool enabled, string actor, bool confirmed, CancellationToken ct = default)
+    {
+        await using var command = Command("SELECT config.set_web_access_advanced($1,$2,$3)");
+        command.Parameters.AddWithValue(enabled);
+        command.Parameters.AddWithValue(actor);
+        command.Parameters.AddWithValue(confirmed);
+        /* A store with no switch row answers NULL, and nothing was changed: null tells the caller apart from a prior value of false. */
+        return await command.ExecuteScalarAsync(ct) is bool prior ? prior : null;
+    }
+
     /// <summary>The per-request read: the group's safe columns and the current session epoch, and a row only while the advanced web access switch is on.</summary>
     public const string EnabledGroupSql = "SELECT " + SafeColumns + ",a.session_epoch FROM config.web_access_groups g " +
         "JOIN config.web_access_advanced a ON a.id=1 AND a.enabled WHERE g.group_id=$1";

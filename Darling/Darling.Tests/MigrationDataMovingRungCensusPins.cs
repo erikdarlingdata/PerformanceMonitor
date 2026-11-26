@@ -573,6 +573,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "existing row, so the index is empty when it is built. V215's case on the same narrow control-plane table (one row per incident, kept a "
             + "year), and cheaper, because the partial predicate keeps no existing row. The two ADD COLUMNs are nullable with no default and are "
             + "catalog-only. The new window table and its index are created empty. The rung spends none of the lock-wait budget and the multiple does not move."),
+        new(
+            319,
+            SetsTheFloor: false,
+            "#9662: the advanced web access setter that names its caller. The UPDATE on config.web_access_advanced (created V262, a single row) sits inside the "
+            + "plpgsql function body of the new three argument set_web_access_advanced, which runs only when an administrator flips the switch later. The rung "
+            + "itself executes none of it, so it reads and rewrites no row at migration time. What it does run is catalog work: two function definitions and the "
+            + "hardening function's grant and revoke statements, all under the lock_timeout the rung opens with. Does not move the MigrationLockWaitTimeoutSeconds multiple."),
     ];
 
     /// <summary>

@@ -4137,6 +4137,10 @@ END $$;";
            columns on config.investigation_requests that say which window held a request and when a late join released the hold. One new table and two catalog-only
            columns: no data moves. An older build ignores them, so it hands a request that opened in a window to the request runner as it always did. */
         new Migration(InvestigationChangeWindows.Version, "investigation-change-windows", InvestigationChangeWindows.CreateSql),
+        /* V319 (#9662): the advanced web access setter that names its caller and decides the confirm under its row lock. One new three argument function, a
+           replaced one argument function with the same signature and result, and a replaced hardening function. No table, column or row changes. An older build
+           still calls the one argument function, which behaves as it did, so it ignores the new form. */
+        new Migration(WebAccessAdvancedActor.Version, "web-access-advanced-actor", WebAccessAdvancedActor.CreateSql),
     };
 
     /// <summary>

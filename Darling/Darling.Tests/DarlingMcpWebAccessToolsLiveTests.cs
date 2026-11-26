@@ -404,6 +404,189 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
         });
     }
 
+    private const string AdvancedJournalSql = "SELECT actor || '|' || database_actor FROM config.web_access_group_events WHERE event = $1 ORDER BY event_id DESC LIMIT 1";
+
+    private static async Task<string?> LastAdvancedJournalAsync(NpgsqlDataSource owner, string eventName, CancellationToken ct)
+    {
+        await using var command = owner.CreateCommand(AdvancedJournalSql);
+        command.Parameters.AddWithValue(eventName);
+        return await command.ExecuteScalarAsync(ct) as string;
+    }
+
+    /// <summary>#9662: the tool writes on the service's store owner connection, so the journal row named the store owner. It names the
+    /// caller now, and keeps the database role in its own column. The Viewer's one argument setter still names the session user.</summary>
+    [Fact]
+    public async Task AnAdvancedSwitchFlip_OverMcp_JournalsTheCaller_AndAViewerFlipStillJournalsTheSessionUser()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var sessionUser = (string)(await ScalarAsync(owner, "SELECT session_user", ct))!;
+            var store = new WebAccessGroupStore(owner);
+
+            await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, true, Actor, null, ct);
+            Assert.Equal(Actor + "|" + sessionUser, await LastAdvancedJournalAsync(owner, "advanced_enabled", ct));
+
+            await store.SetAdvancedEnabledAsync(false, ct);
+            Assert.Equal(sessionUser + "|" + sessionUser, await LastAdvancedJournalAsync(owner, "advanced_disabled", ct));
+
+            await store.SetAdvancedEnabledAsync(true, ct);
+            Assert.Equal(sessionUser + "|" + sessionUser, await LastAdvancedJournalAsync(owner, "advanced_enabled", ct));
+
+            await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, false, false, Actor, null, ct);
+            Assert.Equal(Actor + "|" + sessionUser, await LastAdvancedJournalAsync(owner, "advanced_disabled", ct));
+        });
+    }
+
+    /// <summary>#9662: the confirm is decided under the store's row lock, from the value held then. A switch that was on at the tool's
+    /// earlier look and is off when the write runs is not turned on without the confirm, and the answer is the refusal, never unchanged.</summary>
+    [Fact]
+    public async Task AnUnconfirmedEnable_WhenTheStoredValueIsOff_ChangesNothing_EvenIfItWasOnAtAnEarlierRead()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var store = new WebAccessGroupStore(owner);
+            await store.SetAdvancedEnabledAsync(true, ct);
+            Assert.NotNull(await store.ReadAdvancedSessionEpochAsync(ct));
+            await store.SetAdvancedEnabledAsync(false, ct);
+            var epoch = await ScalarAsync(owner, "SELECT session_epoch FROM config.web_access_advanced", ct);
+            var journalRows = await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct);
+
+            /* The function itself: it returns the value it held and changes nothing. */
+            Assert.False(await store.SetAdvancedEnabledAsync(true, Actor, false, ct));
+            Assert.Null(await store.ReadAdvancedSessionEpochAsync(ct));
+
+            var refused = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, false, Actor, null, ct))!;
+            Assert.Equal("confirm_required", (string)refused["code"]!);
+            Assert.Null(refused["undo"]);
+            Assert.Null(await store.ReadAdvancedSessionEpochAsync(ct));
+            Assert.Equal(epoch, await ScalarAsync(owner, "SELECT session_epoch FROM config.web_access_advanced", ct));
+            Assert.Equal(journalRows, await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct));
+
+            /* Confirmed, it turns on and returns the prior value, which the answer builds its undo from. */
+            Assert.False(await store.SetAdvancedEnabledAsync(true, Actor, true, ct));
+            Assert.NotNull(await store.ReadAdvancedSessionEpochAsync(ct));
+            Assert.True(await store.SetAdvancedEnabledAsync(false, Actor, false, ct));
+            Assert.Null(await store.ReadAdvancedSessionEpochAsync(ct));
+        });
+    }
+
+    /// <summary>Setting the switch to the value it holds changes nothing, whatever the confirm says, and the answer is unchanged with no undo.</summary>
+    [Fact]
+    public async Task ASwitchAlreadyOn_AnsweredWithoutConfirm_IsUnchanged_WithNoUndo_AndNoJournalRow()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, true, Actor, null, ct);
+            var epoch = await ScalarAsync(owner, "SELECT session_epoch FROM config.web_access_advanced", ct);
+            var journalRows = await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct);
+
+            var answer = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, false, Actor, null, ct))!;
+            Assert.Equal("unchanged", (string)answer["status"]!);
+            Assert.True((bool)answer["advanced_web_access_enabled"]!);
+            Assert.Null(answer["undo"]);
+            Assert.Equal(epoch, await ScalarAsync(owner, "SELECT session_epoch FROM config.web_access_advanced", ct));
+            Assert.Equal(journalRows, await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct));
+        });
+    }
+
+    /// <summary>A blank or oversized actor is refused by the store before it changes anything, as the group writes refuse one.</summary>
+    [Fact]
+    public async Task ABlankOrOversizedActor_IsRefusedByTheStore_AndChangesNothing()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var store = new WebAccessGroupStore(owner);
+            await Assert.ThrowsAsync<PostgresException>(() => store.SetAdvancedEnabledAsync(true, "   ", true, ct));
+            await Assert.ThrowsAsync<PostgresException>(() => store.SetAdvancedEnabledAsync(true, new string('a', 257), true, ct));
+            Assert.Null(await store.ReadAdvancedSessionEpochAsync(ct));
+            Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct));
+        });
+    }
+
+    /// <summary>An actor with a control character is refused like a blank one: a tab, a newline, a bell and the bidirectional marks that
+    /// reorder text (U+202E) would otherwise reach the journal as a name that reads differently from what it holds.</summary>
+    [Fact]
+    public async Task AnActorWithAControlCharacter_IsRefusedByTheStore_AndChangesNothing()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var store = new WebAccessGroupStore(owner);
+            foreach (var actor in new[] { "mcp:\t\n", "mcp:a\tb", "mcp:a\nb", "mcp:a\ab", "mcp:rtl\u202Egnp", "mcp:\u2066x\u2069" })
+            {
+                var failure = await Assert.ThrowsAsync<PostgresException>(() => store.SetAdvancedEnabledAsync(true, actor, true, ct));
+                Assert.Equal("WG400", failure.SqlState);
+            }
+
+            Assert.Null(await store.ReadAdvancedSessionEpochAsync(ct));
+            Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct));
+            Assert.True(await store.SetAdvancedEnabledAsync(true, "mcp:plain-name", true, ct) is false);
+        });
+    }
+
+    /// <summary>A store with no switch row changed nothing, so the tool refuses and says so: no flip answer, no undo hint and no warning line.</summary>
+    [Fact]
+    public async Task AMissingSwitchRow_IsRefusedByTheTool_WithNoUndoAndNoLogLine()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            await ScalarAsync(owner, "DELETE FROM config.web_access_advanced", ct);
+            var store = new WebAccessGroupStore(owner);
+            Assert.Null(await store.SetAdvancedEnabledAsync(true, Actor, true, ct));
+
+            var logger = new CapturingTestLogger();
+            var refused = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, true, Actor, logger, ct))!;
+            Assert.Equal("switch_missing", (string)refused["code"]!);
+            Assert.Null(refused["undo"]);
+            Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+            Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct));
+        });
+    }
+
+    /// <summary>Rewinding past the three argument setter leaves the one argument setter working: its V319 body calls the three argument form,
+    /// so the rewind puts the V262 body back before it drops that form.</summary>
+    [Fact]
+    public async Task AfterARewindPastTheThreeArgumentSetter_TheOneArgumentSetterStillFlipsTheSwitch()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            await using (var connection = await owner.OpenConnectionAsync(ct))
+                await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 318, ct);
+            Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM pg_proc WHERE proname = 'set_web_access_advanced' AND pronargs = 3", ct));
+
+            var store = new WebAccessGroupStore(owner);
+            await store.SetAdvancedEnabledAsync(true, ct);
+            Assert.NotNull(await store.ReadAdvancedSessionEpochAsync(ct));
+        });
+    }
+
+    /// <summary>Through a built server, the journal row of a flip names the token's identity, not the store owner.</summary>
+    [Fact]
+    public async Task AFlipThroughTheServer_JournalsTheCallersTokenIdentity()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var logger = new CapturingTestLogger();
+            var ownerSource = new StoreOwnerSource();
+            ownerSource.Publish(owner);
+            var mcp = new McpConfig
+            {
+                AllowWrites = true,
+                AllowServerAdmin = true,
+                Tokens = new List<McpTokenEntry> { new() { Name = "ops-lead", Token = OperatorBearer, Role = "operator" } },
+            };
+            using var server = await BuildServerAsync(mcp, ownerSource, logger);
+
+            await DarlingMcpWritePolicyTests.ToolsCallAsync(server, "set_advanced_web_access", "{\"enabled\":true,\"confirm\":true}", OperatorBearer);
+
+            var row = await LastAdvancedJournalAsync(owner, "advanced_enabled", ct);
+            Assert.NotNull(row);
+            var sessionUser = (string)(await ScalarAsync(owner, "SELECT session_user", ct))!;
+            Assert.StartsWith("mcp:", row, StringComparison.Ordinal);
+            Assert.Contains("ops-lead", row, StringComparison.Ordinal);
+            Assert.EndsWith("|" + sessionUser, row, StringComparison.Ordinal);
+        });
+    }
+
     /// <summary>A built MCP server over the real tools, every provider of the host's logging replaced by <paramref name="logger"/>.</summary>
     private static async Task<TestServer> BuildServerAsync(McpConfig mcp, StoreOwnerSource ownerSource, ILogger logger)
     {
