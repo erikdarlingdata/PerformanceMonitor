@@ -270,7 +270,17 @@ public class StoreLogSelfMonitoringStoreTests
             + "down too");
 
         /* The once-then-Debug rule for a capture the store will never allow is behaviour, pinned by
-           NewInstallLogNoiseTests, not by what the catch's text spells. */
+           NewInstallLogNoiseTests. What this test pins is that the worker feeds it (#9695): a capture that worked
+           resets it inside the try, after the sweep and before the catch, and the catch asks it before it writes. */
+        var succeeded = body.IndexOf("_storeLogCaptureNotice.Succeeded();", logSweep, StringComparison.Ordinal);
+        Assert.True(
+            succeeded > logSweep && succeeded < innerCatch,
+            "a capture that worked no longer resets the store-log notice before the catch, so the same cause after a "
+            + "working capture would stay at Debug");
+        var shouldWarn = body.IndexOf("_storeLogCaptureNotice.ShouldWarn(ex)", innerCatch, StringComparison.Ordinal);
+        Assert.True(
+            shouldWarn > innerCatch && shouldWarn < reopen,
+            "the store-log catch no longer asks the notice whether to warn");
         /* No second timer: a new cadence field would put the two series on different grids, which is the
            thing riding this tick buys. */
         Assert.DoesNotContain("_nextStoreLog", worker, StringComparison.Ordinal);
