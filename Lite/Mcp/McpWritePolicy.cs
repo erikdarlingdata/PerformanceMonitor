@@ -73,6 +73,16 @@ internal static class McpWritePolicy
         "set_notification_route_enabled",
         "delete_notification_route",
 
+        /* #9639: authoring a route, the twins of Darling's create_notification_route and update_notification_route. */
+        "create_notification_route",
+        "update_notification_route",
+
+        /* #9639: the mute-rule writes, Darling's twins. get_mute_rules is a read. */
+        "create_mute_rule",
+        "update_mute_rule",
+        "delete_mute_rule",
+        "set_mute_rule_enabled",
+
         /* #5991: the query-tag and query-tag-rule writes, Darling's twins. The three reads (list_query_tags,
            list_query_tag_rules, test_query_tag_rule) are ordinary reads. */
         /* #9640: set_server_excluded_databases is a plain write, as on Darling. */
@@ -95,6 +105,9 @@ internal static class McpWritePolicy
 
         /* #9640: Darling's reset_collector_schedules twin. get_collector_schedules is a read. */
         "reset_collector_schedules",
+
+        /* #9639: the alert-settings update, Darling's twin. get_alert_settings is a read. */
+        "update_alert_settings",
     };
 
     /// <summary>A write, a server administration tool included (every one is also in <see cref="WriteTools"/>).</summary>

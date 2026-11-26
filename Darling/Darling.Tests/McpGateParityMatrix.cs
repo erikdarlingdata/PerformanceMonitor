@@ -77,7 +77,7 @@ internal interface IGateHost
 /// <para>
 /// The apps differ by intent in two places, each written once below: <see cref="TokenInForce"/> (Lite's tokenless setting
 /// ignores a stored token, Darling's applies only when no token is stored) and <see cref="Registers"/> (the investigations
-/// arm serves 2 tools in Lite and 21 in Darling).
+/// arm serves 2 tools in Lite and 21 in Darling, the 4 mute rule writes among them in Darling only).
 /// </para>
 /// </summary>
 internal static class McpGateParityMatrix
@@ -121,10 +121,18 @@ internal static class McpGateParityMatrix
     /// <summary>The writes both apps register: served only under the writes arm.</summary>
     internal static readonly string[] SharedWrites =
     {
-        "mute_analysis_finding", "unmute_analysis_finding", "set_notification_route_enabled", "delete_notification_route",
+        "mute_analysis_finding", "unmute_analysis_finding", "set_notification_route_enabled", "delete_notification_route", "create_notification_route", "update_notification_route",
         "create_query_tag", "update_query_tag", "delete_query_tag", "assign_query_tag", "unassign_query_tag",
-        "create_query_tag_rule", "update_query_tag_rule", "delete_query_tag_rule",
+        "create_query_tag_rule", "update_query_tag_rule", "delete_query_tag_rule", "update_alert_settings",
         "reset_collector_schedules", "set_server_excluded_databases",
+    };
+
+    /// <summary>The four mute rule writes (#9639). Both apps register them and both serve them under the writes arm. Darling
+    /// serves them under the investigations arm as well, while <c>mcp.allowAgentMuteRules</c> is on (the gate suite leaves it
+    /// on): Lite has no investigations arm that serves a write. That difference is written once, in <see cref="Expected"/>.</summary>
+    internal static readonly string[] SharedMuteRuleWrites =
+    {
+        "create_mute_rule", "update_mute_rule", "delete_mute_rule", "set_mute_rule_enabled",
     };
 
     /// <summary>The server admin tools both apps register (#9640): writes served only under the server-admin arm, which needs the
@@ -142,10 +150,10 @@ internal static class McpGateParityMatrix
     internal const string DarlingInvestigationMessageTool = "post_investigation_message";
 
     /// <summary>Darling's agent action tools: writes that Darling also serves under the investigations arm, where each call
-    /// is decided inside the tool.</summary>
+    /// is decided inside the tool. The four mute rule tools are Darling agent action tools too, but Lite has them, so they are in
+    /// <see cref="SharedMuteRuleWrites"/>.</summary>
     internal static readonly string[] DarlingAgentActionTools =
     {
-        "create_mute_rule", "update_mute_rule", "delete_mute_rule", "set_mute_rule_enabled",
         "create_custom_alert_rule", "update_custom_alert_rule", "delete_custom_alert_rule",
         "set_alert_threshold_override", "merge_deadlock_signatures",
         "force_query_store_plan", "unforce_query_store_plan", "evict_cached_plan", "kill_session",
@@ -157,8 +165,8 @@ internal static class McpGateParityMatrix
     /// this file and cannot reference the Darling service. The tools/list comparison fails when the product serves a name this table lacks.</summary>
     internal static readonly string[] DarlingChangeWindowTools = { "declare_change_window", "clear_change_window" };
 
-    /// <summary>The 19 tools Darling's investigations arm serves beyond the 2 shared ones. Lite has no tool of these names
-    /// (<see cref="Registers"/>).</summary>
+    /// <summary>The 15 tools Darling's investigations arm serves beyond the 2 shared ones and the 4 shared mute rule writes. Lite
+    /// has no tool of these names (<see cref="Registers"/>).</summary>
     internal static readonly string[] DarlingInvestigationArmTools =
         DarlingAgentActionTools.Concat(DarlingChangeWindowTools).Append(DarlingInvestigationMessageTool).ToArray();
 
@@ -169,6 +177,7 @@ internal static class McpGateParityMatrix
     internal static readonly string[] Tools = SharedReads
         .Concat(SharedWrites)
         .Concat(SharedServerAdminTools)
+        .Concat(SharedMuteRuleWrites)
         .Concat(SharedInvestigationTools)
         .Concat(DarlingInvestigationArmTools)
         .Concat(LiteOnlyReads)
@@ -351,6 +360,11 @@ internal static class McpGateParityMatrix
         else if (SharedServerAdminTools.Contains(tool))
         {
             served = serverAdmin;
+        }
+        else if (SharedMuteRuleWrites.Contains(tool))
+        {
+            /* INTENDED DIFFERENCE: Darling's investigations arm serves the mute rule tools too (agent mute rules on). */
+            served = writes || (app == GateApp.Darling && investigations);
         }
         else if (SharedInvestigationTools.Contains(tool) || tool == DarlingInvestigationMessageTool)
         {

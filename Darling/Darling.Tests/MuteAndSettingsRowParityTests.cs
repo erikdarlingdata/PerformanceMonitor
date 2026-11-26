@@ -60,8 +60,20 @@ public sealed class MuteDialogClientTimeoutsParityTests
         {
             var code = RepoFile.ReadRepoFile(codePath);
 
-            Assert.True(Regex.IsMatch(code, @"bool showDatabase = [^;]*or AlertFamily\.ClientTimeoutsMetric;"), $"{app}: showDatabase lists the metric");
-            Assert.Contains("bool showClientApp = metric is null or \"(any)\" or AlertFamily.ClientTimeoutsMetric;", code, StringComparison.Ordinal);
+            if (app == "Lite")
+            {
+                /* Lite's dialog asks the shared MuteRulePatternFields list (#9639), which the MCP mute rule tools read too. The gate lives there. */
+                var fields = RepoFile.ReadRepoFile("Lite", "Services", "MuteRulePatternFields.cs");
+                Assert.Contains("bool showDatabase = MuteRulePatternFields.AllowsDatabase(metric);", code, StringComparison.Ordinal);
+                Assert.Contains("bool showClientApp = MuteRulePatternFields.AllowsClientApp(metric);", code, StringComparison.Ordinal);
+                Assert.True(Regex.IsMatch(fields, @"AllowsDatabase\(string\? metric\) =>[^;]*or AlertFamily\.ClientTimeoutsMetric;"), "Lite: AllowsDatabase lists the metric");
+                Assert.True(Regex.IsMatch(fields, @"AllowsClientApp\(string\? metric\) => [^;]*metric is AlertFamily\.ClientTimeoutsMetric;"), "Lite: AllowsClientApp lists the metric");
+            }
+            else
+            {
+                Assert.True(Regex.IsMatch(code, @"bool showDatabase = [^;]*or AlertFamily\.ClientTimeoutsMetric;"), $"{app}: showDatabase lists the metric");
+                Assert.Contains("bool showClientApp = metric is null or \"(any)\" or AlertFamily.ClientTimeoutsMetric;", code, StringComparison.Ordinal);
+            }
 
             /* The pre-fill from the alert's context, and the save that keeps each pattern only while its box is visible. */
             Assert.Contains("DatabasePatternBox.Text = context.DatabaseName;", code, StringComparison.Ordinal);
