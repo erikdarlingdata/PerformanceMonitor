@@ -121,4 +121,6 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
+After the first start has migrated the store, run `/opt/darling/provision-roles.sql` once to create the four least-privilege logins, then set `postgres.webConnectionString` and `postgres.mcpConnectionString` and restart. [Security](darling/security.md#security--least-privilege-roles) explains each placeholder and the settings, and notes that custom alerts need `postgres.webConnectionString`.
+
 Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs naturally with `file:`), and note `Microsoft.Data.SqlClient` needs `libgssapi-krb5-2` installed (`apt-get install libgssapi-krb5-2`) — the container image carries it already.

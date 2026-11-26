@@ -153,6 +153,12 @@
 --     sees any of them, and you should keep the passwords out of the lines, as in BEFORE RUNNING above.
 -- ============================================================================================
 
+-- Quiet the run (#9700). The DROP ... IF EXISTS statements below each print a NOTICE when the object is not there yet,
+-- about a hundred lines on a fresh store, which hides the WARNINGs that need a read. This keeps WARNING and above for the
+-- run and puts the session's own setting back at the very end.
+SELECT current_setting('client_min_messages') AS darling_saved_client_min_messages \gset
+SET client_min_messages = warning;
+
 -- 0. Keep this script's own role DDL out of pg_stat_statements (#3899). Step 1 sends each password as an
 --    ALTER ROLE ... PASSWORD literal, and while pg_stat_statements is loaded with utility tracking on (the
 --    module's default), it records that statement VERBATIM, password included, where any superuser or
@@ -3046,6 +3052,32 @@ REVOKE INSERT, UPDATE, DELETE ON config.custom_alert_rules FROM viewer;
 GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO web;
 GRANT INSERT, UPDATE, DELETE ON config.custom_alert_rules TO mcp;
 
+-- 3e1. Custom alert evaluator (#9700): the service evaluates the user-authored rules on a store it does not manage when
+--      postgres.webConnectionString names the web login. It writes a rule's recovery row through
+--      config.record_custom_alert_resolution, which only web and mcp may execute (viewer is read-only). Same function,
+--      same text, as managed provisioning rebuilds on every start: a fixed no-channel resolution row, a pinned search_path
+--      and no dynamic SQL. Re-run this script on a store that ran an earlier copy to add it.
+CREATE OR REPLACE FUNCTION config.record_custom_alert_resolution(
+   p_server_id integer,
+   p_server_name text,
+   p_metric_name text,
+   p_detail_text text)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+   INSERT INTO config.config_alert_log
+      (alert_time, server_id, server_name, metric_name, current_value, threshold_value,
+       alert_sent, notification_type, send_error, muted, detail_text, context_json)
+   VALUES
+      ((now() AT TIME ZONE 'UTC'), p_server_id, p_server_name, p_metric_name, 0, 0,
+       false, 'none', NULL, false, p_detail_text, NULL);
+$fn$;
+REVOKE ALL ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) FROM viewer;
+GRANT EXECUTE ON FUNCTION config.record_custom_alert_resolution(integer, text, text, text) TO web, mcp;
+
 -- 3e2. Database state expectations (#6397): the MCP set_database_state_expected tool upserts (INSERT, UPDATE) and clears
 --      (DELETE) one config.database_state_expected row, the same narrow single-table floor web holds in 3c. Its read,
 --      get_database_state_expectations, runs on mcp's SELECT on all of config (step 2). The table is V49. BRING-YOUR-OWN
@@ -4103,10 +4135,9 @@ GRANT CONNECT ON DATABASE darling TO mcp;
 --
 --       ALTER DATABASE darling SET search_path = collect, config, public;
 --
--- 7. Not mirrored from managed mode, deliberately: the config.record_custom_alert_resolution function
---    (#3334) the managed batch creates for web and mcp. It exists for the custom-alert evaluator, which
---    runs on a managed store only; with no evaluator there is never a firing rule for a rule delete to
---    resolve.
+-- 7. Custom alerts (#9700): step 3e1 creates config.record_custom_alert_resolution (#3334) for web and mcp, the
+--    function the custom-alert evaluator and a rule delete write a recovery row through. The service starts the
+--    evaluator on this store when postgres.webConnectionString names the web login.
 
 -- 8. Function owner. The queue functions run as the owner of config.config_command, whoever runs this script: each definer-rights
 --    function this script creates in schema config is created by the role running the script, which is a superuser on some
@@ -4137,6 +4168,7 @@ BEGIN
    'config.update_notification_route(integer, text, text[], text, boolean, integer, integer, boolean, integer, text, text, text)',
    'config.set_notification_route_agent(integer, text, text[], integer, integer, integer, integer, integer, integer, boolean, jsonb, text, boolean)',
    'config.set_notification_route_destinations(integer, text, text[], text, text, text, text, text)',
+   'config.record_custom_alert_resolution(integer, text, text, text)',
    'config.request_mcp_command(text, integer, integer, text)',
    'config.read_mcp_command_result(bigint)',
    'config.submit_external_alert(text, text, text, text, text, text, double precision)'
@@ -4186,3 +4218,6 @@ BEGIN
         END LOOP;
     END IF;
 END $personal_token$;
+
+-- Put the session's own message level back (#9700).
+SET client_min_messages = :'darling_saved_client_min_messages';

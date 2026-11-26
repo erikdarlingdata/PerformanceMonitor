@@ -1098,6 +1098,35 @@ public sealed class DarlingStoreLoginsTests
     /* ─────────────────────────── the custom-alert evaluator's login (#3970) ─────────────────────────── */
 
     [Fact]
+    public void ConfiguredCustomAlertLogin_IsTheWebLoginTheOperatorNamed()
+    {
+        // #9700: a bring-your-own store runs the evaluator on postgres.webConnectionString, and on nothing else.
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = WebLogin };
+        Assert.Equal(WebLogin, DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, NullLogger.Instance));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ConfiguredCustomAlertLogin_WithTheSettingUnset_IsNull_NeverTheOwner(string? webConnectionString)
+    {
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = webConnectionString };
+        Assert.Null(DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, NullLogger.Instance));
+    }
+
+    [Fact]
+    public void ConfiguredCustomAlertLogin_WithAnUnresolvableReference_IsNull_NeverTheOwner()
+    {
+        var postgres = new PostgresConfig
+        {
+            ConnectionString = Owner,
+            WebConnectionString = "env:DARLING_TEST_NO_SUCH_WEB_LOGIN_9700",
+        };
+        Assert.Null(DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, NullLogger.Instance));
+    }
+
+    [Fact]
     public async Task CustomAlertViewer_WithNoVerdictPublished_IsNull()
     {
         DarlingStoreLogins.ResetComposeStoreVerdictForTests();
@@ -1283,7 +1312,8 @@ public sealed class DarlingStoreLoginsTests
             + @"config\.Postgres\.ConnectionString, _logger, stoppingToken\);\s*\}",
             gate);
 
-        Assert.Equal(2, Regex.Matches(gate, @"customAlertViewerConnString\s*=(?!=)").Count);
+        // The third assignment is #9700's bring-your-own branch: the configured web login, never the owner.
+        Assert.Equal(3, Regex.Matches(gate, @"customAlertViewerConnString\s*=(?!=)").Count);
         Assert.DoesNotContain("customAlertViewerConnString = config.Postgres.ConnectionString", gate, StringComparison.Ordinal);
     }
 

@@ -330,8 +330,8 @@ internal static class DarlingStoreLogins
     /// rights, which the viewer-role pool exists to prevent. A bring-your-own store, and a process that never
     /// reaches compose provisioning at all (managed mode, or not running in a container), publish no verdict
     /// here (<see cref="ReadComposeStoreVerdict"/> is null), so both return null — the ruling's "a bring-your-own
-    /// store stays out": its viewer role comes from <c>tools/provision-roles.sql</c>, which does not create
-    /// <c>config.record_custom_alert_resolution</c>.
+    /// store stays out" of this method: it takes <c>postgres.webConnectionString</c> instead
+    /// (<see cref="ResolveConfiguredCustomAlertLogin"/>, #9700).
     /// </summary>
     internal static async Task<string?> ResolveComposeCustomAlertViewerAsync(
         string ownerConnectionString, ILogger logger, CancellationToken cancellationToken)
@@ -367,6 +367,44 @@ internal static class DarlingStoreLogins
             candidate, "Custom alert evaluator not started this attempt", "It stays down", DarlingManagedPostgres.WebRoleName, logger, cancellationToken)
             ? candidate
             : null;
+    }
+
+    /// <summary>
+    /// The custom-alert evaluator's login on a bring-your-own store (#9700): the web login the operator named in
+    /// <c>postgres.webConnectionString</c>, resolved the way the web host resolves it. Null when the setting is unset
+    /// (the evaluator stays down and says which setting starts it) and when it cannot resolve or resolves blank (logged,
+    /// and never the owner login in its place). The web login is the one that may execute
+    /// <c>config.record_custom_alert_resolution</c>, which <c>tools/provision-roles.sql</c> creates for it.
+    /// </summary>
+    internal static string? ResolveConfiguredCustomAlertLogin(PostgresConfig postgres, ILogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        if (string.IsNullOrWhiteSpace(postgres.WebConnectionString))
+        {
+            return null;
+        }
+
+        string resolved;
+        try
+        {
+            resolved = DarlingSecretSource.Resolve(postgres.WebConnectionString, "postgres.webConnectionString");
+        }
+        catch (InvalidOperationException ex)
+        {
+            logger.LogError("Custom alert evaluator not started: {Message}", ex.Message);
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(resolved))
+        {
+            logger.LogError(
+                "Custom alert evaluator not started: postgres.webConnectionString is set but resolves to a blank connection string, and the owner login is never used in its place");
+            return null;
+        }
+
+        return resolved;
     }
 
     /// <summary>
