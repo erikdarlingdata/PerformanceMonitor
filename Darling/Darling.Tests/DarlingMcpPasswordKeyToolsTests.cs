@@ -116,20 +116,20 @@ public sealed class DarlingMcpPasswordKeyToolsTests
         var ct = TestContext.Current.CancellationToken;
         await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
         await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
-        var directory = Path.Combine(Path.GetTempPath(), "pmkey-" + Guid.NewGuid().ToString("N")[..12]);
-        Directory.CreateDirectory(directory);
         var bodySucceeded = false;
         try
         {
             var logger = new CapturingTestLogger();
-            var runtime = await DarlingPasswordKeyRuntime.StartAsync(
-                directory, source, logger, ct,
-                new PasswordKeyStartOptions { IsWindows = false, CanOpen = static _ => false, SetRing = static _ => { }, ServiceHost = "example-host" });
-            Assert.True(runtime.State == "ok", $"The key start answered {runtime.State}: {runtime.Note}");
-            var keyId = runtime.Ring.Status.KeyId!;
-            var keyFile = Path.Combine(directory, DarlingPasswordKeyFile.FileName);
-            var keyFileBytes = File.ReadAllBytes(keyFile);
-            var keyFileText = Convert.ToBase64String(keyFileBytes);
+            // The key start itself is not run: it needs the account's own key file protection, which not every machine allows a test.
+            // The store is given a published key the way the start publishes one, and the tool is asked to replace it.
+            using var key = PasswordPrivateKey.Generate();
+            var keyId = key.PublicKey.KeyId;
+            var keyText = Convert.ToBase64String(key.ExportPkcs8());
+            await using (var publish = await source.OpenConnectionAsync(ct))
+            {
+                await DarlingPasswordKeyStore.PublishAsync(publish, keyId, key.PublicKey.Spki, ct);
+            }
+
             await using (var seed = await source.OpenConnectionAsync(ct))
             await using (var command = new NpgsqlCommand(@"
 INSERT INTO config.config_notification (id, smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password)
@@ -153,7 +153,6 @@ ON CONFLICT (id) DO UPDATE SET smtp_encrypted_password = EXCLUDED.smtp_encrypted
             var after = await ReadStateAsync(source, ct);
             Assert.Null(after.CurrentKeyId);
             Assert.Equal(("replaced", "reset"), (after.OldState, after.OldReason));
-            Assert.Equal(keyFileBytes, File.ReadAllBytes(keyFile));
 
             // A second reset finds no current key.
             var again = await DarlingMcpPasswordKeyTools.ResetPasswordKeyAsync(true, source, fromSetting: false, logger, ct);
@@ -162,7 +161,7 @@ ON CONFLICT (id) DO UPDATE SET smtp_encrypted_password = EXCLUDED.smtp_encrypted
             // Neither the key, nor the sealed value, appears in the answers or the log.
             foreach (var text in new[] { refused, answer, again, logger.Joined })
             {
-                Assert.DoesNotContain(keyFileText, text, StringComparison.Ordinal);
+                Assert.DoesNotContain(keyText, text, StringComparison.Ordinal);
                 Assert.DoesNotContain("0123456789abcdef", text, StringComparison.Ordinal);
             }
 
@@ -171,7 +170,6 @@ ON CONFLICT (id) DO UPDATE SET smtp_encrypted_password = EXCLUDED.smtp_encrypted
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
-            Directory.Delete(directory, recursive: true);
         }
     }
 
