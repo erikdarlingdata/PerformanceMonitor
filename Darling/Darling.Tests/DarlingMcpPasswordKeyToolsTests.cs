@@ -161,6 +161,12 @@ public sealed class DarlingMcpPasswordKeyToolsTests
         }
         finally
         {
+            // The link goes first, on its own, so the recursive delete never follows it.
+            if (new DirectoryInfo(pending).LinkTarget is not null)
+            {
+                Directory.Delete(pending);
+            }
+
             Directory.Delete(root, recursive: true);
         }
     }
