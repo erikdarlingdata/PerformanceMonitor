@@ -1753,16 +1753,23 @@ AND   j.hypertable_name = '{relation}'", connection))
                     var captures = await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, _logger, budget.Token);
                     return new StorePassSteps.StepCounts(Built: captures.Count);
                 });
+                _storeLogCaptureNotice.Succeeded();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                var unavailable = ex is PostgresException
-                {
-                    SqlState: PostgresErrorCodes.UndefinedFile or PostgresErrorCodes.InsufficientPrivilege,
-                };
-                if (unavailable && _storeLogCaptureUnavailableWarned)
+                if (!_storeLogCaptureNotice.ShouldWarn(ex))
                 {
                     _logger.LogDebug("Store log capture is still unavailable: {Message}", ex.Message);
+                }
+                else if (StoreLogCaptureNotice.IsStoreSideCause(ex))
+                {
+                    _logger.LogWarning(
+                        "Store log capture failed, so this hour's store-log census is missing (get_store_log "
+                        + "reports the capture gap). {Cause}: {Message}. Capture needs logging_collector on with "
+                        + "its log folder under the data directory, and a store login that holds "
+                        + "pg_read_server_files and EXECUTE on pg_read_binary_file. This is said once per service "
+                        + "start: the same cause repeats at Debug until it changes.",
+                        StoreLogCaptureFailureCause(ex), ex.Message);
                 }
                 else
                 {
@@ -1770,7 +1777,6 @@ AND   j.hypertable_name = '{relation}'", connection))
                         "Store log capture failed, so this hour's store-log census is missing (get_store_log "
                         + "reports the capture gap). {Cause}: {Message}",
                         StoreLogCaptureFailureCause(ex), ex.Message);
-                    _storeLogCaptureUnavailableWarned |= unavailable;
                 }
             }
 
