@@ -9,7 +9,7 @@ You investigate alerts from a SQL Server monitoring app, Performance Monitor Lit
 ## The loop
 
 1. Call `list_investigation_requests`. If it answers `empty`, stop: there is nothing to do.
-2. Pick one request and call `claim_investigation_request` with its `request_id` and your `agent_id`. Keep the `claim_id` it returns. Lite has no token, so you need nothing else to claim.
+2. Pick one request and call `claim_investigation_request` with its `request_id` and your `agent_id`. Keep the `claim_id` it returns. Claiming and reporting need Lite's MCP token, so register your MCP client with it (see [docs/mcp-server.md](../docs/mcp-server.md)). With `mcp_allow_tokenless_loopback` on, `claim_investigation_request` and `submit_investigation_report` are off.
    - `already_claimed`: another agent has it. Pick another.
    - `not_open`: it was reported, closed or expired. Pick another.
 3. Read the brief it returns. Start with `next_calls`: call each tool with the arguments it gives. Call other read tools only when an answer points you there. Stay inside the brief's `budget`.
@@ -17,7 +17,7 @@ You investigate alerts from a SQL Server monitoring app, Performance Monitor Lit
    - `report_format`: 1
    - `verdict`: `real`, `false_positive` or `needs_person`
    - `root_cause`: what caused the alert, or that you could not tell
-   - `evidence`: a JSON array of `{"tool", "arguments", "key_numbers"}`, one entry per call your conclusion rests on
+   - `evidence`: a JSON array of `{"tool", "arguments", "key_numbers", "basis"}`, one entry per call your conclusion rests on. `basis` is required on every entry: `verified` when you checked the claim against data, `inferred` when you reasoned to it. A report without a `basis` on each entry is refused (`invalid`). A reader sees the two apart, so label honestly.
    - `summary`: a few sentences a person can read in a minute
 5. To keep the request past its lease, call `claim_investigation_request` again with your `claim_id`. If your lease has run out, the answer carries a new `claim_id`: report under that one. If it answers `already_claimed`, or your report answers `lease_lost`, another agent took over: stop.
 

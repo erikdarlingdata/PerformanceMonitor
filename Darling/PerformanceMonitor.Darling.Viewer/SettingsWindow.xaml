@@ -126,6 +126,29 @@
                                 <TextBlock Text="Query text and plan XML are fetched for each database-hour's top N plans on CPU, duration, physical reads, writes, memory grant, tempdb and executions (0-100000, default 100), plus forced plans and plans the engine's plan correction names. A plan outside the top N keeps its runtime statistics, shows as not collected, and is fetched by a later run if it ranks then. 0 fetches every new plan. Takes effect on the next collection cycle, no restart."
                                            FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
                                            TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                <!-- #9638: the three settings darling.json only seeds on first start. Their live values are these store columns. -->
+                                <Grid Margin="0,12,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="70"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="70"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="80"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock x:Name="PlanContentRetentionDaysLabel" Grid.Column="0" Text="Plan retention (days):" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=PlanContentRetentionDaysLabel}" x:Name="PlanContentRetentionDaysTextBox" Grid.Column="1" Margin="8,0,16,0"/>
+                                    <TextBlock x:Name="ComposeStatementTimeoutSecondsLabel" Grid.Column="2" Text="Query timeout (s):" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <TextBox AutomationProperties.LabeledBy="{Binding ElementName=ComposeStatementTimeoutSecondsLabel}" x:Name="ComposeStatementTimeoutSecondsTextBox" Grid.Column="3" Margin="8,0,16,0"/>
+                                    <TextBlock x:Name="PlanXmlCompressionLabel" Grid.Column="4" Text="Plan storage:" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                    <ComboBox AutomationProperties.LabeledBy="{Binding ElementName=PlanXmlCompressionLabel}" x:Name="PlanXmlCompressionComboBox" Grid.Column="5" Margin="8,0,0,0"/>
+                                </Grid>
+                                <TextBlock x:Name="ServiceSeedSettingsHelp"
+                                           FontSize="11" FontStyle="Italic" Foreground="{DynamicResource ForegroundMutedBrush}"
+                                           TextWrapping="Wrap" Margin="0,4,0,0"/>
                             </StackPanel>
                         </Border>
 
