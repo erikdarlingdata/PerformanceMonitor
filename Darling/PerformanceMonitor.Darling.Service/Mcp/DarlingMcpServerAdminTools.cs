@@ -121,7 +121,7 @@ public sealed partial class DarlingMcpServerAdminTools
             Hosting.DarlingHttpRefusalLog.Sanitize(target, 512), Hosting.DarlingHttpRefusalLog.Sanitize(driverText, 512));
         /* #9674: a Strict test that failed on something other than a login says what Strict needs, because the driver's text does not. The
            line is fixed text, with nothing the driver said in it, so every caller gets it, including the ones that never see the driver text. */
-        var strict = server.IsPostgres || probe.SqlClientNativeLoadFailed ? null : StrictEncryptionHint.For(server.EncryptMode, probe.SqlErrorNumber);
+        var strict = StrictHintFor(server, probe);
         var strictLine = strict is null ? string.Empty : Environment.NewLine + strict;
         if (revealConnectError && !string.IsNullOrWhiteSpace(probe.Error))
         {
@@ -130,6 +130,14 @@ public sealed partial class DarlingMcpServerAdminTools
 
         return $"Could not connect to {target}. The service log has the details.{strictLine}";
     }
+
+    /// <summary>
+    /// #9674: the Strict line for a failed connection test of <paramref name="server"/>, or null. None for a PostgreSQL target (Strict
+    /// is a SQL Server option) and none for a native-library load failure (no connection can work from this install, whatever the mode).
+    /// Shared by the add and edit replies, the <c>--test-connection</c> verb and the <c>test_connect</c> command.
+    /// </summary>
+    internal static string? StrictHintFor(MonitoredServer server, ConnectionProbeResult probe) =>
+        server.IsPostgres || probe.SqlClientNativeLoadFailed ? null : StrictEncryptionHint.For(server.EncryptMode, probe.SqlErrorNumber);
 
     private static Task<ConnectionProbeResult> DefaultProbeAsync(MonitoredServer server, CancellationToken cancellationToken) =>
         DarlingServerConnector.ProbeAsync(server, null, cancellationToken);

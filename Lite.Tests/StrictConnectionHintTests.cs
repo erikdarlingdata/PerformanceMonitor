@@ -79,4 +79,16 @@ public sealed class StrictConnectionHintTests
         Assert.EndsWith(StrictEncryptionHint.Text, ServerEntryRules.FailureText(new InvalidOperationException("Broke."), "Strict"), StringComparison.Ordinal);
         Assert.Equal("Broke.", ServerEntryRules.FailureText(new InvalidOperationException("Broke."), "Mandatory"));
     }
+
+    /// <summary>Lite connects with Strict only for the exact stored word: "strict" builds Mandatory, so it gets no Strict line.</summary>
+    [Theory]
+    [InlineData("Strict", true)]
+    [InlineData("strict", false)]
+    [InlineData("Mandatory", false)]
+    public void FailureText_TheLineFollowsTheModeLiteConnectsWith(string mode, bool expectLine)
+    {
+        var text = ServerEntryRules.FailureText(new InvalidOperationException("Broke."), mode);
+
+        Assert.Equal(expectLine, text.Contains(StrictEncryptionHint.Text, StringComparison.Ordinal));
+    }
 }

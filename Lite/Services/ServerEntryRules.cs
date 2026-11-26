@@ -131,6 +131,8 @@ internal static class ServerEntryRules
         }
 
         var number = (ex as SqlException ?? ex.InnerException as SqlException)?.Number;
-        return StrictEncryptionHint.Append(text, encryptMode, number);
+        /* Lite connects with Strict only for the exact stored word, so a "strict" it builds as Mandatory gets no Strict line. */
+        var usedStrict = EncryptOptionFor(encryptMode) == SqlConnectionEncryptOption.Strict;
+        return StrictEncryptionHint.Append(text, usedStrict ? "Strict" : null, number);
     }
 }

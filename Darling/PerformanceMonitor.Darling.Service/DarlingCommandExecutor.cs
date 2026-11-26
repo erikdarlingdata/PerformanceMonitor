@@ -322,7 +322,7 @@ WHERE status = 'in_progress'
 
                 var columnStatsDatabases = await ReadColumnStatsGrantDatabasesAsync(server, cancellationToken);
                 var probe = await DarlingServerConnector.ProbeAsync(server, _logger, cancellationToken, columnStatsDatabases: columnStatsDatabases);
-                var (resultStatus, resultJson) = MapProbeResult(probe);
+                var (resultStatus, resultJson) = MapProbeResult(probe, server);
                 _logger?.LogInformation("Command {Id} (test_connect '{Server}') => {Result}", command.CommandId, server.DisplayName, resultStatus);
                 return new CommandOutcome(probe.Success, resultStatus, resultJson);
             }
@@ -955,8 +955,11 @@ WHERE status = 'in_progress'
             : StoreWrite(CollectorScheduleSql.SetFleetDatabases, new object?[] { canonical, scope }, "collector database scope set (fleet-wide)");
     }
 
-    /// <summary>test_connect result mapping (pure): success carries the probe facts, failure the error.</summary>
-    internal static (string ResultStatus, string ResultJson) MapProbeResult(ConnectionProbeResult probe)
+    /// <summary>
+    /// test_connect result mapping (pure): success carries the probe facts, failure the error. <paramref name="server"/> is the entry
+    /// that was tested: a failed Strict test adds the Strict line after the error (#9674). Null adds none.
+    /// </summary>
+    internal static (string ResultStatus, string ResultJson) MapProbeResult(ConnectionProbeResult probe, MonitoredServer? server = null)
     {
         if (probe.Success)
         {
@@ -993,7 +996,9 @@ WHERE status = 'in_progress'
             return ("connected", json);
         }
 
-        return ("connection_failed", ErrorJson(probe.Error ?? "connection failed"));
+        var strict = server is null ? null : Mcp.DarlingMcpServerAdminTools.StrictHintFor(server, probe);
+        var error = probe.Error ?? "connection failed";
+        return ("connection_failed", ErrorJson(strict is null ? error : error + Environment.NewLine + strict));
     }
 
     private Task ExecuteStoreWriteAsync(CommandPlan plan, CancellationToken cancellationToken) =>

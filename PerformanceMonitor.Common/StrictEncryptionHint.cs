@@ -35,13 +35,16 @@ public static class StrictEncryptionHint
 
     /// <summary>
     /// The hint for a failed connection test, or null when none applies. It applies only when <paramref name="encryptMode"/>
-    /// is exactly <c>Strict</c> (the spelling the stored mode and the connection builders use) and the failure is not a
+    /// is <c>Strict</c> (any casing, trimmed, as Darling's connection builders read it) and the failure is not a
     /// login failure. <paramref name="sqlErrorNumber"/> is the number of the <c>SqlException</c> the driver threw, or null
     /// when it threw something else. The caller does not ask for a hint on a cancellation.
     /// </summary>
     public static string? For(string? encryptMode, int? sqlErrorNumber)
     {
-        if (!string.Equals(encryptMode, "Strict", StringComparison.Ordinal))
+        /* Darling folds a stored mode with Trim and a case-insensitive match (hand-edited darling.json can say "strict"), so Strict
+           here means what Darling connects with. Lite connects with Strict only for the exact word, and its caller passes the
+           mode through <c>ServerEntryRules.EncryptOptionFor</c> first. */
+        if (!string.Equals(encryptMode?.Trim(), "Strict", StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }

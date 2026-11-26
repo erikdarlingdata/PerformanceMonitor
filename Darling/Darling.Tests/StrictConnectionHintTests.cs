@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
@@ -36,6 +37,10 @@ public sealed class StrictConnectionHintTests : IDisposable
 
     [Theory]
     [InlineData("Strict", null, true)]
+    /* darling.json is hand-edited and the connection builders read the mode trimmed and case-insensitively, so these are Strict too. */
+    [InlineData("strict", null, true)]
+    [InlineData(" STRICT ", null, true)]
+    [InlineData("strict", 18456, false)]
     [InlineData("Strict", 0, true)]
     [InlineData("Strict", -1, true)]
     [InlineData("Strict", 18456, false)]
@@ -159,5 +164,72 @@ public sealed class StrictConnectionHintTests : IDisposable
 
         Assert.Contains("connection_failed", answer, StringComparison.Ordinal);
         Assert.DoesNotContain(StrictEncryptionHint.Text, answer, StringComparison.Ordinal);
+    }
+
+    private static MonitoredServer ClosedPortServer(string mode) => new()
+    {
+        Name = "closed-port", Host = "127.0.0.1," + ClosedLocalPort(), Auth = "sql", Username = "monitor", Password = "Synth-Strict-Pw-1", EncryptMode = mode,
+    };
+
+    private static async Task<string> TestConnectionVerbAsync(string mode)
+    {
+        var output = new StringWriter();
+        var ok = await DarlingCliCommands.ProbeTargetsAsync(
+            new[] { ClosedPortServer(mode) }, output, null,
+            (server, token) => DarlingServerConnector.ProbeAsync(server, null, token),
+            windowsHost: false, "console", CancellationToken.None);
+        Assert.False(ok);
+        Assert.Contains("[FAIL] closed-port", output.ToString(), StringComparison.Ordinal);
+        return output.ToString();
+    }
+
+    [Fact]
+    public async Task TestConnectionVerb_StrictEntryOnAClosedPort_FailsWithTheLine()
+    {
+        Assert.Contains(StrictEncryptionHint.Text, await TestConnectionVerbAsync("Strict"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TestConnectionVerb_MandatoryEntryOnAClosedPort_FailsWithoutTheLine()
+    {
+        Assert.DoesNotContain(StrictEncryptionHint.Text, await TestConnectionVerbAsync("Mandatory"), StringComparison.Ordinal);
+    }
+
+    private static async Task<(string Status, string Error)> TestConnectCommandAsync(string mode)
+    {
+        var server = ClosedPortServer(mode);
+        var probe = await DarlingServerConnector.ProbeAsync(server, null, CancellationToken.None);
+        var (status, json) = DarlingCommandExecutor.MapProbeResult(probe, server);
+        using var document = JsonDocument.Parse(json);
+        Assert.False(document.RootElement.GetProperty("success").GetBoolean());
+        return (status, document.RootElement.GetProperty("error").GetString()!);
+    }
+
+    [Fact]
+    public async Task TestConnectCommand_StrictEntryOnAClosedPort_FailsWithTheLine_AndKeepsItsStatusWord()
+    {
+        var (status, error) = await TestConnectCommandAsync("Strict");
+
+        Assert.Equal("connection_failed", status);
+        Assert.Contains(StrictEncryptionHint.Text, error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task TestConnectCommand_MandatoryEntryOnAClosedPort_FailsWithoutTheLine()
+    {
+        var (status, error) = await TestConnectCommandAsync("Mandatory");
+
+        Assert.Equal("connection_failed", status);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TestConnectCommand_StrictPostgresTarget_AndNativeLoadFailure_HaveNoLine()
+    {
+        var (_, postgres) = DarlingCommandExecutor.MapProbeResult(Failed(null), Server("Strict", "postgres"));
+        var (_, native) = DarlingCommandExecutor.MapProbeResult(Failed(null, nativeLoad: true), Server("Strict"));
+
+        Assert.DoesNotContain(StrictEncryptionHint.Text, postgres, StringComparison.Ordinal);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, native, StringComparison.Ordinal);
     }
 }
