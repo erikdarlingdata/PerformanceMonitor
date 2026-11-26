@@ -19,6 +19,10 @@ Service running:
 
 Exit codes are numbers. The [exit code table](#exit-codes) below says what each number means for each family of verbs. A script can gate on the number.
 
+## The Linux form
+
+The examples on this page use the Windows form, `.\PerformanceMonitor.Darling.Service.exe --verb`. On Linux under systemd the same verb is `sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --verb`. [Service verbs on Linux](linux.md#service-verbs-on-linux) has the table, with what to do in place of each verb that is Windows only.
+
 ## The table
 
 | Verb | What it does | Needs elevation | Service running | Exit codes | Details |

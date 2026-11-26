@@ -4,6 +4,8 @@ Audience: operators.
 
 This page is for the person who keeps a Darling install running after the first week. Each heading below is one task, written as numbered steps. When you need to know what a setting means, follow the link to the [Darling operator guide](../../Darling/README.md).
 
+The commands on this page are written for Windows. On Linux, [Service verbs on Linux](linux.md#service-verbs-on-linux) gives the form of each one.
+
 ## Read this first: `darling.json` is only a seed for the server list
 
 The service reads the `servers` array in `darling.json` on the first start only. After that, the store holds the server list. If you edit the array later, nothing happens.
@@ -159,6 +161,8 @@ To turn one collector off for the whole fleet, run `.\PerformanceMonitor.Darling
 
 ## Upgrade
 
+On Linux under systemd, follow [Upgrade by hand](linux.md#upgrade-by-hand). The steps below are for Windows.
+
 To upgrade or uninstall without PowerShell, see [Where PowerShell is used, and installing without it](install.md#where-powershell-is-used-and-installing-without-it).
 
 Do the steps from an elevated PowerShell on the service host.
@@ -313,6 +317,8 @@ Nothing that you must keep lives in the install directory. The managed store, th
 
 ## Uninstall
 
+On Linux under systemd, follow [Uninstall](linux.md#uninstall). The steps below are for Windows.
+
 Run these from an elevated PowerShell, from the folder that holds `uninstall-darling.ps1`. On an MSI install the script refuses. Uninstall from **Settings, Apps** instead.
 
 Before you start, know that the uninstall does not touch the monitored servers. If you want this install's Extended Events sessions gone from them, remove each server first. See [Remove a server](#remove-a-server).
@@ -338,6 +344,8 @@ After the store is deleted, `-PurgeData` also removes the local group `Performan
 For a script run that cannot answer a question, add `-ConfirmPurge` to `-PurgeData`. It deletes without the `DELETE` prompt.
 
 ## Where everything is
+
+This table is for a Windows install. For Linux under systemd, see [Where everything is](linux.md#where-everything-is).
 
 | What | Where |
 |---|---|

@@ -112,6 +112,20 @@ public sealed class StoreVerbPlatformRefusalTests
         Assert.Equal(OperatorVerbForm.Command("--backfill-rollups", OperatingSystem.IsWindows()), OperatorVerbForm.CommandHere("--backfill-rollups"));
     }
 
+    /* #9703: the first-start message and the verb hints named the .exe on Linux. Off Windows the entry point names the
+       install folder, so the command runs from any directory, and a folder with a space is quoted. */
+    [Fact]
+    public void TheEntryPoint_IsTheExeOnWindows_AndTheDllInTheInstallFolderElsewhere()
+    {
+        Assert.Equal("PerformanceMonitor.Darling.Service.exe", OperatorVerbForm.EntryPoint(isWindows: true, "/opt/darling/"));
+        Assert.Equal("dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll", OperatorVerbForm.EntryPoint(isWindows: false, "/opt/darling/"));
+        Assert.Equal("dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll", OperatorVerbForm.EntryPoint(isWindows: false, "/opt/darling"));
+        Assert.Equal("dotnet \"/opt/my darling/PerformanceMonitor.Darling.Service.dll\"", OperatorVerbForm.EntryPoint(isWindows: false, "/opt/my darling"));
+        Assert.Equal("dotnet PerformanceMonitor.Darling.Service.dll", OperatorVerbForm.EntryPoint(isWindows: false, installDir: null));
+        Assert.Equal(OperatorVerbForm.EntryPointHere() + " --add-server", OperatorVerbForm.InstalledCommandHere("--add-server"));
+        Assert.Equal(OperatorVerbForm.EntryPoint(OperatingSystem.IsWindows(), AppContext.BaseDirectory), OperatorVerbForm.EntryPointHere());
+    }
+
     [Fact]
     public void TheRetentionHeldRemedy_NamesTheCommandFormForTheHost()
     {

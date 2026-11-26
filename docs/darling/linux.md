@@ -1,0 +1,487 @@
+# Install Darling on Linux with systemd
+
+Audience: operators.
+
+This page takes you from a downloaded tarball to a service that collects data. It is for a Linux host that runs systemd, with a PostgreSQL server that you run yourself as the store. Follow it from top to bottom. The Docker Compose shape is in the [Darling quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804). The Helm chart is in [Run Darling on Kubernetes](kubernetes.md). The Windows install is in [Install Darling](install.md).
+
+The steps were run on Ubuntu 24.04 with PostgreSQL 18 and TimescaleDB 2.32 on the same host as the service. On another distribution the package names and the PostgreSQL paths differ, and the rest is the same.
+
+Every step ends with a proof point. If a proof point does not appear, stop at that step. The next step will not fix it.
+
+## What is different from Windows
+
+- The bundled store is Windows only. On Linux `postgres.managed` is `false`, and you create the database and its login.
+- There is no DPAPI, so `--encrypt-password` is Windows only. A secret in `darling.json` is a `file:` or `env:` reference.
+- The tarball has no install script, no upgrade script and no unit file ([#9688](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9688)). You write the unit, and you upgrade by hand.
+- The Viewer is a Windows app. A Linux host serves the [web dashboard](web-dashboard.md), or a Windows Viewer connects to the store over the network.
+- Every command on the other pages is written `.\PerformanceMonitor.Darling.Service.exe --verb`. The Linux form is in [Service verbs on Linux](#service-verbs-on-linux).
+
+## Step 1: Prerequisites
+
+- A Linux x64 host with systemd, and `sudo` on it.
+- PostgreSQL for the store. The minimum is PostgreSQL 16, and the service is developed and validated against PostgreSQL 18. TimescaleDB is optional. With it the service converts the collector tables to hypertables with compression. Without it the service runs in plain PostgreSQL mode. This page sets up PostgreSQL 18 with TimescaleDB.
+- A store host sized for your estate. The [store sizing guide](../darling-store-sizing.md) gives the disk, RAM and vCPUs by server count.
+- A monitored SQL Server and a login on it with the [monitoring grants](monitored-servers.md#permissions-on-monitored-servers). On Linux the login is a SQL login (`"auth": "sql"`).
+
+## Step 2: Install the .NET runtime
+
+The tarball is framework-dependent. The host needs the .NET 10 runtime and the ASP.NET Core 10 runtime. Ubuntu 24.04 has both in its own repositories, and they install `dotnet` at `/usr/bin/dotnet`, which is the path the unit uses. `Microsoft.Data.SqlClient` also needs `libgssapi-krb5-2`.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y dotnet-runtime-10.0 aspnetcore-runtime-10.0 libgssapi-krb5-2
+dotnet --list-runtimes
+```
+
+On a distribution without these packages, take both runtimes from <https://dotnet.microsoft.com/download/dotnet/10.0>, and change the `dotnet` path in the unit if it is not `/usr/bin/dotnet`.
+
+**Proof:** the list has a `Microsoft.AspNetCore.App 10.` line and a `Microsoft.NETCore.App 10.` line.
+
+## Step 3: Set up the store
+
+Do this step on the PostgreSQL host, as a user who can run `sudo -u postgres`.
+
+### Install PostgreSQL 18 and TimescaleDB
+
+Ubuntu's own repositories do not carry PostgreSQL 18 or TimescaleDB. PostgreSQL 18 comes from the PostgreSQL project's apt repository (PGDG), and TimescaleDB comes from the Timescale apt repository. The two projects keep the current setup commands on their own pages: [PostgreSQL on Ubuntu](https://www.postgresql.org/download/linux/ubuntu/) and [Install TimescaleDB on Linux](https://docs.timescale.com/self-hosted/latest/install/installation-linux/). At the time of writing they are:
+
+```bash
+sudo apt-get install -y postgresql-common
+sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh
+echo "deb https://packagecloud.io/timescale/timescaledb/ubuntu/ $(lsb_release -c -s) main" | sudo tee /etc/apt/sources.list.d/timescaledb.list
+wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/timescaledb.gpg
+sudo apt-get update
+sudo apt-get install -y postgresql-18 timescaledb-2-postgresql-18
+```
+
+**Proof:** `sudo -u postgres psql -c "SELECT version()"` answers with PostgreSQL 18.
+
+### Settings
+
+Put the settings in one file of your own, so a package upgrade does not overwrite them. On a Debian or Ubuntu package install that file goes in `/etc/postgresql/18/main/conf.d/`, for example `/etc/postgresql/18/main/conf.d/darling.conf`.
+
+```ini
+shared_preload_libraries = 'timescaledb,pg_stat_statements'
+listen_addresses = 'localhost'
+timezone = 'UTC'
+random_page_cost = 1.1
+timescaledb.max_background_workers = 128
+max_worker_processes = 139
+timescaledb.telemetry_level = off
+pg_stat_statements.track_utility = off
+```
+
+Restart PostgreSQL, because the preload list and the worker settings are read only at a start:
+
+```bash
+sudo systemctl restart postgresql@18-main
+```
+
+This table says what each setting is for, and what the service does or logs without it. The managed Windows store sets all of them for itself. The service changes no server setting on a store that you bring.
+
+| Setting | Value | Why |
+|---|---|---|
+| `shared_preload_libraries` | `'timescaledb,pg_stat_statements'` | TimescaleDB must be preloaded before its extension can be created. `pg_stat_statements` feeds the store's own statement statistics (`get_store_query_stats`). |
+| `listen_addresses` | `'localhost'` | Enough when the service runs on the store host. Name another address only when the service or a Viewer connects from another machine, and then read [Opt-in Network Endpoints](network-endpoints.md). |
+| `timezone` | `'UTC'` | The service pins its own connections to UTC. TimescaleDB's own jobs follow the server's time zone, so a window measured in days starts and ends off UTC midnight on any other zone. |
+| `random_page_cost` | `1.1` | For SSD storage. With the default of 4 the planner can pick a sequential scan over a BRIN index for windows of 12 hours or more. |
+| `timescaledb.max_background_workers` and `max_worker_processes` | `128` and `139` | The stock `max_worker_processes = 8` cannot run the compression, retention and refresh policies. This pair is a safe start for a new install. Re-size it after the first start, as [Size the workers after the first start](#size-the-workers-after-the-first-start) says. |
+| `timescaledb.telemetry_level` | `off` | Stops TimescaleDB's own telemetry job. The managed store sets it. |
+| `pg_stat_statements.track_utility` | `off` | With it on, utility statements are recorded with their literals, a password in a role statement among them. The service warns about it. |
+| `timescaledb.enable_job_execution_logging` | `on` (optional) | Records successful policy runs in `timescaledb_information.job_history`. Without it only failed runs are recorded. |
+| `logging_collector` and `log_directory` | leave as packaged | See [Store log capture](#store-log-capture). |
+
+After the service starts, `--check-settings` prints the store host profile and a verdict for each sizing setting. See [Check Host/Store Sizing Settings](install.md#check-hoststore-sizing-settings).
+
+### The owner role and the database
+
+The service connects as one login that owns the store database. It does not need to be a superuser. `createuser` asks for the new role's password twice and does not echo it. Use a long random password, and keep it for step 6.
+
+```bash
+sudo -u postgres createuser --pwprompt darling
+sudo -u postgres createdb --owner=darling --template=template0 --encoding=UTF8 --locale=C darling
+```
+
+The database must use the C collation, the same as the managed Windows store and the compose store. `--template=template0` is required with `--locale=C`, because a database made from the default template keeps the template's locale and the command fails. The [Darling Exporter](../../Exporter/README.md#the-store-collation) refuses a store with any other collation.
+
+### Extensions and rights that need a superuser
+
+The owner role cannot do these itself. Run them once as `postgres`, in the `darling` database, before the first start:
+
+```bash
+sudo -u postgres psql -X -d darling
+```
+
+```sql
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public;
+GRANT pg_monitor TO darling;
+GRANT CREATE ON SCHEMA _timescaledb_internal TO darling;
+REVOKE SELECT ON public.pg_stat_statements FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.pg_stat_statements(boolean) FROM PUBLIC;
+GRANT SELECT ON public.pg_stat_statements TO pg_read_all_stats, darling;
+GRANT EXECUTE ON FUNCTION public.pg_stat_statements(boolean) TO pg_read_all_stats, darling;
+REVOKE SELECT ON public.pg_stat_statements_info FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.pg_stat_statements_info() FROM PUBLIC;
+GRANT SELECT ON public.pg_stat_statements_info TO pg_read_all_stats, darling;
+GRANT EXECUTE ON FUNCTION public.pg_stat_statements_info() TO pg_read_all_stats, darling;
+```
+
+What each one is for:
+
+- **`timescaledb`.** The service can create this extension itself, and a superuser can create it first. Creating it here lets the `_timescaledb_internal` grant below happen before the first start.
+- **`pg_stat_statements`.** This extension is not trusted, so only a superuser can create it. The service does not try, and it logs nothing while the extension is missing. Name `SCHEMA public`. After its first start the service sets the database `search_path` to `collect, config, public`, so a later `CREATE EXTENSION pg_stat_statements` without a schema lands in `collect`, and the service then warns that `PUBLIC can still read collect.pg_stat_statements`. The statements in [Security](security.md#security--least-privilege-roles) are written for `public`.
+- **`pg_monitor`.** Without it the service logs `The store's role cannot read pg_wal's size (pg_ls_waldir)` and records the WAL figures without that size.
+- **CREATE on `_timescaledb_internal`.** Without it, some continuous aggregates and one rollup fail to set up on every start with `42501: permission denied for schema _timescaledb_internal`. The summary line then reads `24/32 continuous aggregate(s) ready`, and reads over those rollups fall back to raw scans. This is a defect, [#9691](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9691), and the grant is the workaround today. If a first start has already run without it, run the grant and restart the service.
+- **The `pg_stat_statements` revokes and grants.** They stop every login in the database from reading the statement statistics of every role. Without them the service warns `PUBLIC can still read public.pg_stat_statements` and names these statements. Only the owner of the extension or a superuser can run them.
+
+A superuser login for the service also clears all of this, and [Security](security.md#security--least-privilege-roles) describes the store that way. The grants above are the smaller choice. [#9698](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9698) tracks what the service says when a right is missing.
+
+**Proof:** `sudo -u postgres psql -X -d darling -c "\dx"` lists `timescaledb` and `pg_stat_statements`, and `SHOW shared_preload_libraries` returns both names.
+
+### The least-privilege roles, when the web dashboard or MCP is on
+
+The tarball ships `provision-roles.sql`. It creates the `admin`, `viewer`, `web` and `mcp` logins on a store that you bring. You can skip it while the web dashboard and MCP are both off, which is the default. With either one on and no `postgres.webConnectionString` or `postgres.mcpConnectionString` set, that surface connects as the owner and the service warns about it. When to run the script, its placeholders and what it grants are in [Security](security.md#security--least-privilege-roles).
+
+Custom alerts do not run on this shape today. The service logs `Custom alert evaluator not started: this deployment has no viewer-role login to evaluate custom alerts with`, with or without the script ([#9700](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9700)). The built-in alerts are not affected.
+
+### Store log capture
+
+The service reads the store's own PostgreSQL log into the store. A Debian or Ubuntu package logs to `/var/log/postgresql` with `logging_collector = off`, which is a healthy setup, and the service cannot read that. It logs one of these two warnings every hour ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)):
+
+- `Store log capture failed ... The store keeps no log files to read (logging_collector is off or the log folder is missing)`
+- `Store log capture failed ... Reading the store's own log needs pg_read_server_files and EXECUTE on pg_read_binary_file`
+
+Both are safe to leave. Collection from your monitored servers is not affected, and PostgreSQL's log is still in `/var/log/postgresql`. Capture needs `logging_collector = on`, a `log_directory` inside the data directory (the PostgreSQL default, `log`), and `pg_read_server_files` plus EXECUTE on `pg_read_binary_file` for the owner role. `pg_read_server_files` lets the role read any file the PostgreSQL server can read, so grant it only when you want the capture.
+
+## Step 4: Download and verify
+
+Each release on the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) has `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. Download both into one folder. The checksum file lists the compose archive too, so tell `sha256sum` to skip the file that you did not download:
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS-linux.txt
+```
+
+**Proof:** `PerformanceMonitorDarling-linux-x64-<version>.tar.gz: OK`. Without `--ignore-missing` the command fails on the compose archive's line.
+
+## Step 5: Extract, and create the user and folders
+
+The tarball has no top-level folder, so make the folder first. Its files are owned by root ([#9701](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9701)). `--no-same-owner` keeps root the owner of everything that is extracted, whatever an archive records.
+
+```bash
+sudo mkdir -p /opt/darling
+sudo tar -xzf PerformanceMonitorDarling-linux-x64-<version>.tar.gz -C /opt/darling --no-same-owner
+```
+
+Create the service user and the folders it writes. The unit runs as that user, and it cannot create folders under `/etc` or `/usr/share` itself.
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin darling
+sudo mkdir -p /etc/darling/darling-keys
+sudo mkdir -p /usr/share/PerformanceMonitorDarling/logs
+sudo chown root:darling /etc/darling
+sudo chmod 750 /etc/darling
+sudo chown darling:darling /etc/darling/darling-keys
+sudo chmod 700 /etc/darling/darling-keys
+sudo chown -R darling:darling /usr/share/PerformanceMonitorDarling
+sudo chmod 700 /usr/share/PerformanceMonitorDarling/logs
+```
+
+| Path | Owner and mode | What it holds |
+|---|---|---|
+| `/opt/darling` | root, as extracted | The service files. The service never writes here. |
+| `/etc/darling` | `root:darling`, `750` | `darling.json` and the secret files. Other users on the host cannot list it. |
+| `/etc/darling/darling-keys` | `darling:darling`, `700` | The `password-key` and `log-hash-key` files. The service makes them on its first start, mode `600`. It checks that the folder is owner-only. Back this folder up (see [Security](security.md)). |
+| `/usr/share/PerformanceMonitorDarling/logs` | `darling:darling`, `700` | The file log. Without this folder the service still runs, writes no log file, and says `File logging is disabled` at start. |
+
+`darling-keys` sits beside `darling.json`. If your config is not in `/etc/darling`, create the folder next to it.
+
+**Proof:** `/opt/darling/PerformanceMonitor.Darling.Service --version` prints the version that you downloaded.
+
+## Step 6: Write `darling.json` and the secret files
+
+The `darling.sample.json` in the tarball is shaped for Windows: it starts with `"managed": true` and uses `encryptedPassword`. Do not copy it on Linux ([#9701](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9701)). Write a file like the one below.
+
+Create the three files empty, with the right owner and mode, before anything secret goes in them:
+
+```bash
+sudo install -o darling -g darling -m 600 /dev/null /etc/darling/darling.json
+sudo install -o darling -g darling -m 600 /dev/null /etc/darling/store_connection
+sudo install -o darling -g darling -m 600 /dev/null /etc/darling/sql_password
+```
+
+Then edit each one as root, for example `sudo nano /etc/darling/darling.json`. Do not put a password on a command line, where the shell history keeps it.
+
+`/etc/darling/darling.json`:
+
+```json
+{
+  "postgres": {
+    "managed": false,
+    "connectionString": "file:/etc/darling/store_connection"
+  },
+  "servers": [
+    {
+      "host": "<sql-server>,1433",
+      "name": "<display-name>",
+      "auth": "sql",
+      "username": "<monitoring-login>",
+      "password": "file:/etc/darling/sql_password"
+    }
+  ],
+  "web": { "enabled": false },
+  "mcp": { "enabled": false }
+}
+```
+
+`/etc/darling/store_connection` holds one line, the Npgsql connection string for the owner role from step 3:
+
+```
+Host=127.0.0.1;Port=5432;Username=darling;Password=<store-password>;Database=darling
+```
+
+`/etc/darling/sql_password` holds one line, the password of the monitoring login. The service trims the end of a `file:` secret, so a final newline does no harm.
+
+Notes on the file:
+
+- **Nothing secret goes in `darling.json`.** Every secret slot takes a `file:/path` or an `env:NAME` reference. A literal `password` works, and the service warns about it on every use. systemd's `LoadCredential=` pairs with `file:`.
+- **Keep the secret files in `/etc/darling`, not in `darling-keys`.** The key folder is for the service's own keys.
+- **`servers` is only a seed.** The service copies the list into the store on its first start, and later edits to the list in the file do nothing. Get each entry right before the first start. See [Changing a registered server](#changing-a-registered-server) and [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed).
+- **A PostgreSQL target** sets `"engine": "postgres"` on its entry. See [PostgreSQL Targets](postgresql-targets.md#postgresql-targets).
+- The file is JSONC, so `//` comments are allowed. Every field is in the [Configuration Reference](configuration.md).
+
+**Proof:** `sudo ls -l /etc/darling` shows the three files as `-rw-------` and owned by `darling`.
+
+## Step 7: Pre-flight
+
+```bash
+sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --test-connection
+```
+
+This validates the file and then connects to every configured server, as the service's own user. It exits with code `0` only when the config is valid and every server is reachable.
+
+**Proof:**
+
+```
+Validating connectivity to <count> server(s)...
+  [PASS] <display-name>: SQL major version <major>, <edition>, msdb access: yes
+All servers reachable.
+```
+
+Two things to expect here:
+
+- **A note about the registry on a new store.** Before the first start the store has no tables, so the command prints `NOTE: could not read the store's registry (42P01: relation "config_monitored_servers" does not exist ...), so validating darling.json's own server list instead.` That is expected on a store that has never been started ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)).
+- **A pre-login handshake failure means an untrusted certificate.** `[FAIL] <display-name>: A connection was successfully established with the server, but then an error occurred during the pre-login handshake. (provider: TCP Provider, error: 35 - An internal exception was caught)` with the port reachable means the SQL Server's certificate chains to a CA that is not in the Linux trust store. Amazon RDS for SQL Server is one such case. The message names no certificate ([#9692](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9692)). The secure fix is to add the CA: put each CA certificate as its own `.crt` file under `/usr/local/share/ca-certificates/`, run `sudo update-ca-certificates`, and run the pre-flight again. The other fix is `"trustServerCertificate": true` on the server's entry, which keeps the connection encrypted and accepts any certificate. Choose before the first start, because `servers` is only a seed.
+
+## Step 8: Write the unit and start the service
+
+Save this as `/etc/systemd/system/darling.service`:
+
+```ini
+[Unit]
+Description=PerformanceMonitor Darling
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll
+Environment=DARLING_CONFIG=/etc/darling/darling.json
+User=darling
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now darling
+systemctl status darling
+```
+
+**Proof:** `Active: active (running)`. This proves only that the process started. Step 9 proves that it collects.
+
+Know these limits of the unit ([#9702](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9702)):
+
+- **The service tells systemd it is ready when its host starts, before the store is ready.** With `Type=notify` the service sends the ready signal itself, and it sends it at host start. `active (running)` is true while the service is still migrating the store or retrying its connection. The real readiness signal is the `Postgres store ready` line, followed by `PerformanceMonitor Darling collection loop started`.
+- **`Restart=on-failure` restarts a process that exits.** It does nothing for a service that runs and has stopped collecting. Watch for that with the store check in step 9.
+- **`After=postgresql.service` orders the unit after a local PostgreSQL only under that unit name.** That is the name on Debian and Ubuntu. Another name, such as `postgresql-16.service` from the PostgreSQL packages for RHEL, goes on the `After=` line instead. With the store on another host the line does nothing. In every case the service retries the store until PostgreSQL answers.
+
+## Step 9: Proof that it collects
+
+Read the file log, not the journal:
+
+```bash
+sudo tail -n 60 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date -u +%Y%m%d).log
+```
+
+**Proof:** these lines, at the default log level:
+
+```
+Loaded configuration from /etc/darling/darling.json: <count> server(s)
+Postgres store ready (schema v<version>, <count> migration(s) applied)
+TimescaleDB detected ...
+TimescaleDB: <n>/<n> collector table(s) are hypertables
+TimescaleDB: <n>/<n> continuous aggregate(s) ready (...)
+PerformanceMonitor Darling collection loop started
+[<display-name>] Connected (major <major>, engine <engine type>, edition <edition>, server_id <id>)
+```
+
+`Postgres store ready` means the store is migrated. `PerformanceMonitor Darling collection loop started` means ready. One `Connected` line for each server means the service reached it. On the hypertable line and on the continuous aggregate line, both numbers must be equal.
+
+The lines that the Windows install page lists for the managed store (`Extracting the bundled Postgres runtime`, `Managed Postgres started`, `Creating the 'darling' database`, `Least-privilege roles ready`) never appear on a store that you bring. The per-collector `=> <count> rows (sql:<ms>ms, pg:<ms>ms)` lines are written at `Debug`, which the default level does not write. See [Logs](operations.md#logs) to turn them on.
+
+The first server connects about 30 seconds after the loop starts. On a 2-server install the second connected about 2 minutes after it, with no line in between that says it is waiting ([#9696](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9696)). For a SQL Server target the `Connected` line names the engine type (`Box`, `AzureSqlDb` or `ManagedInstance`) and the edition in the words the pre-flight prints, such as `engine Box, edition Enterprise`. For a PostgreSQL target it names the major version and the engine, and no edition.
+
+With the web dashboard and MCP off, the service opens no listening socket, so there is no port to probe. The proof that collection works is in the store. This counts the collector runs of the last 15 minutes for each server:
+
+```bash
+sudo -u postgres psql -X -d darling -c "SELECT server_id, status, count(*) FROM collect.collection_log WHERE collection_time > (now() AT TIME ZONE 'UTC') - interval '15 minutes' GROUP BY server_id, status ORDER BY server_id, status"
+```
+
+**Proof:** `SUCCESS` rows for every server. For a check that your own monitoring can run, use the one-row query in [Watching the service from outside](operations.md#watching-the-service-from-outside). It returns `true` while collection is current. The `heartbeat` setting on the same page pings a URL of yours instead.
+
+### What a new install logs that is not a fault
+
+These `WARN` lines appear on a healthy new install ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)):
+
+- `Retention policy for <table> HELD PAUSED` or `RE-HELD`, for the query statistics tables and their rollups. The rollups cannot cover a day that has not closed, so a new store carries these for at least its first day. While a policy is held, its purge is stopped. The message points at `--backfill-rollups`, which a new store does not need.
+- `Store log capture failed`, every hour. See [Store log capture](#store-log-capture).
+
+### Size the workers after the first start
+
+The worker formula in [Background workers](operations.md#background-workers-sizing-an-unmanaged-store-and-what-happens-if-you-dont) needs the store's hypertable and continuous aggregate counts, and they exist only after the first start creates the tables. That is why step 3 starts with `128` and `139`. Now read the real counts:
+
+```bash
+sudo -u postgres psql -X -d darling -c "SELECT count(*) AS hypertables FROM timescaledb_information.hypertables" -c "SELECT count(*) AS continuous_aggregates FROM timescaledb_information.continuous_aggregates"
+```
+
+Work the formula with those two numbers and the host's RAM. For host RAM, use the memory that the host always has. On a virtual machine with dynamic memory that is its minimum, not what it holds at the moment. If the result differs from the pair in `darling.conf`, change it, restart PostgreSQL, and then restart the service. Do this again after each upgrade, because a new build can add tables.
+
+## Logs
+
+- **The file log is the one to read.** It is `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, one file for each day, kept 14 days, one line for each event.
+- **The journal is the noisy one.** `journalctl -u darling` shows the same events in the console format, which puts the source on one line and the message on the next. Each start also writes more than 30 `Rollup coverage floor` lines there ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)). Use the journal for what systemd itself reports: starts, stops and a process that exits.
+- **The log files are mode `644` inside a `700` folder.** The service creates each file with the process umask. The folder's mode is what keeps other users out, so this is harmless. To make the files owner-only as well, add `UMask=0077` to the unit's `[Service]` section and restart the service.
+- **The log level** is set with a standard .NET logging source. In the unit, that is a line such as `Environment=Logging__LogLevel__PerformanceMonitor.Darling.Service=Debug`. See [Logs](operations.md#logs).
+- There is no Windows event log on Linux. The file log and the journal are the two surfaces.
+
+## Service verbs on Linux
+
+Run a verb as the service's user, with `DARLING_CONFIG` set, so that it reads the same config and can open the same keys and secret files:
+
+```bash
+sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll <verb>
+```
+
+The apphost, `/opt/darling/PerformanceMonitor.Darling.Service <verb>`, is the same program and finds `dotnet` by itself. A message from the service that tells you to run a verb names it in this form, with the folder the service runs from, for example `dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --backfill-rollups` ([#9703](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9703)). The `--help` text still writes `PerformanceMonitor.Darling.Service.exe`, and on Linux that means this command.
+
+In this table `darling-verb` stands for the whole command above. The [command line reference](cli.md) has every verb with its exit codes.
+
+| On the Windows pages | On Linux |
+|---|---|
+| `.\PerformanceMonitor.Darling.Service.exe --version` | `darling-verb --version` |
+| `.\PerformanceMonitor.Darling.Service.exe --test-connection` or `--validate-config` | `darling-verb --test-connection` |
+| `.\PerformanceMonitor.Darling.Service.exe --check-settings` | `darling-verb --check-settings` |
+| `.\PerformanceMonitor.Darling.Service.exe --add-server` | `darling-verb --add-server`, with the arguments in [Add-server](cli.md#--add-server) |
+| `.\PerformanceMonitor.Darling.Service.exe --grant-script` | `darling-verb --grant-script` |
+| `--enable-collector`, `--disable-collector`, `--set-collector-run-at`, `--set-collector-frequency`, `--set-collector-retention` | The same verbs after `darling-verb`. See [Collector settings](cli.md#collector-settings) |
+| `.\PerformanceMonitor.Darling.Service.exe --backfill-rollups` | `darling-verb --backfill-rollups`. Add `--dry-run` to see the plan first |
+| `.\PerformanceMonitor.Darling.Service.exe --reset-password-key` | `darling-verb --reset-password-key`, then `sudo systemctl restart darling` |
+| `.\PerformanceMonitor.Darling.Service.exe --diagnostics-bundle` | `darling-verb --diagnostics-bundle`. See [Diagnostics Bundle](cli.md#diagnostics-bundle) |
+| `--add-alert-source`, `--rotate-alert-source`, `--remove-alert-source`, `--list-alert-sources` | The same verbs after `darling-verb` |
+| `--encrypt-password` | Windows only. Use a `file:` or `env:` reference in `darling.json` |
+| `--enable-web`, `--disable-web`, `--enable-mcp`, `--disable-mcp` | Windows only. See [The web dashboard and MCP](#the-web-dashboard-and-mcp) |
+| `--print-web-token`, `--print-mcp-token` | Windows only. On Linux the token is in the file that your `file:` reference names |
+| `--configure-network`, `--configure-firewall`, `--grant-cert-key-access` | Windows only. Edit the `network` blocks in `darling.json` by hand, and open ports with the host's own firewall |
+| `--print-viewer-connection`, `--export-viewer-config` | Windows only, for the managed store. Write the Viewer's `darling.json` by hand, as [Manual configuration](viewer.md#manual-configuration-fallback) says |
+| `Start-Service`, `Stop-Service` or `Restart-Service 'PerformanceMonitor Darling'` | `sudo systemctl start darling`, `stop` or `restart` |
+| `Get-Service 'PerformanceMonitor Darling'` | `systemctl status darling` |
+| `Get-Content <log> -Wait -Tail 40` | `sudo tail -n 40 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date -u +%Y%m%d).log` |
+| `install-darling.ps1`, `Install-Darling.cmd`, the MSI | Steps 5 to 8 of this page |
+| `upgrade-darling.ps1` | [Upgrade by hand](#upgrade-by-hand) |
+| `uninstall-darling.ps1` | [Uninstall](#uninstall) |
+
+## Changing a registered server
+
+After the first start the server list lives in the store, and an edit to `servers` in `darling.json` does nothing. No log line says that the file differs from the registered server ([#9693](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9693)).
+
+- **To add a server**, use `--add-server` in its Linux form. It cannot change a server that is already registered.
+- **To change a registered server**, for example its `trustServerCertificate`, its `encryptMode` or its saved password, you need a write surface. They are the web dashboard's Admin page, the MCP `edit_server` tool (which needs `mcp.allowWrites`, `mcp.allowServerAdmin` and a token), and a Windows Viewer connected to this store. With the web dashboard and MCP off there is no way to do it on the host itself today. [Running Darling day to day](admin.md) has the steps for each surface.
+
+## The web dashboard and MCP
+
+Both are off in the example. `--enable-web` and `--enable-mcp` are Windows only, so on Linux the switch is set in one of two places:
+
+- **Before the first start**, set `web.enabled` or `mcp.enabled` to `true` in `darling.json`. The first start copies the value into the store.
+- **After the first start**, the store holds the switch, in `config.config_service.web_enabled` and `mcp_enabled`, and the file's value is ignored. Change it there as the store owner, for example `UPDATE config.config_service SET web_enabled = true WHERE id = 1`, and then restart the service.
+
+The `network` block of each surface (`listen`, `allowFrom`, `token`) is read from the file at every start. Give the token as a `file:` reference. The settings are in [Web dashboard configuration](configuration-web.md) and [MCP configuration](configuration-mcp.md), and the exposure rules are in [Opt-in Network Endpoints](network-endpoints.md). Run `provision-roles.sql` before you turn either surface on (see [The least-privilege roles](#the-least-privilege-roles-when-the-web-dashboard-or-mcp-is-on)).
+
+## Upgrade by hand
+
+There is no upgrade script for Linux ([#9688](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9688)). The config, the secrets and the keys are in `/etc/darling`, outside the service folder, so an upgrade replaces only `/opt/darling`.
+
+1. Read the release notes, and [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) for anything that an older build reads differently.
+2. Back up the store. See [Back up, restore and move the store](../darling-store-backup.md).
+3. Download and verify the new tarball, as in step 4.
+4. Replace the service files and keep the old ones:
+
+   ```bash
+   sudo systemctl stop darling
+   sudo mv /opt/darling /opt/darling.previous
+   sudo mkdir -p /opt/darling
+   sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling --no-same-owner
+   sudo systemctl start darling
+   ```
+
+5. Check the proof lines of step 9. `Postgres store ready (schema v<version>, <count> migration(s) applied)` shows the store's new schema version.
+6. Read the worker counts again, as in [Size the workers after the first start](#size-the-workers-after-the-first-start).
+
+Nothing checks that the old process is gone or rolls back for you. To go back, stop the unit, move `/opt/darling.previous` back to `/opt/darling` and start the unit. The store's migrations stay applied, so read the rollback list first. Remove `/opt/darling.previous` when you no longer need it.
+
+## Uninstall
+
+The uninstall does not touch the monitored servers. To remove this install's Extended Events sessions from them, remove each server first. See [Remove a server](admin.md#remove-a-server).
+
+```bash
+sudo systemctl disable --now darling
+sudo rm /etc/systemd/system/darling.service
+sudo systemctl daemon-reload
+sudo rm -rf /opt/darling /opt/darling.previous
+```
+
+That leaves the store, the config, the keys and the logs. To remove them too:
+
+```bash
+sudo rm -rf /etc/darling /usr/share/PerformanceMonitorDarling
+sudo userdel darling
+sudo -u postgres dropdb darling
+sudo -u postgres dropuser darling
+```
+
+`dropdb` deletes every collected row. Without the `darling-keys` folder, a saved password in a restored copy of the store cannot be opened again.
+
+## Where everything is
+
+| What | Where |
+|---|---|
+| Service files | `/opt/darling` |
+| Config file | `/etc/darling/darling.json`, named by `DARLING_CONFIG` in the unit |
+| Secret files | `/etc/darling/store_connection` and `/etc/darling/sql_password`, or wherever your `file:` references point |
+| Password key and log-hash key | `/etc/darling/darling-keys/password-key` and `/etc/darling/darling-keys/log-hash-key` |
+| Unit | `/etc/systemd/system/darling.service` |
+| Service logs | `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, and `journalctl -u darling` |
+| Store | Your PostgreSQL server's data directory, database `darling` |
+| Store settings | `/etc/postgresql/18/main/conf.d/darling.conf` on a Debian or Ubuntu package install |
+| Rollback copy | `/opt/darling.previous`, after an upgrade by hand |
+
+Back up `/etc/darling`, with its keys, and the store.
+
+## Where to go next
+
+- [The web dashboard](web-dashboard.md) and [MCP server](../mcp-server.md#darling): the two surfaces a Linux host serves.
+- [Running Darling day to day](admin.md): add or remove a server, change a password, pause collection.
+- [Operations](operations.md): the store, retention, the logs and watching the service from outside.
+- [Darling troubleshooting](troubleshooting.md): every service log line and what it means.

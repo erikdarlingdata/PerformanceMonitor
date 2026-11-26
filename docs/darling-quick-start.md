@@ -29,7 +29,7 @@ Both surfaces are off by default. After the service collects, turn them on with 
 
 On Linux, run the service under Docker Compose with the official TimescaleDB image. You can also run it under systemd with a PostgreSQL server that you already run, version 16 or later. The bundled store is Windows-only.
 
-On Linux, the service keeps a key pair and seals secrets to it, so it can save and use them. The secrets are a SQL login password, the SMTP password, webhook URLs, the PagerDuty key, and generic webhook headers. `--reset-password-key` makes a new key. See [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804) in the operator guide.
+On Linux, the service keeps a key pair and seals secrets to it, so it can save and use them. The secrets are a SQL login password, the SMTP password, webhook URLs, the PagerDuty key, and generic webhook headers. `--reset-password-key` makes a new key. The Docker Compose steps are in [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804) below. The systemd steps have their own page, [Install Darling on Linux with systemd](darling/linux.md).
 
 Configuration is a single JSON file with no schedule knobs. One exception: a collector that runs once a day or less often can have a run time. That is a time of day on the monitored server's own clock. Set it in the viewer's Collector Schedules window (the **Run at** column) or with `--set-collector-run-at`. See the **[Darling operator guide](../Darling/README.md)** for the configuration reference, permissions, and operations.
 
@@ -38,7 +38,7 @@ Configuration is a single JSON file with no schedule knobs. One exception: a col
 
 The service is cross-platform .NET; only the **bundled zero-admin store** and DPAPI are Windows-specific. On Linux you pair the service with the official TimescaleDB image (compose, the recommended shape) or point it at PostgreSQL you already run (systemd), keeping `postgres.managed = false` either way. The Viewer stays a Windows desktop app — Linux hosts read the **web dashboard**, which the container exposes.
 
-Each shape needs a different file from the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases). `SHA256SUMS-linux.txt` on the same page lists the checksums.
+Each shape needs a different file from the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases). `SHA256SUMS-linux.txt` on the same page lists the checksums. It lists both Linux archives. After you download one of them, check it with `sha256sum -c --ignore-missing SHA256SUMS-linux.txt`.
 
 - **Docker Compose:** download `PerformanceMonitorDarling-compose-<version>.tar.gz`. Extract it, then `cd` into the folder it makes.
 - **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder. Those releases have no `setup.sh`, so make the secret files by hand from the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
@@ -72,7 +72,7 @@ Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:51
 
 - **Nothing secret goes in darling.json.** Every secret slot — the whole `postgres.connectionString`, server `password`s, `smtp.password`, the tokens — takes an `env:NAME` or `file:/run/secrets/<name>` reference. The compose file mounts each secret from `secrets/`.
 - **Start with a fresh store volume per deployment.** The control plane is store-authoritative after the first seed, so a reused volume's enable toggles override darling.json — by design.
-- **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation. Keep `secrets/` at `chmod 700` with its files at `644`: the container reads them as user 1654 through compose's bind mounts, and the folder's 700 is what keeps other users on the host out. `darling.json` is `644` too, so every user on the host can read it: never put a secret inline in it. The systemd shape should keep `darling.json` readable by the service's user only.
+- **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation. Keep `secrets/` at `chmod 700` with its files at `644`: the container reads them as user 1654 through compose's bind mounts, and the folder's 700 is what keeps other users on the host out. `darling.json` is `644` too, so every user on the host can read it: never put a secret inline in it. The systemd shape should keep `darling.json` readable by the service's user only. The commands, and where the `file:` secret files go, are in [Install Darling on Linux with systemd](darling/linux.md#step-5-extract-and-create-the-user-and-folders).
 - **A new store is created with the C collation.** The `store` service passes `POSTGRES_INITDB_ARGS` (`--encoding=UTF8 --locale=C`), the same encoding and locale as the managed Windows store. `initdb` runs once, so this applies to a new volume only. A volume made before this keeps the collation it was made with, which is the image's `en_US.utf8`, and the Darling service works on it as before. The Darling Exporter needs the C collation: on any other store it exits 2 with a one-line message. See "The store collation" in the [Exporter README](../Exporter/README.md#the-store-collation) for how to move to a C store.
 - **The store's preload list is the compose file's.** The store service passes `shared_preload_libraries` on its command line (TimescaleDB plus `pg_stat_statements`, for `get_store_query_stats`, #3899), and a command-line setting outranks both `postgresql.conf` and `ALTER SYSTEM`. To preload another library in the store, add it to that line in `docker-compose.yml`; an `ALTER SYSTEM` or conf edit of the list is ignored while the line is there.
 
@@ -88,7 +88,7 @@ The compose file sets no TLS on the store, so this connection is not encrypted. 
 
 **The store keeps its own log files** ([#9333](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9333)). PostgreSQL's own log is in the `log` folder of the store volume, one file for each weekday, and `docker compose logs` for the PostgreSQL container shows only its startup lines.
 
-**systemd + bring-your-own PostgreSQL.** The tarball is framework-dependent, not self-contained. The host needs the ASP.NET Core 10 runtime and the .NET 10 runtime, from <https://dotnet.microsoft.com/download/dotnet/10.0>. The container image carries both already.
+**systemd + bring-your-own PostgreSQL.** The full procedure for this shape is on its own page: [Install Darling on Linux with systemd](darling/linux.md). It has the store setup, a `darling.json` example for Linux, the proof lines, the Linux form of each service verb, the upgrade and the uninstall. The rest of this section is the short form. The tarball is framework-dependent, not self-contained. The host needs the ASP.NET Core 10 runtime and the .NET 10 runtime, from <https://dotnet.microsoft.com/download/dotnet/10.0>. On Ubuntu 24.04, `sudo apt-get install -y dotnet-runtime-10.0 aspnetcore-runtime-10.0` installs both from Ubuntu's own repositories. The container image carries both already.
 
 Download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL, at or above the minimum version in [Prerequisites](darling/install.md#prerequisites), with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under the unit below. Create the service user and the folders it writes first, because the unit runs as that user and it cannot create them under `/usr/share` or `/etc` itself:
 
@@ -102,16 +102,18 @@ sudo chmod 700 /etc/darling/darling-keys
 sudo chmod 700 /usr/share/PerformanceMonitorDarling/logs
 ```
 
-`darling-keys` is where the service keeps its secret key pair (the `password-key` file) and its log-hash key (the `log-hash-key` file). It sits beside `darling.json`, so if your config is not in `/etc/darling`, create the folder next to it. The service checks that the folder is owner-only and that the user owns the files in it, and it keeps its keys there across restarts, so back it up (see [Security](darling/security.md)). The file log goes to `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`. Without that folder the service still runs, but it writes no log file and says `File logging is disabled` at start.
+`darling-keys` is where the service keeps its secret key pair (the `password-key` file) and its log-hash key (the `log-hash-key` file). It sits beside `darling.json`, so if your config is not in `/etc/darling`, create the folder next to it. The service checks that the folder is owner-only and that the user owns the files in it, and it keeps its keys there across restarts, so back it up (see [Security](darling/security.md)). The file log goes to `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`. It is the log to read. `journalctl -u darling` carries the same events in a two-line console format. Without that folder the service still runs, but it writes no log file and says `File logging is disabled` at start.
 
 The unit:
 
 ```ini
 [Unit]
 Description=PerformanceMonitor Darling
-After=network-online.target
+After=network-online.target postgresql.service
+Wants=network-online.target
 
 [Service]
+Type=notify
 ExecStart=/usr/bin/dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll
 Environment=DARLING_CONFIG=/etc/darling/darling.json
 User=darling
@@ -122,3 +124,5 @@ WantedBy=multi-user.target
 ```
 
 Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs naturally with `file:`), and note `Microsoft.Data.SqlClient` needs `libgssapi-krb5-2` installed (`apt-get install libgssapi-krb5-2`) — the container image carries it already.
+
+systemd reports `active (running)` when the host process starts, before the store is ready. The readiness signal is the `Postgres store ready` line in the log, followed by `PerformanceMonitor Darling collection loop started`. With the web dashboard off there is no port to probe, so check `collect.collection_log` as [Watching the service from outside](darling/operations.md#watching-the-service-from-outside) says.
