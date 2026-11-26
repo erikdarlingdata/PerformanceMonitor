@@ -211,7 +211,7 @@ internal sealed class McpSettings
                 settings.AllowServerAdmin = allowServerAdmin.GetBoolean();
             }
 
-            if (root.TryGetProperty(McpUnverifiedWindowsAuthScreen.Setting, out var allowWindowsAuth))
+            if (root.TryGetProperty("mcp_allow_windows_auth_over_unverified_tls", out var allowWindowsAuth))
             {
                 if (allowWindowsAuth.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                 {
