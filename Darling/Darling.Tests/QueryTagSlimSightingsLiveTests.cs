@@ -130,19 +130,19 @@ public sealed class QueryTagSlimSightingsLiveTests
         await WithStoreAsync(async env =>
         {
             /* 0xAA is one hash seen by one caller in two databases, and by a second caller: three sighting rows that age out in one
-               slice. 0xNN has no caller and no database. 0xRR is recent. */
+               slice. 0xFF has no caller and no database. 0xDD is recent. */
             await SightAsync(env, HashSightings("0xAA", "App", database: "Sales"));
             await SightAsync(env, HashSightings("0xAA", "App", database: "Archive01"));
             await SightAsync(env, HashSightings("0xAA", "Report", database: "Sales"));
-            await SightAsync(env, HashSightings("0xRR", "App"));
+            await SightAsync(env, HashSightings("0xDD", "App"));
             await AgeAsync(env, "0xAA", SightingsDays + 5);
             await ExecAsync(env,
-                $"INSERT INTO collect.query_tag_sightings (server_id, key_kind, key, first_seen, last_seen) VALUES ({Server}, 'hash', '0xNN', now() - interval '{SightingsDays + 5} days', now() - interval '{SightingsDays + 5} days')");
+                $"INSERT INTO collect.query_tag_sightings (server_id, key_kind, key, first_seen, last_seen) VALUES ({Server}, 'hash', '0xFF', now() - interval '{SightingsDays + 5} days', now() - interval '{SightingsDays + 5} days')");
 
             await PurgeAsync(env);
 
-            Assert.Equal("0xRR", await SightedKeysAsync(env));
-            Assert.Equal("0xAA|Archive01|App|svc|H1|-,0xAA|Sales|App|svc|H1|-,0xAA|Sales|Report|svc|H1|-,0xNN|-|-|-|-|-", await SlimAsync(env));
+            Assert.Equal("0xDD", await SightedKeysAsync(env));
+            Assert.Equal("0xAA|Archive01|App|svc|H1|-,0xAA|Sales|App|svc|H1|-,0xAA|Sales|Report|svc|H1|-,0xFF|-|-|-|-|-", await SlimAsync(env));
 
             /* The slim row keeps the day the key was last seen, which is what its own horizon is measured from. */
             Assert.Equal("4", await ScalarAsync(env,
@@ -157,14 +157,14 @@ public sealed class QueryTagSlimSightingsLiveTests
         {
             await ExecAsync(env,
                 "INSERT INTO collect.query_tag_sightings_slim (server_id, key_kind, key, last_seen) VALUES "
-                + $"({Server}, 'hash', '0xGONE', now() - interval '{SlimDays + 1} days'), "
-                + $"({Server}, 'hash', '0xKEPT', now() - interval '{SlimDays - 1} days')");
-            await SightAsync(env, HashSightings("0xANCIENT", "App"));
-            await AgeAsync(env, "0xANCIENT", SlimDays + 30);
+                + $"({Server}, 'hash', '0x10', now() - interval '{SlimDays + 1} days'), "
+                + $"({Server}, 'hash', '0x20', now() - interval '{SlimDays - 1} days')");
+            await SightAsync(env, HashSightings("0xEE", "App"));
+            await AgeAsync(env, "0xEE", SlimDays + 30);
 
             await PurgeAsync(env);
 
-            Assert.Equal("0xKEPT|-|-|-|-|-", await SlimAsync(env));
+            Assert.Equal("0x20|-|-|-|-|-", await SlimAsync(env));
             Assert.Equal(string.Empty, await SightedKeysAsync(env));
         });
     }
