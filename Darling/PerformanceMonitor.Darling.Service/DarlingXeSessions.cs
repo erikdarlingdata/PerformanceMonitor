@@ -873,11 +873,22 @@ WHERE ses.name = @session_name;", connection))
     private static async Task<bool> EnsureAttentionOnPremAsync(SqlConnection connection, ServerRuntime server, ILogger? logger, CancellationToken cancellationToken)
     {
         ServerSessionState state;
-        using (var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorDarling"), connection))
+        async Task<object?> ProbeAsync(bool committedRead, CancellationToken token)
         {
+            using var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorDarling", committedRead), connection);
             cmd.CommandTimeout = 60;
             cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = AlwaysOnXeSessions.AttentionXeSessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            return await cmd.ExecuteScalarAsync(token);
+        }
+
+        {
+            /* #9675: the first probe is a dirty read, so it can read another entry's session, still being created on the same instance,
+               as another definition. A mismatch is read again, committed, before anything is dropped. */
+            var result = await AlwaysOnXeSessions.ConfirmAttentionMismatchAsync(
+                await ProbeAsync(committedRead: false, cancellationToken),
+                token => ProbeAsync(committedRead: true, token),
+                AlwaysOnXeSessions.AttentionMismatchConfirmPause,
+                cancellationToken);
             state = ServerSessionStateOf(result);
 
             /* #5640 (L4): the name is ours, so a session of it with other events, actions or targets is an older definition of our
@@ -894,9 +905,15 @@ WHERE ses.name = @session_name;", connection))
 
                 server.AttentionXeDefinitionReplaced = true;
                 logger?.LogWarning("[{Server}] The attention XE session {Session} has a definition other than this version's (events, actions or targets): dropping it and creating it again", server.Config.DisplayName, AlwaysOnXeSessions.AttentionXeSessionName);
-                using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
-                dropCmd.CommandTimeout = 60;
-                await dropCmd.ExecuteNonQueryAsync(cancellationToken);
+                await AlwaysOnXeSessions.DropAttentionMismatchAsync(
+                    async token =>
+                    {
+                        using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
+                        dropCmd.CommandTimeout = 60;
+                        await dropCmd.ExecuteNonQueryAsync(token);
+                    },
+                    token => ProbeAsync(committedRead: true, token),
+                    cancellationToken);
 
                 /* The dropped session is created again below. */
                 state = ServerSessionState.Absent;
