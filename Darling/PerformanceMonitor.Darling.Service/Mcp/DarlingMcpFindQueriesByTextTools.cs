@@ -823,7 +823,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
 
             var planCacheOutcome = await RunSourceAsync<PlanCacheHit, object>(
                 postgres, planCacheBudget, limit,
-                (_, _, step, collected, _) =>
+                (_, _, step, collected, _, _) =>
                 {
                     /* No text matched, so no sample statement runs. */
                     if (digests is { Length: 0 } || step >= spans.Count || collected.Count > limit)
@@ -997,13 +997,15 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
             (DateTime Floor, DateTime Ceiling)? pending = null;
             var lookupCapped = false;
             DateTime? covered = null;
-            var clock = System.Diagnostics.Stopwatch.StartNew();
-            long Left() => planCacheBudget.Milliseconds - (long)(planCacheBudget.ElapsedClock?.Invoke() ?? clock.Elapsed).TotalMilliseconds;
 
             var planCache = await RunSourceAsync<AllServersHit, object>(
                 postgres, planCacheBudget, limit,
-                async (connection, transaction, step, collected, ct) =>
+                async (connection, transaction, step, collected, elapsed, ct) =>
                 {
+                    /* What is left of the budget for a read this call makes itself, by the source's own clock: the time the source's gate
+                       reads after this call, so the two cannot disagree about whether anything is left. */
+                    long Left() => planCacheBudget.Milliseconds - (long)elapsed().TotalMilliseconds;
+
                     /* The span the last statement ran is done, except that a lookup span that hit its match limit without filling the page runs
                        again with the same limit, for the keys not yet found (the keys it found are excluded, so each rerun makes progress, and an
                        unlimited rerun would probe every sighting of the span: a query_hash with many digests fills the first limit alone). */
@@ -1025,8 +1027,8 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     /* #9605: the newest lookup span is done and the page is still short, so the matched digests are worth reading, once: at most
                        ProbeDigestCap of them and the probe reads the rest of the window by them, more and the lookup spans go on. The read has a
                        timeout of its own inside a savepoint, so one that runs out costs its share of the budget and nothing else: the rows found
-                       stay and the lookup spans go on under what is left. With nothing left it is not run, and the source stops at the gate after
-                       this call. */
+                       stay and the lookup spans go on under what is left. With nothing left by the source's clock it is not run, and the source,
+                       which reads that clock at its gate after this call, stops there. */
                     if (pending is null && !matchTried && covered is not null && Left() is > 0 and var left)
                     {
                         matchTried = true;
@@ -1079,8 +1081,9 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                         /* #9219: a lookup span's time width is the fixed one (1, 1, 2, 4, 8 and then RawTierSpanMaxParts parts), and it ends no
                            further back than the sample SpanRows rows, times its parts up to AllServersSpanRowParts, from its newest edge, so its
                            probes are bounded by a count. The cut-off read runs inside this call, before the source arms the statement timeout for
-                           the statement that follows, so it is armed here to what is left of the budget; with nothing left it is not run, and the
-                           source stops at the gate after this call. */
+                           the statement that follows, so it is armed here to what is left of the budget by the source's clock. With nothing left
+                           it is not run: the source reads the same clock at its gate after this call and stops there, so the statement of a span
+                           that was not cut never runs. */
                         var part = (now - floor) / RawTierSpanParts;
                         var width = lookupIndex == 0 ? 1 : Math.Min(1 << Math.Min(lookupIndex - 1, 8), RawTierSpanMaxParts);
                         var spanFloor = reached - floor < part * (width + 1) ? floor : reached - part * width;
@@ -1335,7 +1338,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
         string horizon, string stoppedAdvice, Func<NpgsqlDataReader, TRaw> read, Func<TRaw, TRow> shape, CancellationToken cancellationToken)
     {
         var outcome = await RunSourceAsync(
-            postgres, budget, limit, (_, _, step, _, _) => Task.FromResult(step == 0 ? new SourceStatement(sql, bind) : null), stoppedAdvice, null, read, null, shape, cancellationToken);
+            postgres, budget, limit, (_, _, step, _, _, _) => Task.FromResult(step == 0 ? new SourceStatement(sql, bind) : null), stoppedAdvice, null, read, null, shape, cancellationToken);
         return new
         {
             status = outcome.Status,
@@ -1354,8 +1357,9 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
     private sealed record SourceOutcome<TRow>(string Status, string? Message, int Returned, bool Truncated, IReadOnlyList<TRow> Rows, int CompletedSteps);
 
     /// <summary>The source read as a sequence of statements inside one transaction and one budget. <paramref name="next"/> is asked for the
-    /// statement of each step in turn, with the rows the earlier steps found, and may read first (#7849: the all-servers scope reads the matched
-    /// digests, then hands back the sample statement that fits them); null ends the source. <c>statement_timeout</c> starts at the budget, and each
+    /// statement of each step in turn, with the rows the earlier steps found and the source's clock (the time spent of the budget, the one the
+    /// gate before each statement reads), and may read first (#7849: the all-servers scope reads the matched digests, then hands back the sample
+    /// statement that fits them), under a timeout it takes from that clock; null ends the source. <c>statement_timeout</c> starts at the budget, and each
     /// statement runs under what the steps before it left, so the source takes at most the budget before it is <c>stopped</c>, whichever
     /// statement runs out and even when a read spent it all. A source that stops keeps the rows the completed steps found: the stopped message
     /// counts them and, when <paramref name="searched"/> describes the completed steps (it is absent or returns null when they are not spans), says
@@ -1364,7 +1368,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
     /// next step itself); a row it returns true for is not read as a page row.</summary>
     private static async Task<SourceOutcome<TRow>> RunSourceAsync<TRaw, TRow>(
         NpgsqlDataSource postgres, SourceBudget budget, int limit,
-        Func<NpgsqlConnection, NpgsqlTransaction, int, IReadOnlyList<TRaw>, CancellationToken, Task<SourceStatement?>> next,
+        Func<NpgsqlConnection, NpgsqlTransaction, int, IReadOnlyList<TRaw>, Func<TimeSpan>, CancellationToken, Task<SourceStatement?>> next,
         string stoppedAdvice, Func<int, string?>? searched, Func<NpgsqlDataReader, TRaw> read, Func<NpgsqlDataReader, bool>? aside, Func<TRaw, TRow> shape,
         CancellationToken cancellationToken)
     {
@@ -1405,7 +1409,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
 
             for (var step = 0; ; step++)
             {
-                var statement = await next(connection, transaction, step, rows, cancellationToken);
+                var statement = await next(connection, transaction, step, rows, Elapsed, cancellationToken);
                 if (statement is null)
                 {
                     break;
