@@ -301,6 +301,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Query tag sightings are kept as long as the longest collector that writes them** ([#9709])
 - **The `object_inventory` purge keeps each database's newest object list** ([#9716])
 - **Retention adopts missing liveness rows in keyset slices under a per-table budget** ([#9669])
+- **A store owned by a login that is not a superuser builds every continuous aggregate, and the service names any right that login lacks** ([#9722])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8523,6 +8524,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9718]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9718
 [#9719]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9719
 [#9720]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9720
+[#9722]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9722
 [#9724]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9724
 [#9725]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9725
 [#9726]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9726
