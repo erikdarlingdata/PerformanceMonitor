@@ -27,6 +27,7 @@ namespace PerformanceMonitorLite.Tests;
 /// test, so no real servers.json, host record, credential or SQL Server is touched. Each write is read back through a fresh
 /// <see cref="ServerManager"/> over the same folder, which is what the Manage Servers window reads.
 /// </summary>
+[InMemoryCredentials]
 public sealed class McpServerAdminToolsTests : IDisposable
 {
     private const string Secret = "not-a-real-secret-value";
