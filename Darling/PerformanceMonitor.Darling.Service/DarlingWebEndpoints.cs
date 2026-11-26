@@ -192,7 +192,7 @@ public static partial class DarlingWebEndpoints
         "generate_webhook_signing_key",
         "remove_webhook_signing_key",
         "update_notification_channels",
-        /* #9636: a test send goes from the service over MCP; the web has no route for it. */
+        /* #9636: a test send goes from the service over MCP and the web has no route for it. */
         "send_test_notification",
         "dismiss_alert_history",
         "restore_alert_history",
