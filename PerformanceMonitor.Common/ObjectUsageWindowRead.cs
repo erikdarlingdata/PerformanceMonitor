@@ -74,6 +74,8 @@ public static class ObjectUsageWindowRead
     /// $1 server_id, $2 database_name, $3 the window start (naive UTC, the clock collection_time is stored in). The baseline lookup is bounded
     /// below by <see cref="BaselineReachDays"/> so Darling's (server_id, collection_time DESC) index answers it from the chunks near the start.
     /// The SELECT list is <see cref="Columns"/>, the contract <see cref="Map"/> reads: change <see cref="Columns"/> and <see cref="Map"/> together.
+    /// The rows of one snapshot come in <c>collection_id</c> order, the order both chain builders read them in: when a snapshot's rows disagree (a
+    /// retried database, a rename between two reads of one run) the first non-null node name and the last row's identity are the same on every path.
     /// </summary>
     public static readonly string Sql = BaselineCte + $"""
 
@@ -85,7 +87,8 @@ public static class ObjectUsageWindowRead
         AND   s.database_name = $2
         AND   s.collection_time >= COALESCE((SELECT collection_time FROM baseline), $3)
         ORDER BY
-            s.collection_time
+            s.collection_time,
+            s.collection_id
         """;
 
     /// <summary>Maps one row of <see cref="Sql"/> (17 columns, in the order of <see cref="Columns"/>). The integer columns are converted rather than read by

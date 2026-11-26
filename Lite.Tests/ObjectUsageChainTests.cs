@@ -296,6 +296,26 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
     }
 
     [Fact]
+    public async Task TheFullFoldsRows_ComeInCollectionIdOrderInsideASnapshot_AsTheBuilderReadsThem()
+    {
+        /* The seed gives later rows lower ids, so collection_id order is the reverse of insertion order inside a snapshot. */
+        await SeedAsync();
+        var expected = await QueryAsync(
+            "SELECT collection_time, object_id, index_id FROM index_object_stats WHERE server_id = $1 AND database_name = $2 AND collection_time >= $3 "
+            + "ORDER BY collection_time, collection_id", _serverId, Database, Start(3));
+        Assert.True(expected.Count > 8);
+
+        var actual = await QueryAsync(ObjectUsageWindowRead.Sql, _serverId, Database, Start(3));
+        Assert.Equal(expected.Count, actual.Count);
+        for (var i = 0; i < expected.Count; i++)
+        {
+            /* The statement's first three cells are collection_time, sqlserver_start_time and answering_server_name, then object_id and index_id. */
+            var cells = actual[i].Split('|');
+            Assert.Equal(expected[i], string.Join("|", cells[0], cells[3], cells[4]));
+        }
+    }
+
+    [Fact]
     public async Task AChainBehindTheNewestSnapshot_TakesTheFold_UntilThePassCatchesUp()
     {
         var rows = ObjectUsageChainHistory.Generate();
