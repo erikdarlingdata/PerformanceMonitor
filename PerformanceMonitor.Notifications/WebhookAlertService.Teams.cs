@@ -234,6 +234,49 @@ public partial class WebhookAlertService
     }
 
     /// <summary>
+    /// A line of Teams markdown that opens with a heading marker (<c>#</c> runs), a bullet (<c>-</c> or <c>+</c>), an ordered-list
+    /// number (<c>1.</c> or <c>1)</c>) or a rule (three or more <c>-</c> or <c>=</c>) is read as that structure and loses the marker.
+    /// A marker counts only when white space or the end of the line follows it, so <c>#1</c>, <c>-5</c>, <c>3.5</c> and <c>==</c> are text.
+    /// </summary>
+    private static readonly Regex TeamsLineStartMarker = new(
+        @"^(?<indent>[ \t]*)(?<marker>#+|[-+]|[0-9]+[.)]|-{3,}|={3,})(?=\s|$)",
+        RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Backslash-escapes the marker at the start of each line of already-escaped Teams prose, so a line that a source wrote as
+    /// <c>- 5 retries left</c> or <c># of failed rows: 3</c> shows with its marker. Every punctuation character of a marker is
+    /// escaped (<c>\#\#</c>, <c>\-\-\-</c>), the digits of a number stay as they are (<c>1\.</c>), and the indentation stays in
+    /// front of the escape. Markdown reads a backslash before ASCII punctuation as an escape, as it does for the escapes in
+    /// <see cref="TeamsEscape"/>. A marker in the middle of a line is not at a line start and is left alone.
+    /// </summary>
+    internal static string TeamsEscapeLineStarts(string escaped)
+    {
+        if (string.IsNullOrEmpty(escaped))
+        {
+            return escaped;
+        }
+
+        return TeamsLineStartMarker.Replace(escaped, match =>
+        {
+            var marker = match.Groups["marker"].Value;
+            var builder = new StringBuilder(match.Groups["indent"].Value);
+            foreach (var ch in marker)
+            {
+                if (ch is >= '0' and <= '9')
+                {
+                    builder.Append(ch);
+                }
+                else
+                {
+                    builder.Append('\\').Append(ch);
+                }
+            }
+
+            return builder.ToString();
+        });
+    }
+
+    /// <summary>
     /// A record text as the inside of a single-backtick code span: a backtick becomes a straight quote (it would
     /// end the span), and each run of line breaks (CR, LF, CR LF, NEL, and the line and paragraph separators) becomes one
     /// space. A markdown reader ends a paragraph, and with it an open span, at a blank line, so the text stays on one
@@ -338,11 +381,12 @@ public partial class WebhookAlertService
         {
             /* #9576: an external alert's detail keeps its line breaks, and a MessageCard's markdown text shows a lone line feed as a
                space, so each one becomes a blank-line paragraph break (the doubled line feed the card documents for a new line).
-               Only the text a source sent carries breaks this way: an engine alert's prose is left exactly as it was. */
+               Only the text a source sent carries breaks this way: an engine alert's prose is left exactly as it was. Each line is then
+               a paragraph of its own, so a line that opens with a heading, list or rule marker keeps the marker as text (#9607). */
             var escapedProse = TeamsEscape(prose);
             if (context?.External is not null)
             {
-                escapedProse = escapedProse.Replace("\n", "\n\n", StringComparison.Ordinal);
+                escapedProse = TeamsEscapeLineStarts(escapedProse).Replace("\n", "\n\n", StringComparison.Ordinal);
             }
 
             itemSections.Add(new { activityTitle = "Details", text = CapTeamsProse(escapedProse), markdown = true });
