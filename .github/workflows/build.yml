@@ -1142,7 +1142,7 @@ jobs:
           # The export tool's Linux zip. zip keeps the execute bit of darling-export, and the listing check fails the job without it.
           export_zip="PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
           (cd publish/DarlingExport-linux && zip -q -r -X "${GITHUB_WORKSPACE}/releases/${export_zip}" .)
-          if ! zipinfo "releases/${export_zip}" darling-export | grep -Eq '^-rwxr-xr-x '; then
+          if ! zipinfo "releases/${export_zip}" darling-export | grep -E '^-rwxr-xr-x ' >/dev/null; then
             echo "::error::darling-export is missing from ${export_zip} or lacks its execute bit."
             exit 1
           fi
