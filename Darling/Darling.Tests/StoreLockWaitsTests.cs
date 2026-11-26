@@ -449,12 +449,16 @@ public sealed class StoreLockWaitsLiveTests
     {
         await WithScenarioAsync(holderEndsBeforeTheSweep: false, async (s, ct) =>
         {
+            /* A process that lives as long as the server, so it is the same process at the map's read and at the sweep. A short-lived
+               background process (a parallel worker of another test's query) can start after the scenario read the map, and the map
+               then rightly reads it unresolved. The map is read again here, as the store pass reads it once a minute. */
             await using var command = new NpgsqlCommand(
-                "SELECT pid, COALESCE(usename::text, backend_type) FROM pg_stat_activity WHERE backend_type <> 'client backend' AND pid IS NOT NULL AND backend_start IS NOT NULL ORDER BY pid LIMIT 1", s.Owner);
+                "SELECT pid, COALESCE(usename::text, backend_type) FROM pg_stat_activity WHERE backend_type IN ('checkpointer', 'background writer', 'walwriter', 'autovacuum launcher') AND pid IS NOT NULL AND backend_start IS NOT NULL ORDER BY pid LIMIT 1", s.Owner);
             await using var reader = await command.ExecuteReaderAsync(ct);
-            Assert.True(await reader.ReadAsync(ct), "the store has no background process to hold a lock");
+            Assert.True(await reader.ReadAsync(ct), "the store shows no checkpointer, background writer, walwriter or autovacuum launcher to hold a lock");
             var (backgroundPid, expectedRole) = (reader.GetInt32(0), reader.GetString(1));
             await reader.CloseAsync();
+            await s.Map.RefreshAsync(s.Owner, ct);
 
             var row = Assert.Single(await SweepAndReadAsync(s, await WaitLogAsync(s, backgroundPid, 6200, timedOut: false, ct), ct));
 

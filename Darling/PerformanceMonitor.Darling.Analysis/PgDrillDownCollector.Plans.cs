@@ -167,33 +167,18 @@ LIMIT 1";
     /// PLAN_WARNING finding's drill-down. The fact carries only counts (Fact.Metadata is numeric),
     /// so the strings — CREATE statements, warning messages — are rendered here. Mirrors the
     /// Lite/Dashboard drill-down collectors. Best-effort: a read/parse failure leaves no detail.
+    ///
+    /// <para>#8570: after a fact pass the plans are the ones that pass read (<see cref="AnalysisContext.PlanAdvisoryPlanXmls"/>),
+    /// so the window is read once per pass, not once per finding. Without them (a drill-down run on its own, or a fact
+    /// read that failed) this reads the same statement itself.</para>
     /// </summary>
     private async Task CollectPlanAdvisoryDetail(AnalysisFinding finding, AnalysisContext context, HashSet<string> pathKeys)
     {
         try
         {
-            var planXmls = new List<string>();
-
-            /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
-               before the CPU-only parse; the scoping is kept so the connection closes before
-               the parse, even though PG holds no lock. */
-            await using (var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken))
-            {
-                using var cmd = new NpgsqlCommand(PlanAdvisoryXmlSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
-                cmd.Parameters.AddWithValue(context.ServerId);
-                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
-                cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-
-                using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-                while (await reader.ReadAsync(context.CancellationToken))
-                {
-                    var planXml = PayloadDimensions.ResolveContent(
-                        reader.IsDBNull(0) ? null : reader.GetString(0),
-                        reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
-                    if (!string.IsNullOrEmpty(planXml))
-                        planXmls.Add(SensitiveStatements.Xml(planXml)!); // #4348: judged before the analyzer quotes it
-                }
-            }
+            var planXmls = context.PlanAdvisoryPlanXmls is { } passPlans
+                ? passPlans.Select(planXml => SensitiveStatements.Xml(planXml)!).ToList() // #4348: judged before the analyzer quotes it
+                : await ReadPlanAdvisoryXmlsAsync(context);
 
             if (planXmls.Count == 0)
                 return;
@@ -237,5 +222,35 @@ LIMIT 1";
             // Plan read/parse can fail on malformed XML — skip, the detail is best-effort.
             // An abandonment is NOT swallowed here (#2443).
         }
+    }
+
+    /// <summary>
+    /// The plan-advisory drill-down's own read of the top plans, each statement withheld as the filter rules (#4348).
+    /// </summary>
+    private async Task<List<string>> ReadPlanAdvisoryXmlsAsync(AnalysisContext context)
+    {
+        var planXmls = new List<string>();
+
+        /* PG port: Lite scopes the connection in a block to release its DuckDB read lock
+           before the CPU-only parse; the read is its own method so the connection closes
+           before the parse, even though PG holds no lock. */
+        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisDrillDown, context.CancellationToken);
+
+        using var cmd = new NpgsqlCommand(PlanAdvisoryXmlSql, connection) { CommandTimeout = DrillDownCommandTimeoutSeconds };
+        cmd.Parameters.AddWithValue(context.ServerId);
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+
+        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
+        while (await reader.ReadAsync(context.CancellationToken))
+        {
+            var planXml = PayloadDimensions.ResolveContent(
+                reader.IsDBNull(0) ? null : reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetFieldValue<byte[]>(1));
+            if (!string.IsNullOrEmpty(planXml))
+                planXmls.Add(SensitiveStatements.Xml(planXml)!); // #4348: judged before the analyzer quotes it
+        }
+
+        return planXmls;
     }
 }

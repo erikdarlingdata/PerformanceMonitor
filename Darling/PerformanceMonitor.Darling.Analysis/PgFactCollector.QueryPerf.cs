@@ -282,6 +282,12 @@ WHERE TRUE
 ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
 
     /// <summary>
+    /// #8570: the two parallel-plan costs at zero for the rest of the transaction that runs <see cref="ParameterSensitivitySql"/>
+    /// (the Viewer's Query Store keys read sets the same two, #8549).
+    /// </summary>
+    public const string ParameterSensitivityParallelCostsSql = "SET LOCAL parallel_setup_cost TO 0; SET LOCAL parallel_tuple_cost TO 0";
+
+    /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose
     /// per-execution worker time varies wildly — one plan serving very different
     /// parameter values. Emits one aggregate PARAMETER_SENSITIVITY fact.
@@ -294,7 +300,16 @@ ORDER BY worker_ratio DESC, database_name, query_hash, query_plan_hash";
         {
             await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.AnalysisFacts, context.CancellationToken);
 
-            using var cmd = new NpgsqlCommand(ParameterSensitivitySql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
+            /* #8570: the statement decompresses and aggregates every query_stats row of the server's window, and the planner's
+               default parallel costs keep it serial. On a 168-hour field read, zero setup and tuple costs gave a Gather with 2
+               workers and took the warm read to under half its serial time, the same rows. The transaction holds this one
+               statement, so the two costs return to the session's own values when it ends (a role or database setting still
+               holds for every other read). */
+            await using var transaction = await connection.BeginTransactionAsync(context.CancellationToken);
+            await using (var set = new NpgsqlCommand(ParameterSensitivityParallelCostsSql, connection, transaction) { CommandTimeout = FactCommandTimeoutSeconds })
+                await set.ExecuteNonQueryAsync(context.CancellationToken);
+
+            using var cmd = new NpgsqlCommand(ParameterSensitivitySql, connection, transaction) { CommandTimeout = FactCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
             cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
@@ -1890,6 +1905,10 @@ ORDER BY r.delta_worker_time DESC";
                         planXmls.Add(planXml);
                 }
             }
+
+            /* #8570: the plan-advisory drill-down of this pass renders its indexes and warnings from these rows instead of
+               reading the window a second time. */
+            context.PlanAdvisoryPlanXmls = planXmls;
 
             // Connection released above; parse off the store (CPU-only, no DB).
             if (planXmls.Count == 0)
