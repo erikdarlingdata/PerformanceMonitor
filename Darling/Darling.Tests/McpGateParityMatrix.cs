@@ -121,7 +121,7 @@ internal static class McpGateParityMatrix
     /// <summary>The writes both apps register: served only under the writes arm.</summary>
     internal static readonly string[] SharedWrites =
     {
-        "mute_analysis_finding", "unmute_analysis_finding", "set_notification_route_enabled", "delete_notification_route",
+        "mute_analysis_finding", "unmute_analysis_finding", "set_notification_route_enabled", "delete_notification_route", "create_notification_route", "update_notification_route",
         "create_query_tag", "update_query_tag", "delete_query_tag", "assign_query_tag", "unassign_query_tag",
         "create_query_tag_rule", "update_query_tag_rule", "delete_query_tag_rule", "update_alert_settings",
     };
