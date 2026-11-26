@@ -195,28 +195,31 @@ public sealed class McpUnverifiedWindowsAuthTests : IDisposable
         Assert.Equal(AuthenticationTypes.SqlServer, NewManager().GetAllServers().Single().AuthenticationType);
     }
 
+    /* The Edit Server window's own host question (a changed TLS setting on a confirmed host) still applies after the screen, and a tool call cannot
+       answer it, so these two tests assert only that the screen is not what stops the edit. */
     [Fact]
-    public async Task EditServer_SavesWindowsAuthOverUnverifiedTls_WhenTheSettingIsOn()
+    public async Task EditServer_IsNotStoppedByTheScreen_WhenTheSettingIsOn()
     {
         var manager = Seeded();
         var probe = new Probe();
 
-        var answer = await McpServerAdminTools.EditAsync(manager, "Billing", "{\"trust_server_certificate\":true}", probe.RunAsync, CancellationToken.None, Hooks(true));
+        var refused = await McpServerAdminTools.EditAsync(manager, "Billing", "{\"trust_server_certificate\":true}", probe.RunAsync, CancellationToken.None, Hooks(false));
+        var allowed = await McpServerAdminTools.EditAsync(manager, "Billing", "{\"trust_server_certificate\":true}", probe.RunAsync, CancellationToken.None, Hooks(true));
 
-        Assert.Equal("updated", Status(answer));
-        Assert.True(NewManager().GetAllServers().Single(s => s.DisplayName == "Billing").TrustServerCertificate);
+        Assert.Equal("invalid", Status(refused));
+        Assert.NotEqual("invalid", Status(allowed));
     }
 
     [Fact]
-    public async Task EditServer_StillSaves_SqlAuthOverUnverifiedTls_AndANameChangeOnAWindowsServer()
+    public async Task EditServer_IsNotStoppedByTheScreen_ForSqlAuth_AndSavesAnEditOfAnotherFieldOnAWindowsServer()
     {
         var manager = Seeded();
         var probe = new Probe();
 
-        var sqlAnswer = await McpServerAdminTools.EditAsync(manager, "Orders", "{\"trust_server_certificate\":true}", probe.RunAsync, CancellationToken.None, Hooks(false));
+        var sqlAnswer = await McpServerAdminTools.EditAsync(manager, "Orders", "{\"trust_server_certificate\":true,\"password\":\"another-fake-secret-value\"}", probe.RunAsync, CancellationToken.None, Hooks(false));
         var nameAnswer = await McpServerAdminTools.EditAsync(manager, "Billing", "{\"description\":\"month end\"}", probe.RunAsync, CancellationToken.None, Hooks(false));
 
-        Assert.Equal("updated", Status(sqlAnswer));
+        Assert.NotEqual("invalid", Status(sqlAnswer));
         Assert.Equal("updated", Status(nameAnswer));
     }
 

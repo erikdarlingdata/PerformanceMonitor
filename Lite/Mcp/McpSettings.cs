@@ -201,7 +201,7 @@ internal sealed class McpSettings
                 settings.AllowWrites = allowWrites.GetBoolean();
             }
 
-            if (root.TryGetProperty(McpWritePolicy.ServerAdminSetting, out var allowServerAdmin))
+            if (root.TryGetProperty("mcp_allow_server_admin", out var allowServerAdmin))
             {
                 if (allowServerAdmin.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                 {
