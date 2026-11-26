@@ -376,6 +376,7 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
         "reset_collector_schedules 01100 StoreRequired server_name",
         "restore_alert_history 01100 StoreRequired",
         "resume_collection 01100 StoreRequired",
+        "rotate_alert_source 00100 StoreRequired",
         "run_collectors_now 01100 StoreRequired server_name",
         "run_custom_view_panel 11111 StoreRequired",
         "save_environment_profile 01100 StoreRequired server_name",
