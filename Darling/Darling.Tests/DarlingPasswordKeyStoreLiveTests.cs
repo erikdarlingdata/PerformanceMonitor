@@ -259,11 +259,13 @@ public sealed class DarlingPasswordKeyStoreLiveTests
             Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", setting.Ring.Status.Reason, StringComparison.Ordinal);
             Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", (await store.ReadStateAsync("example-host")).Note, StringComparison.Ordinal);
 
-            // A published key whose id does not match its own key, and no key file in the folder.
+            // A published key whose id does not match its own key, and no key file in the folder. The store's own check refuses
+            // such a row, so it is dropped for this scratch store.
             using var other = PasswordPrivateKey.Generate();
+            await store.ExecAsync("ALTER TABLE config.password_key DROP CONSTRAINT ck_password_key_id_matches_key;");
             await store.ExecAsync(
                 "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES (@id, @key, 'RSA3072-OAEP-SHA256/A256GCM', 'current');",
-                ("id", "not-the-id-of-this-key"), ("key", other.PublicKey.Spki));
+                ("id", "0123456789abcdef"), ("key", other.PublicKey.Spki));
             var inconsistent = await store.StartAsync(folderNote: note);
             Assert.Equal("refused", inconsistent.State);
             Assert.Contains("inconsistent", inconsistent.Note, StringComparison.Ordinal);
