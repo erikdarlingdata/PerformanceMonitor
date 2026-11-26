@@ -809,13 +809,16 @@ public sealed partial class DarlingWorker
            single sweep tick and slamming the N=4 gate (the field herd). Reconcile-ADDED servers below keep the
            MinValue default and launch promptly. */
         var coldStartInstant = DateTime.UtcNow;
+        /* #9696: the spread exists so first bodies do not queue behind the sweep gate. A fleet no larger than the gate's
+           first width has nothing to queue, so every server launches its first body at once, the way a reconcile-added
+           server does, instead of one of two servers waiting up to the whole spread for its first connect. */
+        var spreadColdStart = SpreadsColdStart(initialServers.Count, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps));
         foreach (var server in initialServers)
         {
             servers.Add(new ServerLoopState
             {
                 Config = server,
-                FirstSweepDueUtc = ColdStartFirstSweepDue(
-                    coldStartInstant, server.ServerId),
+                FirstSweepDueUtc = spreadColdStart ? ColdStartFirstSweepDue(coldStartInstant, server.ServerId) : DateTime.MinValue,
             });
         }
 

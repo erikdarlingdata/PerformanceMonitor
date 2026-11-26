@@ -521,6 +521,22 @@ public sealed class DarlingSweepSchedulingTests
     }
 
     /// <summary>
+    /// #9696: the spread applies only to a fleet larger than the sweep gate's width. A fleet that fits has no first body to queue, so
+    /// every server launches at once and none waits up to the spread for its first connect.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 4, false)]
+    [InlineData(2, 4, false)]
+    [InlineData(4, 4, false)]
+    [InlineData(5, 4, true)]
+    [InlineData(2, 1, true)]
+    [InlineData(24, 4, true)]
+    public void SpreadsColdStart_OnlyWhenTheFleetIsWiderThanTheGate(int initialServers, int sweepWidth, bool spreads)
+    {
+        Assert.Equal(spreads, DarlingWorker.SpreadsColdStart(initialServers, sweepWidth));
+    }
+
+    /// <summary>
     /// Deterministic and restart-stable: the first-sweep launch time is a PURE function of (coldStartInstant, id)
     /// with no Random, so re-deriving it for the same inputs yields the same instant. (The base instant differs
     /// per restart, which is correct — the OFFSET from that base is what must be stable, and it is.)
