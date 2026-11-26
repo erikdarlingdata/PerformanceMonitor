@@ -165,8 +165,8 @@ public sealed class McpServerRegistryTools
     [McpServerTool(Name = "remove_server"), Description(
         "Write: removes a monitored server, with no confirm step, as Manage Servers' Delete does: its saved login, its long-query trace Extended Events session on the server, " +
         "its collection health, alert state and tag assignments, then its entry in the server list. Served only when mcp_allow_server_admin and mcp_allow_writes are both true. " +
-        "Already-collected history is NOT deleted. The name is matched exactly first (display name or storage name, any letter case). A part of a name removes nothing: one server that fits is returned as {status:\"partial_match\"} to re-issue with its full name; " +
-        "when several servers match, nothing is removed and the candidates are listed. <<GUIDE>> " +
+        "Already-collected history is NOT deleted. The name is matched exactly first (display name or storage name, any letter case). A part of a name removes nothing. <<GUIDE>> " +
+        "A part of a name that fits one server is returned as {status:\"partial_match\"} to re-issue with its full name; when several servers match, nothing is removed and the candidates are listed. " +
         "Returns {status:\"removed\", server (the storage name), display_name, matched_by:\"exact\", previous (the removed entry in the keys add_servers takes; " +
         "a SQL or service-principal password cannot be read back, so it carries the placeholder <password>), undo (the add_servers arguments that re-add it), undo_note}, " +
         "{status:\"partial_match\", matched_by, candidates:[{server, display_name}]}, {status:\"ambiguous\", candidates:[{server, display_name}]} or {status:\"not_found\", message}.")]
@@ -263,7 +263,10 @@ public sealed class McpServerRegistryTools
             previous = previous,
             undo = undoText,
             undo_note = "The undo re-adds the server with a fresh connection test. A SQL or service-principal row needs the real password in place of <password>. " +
-                "Collected history stays in the store and is shown again once the server is added back. Alert and tag state the removal dropped is not brought back.",
+                "Collected history stays in the store and is shown again once the server is added back. Alert and tag state the removal dropped is not brought back."
+                + (target.AuthenticationType is AuthenticationTypes.EntraMFA or AuthenticationTypes.EntraDeviceCode
+                    ? " This server signs in with Microsoft Entra MFA or device code, which add_servers does not take, so this undo cannot be replayed: add the server again in the Add Server window."
+                    : ""),
             cleanup = clean ? "complete" : "incomplete: the server's tag assignments were not cleared (the store was busy), and they come back if it is added again",
         }, McpHelpers.JsonOptions);
     }

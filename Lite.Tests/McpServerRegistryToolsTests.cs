@@ -256,6 +256,22 @@ public sealed class McpServerRegistryToolsTests : IDisposable
         Assert.Contains("password", root.GetProperty("undo").GetString()!, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(AuthenticationTypes.EntraMFA, true)]
+    [InlineData(AuthenticationTypes.EntraDeviceCode, true)]
+    [InlineData(AuthenticationTypes.Windows, false)]
+    public async Task RemoveServer_SaysTheUndoCannotBeReplayed_ForAServerThatSignsInWithEntraMfaOrDeviceCode(string auth, bool cannotReplay)
+    {
+        var manager = NewManager();
+        manager.AddServer(new ServerConnection { ServerName = "sql07", DisplayName = "Interactive", AuthenticationType = auth });
+        var hooks = new Hooks();
+
+        var answer = await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), "Interactive");
+
+        var note = Parse(answer).GetProperty("undo_note").GetString()!;
+        Assert.Equal(cannotReplay, note.Contains("cannot be replayed", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task RemoveServer_RemovesNothing_WhenTheNameIsAmbiguousUnknownOrMissing()
     {
