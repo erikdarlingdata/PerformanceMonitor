@@ -278,7 +278,7 @@ public sealed class McpMuteRuleWriteTests : IDisposable
     [InlineData("{\"wait_type_pattern\":\"PAGEIOLATCH\"}", "wait_type_pattern")]
     [InlineData("{}", "No editable")]
     [InlineData("[]", "JSON object")]
-    [InlineData("{not json", "not valid JSON")]
+    [InlineData("{not json", "changes_json")]
     public async Task Update_RefusesWithAPlainMessage_AndTheStoredRuleIsUntouched(string changes, string expected)
     {
         await CreateAsync("SQLA", "High CPU", reason: "keep");

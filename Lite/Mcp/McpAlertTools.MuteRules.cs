@@ -47,7 +47,7 @@ public sealed partial class McpAlertTools
 
     private static string? Trimmed(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
-    private static string Invalid(string message) => McpHelpers.Status("invalid", message + " Nothing was written.");
+    private static string Invalid(string parameter, string message) => McpHelpers.Refusal(parameter, message + " Nothing was written.");
 
     private static string MuteUnavailable(string archivePath) =>
         PreservedTableRestore.IsRestorePendingFor(archivePath, MuteRulesTable)
@@ -55,9 +55,10 @@ public sealed partial class McpAlertTools
             : McpHelpers.Status("unavailable", "The store refused the write, so nothing was saved. Lite's log has the reason.");
 
     /// <summary>The refusal for a pattern the rule's metric never carries (the window hides that box and drops it on Save), or null.</summary>
-    internal static string? PatternScopeRefusal(MuteRule rule)
+    internal static string? PatternScopeRefusal(MuteRule rule, out string parameter)
     {
         var metric = rule.MetricName;
+        parameter = "metric_name";
         (string Name, string? Value, bool Allowed)[] fields =
         [
             ("database_pattern", rule.DatabasePattern, MuteRulePatternFields.AllowsDatabase(metric)),
@@ -70,6 +71,7 @@ public sealed partial class McpAlertTools
         {
             if (value is not null && !allowed)
             {
+                parameter = name;
                 return $"{name} does not apply to the metric '{metric}': its alerts do not carry that dimension, so the rule would match nothing. Clear {name}, or change metric_name.";
             }
         }
@@ -93,6 +95,9 @@ public sealed partial class McpAlertTools
         service.GetRules().FirstOrDefault(r => string.Equals(r.Id, ruleId, StringComparison.Ordinal));
 
     [McpServerTool(Name = "create_mute_rule"), Description(
+        "Agent arm: agent_action = request's server only; else direct (guide). Creates an alert mute rule: matching alerts are still logged, just not delivered. Changes shared alert configuration the service delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert across the whole fleet. No confirm step: the rule takes effect on the running service's next collection sweep. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled." +
+        "<<GUIDE>>" +
+        "Differences in Lite: the rule takes effect at once in the running app (no collection sweep), there is no agent arm (agent_action, reason or expires_at limits), and a rule has no starts_at, repeat schedule, action, server_id or external_source, so this tool takes none of them. " +
         "Write: creates an alert mute rule, the Manage Mute Rules window's Add. Matching alerts are still logged, just not delivered. Changes alert configuration the app delivers on: a field left out does not narrow the rule, so a rule with NO scope or pattern set mutes EVERY alert on every server (the window asks for confirmation here; this tool does not). " +
         "Served only when mcp_allow_writes is true. server_name and metric_name match the alert's exact values (see get_alert_history, get_mute_rules); the *_pattern fields are case-insensitive substrings, and each applies only to the metrics whose alerts carry that dimension (the window hides the other boxes), so a pattern the metric never carries is refused. " +
         "expires_at is an optional ISO-8601 UTC instant in the future after which the rule stops applying; omit it for a permanent rule. The running app uses the rule at once. " +
@@ -125,12 +130,12 @@ public sealed partial class McpAlertTools
             {
                 if (!TryParseUtc(expires_at, out var parsed))
                 {
-                    return Invalid($"expires_at '{expires_at}' is not a valid ISO-8601 timestamp (e.g. 2027-08-01T00:00:00Z).");
+                    return Invalid("expires_at", $"expires_at '{expires_at}' is not a valid ISO-8601 timestamp (e.g. 2027-08-01T00:00:00Z).");
                 }
 
                 if (parsed <= now)
                 {
-                    return Invalid($"expires_at ({parsed:o}) is already in the past, so the rule would be born expired and mute nothing. Send a future instant, or omit it for a permanent rule.");
+                    return Invalid("expires_at", $"expires_at ({parsed:o}) is already in the past, so the rule would be born expired and mute nothing. Send a future instant, or omit it for a permanent rule.");
                 }
 
                 expiresAtUtc = parsed;
@@ -151,9 +156,9 @@ public sealed partial class McpAlertTools
                 ClientAppPattern = Trimmed(client_app_pattern),
             };
 
-            if (PatternScopeRefusal(rule) is { } scopeProblem)
+            if (PatternScopeRefusal(rule, out var scopeParameter) is { } scopeProblem)
             {
-                return Invalid(scopeProblem);
+                return Invalid(scopeParameter, scopeProblem);
             }
 
             if (PreservedTableRestore.IsRestorePendingFor(archivePath, MuteRulesTable))
@@ -209,6 +214,9 @@ public sealed partial class McpAlertTools
     private static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
     [McpServerTool(Name = "set_mute_rule_enabled"), Description(
+        "Agent arm: agent_action = request's server only; else direct (guide). Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
+        "<<GUIDE>>" +
+        "Differences in Lite: the change takes effect at once in the running app, and there is no agent arm (agent_action or reason). " +
         "Write: enables or disables an existing mute rule by its id (from get_mute_rules or create_mute_rule) WITHOUT deleting it, the checkbox in Manage Mute Rules. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so prefer this to delete_mute_rule then create_mute_rule for a reversible change. " +
         "Served only when mcp_allow_writes is true. Returns {status:\"updated\", mute_rule:{...} as stored, previous {enabled}, undo}, {status:\"unchanged\", ...} when the rule already holds that value (a retry is safe and writes nothing), {status:\"not_found\"}, or {status:\"unavailable\"} while an earlier database reset's saved-settings restore is pending. The running app uses the change at once.")]
     public static Task<string> SetMuteRuleEnabled(
@@ -224,7 +232,7 @@ public sealed partial class McpAlertTools
         {
             if (string.IsNullOrWhiteSpace(rule_id))
             {
-                return Invalid("rule_id is required.");
+                return Invalid("rule_id", "rule_id is required.");
             }
 
             var existing = FindMute(service, rule_id);
@@ -270,7 +278,7 @@ public sealed partial class McpAlertTools
         {
             if (string.IsNullOrWhiteSpace(rule_id))
             {
-                return Invalid("rule_id is required.");
+                return Invalid("rule_id", "rule_id is required.");
             }
 
             var existing = FindMute(service, rule_id);
@@ -321,6 +329,14 @@ public sealed partial class McpAlertTools
         ["server_name", "metric_name", "database_pattern", "query_text_pattern", "wait_type_pattern", "job_name_pattern", "client_app_pattern", "reason", "expires_at_utc"];
 
     [McpServerTool(Name = "update_mute_rule"), Description(
+        "Agent arm: agent_action = request's server only; else direct (guide). Edits an existing alert mute rule IN PLACE by its id: changes shared alert configuration. PARTIAL " +
+        "update: send only the fields to change, in the same shape get_mute_rules returns; a field you do NOT " +
+        "send stays exactly as stored, and an EXPLICIT JSON null CLEARS that field. enabled is NOT editable " +
+        "here: use set_mute_rule_enabled instead. created_at_utc never moves. Clearing " +
+        "scope fields WIDENS the rule: one left with none mutes EVERY alert. Returns updated, unchanged, " +
+        "not_found, or invalid (nothing written)." +
+        "<<GUIDE>>" +
+        "Differences in Lite: the edit takes effect at once in the running app, there is no agent arm, and only server_name, metric_name, the five patterns, reason and expires_at_utc can be edited (a rule has no starts_at, repeat schedule, action, server_id or external_source). " +
         "Write: edits an existing alert mute rule IN PLACE by its id, the Edit button in Manage Mute Rules. PARTIAL update: send only the fields to change, in the shape get_mute_rules returns; a field you do not send stays as stored, and an explicit JSON null CLEARS it. " +
         "Editable fields: server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc (null makes the rule permanent; create_mute_rule's expires_at is accepted as an alias, send only one). " +
         "enabled is not editable here (use set_mute_rule_enabled) and created_at_utc never moves. Clearing scope fields WIDENS the rule: one left with none mutes EVERY alert. A pattern the (resulting) metric's alerts never carry is refused. " +
@@ -339,26 +355,33 @@ public sealed partial class McpAlertTools
         {
             if (string.IsNullOrWhiteSpace(rule_id))
             {
-                return Invalid("rule_id is required.");
+                return Invalid("rule_id", "rule_id is required.");
             }
 
-            JsonNode? root;
+            JsonNode? root = null;
+            string? parseError = null;
             try
             {
                 root = JsonNode.Parse(changes_json);
             }
             catch (JsonException ex)
             {
-                return Invalid($"changes_json is not valid JSON: {ex.Message}");
+                parseError = JsonParseError.Describe("changes_json", ex);
+            }
+
+            if (parseError is not null)
+            {
+                return Invalid("changes_json", parseError);
             }
 
             if (root is not JsonObject body)
             {
-                return Invalid("changes_json must be a JSON object of the mute-rule fields to change (see get_mute_rules for the shape).");
+                return Invalid("changes_json", "changes_json must be a JSON object of the mute-rule fields to change (see get_mute_rules for the shape).");
             }
 
             var changes = new List<(string Field, Action<MuteRule> Apply)>();
             string? error = null;
+            var errorParameter = "changes_json";
 
             string? AddText(string name, JsonNode? node, Action<MuteRule, string?> set)
             {
@@ -391,6 +414,7 @@ public sealed partial class McpAlertTools
                 }
 
                 var field = prop.Key;
+                errorParameter = field;
                 switch (field)
                 {
                     case "server_name": error = AddText(field, prop.Value, (r, v) => r.ServerName = v); break;
@@ -438,17 +462,18 @@ public sealed partial class McpAlertTools
 
             if (error is null && changes.GroupBy(c => c.Field, StringComparer.Ordinal).Any(g => g.Count() > 1))
             {
+                errorParameter = "expires_at";
                 error = "'expires_at' and 'expires_at_utc' are two names for the same field; send only one.";
             }
 
             if (error is not null)
             {
-                return Invalid(error);
+                return Invalid(errorParameter, error);
             }
 
             if (changes.Count == 0)
             {
-                return Invalid("No editable mute-rule fields were provided. Send only the fields to change (e.g. {\"reason\":\"...\"}); pass null to clear one.");
+                return Invalid("changes_json", "No editable mute-rule fields were provided. Send only the fields to change (e.g. {\"reason\":\"...\"}); pass null to clear one.");
             }
 
             var existing = FindMute(service, rule_id);
@@ -465,9 +490,9 @@ public sealed partial class McpAlertTools
 
             /* The scope check runs only when the call moves the metric or a pattern, so an old rule's other fields stay editable. */
             if (changes.Any(c => c.Field is "metric_name" || c.Field.EndsWith("_pattern", StringComparison.Ordinal))
-                && PatternScopeRefusal(merged) is { } scopeProblem)
+                && PatternScopeRefusal(merged, out var scopeParameter) is { } scopeProblem)
             {
-                return Invalid(scopeProblem);
+                return Invalid(scopeParameter, scopeProblem);
             }
 
             var previous = MutePreviousFields(existing, changes.Select(c => c.Field));
