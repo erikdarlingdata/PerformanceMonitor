@@ -55,8 +55,9 @@ public sealed class ClientTimeoutsToolLiveTests
     private const int BudgetId = -9593101;
     private const int SmallStoreId = -9593102;
     private const int PagingId = -9600101;
+    private const int BigRunId = -9600102;
 
-    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, ShortCallsId, NearMissId, MetadataCallsId, NoCallsId, TwoCallsId, BudgetId, SmallStoreId, PagingId };
+    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, ShortCallsId, NearMissId, MetadataCallsId, NoCallsId, TwoCallsId, BudgetId, SmallStoreId, PagingId, BigRunId };
 
     private static string Name(int id) => "ct-live" + (-id).ToString(CultureInfo.InvariantCulture);
 
@@ -885,6 +886,44 @@ public sealed class ClientTimeoutsToolLiveTests
             var every = whole.Select(e => e!["statement_fingerprint"]!.GetValue<string>()).ToHashSet(StringComparer.Ordinal);
             Assert.Equal(limit, every.Count);
             Assert.Equal(every, pages.SelectMany(p => p.Fingerprints).ToHashSet(StringComparer.Ordinal));
+        });
+    }
+
+    /// <summary>
+    /// One run holds more events than a reply fits, so the reply lists a single <c>collected_at</c> and moving <c>as_of</c> to it returns the same page. The
+    /// note says so, so a caller that follows it is not sent round again.
+    /// </summary>
+    [Fact]
+    public async Task ARunLargerThanOnePage_ListsOneCollectedAt_AndTheNoteSaysItsOlderEventsCannotBePagedThisWay()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            const int inRun = 30;
+            var now = Now();
+            await RegisterAsync(connection, BigRunId, "sqlserver", ct);
+            var runs = await SeedRunsAsync(connection, BigRunId, now.AddSeconds(-30), 12, TimeSpan.FromMinutes(1), ct);
+            foreach (var run in runs)
+            {
+                await RowAsync(connection, BigRunId, run.AddSeconds(2), "count", 5, null, null, null, null, ct);
+            }
+
+            var collectionTime = runs[0].AddSeconds(2);
+            for (var n = 0; n < inRun; n++)
+            {
+                var text = ("SELECT /* event " + n.ToString("D4", CultureInfo.InvariantCulture) + " */ ").PadRight(2000, 'x');
+                await RowAsync(connection, BigRunId, collectionTime, "sample", 0, "sales", "app-" + (n % 7).ToString(CultureInfo.InvariantCulture),
+                    "fp-" + n.ToString("D4", CultureInfo.InvariantCulture), text, ct, durationUs: 30_000_000, eventTime: collectionTime.AddSeconds(-(5 + (6 * n))));
+            }
+
+            using var doc = JsonDocument.Parse(await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(BigRunId), 1, limit: inRun, cancellationToken: ct));
+            var body = doc.RootElement.GetProperty("client_timeouts");
+            var listed = body.GetProperty("sampled_events").EnumerateArray().ToList();
+            Assert.InRange(listed.Count, 1, inRun - 1);
+            Assert.True(body.GetProperty("budget_truncated").GetBoolean());
+            Assert.Single(listed.Select(e => e.GetProperty("collected_at").GetString()).Distinct());
+            Assert.Contains(
+                "If every listed event has the same collected_at, that one run alone fills the reply and its older events cannot be paged this way.",
+                body.GetProperty("budget_note").GetString()!, StringComparison.Ordinal);
         });
     }
 

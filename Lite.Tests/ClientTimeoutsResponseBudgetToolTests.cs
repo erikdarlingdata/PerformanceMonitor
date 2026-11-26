@@ -187,6 +187,31 @@ public sealed class ClientTimeoutsResponseBudgetToolTests : IClassFixture<Shared
         Assert.Equal(every, pages.SelectMany(p => p.Fingerprints).ToHashSet(StringComparer.Ordinal));
     }
 
+    /// <summary>
+    /// One run holds more events than a reply fits, so the reply lists a single <c>collected_at</c> and moving <c>as_of</c> to it returns the same page. The
+    /// note says so, so a caller that follows it is not sent round again.
+    /// </summary>
+    [Fact]
+    public async Task ARunLargerThanOnePage_ListsOneCollectedAt_AndTheNoteSaysItsOlderEventsCannotBePagedThisWay()
+    {
+        const int inRun = 30;
+        var now = DateTime.UtcNow;
+        await SeedAsync(now, 0);
+        await SeedRunEventsAsync(now, 1, inRun);
+
+        var json = await McpClientTimeoutTools.GetClientTimeouts(new LocalDataService(_duckDb), _serverManager, ServerName, 1, inRun, now.ToString("o"));
+
+        using var doc = JsonDocument.Parse(json);
+        var body = doc.RootElement.GetProperty("client_timeouts");
+        var listed = body.GetProperty("sampled_events").EnumerateArray().ToList();
+        Assert.InRange(listed.Count, 1, inRun - 1);
+        Assert.True(body.GetProperty("budget_truncated").GetBoolean());
+        Assert.Single(listed.Select(e => e.GetProperty("collected_at").GetString()).Distinct());
+        Assert.Contains(
+            "If every listed event has the same collected_at, that one run alone fills the reply and its older events cannot be paged this way.",
+            body.GetProperty("budget_note").GetString()!, StringComparison.Ordinal);
+    }
+
     /// <summary>The whole payload, unbudgeted, over the same rows the tool reads.</summary>
     private async Task<System.Text.Json.Nodes.JsonObject> ReadAsync(DateTime now, int limit, bool budgeted)
     {

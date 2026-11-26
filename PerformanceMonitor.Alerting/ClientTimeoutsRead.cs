@@ -142,6 +142,7 @@ public static class ClientTimeoutsRead
             ? null
             : McpResponseBudget.PageCutNote(eventsReturned, kept, "newest collected_at first", "sampled events",
                 "Move as_of back to the oldest returned collected_at, with hours_back wide enough to reach the older events, to read them (that collector run is read again whole, so no event is skipped), or pass a smaller limit. " +
+                "If every listed event has the same collected_at, that one run alone fills the reply and its older events cannot be paged this way. " +
                 "count, the rates, the top lists and matched_calls are whole.");
 
     /// <summary>
