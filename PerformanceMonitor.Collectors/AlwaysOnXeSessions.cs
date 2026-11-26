@@ -532,10 +532,12 @@ public static class AlwaysOnXeSessions
     /// <c>session_state</c> 0 (stopped), 1 (running) or <see cref="AttentionDefinitionMismatch"/> (2: it exists with events, actions or
     /// targets other than the ones <see cref="BuildAttentionServerCreateSql"/> makes, which is an older definition of our own
     /// session, since the name is ours). <c>@session_name</c> is the shared name. <paramref name="appTag"/> is the host's own
-    /// comment tag.
+    /// comment tag. The first read of an ensure is a dirty read, so it sees a session another caller is still creating, which can
+    /// read as another definition (#9675): <paramref name="committedRead"/> asks for the read that waits for that create to commit,
+    /// and the confirming read of <see cref="ConfirmAttentionMismatchAsync"/> uses it.
     /// </summary>
-    public static string BuildAttentionServerProbeSql(string appTag) => @"
-SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+    public static string BuildAttentionServerProbeSql(string appTag, bool committedRead = false) => @"
+SET TRANSACTION ISOLATION LEVEL " + (committedRead ? "READ COMMITTED" : "READ UNCOMMITTED") + @";
 
 SELECT /* " + appTag + @" */
     session_state =
@@ -548,6 +550,57 @@ FROM sys.server_event_sessions AS ses
 LEFT JOIN sys.dm_xe_sessions AS dxs
   ON dxs.name = ses.name
 WHERE ses.name = @session_name;";
+
+    /// <summary>How long a probe that read another definition waits before it reads again (#9675): the create of the session is a few milliseconds of catalog writes.</summary>
+    public static readonly TimeSpan AttentionMismatchConfirmPause = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// #9675: the step that goes between the first probe of the server-scoped client-timeout session and the drop of a session that
+    /// probe called another definition. Several entries on one instance run the ensure at the same moment, and the first probe is a
+    /// dirty read: while one entry's CREATE EVENT SESSION is still writing the session's events, actions and targets, another
+    /// entry's probe can read the half-written definition as another one, and its drop then removes the session the first entry is
+    /// about to start. So an answer of <see cref="AttentionDefinitionMismatch"/> is read again, after <paramref name="pause"/>
+    /// and with <paramref name="probeAgain"/> (the committed read), and that second answer is the one the ensure acts on. Any
+    /// other first answer is returned as it is, with no second read.
+    /// </summary>
+    public static async Task<object?> ConfirmAttentionMismatchAsync(
+        object? probe, Func<CancellationToken, Task<object?>> probeAgain, TimeSpan pause, CancellationToken cancellationToken)
+    {
+        if (!(probe is int mismatch && mismatch == AttentionDefinitionMismatch))
+        {
+            return probe;
+        }
+
+        if (pause > TimeSpan.Zero)
+        {
+            await Task.Delay(pause, cancellationToken).ConfigureAwait(false);
+        }
+
+        return await probeAgain(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// #9675: runs the drop of a session of another definition. When the drop fails because another entry on the same instance
+    /// dropped it first (both read the same older definition, which is every upgrade with two entries on one instance), the
+    /// session is read again: one that is gone, or that now has this version's definition, is what the drop was for, so the
+    /// failure is not one. A session that is still another definition rethrows the drop's own failure.
+    /// </summary>
+    public static async Task DropAttentionMismatchAsync(
+        Func<CancellationToken, Task> drop, Func<CancellationToken, Task<object?>> probeAgain, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await drop(cancellationToken).ConfigureAwait(false);
+        }
+        catch (System.Data.Common.DbException)
+        {
+            var now = await probeAgain(cancellationToken).ConfigureAwait(false);
+            if (now is int mismatch && mismatch == AttentionDefinitionMismatch)
+            {
+                throw;
+            }
+        }
+    }
 
     /// <summary>
     /// The T-SQL condition that a session's definition is the client-timeout one (#5640): the <c>attention</c> event and the two completed events that carry a predicate (<c>rpc_completed</c>, <c>sql_batch_completed</c>, #9507) and no other event, every
