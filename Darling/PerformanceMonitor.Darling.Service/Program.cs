@@ -551,6 +551,13 @@ builder.Services.AddWindowsService(options =>
     options.ServiceName = "PerformanceMonitor Darling";
 });
 
+/* #9702: under systemd (a Type=notify unit) this sends READY=1 and STOPPING=1, and replaces the console lifetime's
+   "Application started. Press Ctrl+C" lines with systemd's own. It registers nothing when the process is not a systemd
+   service (a Windows service, a console run, the container), so it sits beside AddWindowsService, which is likewise a
+   no-op off Windows. READY=1 goes out when the host starts, before the store is ready: the journal's "Postgres store
+   ready" and "collection loop started" lines are what say the service collects. */
+builder.Services.AddSystemd();
+
 /* The rolling file log under %ProgramData%\PerformanceMonitorDarling\logs — the service's PRIMARY
    diagnostic surface (see DarlingFileLoggerProvider remarks). Registered unconditionally: console
    runs get the same file, which is exactly what an operator collecting a bug report wants. */
