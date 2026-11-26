@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -128,6 +129,37 @@ public sealed class StoreHealthTests : IDisposable
         Assert.Contains("1024 MB", settingText);
         Assert.Contains("512 MB", defaultText);
         Assert.NotEqual(StoreHealthText.StoreSentence(fromDefault), StoreHealthText.StoreSentence(fromSetting.Store));
+    }
+
+    /// <summary>#9603: the window's "Read at" line writes the UTC clock time and says UTC, the zone of the history under it, whatever zone the machine is in.</summary>
+    [Fact]
+    public void ReadAt_IsTheUtcTimeAndNamesTheZone_WhateverTheMachineZone()
+    {
+        var instant = new DateTime(2026, 11, 25, 22, 42, 31, DateTimeKind.Utc);
+
+        Assert.Equal("Read at 22:42:31 UTC", StoreHealthText.ReadAt(instant));
+        /* The same instant held as a local time converts once: the text does not follow the zone the machine is in. */
+        Assert.Equal("Read at 22:42:31 UTC", StoreHealthText.ReadAt(instant.ToLocalTime()));
+        /* A value with no kind is the UTC instant as it stands, as ReadAtUtc is. */
+        Assert.Equal("Read at 22:42:31 UTC", StoreHealthText.ReadAt(DateTime.SpecifyKind(instant, DateTimeKind.Unspecified)));
+    }
+
+    [Fact]
+    public void ReadAt_UsesColonsWhateverTheCurrentCulture()
+    {
+        var culture = (CultureInfo)CultureInfo.InvariantCulture.Clone();
+        culture.DateTimeFormat.TimeSeparator = ".";
+        var prior = CultureInfo.CurrentCulture;
+        CultureInfo.CurrentCulture = culture;
+        try
+        {
+            Assert.Equal("22.42.31", new DateTime(2026, 11, 25, 22, 42, 31).ToString("HH:mm:ss"));
+            Assert.Equal("Read at 22:42:31 UTC", StoreHealthText.ReadAt(new DateTime(2026, 11, 25, 22, 42, 31, DateTimeKind.Utc)));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = prior;
+        }
     }
 
     /// <summary>#9238: the size check of the housekeeping loop uses the effective reset point, not a fixed one. The store is the

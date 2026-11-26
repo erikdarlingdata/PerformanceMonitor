@@ -270,6 +270,15 @@ public static class StoreHealthText
         string.Create(CultureInfo.InvariantCulture,
             $"Archive files are deleted when their month is more than {archives.RetentionMonths} months old.");
 
+    /// <summary>The window's header line: when the store was read, as a UTC clock time with the zone written, the zone the housekeeping history below it
+    /// uses (#9603). A <see cref="DateTimeKind.Local"/> value is converted to UTC once. UTC and unspecified values are taken as the UTC instant, which is
+    /// what <see cref="StoreHealthSnapshot.ReadAtUtc"/> holds, so none is shifted by the machine's zone.</summary>
+    public static string ReadAt(DateTime readAtUtc)
+    {
+        var utc = readAtUtc.Kind == DateTimeKind.Local ? readAtUtc.ToUniversalTime() : readAtUtc;
+        return string.Create(CultureInfo.InvariantCulture, $"Read at {utc:HH:mm:ss} UTC");
+    }
+
     public static string Megabytes(double mb) => string.Create(CultureInfo.InvariantCulture, $"{mb:#,##0.0} MB");
 
     public static string Bytes(long bytes) => Megabytes(bytes / (1024.0 * 1024.0));
