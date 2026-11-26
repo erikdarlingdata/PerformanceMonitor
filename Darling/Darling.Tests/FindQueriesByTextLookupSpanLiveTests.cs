@@ -146,7 +146,7 @@ public sealed class FindQueriesByTextLookupSpanLiveTests
 
         await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
         await using var c = await data.OpenConnectionAsync(ct);
-        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingMcpFindQueriesByTextTools.AllServersJoinSql(0), c);
+        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingMcpFindQueriesByTextTools.PlanCacheAllServersLookupSpanSql, c);
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DarlingMcpFindQueriesByTextTools.EscapeLike("dbo.Common") });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 21 });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = span.Floor });
@@ -161,10 +161,11 @@ public sealed class FindQueriesByTextLookupSpanLiveTests
         Assert.True(read < 100, $"the newest span's statement examined {read} text rows on a store with {FillerTexts} texts that name the pattern");
     }
 
-    /// <summary>A finished all-servers search over a common pattern lists what the whole-window join lists, in its order, when the newest spans (read by
-    /// text lookup) and the later spans (read by the table match) both hold rows: a key whose newest sighting is in the first span is not listed again
-    /// from the second, a key seen only in the second span is, a statement with no digest or a text that does not name the pattern never is, and the
-    /// same query_hash on the other server is its own row.</summary>
+    /// <summary>A finished all-servers search over a common pattern lists what the whole-window join lists, in its order, when the newest span and
+    /// the spans after it both hold rows: a key whose newest sighting is in the first span is not listed again from the second, a key seen only in
+    /// the second span is, a statement with no digest or a text that does not name the pattern never is, and the same query_hash on the other
+    /// server is its own row. A span reads three samples a part here, so the first ends at the samples of half an hour ago and the search reads
+    /// the matched texts and goes on: a seed of six samples is otherwise read whole by the first statement, with nothing for a second span.</summary>
     [Fact]
     public async Task AFinishedSearch_ListsWhatTheWholeWindowJoinLists_WithRowsInTheLookupSpansAndTheLaterOnes()
     {
@@ -174,7 +175,8 @@ public sealed class FindQueriesByTextLookupSpanLiveTests
 
         var reply = await DarlingMcpFindQueriesByTextTools.FindQueriesByText(
             data, "dbo.Common", null, null, 20, McpDataDetail.Full,
-            DarlingMcpFindQueriesByTextTools.SourceBudget.Default, DarlingMcpFindQueriesByTextTools.SourceBudget.Default, ct, ReadyTracker());
+            DarlingMcpFindQueriesByTextTools.SourceBudget.Default,
+            new DarlingMcpFindQueriesByTextTools.SourceBudget(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds) { SpanRows = 3 }, ct, ReadyTracker());
         var planCache = JsonDocument.Parse(reply).RootElement.GetProperty("sources").GetProperty("plan_cache");
 
         Assert.Equal("ok", planCache.GetProperty("status").GetString());
