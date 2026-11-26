@@ -237,7 +237,7 @@ public sealed class DarlingMcpWritePolicyTests
         var before = narrowed.Count;
         DarlingMcpWritePolicy.Apply(narrowed, DarlingMcpWritePolicy.Effective.Off);
 
-        Assert.Equal(before - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount, narrowed.Count);
+        Assert.Equal(before - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount - AdminOnlyReads, narrowed.Count);
         Assert.All(narrowed, tool =>
         {
             Assert.NotNull(tool.ProtocolTool.Annotations);
