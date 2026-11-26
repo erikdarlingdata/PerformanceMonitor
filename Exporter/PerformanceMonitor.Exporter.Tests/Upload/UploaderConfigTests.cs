@@ -78,24 +78,33 @@ public class UploaderConfigTests
     }
 
     [Fact]
-    public void S3_env_key_credentials_name_the_missing_variable_and_never_a_value()
+    public void S3_env_key_credentials_name_the_config_key_of_a_missing_variable_and_never_the_variable_or_a_value()
     {
-        var settings = new UploadSettings.S3("b", Credentials: new S3Credentials.EnvKeys("AK", "SK", null));
+        var settings = new UploadSettings.S3("b", Credentials: new S3Credentials.EnvKeys("AK_LAB_SECRET_LOOKALIKE", "SK_LAB_SECRET_LOOKALIKE", null));
 
-        var ex = Assert.Throws<InvalidOperationException>(() => S3Uploader.ResolveCredentials(settings, Env(("AK", "key-id"))));
+        var secret = Assert.Throws<InvalidOperationException>(() => S3Uploader.ResolveCredentials(settings, Env(("AK_LAB_SECRET_LOOKALIKE", "key-id"))));
+        Assert.Equal("destination.credentials.secret_access_key_env: the environment variable it names is not set.", secret.Message);
 
-        Assert.Contains("SK", ex.Message);
-        Assert.DoesNotContain("key-id", ex.Message);
+        var access = Assert.Throws<InvalidOperationException>(() => S3Uploader.ResolveCredentials(settings, Env(("SK_LAB_SECRET_LOOKALIKE", "secret-value"))));
+        Assert.Equal("destination.credentials.access_key_id_env: the environment variable it names is not set.", access.Message);
+
+        foreach (var message in new[] { secret.Message, access.Message })
+        {
+            Assert.DoesNotContain("LOOKALIKE", message);
+            Assert.DoesNotContain("key-id", message);
+            Assert.DoesNotContain("secret-value", message);
+        }
     }
 
     [Fact]
-    public void S3_a_missing_profile_is_an_error_naming_the_profile()
+    public void S3_a_missing_profile_is_an_error_naming_the_config_key_and_not_the_profile()
     {
         var settings = new UploadSettings.S3("b", Credentials: new S3Credentials.Profile("no-such-profile-xyz"));
 
         var ex = Assert.Throws<InvalidOperationException>(() => S3Uploader.ResolveCredentials(settings, Env()));
 
-        Assert.Contains("no-such-profile-xyz", ex.Message);
+        Assert.Equal("destination.credentials.profile: the AWS profile it names was not found or has no usable credentials.", ex.Message);
+        Assert.DoesNotContain("no-such-profile-xyz", ex.Message);
     }
 
     [Fact]
@@ -154,13 +163,17 @@ public class UploaderConfigTests
     }
 
     [Fact]
-    public void Azure_a_missing_variable_is_an_error_naming_the_variable()
+    public void Azure_a_missing_variable_is_an_error_naming_the_config_key_and_not_the_variable()
     {
-        var settings = new UploadSettings.AzureBlob(null, "example-container", "p", new AzureAuth.ConnectionStringEnv("MY_CS_VAR"));
+        foreach (var auth in new AzureAuth[] { new AzureAuth.ConnectionStringEnv("MY_CS_VAR"), new AzureAuth.SasUrlEnv("MY_CS_VAR") })
+        {
+            var settings = new UploadSettings.AzureBlob("https://acct.blob.core.windows.net", "example-container", "p", auth);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => AzureBlobUploader.BuildContainerClient(settings, Env()));
+            var ex = Assert.Throws<InvalidOperationException>(() => AzureBlobUploader.BuildContainerClient(settings, Env()));
 
-        Assert.Contains("MY_CS_VAR", ex.Message);
+            Assert.Equal("destination.auth.name: the environment variable it names is not set.", ex.Message);
+            Assert.DoesNotContain("MY_CS_VAR", ex.Message);
+        }
     }
 
     [Fact]

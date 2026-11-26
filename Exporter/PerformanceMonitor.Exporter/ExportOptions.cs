@@ -193,6 +193,13 @@ public sealed class ExportOptions
     /// <summary>The S3 region. Null means the AWS SDK's default resolution (environment, profile).</summary>
     public string? AwsRegion { get; init; }
 
+    /// <summary>The config's `destination`, set by `--upload-destination`. `--upload` is not allowed with it.</summary>
+    public PerformanceMonitor.Exporter.Upload.UploadSettings? Destination { get; init; }
+
+    /// <summary>Where this run uploads, or null for no upload: the config's destination, or the `--upload` value with the region.</summary>
+    public PerformanceMonitor.Exporter.Upload.UploadSettings? UploadTarget() =>
+        Destination ?? (Upload is null ? null : PerformanceMonitor.Exporter.Upload.UploadSettings.FromUri(Upload, AwsRegion));
+
     /// <summary>The folder for the exporter's state files. Required: `export` rejects a call that has none.</summary>
     public string StateDir { get; init; } = "";
     public bool IgnoreState { get; init; }
@@ -313,7 +320,8 @@ public sealed class ExportOptions
         int? queryStoreLagHours = null,
         int? freshGuardMinutes = null,
         string? applicationName = null,
-        CredentialSpec? credential = null)
+        CredentialSpec? credential = null,
+        PerformanceMonitor.Exporter.Upload.UploadSettings? destination = null)
     {
         if (freshGuardMinutes is not null && freshGuardMinutes is < 2 or > 15)
         {
@@ -490,6 +498,7 @@ public sealed class ExportOptions
             AllowOpenWindow = allowOpenWindow,
             Upload = upload,
             AwsRegion = awsRegion,
+            Destination = destination,
             StateDir = stateDir ?? "",
             IgnoreState = ignoreState,
             DimensionOrigin = resolvedDimensionOrigin,
