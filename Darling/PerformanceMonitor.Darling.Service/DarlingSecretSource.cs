@@ -166,30 +166,128 @@ public static class DarlingSecretSource
     }
 
     /// <summary>
-    /// The refusal for a <c>file:</c> secret that could not be read (#1804). When the read was denied on Unix and the
-    /// service is not root (#8141: the image runs as 1654, and a 3.12 compose install wrote <c>secrets/*</c> as 0600 files
-    /// of the host user), it adds what to do: for a compose secret, the two upgrade lines from the Container user section
-    /// of docs/darling/security.md and the restart; elsewhere, the path and the user that needs to read it. This read
-    /// happens while the config loads, before the credentials-directory refusal can run, so it has to say both lines.
+    /// The refusal for a <c>file:</c> secret that could not be read (#1804, #9793). On Windows it is the setting, the path
+    /// and the exception's own text. On Unix (the platform comes from <see cref="ComposeCredentialDirectoryGuard.UnixModes"/>,
+    /// which a test stands in) a missing file says it is not there and, for a compose secret, that <c>docker compose up -d</c>
+    /// mounts it after the compose file is edited and <c>docker compose restart</c> does not. A file that is there but
+    /// denied names the account the service runs as (id and name) and the file's owner and mode where a stat can read them,
+    /// never the file's content or length. When the service is not root (#8141: the image runs as 1654, and a 3.12 compose
+    /// install wrote <c>secrets/*</c> as 0600 files of the host user) it also adds what to do: for a compose secret, the two
+    /// upgrade lines from the Container user section of docs/darling/security.md and the restart; elsewhere, the path and
+    /// the user that needs to read it. This read happens while the config loads, before the credentials-directory refusal
+    /// can run, so it has to say both lines.
     /// </summary>
     internal static string CouldNotRead(string settingName, string path, Exception ex)
     {
         var refusal = $"{settingName}: secret file '{path}' could not be read: {ex.Message}";
-        if (ex is not UnauthorizedAccessException
-            || ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes
-            || modes.EffectiveUserId == 0)
+        if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes)
+        {
+            return refusal;
+        }
+
+        var lead = refusal.TrimEnd('.') + ". ";
+        if (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return lead + MissingFileAdvice(settingName, path);
+        }
+
+        if (ex is not UnauthorizedAccessException)
         {
             return refusal;
         }
 
         var euid = modes.EffectiveUserId;
-        var lead = $"{refusal.TrimEnd('.')}. The service runs as user {euid.ToString(CultureInfo.InvariantCulture)}, which cannot read it; ";
+        var facts = $"The service runs as {DescribeAccount(euid, modes.EffectiveUserName)}" + DescribeFile(modes, path) + ".";
+        if (euid == 0)
+        {
+            return lead + facts;
+        }
+
+        facts = facts.TrimEnd('.') + ", which cannot read it. ";
         return path.StartsWith(ComposeSecretsMount, StringComparison.Ordinal)
-            ? lead + "if this install ran as root before, run these once on the host, in the compose folder: "
+            ? lead + facts + "If this install ran as root before, run these once on the host, in the compose folder: "
                 + $"{ComposeSecretsModeFix}, then {DarlingManagedRoles.ComposeVolumeOwnershipCommand(euid)}; "
                 + "then restart the service (docker compose restart darling). See Container user in docs/darling/security.md."
-            : lead + $"give that user read access to '{path}', then restart the service.";
+            : lead + facts + $"Give that user read access to '{path}', then restart the service.";
     }
+
+    /// <summary>What to do about a secret file that is not there (#9793). A compose secret exists in the container only
+    /// when <c>docker compose up -d</c> has recreated it with the secret listed, which a restart does not do.</summary>
+    private static string MissingFileAdvice(string settingName, string path)
+    {
+        if (path.StartsWith(ComposeSecretsMount, StringComparison.Ordinal) && path.Length > ComposeSecretsMount.Length)
+        {
+            var secret = path[ComposeSecretsMount.Length..];
+            return $"The file is not there: '{path}' is where compose mounts the secret '{secret}'. "
+                + "Compose mounts a secret only when 'docker compose up -d' runs after the secret is listed under the service and under secrets: in docker-compose.yml, "
+                + "and 'docker compose restart' does not mount it.";
+        }
+
+        return $"The file is not there: '{path}'. Create it, or correct the path in {settingName}, then restart the service. "
+            + "In a container, a file mounted from the host appears only after 'docker compose up -d' recreates the container with the mount listed in docker-compose.yml.";
+    }
+
+    private static string DescribeAccount(uint userId, string? userName)
+    {
+        var id = userId.ToString(CultureInfo.InvariantCulture);
+        return string.IsNullOrWhiteSpace(userName) ? $"user {id}" : $"user {id} ({userName})";
+    }
+
+    /// <summary>The file's owner and mode as a stat gives them, which needs no read of the file. Empty when neither can be
+    /// told, so the message says only what it knows.</summary>
+    private static string DescribeFile(IUnixDirectoryModes modes, string path)
+    {
+        string? owner = null;
+        string? mode = null;
+        try
+        {
+            if (modes.OwnerOf(path) is { } found)
+            {
+                owner = $"user {found.UserId.ToString(CultureInfo.InvariantCulture)}";
+            }
+        }
+        catch (Exception lookup) when (lookup is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            // A stat that fails leaves out the part it would have answered.
+        }
+
+        try
+        {
+            mode = Convert.ToString((int)modes.Get(path) & 0xFFF, 8).PadLeft(4, '0');
+        }
+        catch (Exception lookup) when (lookup is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            // The owner is still worth saying when the mode cannot be read.
+        }
+
+        return (owner, mode) switch
+        {
+            (not null, not null) => $". The file is owned by {owner} and its mode is {mode}",
+            (not null, null) => $". The file is owned by {owner}",
+            (null, not null) => $". The file's mode is {mode}",
+            _ => "",
+        };
+    }
+
+    /// <summary>
+    /// The log line for a network token that could not be resolved (#9793). On Windows it is the line the host has always
+    /// written: the setting is a DPAPI blob that may have been made on another machine, so it says to make a new one here. On any
+    /// other platform there is no DPAPI, so the line names what failed and why (the exception's text names the file, the
+    /// account and the owner and mode, or the missing variable) and stops, with the consequence the caller states. The
+    /// platform is a parameter so both lines are checked on one machine.
+    /// </summary>
+    /// <param name="tokenName">The token as the log names it, such as "MCP network token" or "Web dashboard token".</param>
+    /// <param name="section">The config section, <c>mcp.network</c> or <c>web.network</c>.</param>
+    /// <param name="consequence">What the failure stops, as a sentence.</param>
+    /// <param name="detail">The exception's message.</param>
+    /// <param name="windows">Whether the service runs on Windows.</param>
+    internal static string DescribeTokenReadFailure(string tokenName, string section, string consequence, string detail, bool windows)
+        => windows
+            ? $"{tokenName} ({section}.encryptedToken) could not be decrypted ({detail}). {consequence} "
+                + "A token made on another machine or account cannot be read here. "
+                + $"Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in {section}.encryptedToken. "
+                + $"On another OS, remove it and set {section}.token to an env: or file: reference."
+            : $"{tokenName} could not be read ({detail}). {consequence}";
 
     /// <summary>Where compose mounts a service's secrets.</summary>
     internal const string ComposeSecretsMount = "/run/secrets/";

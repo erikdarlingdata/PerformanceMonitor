@@ -631,9 +631,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogCritical(ex, 
-                        "MCP network token (mcp.network.encryptedToken) could not be decrypted ({Message}). MCP server not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.",
-                        ex.Message);
+                    _logger.LogCritical(ex,
+                        "{Message}",
+                        DarlingSecretSource.DescribeTokenReadFailure(
+                            "MCP network token", "mcp.network", "MCP server not started.", ex.Message, OperatingSystem.IsWindows()));
                     await DisposeFailedStartAsync();
                     return false;
                 }
@@ -2028,9 +2029,11 @@ public sealed class DarlingMcpHostService : BackgroundService
         }
         catch (Exception ex)
         {
-            logger.LogCritical(ex, 
-                "MCP network token (mcp.network.encryptedToken) could not be decrypted ({Message}). The loopback listener is not served without a token, so the MCP server is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in mcp.network.encryptedToken. On another OS, remove it and set mcp.network.token to an env: or file: reference.",
-                ex.Message);
+            logger.LogCritical(ex,
+                "{Message}",
+                DarlingSecretSource.DescribeTokenReadFailure(
+                    "MCP network token", "mcp.network", "The loopback listener is not served without a token, so the MCP server is not started.",
+                    ex.Message, OperatingSystem.IsWindows()));
             return new LoopbackTokenResolution(true, "");
         }
     }
