@@ -28,7 +28,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// migrate imports only the entries the store LACKS. A taken id is one of two things (#4789): the same server
 /// again, which is a silent skip, or a DIFFERENT server whose identity hashes to the same id, which is refused,
 /// counted apart and logged as a warning naming both, so it is never dropped without a word as if it were
-/// already there. <b>Runs once.</b> A marker file guards it so a later run cannot RESURRECT a
+/// already there. An entry saved before the four-field rule that holds a control character (#9787) is refused by that add, so it
+/// is skipped, counted as refused and logged with its name escaped, and the entries after it still import. <b>Runs once.</b> A marker file guards it so a later run cannot RESURRECT a
 /// server the user has since removed from the store (the marker is written only after a clean pass).
 /// Read-only seats and a disconnected viewer skip it (nothing to write).</para>
 ///
@@ -74,11 +75,21 @@ public sealed class ViewerServerMigration
     /// server already holds is not imported and is logged as a warning naming both (#4789).
     /// </summary>
     [SupportedOSPlatform("windows")]
-    public async Task<int> MigrateAsync(ViewerDataService? dataService, CancellationToken cancellationToken = default)
+    public async Task<int> MigrateAsync(ViewerDataService? dataService, CancellationToken cancellationToken = default) =>
+        (await MigrateCoreAsync(dataService, cancellationToken)).Imported;
+
+    /// <summary>
+    /// <see cref="MigrateAsync"/> with the whole count: what it imported, what a different server's id kept out
+    /// (<see cref="ViewerServerImportResult.Collided"/>), and what the four-field rule refused (<see cref="ViewerServerImportResult.Refused"/>, #9787).
+    /// An entry saved before the rule that holds a refused character is skipped, counted and logged, and the pass goes on,
+    /// so one such entry neither ends the loop nor keeps the once-marker from being written.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal async Task<ViewerServerImportResult> MigrateCoreAsync(ViewerDataService? dataService, CancellationToken cancellationToken = default)
     {
         if (dataService is null || dataService.IsReadOnly || AlreadyMigrated)
         {
-            return 0;
+            return new ViewerServerImportResult(0, 0);
         }
 
         var total = new ViewerServerImportResult(0, 0);
@@ -97,8 +108,17 @@ public sealed class ViewerServerMigration
 
                 /* The guarded add writes exactly the row the bare insert did for an absent id (#4789); a taken id
                    is then told apart: the same server again is skipped, a different one is counted and logged. */
-                var result = await dataService.AddMonitoredServerAsync(row, cancellationToken);
-                total = Record(total, row, result);
+                try
+                {
+                    var result = await dataService.AddMonitoredServerAsync(row, cancellationToken);
+                    total = Record(total, row, result);
+                }
+                catch (MonitoredServerFieldRefusedException ex)
+                {
+                    /* #9787: an entry saved before the four-field rule is left out and counted, and the marker is still written:
+                       a retry would refuse it again, and the entries after it are not held back. */
+                    total = RecordFieldRefusal(total, row, ex.Message);
+                }
             }
         }
         catch (ViewerReadOnlyException)
@@ -106,7 +126,7 @@ public sealed class ViewerServerMigration
             /* Lost the write race (grants tightened under us) — leave the marker unwritten so a later,
                writable run finishes the import. */
             ViewerLogger.Warn("ViewerServerMigration", "Store went read-only mid-migrate; will retry next run.");
-            return total.Imported;
+            return total;
         }
 
         /* An entry with a password waits for the service's password key (#5366): leave the marker unwritten so a later
@@ -114,11 +134,11 @@ public sealed class ViewerServerMigration
         if (deferred)
         {
             ViewerLogger.Warn("ViewerServerMigration", "A server with a password was not imported yet: " + (key.Refusal ?? ViewerPasswordKey.NoKeyText));
-            return total.Imported;
+            return total;
         }
 
         WriteMarker();
-        return total.Imported;
+        return total;
     }
 
     /// <summary>
@@ -154,12 +174,20 @@ public sealed class ViewerServerMigration
 
             /* #6352: Import Settings pushes whatever a local viewer-servers.json holds into the SHARED store, so a host
                SqlClient would read as a named pipe or an admin connection is skipped and counted here (a hand-edited or
-               pre-rule file can carry one). AddMonitoredServerAsync stays unchecked: the registry migration above
-               goes through it, and an existing registration is not blocked. */
+               pre-rule file can carry one). AddMonitoredServerAsync does not apply the host rule: the registry migration
+               above goes through it, and an existing registration is not blocked on its host. */
             if (ViewerDataService.HostRefusal(row, null) is { } hostRefusal)
             {
-                ViewerLogger.Warn("ViewerServerMigration", $"Not imported: server '{row.Name}': {hostRefusal}");
+                ViewerLogger.Warn("ViewerServerMigration", $"Not imported: server '{ServerFieldText.Escape(row.Name)}': {hostRefusal}");
                 total = total with { Refused = total.Refused + 1 };
+                continue;
+            }
+
+            /* #9787: a display name, host, database or login holding a control character is skipped and counted the same way.
+               AddMonitoredServerAsync applies the rule too, so a row that gets past this check cannot be stored either. */
+            if (ServerFieldText.FirstRefusal(row.Name, row.Host, row.Database, row.Username) is { } fieldRefusal)
+            {
+                total = RecordFieldRefusal(total, row, fieldRefusal);
                 continue;
             }
 
@@ -168,6 +196,16 @@ public sealed class ViewerServerMigration
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// Counts <paramref name="row"/> as refused by the four-field rule (#9787) and logs the one sentence, with the row's name
+    /// escaped so a name holding a line feed cannot start a second log entry.
+    /// </summary>
+    private static ViewerServerImportResult RecordFieldRefusal(ViewerServerImportResult total, MonitoredServerRow row, string refusal)
+    {
+        ViewerLogger.Warn("ViewerServerMigration", $"Not imported: server '{ServerFieldText.Escape(row.Name)}': {refusal}");
+        return total with { Refused = total.Refused + 1 };
     }
 
     /// <summary>The key a pass seals with, read the first time an entry needs it and not again.</summary>
