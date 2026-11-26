@@ -101,7 +101,7 @@ public sealed class DarlingMcpNamedTokenTests
     private static List<string> ToolsPointedAtIn(string text, IEnumerable<string> catalog) =>
         catalog.Where(n => text.Contains("`" + n + "`", StringComparison.Ordinal)).OrderBy(n => n, StringComparer.Ordinal).ToList();
 
-    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action", "create_web_access_group", "update_web_access_group", "rotate_web_access_group_token", "delete_web_access_group", "set_advanced_web_access", "get_web_access_groups" };
+    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action", "create_web_access_group", "update_web_access_group", "rotate_web_access_group_token", "delete_web_access_group", "set_advanced_web_access", "get_web_access_groups", "add_alert_source", "rotate_alert_source", "remove_alert_source" };
 
     [Fact]
     public void ServerAdminToolsList_IsTheToolsTheDocsName()
@@ -111,7 +111,7 @@ public sealed class DarlingMcpNamedTokenTests
 
     /// <summary>Review round 2, finding 2 of 2: <c>mcp.allowServerAdmin</c> does nothing unless <c>mcp.allowWrites</c> is on
     /// (<see cref="DarlingMcpWritePolicy.Resolve"/>). An operator token keeps that precondition, so adding <c>mcp.tokens</c> to a
-    /// service with <c>allowServerAdmin: true, allowWrites: false</c> does not turn on the four server admin tools.</summary>
+    /// service with <c>allowServerAdmin: true, allowWrites: false</c> does not turn on the server admin tools.</summary>
     [Theory]
     [InlineData(true, false, false)]
     [InlineData(false, true, false)]
