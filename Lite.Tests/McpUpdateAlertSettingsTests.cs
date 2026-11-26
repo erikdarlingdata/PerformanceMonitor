@@ -12,6 +12,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite;
 using PerformanceMonitorLite.Mcp;
@@ -145,9 +146,9 @@ public sealed class McpUpdateAlertSettingsTests : IDisposable
     }
 
     [Fact]
-    public void AWholeGetAlertSettingsPayload_CanBeHandedBack()
+    public async Task AWholeGetAlertSettingsPayload_CanBeHandedBack()
     {
-        var read = McpAlertTools.GetAlertSettings().GetAwaiter().GetResult();
+        var read = await McpAlertTools.GetAlertSettings();
         var payload = JsonNode.Parse(read)!.AsObject();
         payload.Remove("smtp");
 
