@@ -255,7 +255,9 @@ public sealed class MuteRuleExternalSourceSurfaceTests
     [Fact]
     public void LiteReturnsTheSameKeys_AlwaysNull()
     {
-        var lite = ReadRepoFile("Lite", "Mcp", "McpAlertTools.cs").ReplaceLineEndings("\n");
+        /* The alert history row stays in McpAlertTools.cs. The mute rule payload moved to McpAlertTools.MuteRules.cs (#9639), so count both. */
+        var lite = ReadRepoFile("Lite", "Mcp", "McpAlertTools.cs").ReplaceLineEndings("\n")
+            + ReadRepoFile("Lite", "Mcp", "McpAlertTools.MuteRules.cs").ReplaceLineEndings("\n");
 
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(lite, @"external_source = \(string\?\)null,").Count);
     }

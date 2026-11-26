@@ -177,6 +177,10 @@ public sealed class McpWritePolicyTests
     [Theory]
     [InlineData("mute_analysis_finding", "{\"finding_hash\":\"abc\"}")]
     [InlineData("unmute_analysis_finding", "{\"finding_hash\":\"abc\"}")]
+    [InlineData("create_mute_rule", "{}")]
+    [InlineData("update_mute_rule", "{\"rule_id\":\"x\",\"changes_json\":\"{}\"}")]
+    [InlineData("delete_mute_rule", "{\"rule_id\":\"x\"}")]
+    [InlineData("set_mute_rule_enabled", "{\"rule_id\":\"x\",\"enabled\":true}")]
     public async Task WritesOff_CallingAWriteTool_IsRefusedAsAnUnknownTool(string tool, string arguments)
     {
         using var server = await BuildServer(allowWrites: false);
@@ -216,6 +220,17 @@ public sealed class McpWritePolicyTests
         Assert.Equal(all.Count - McpWritePolicy.WriteTools.Count, served.Count);
         Assert.Contains("list_servers", names);
         Assert.Contains("analyze_server", names);
+    }
+
+    /// <summary>#9639: update_alert_settings is registered, is absent while writes are off, and is served once they are on.</summary>
+    [Fact]
+    public void UpdateAlertSettings_IsServedOnlyWhenWritesAreOn()
+    {
+        var all = RegisteredTools();
+
+        Assert.Contains("update_alert_settings", Names(all));
+        Assert.DoesNotContain("update_alert_settings", Names(McpWritePolicy.FilterToolCollection(all, allowWrites: false)));
+        Assert.Contains("update_alert_settings", Names(McpWritePolicy.FilterToolCollection(all, allowWrites: true)));
     }
 
     /* #5719: Lite's instructions said "90 tools" while tools/list returned 88 with mcp_allow_writes off (the default).
