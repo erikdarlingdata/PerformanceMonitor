@@ -925,6 +925,68 @@ public sealed class AlwaysOnXeSessionsTests : IAsyncDisposable
         Assert.Contains("ELSE 1", azure, StringComparison.Ordinal);
     }
 
+    /* #9675: another entry on the instance is still creating the session, so the first (dirty) probe reads its half-written definition as
+       another one. The ensure acts on the committed re-read, and the drop that would remove the other entry's session never runs. */
+    [Fact]
+    public async Task AMismatchTheFirstProbeReads_IsReadAgainCommitted_AndTheSecondAnswerIsTheOneActedOn()
+    {
+        var mismatch = (object)AlwaysOnXeSessions.AttentionDefinitionMismatch;
+        var reads = 0;
+
+        var settled = await AlwaysOnXeSessions.ConfirmAttentionMismatchAsync(
+            mismatch, _ => { reads++; return Task.FromResult<object?>(0); }, TimeSpan.Zero, CancellationToken.None);
+
+        Assert.Equal(0, settled);
+        Assert.Equal(1, reads);
+        Assert.Equal(DarlingXeSessions.ServerSessionState.Stopped, DarlingXeSessions.ServerSessionStateOf(settled));
+    }
+
+    [Fact]
+    public async Task AMismatchThatTheSecondReadStillShows_StaysAMismatch()
+    {
+        var settled = await AlwaysOnXeSessions.ConfirmAttentionMismatchAsync(
+            AlwaysOnXeSessions.AttentionDefinitionMismatch, _ => Task.FromResult<object?>(AlwaysOnXeSessions.AttentionDefinitionMismatch), TimeSpan.Zero, CancellationToken.None);
+
+        Assert.Equal(AlwaysOnXeSessions.AttentionDefinitionMismatch, settled);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0)]
+    [InlineData(1)]
+    public async Task AnAnswerThatIsNotAMismatch_IsNotReadAgain(object? answer)
+    {
+        var reads = 0;
+
+        var settled = await AlwaysOnXeSessions.ConfirmAttentionMismatchAsync(
+            answer, _ => { reads++; return Task.FromResult<object?>(null); }, TimeSpan.Zero, CancellationToken.None);
+
+        Assert.Equal(answer, settled);
+        Assert.Equal(0, reads);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(1)]
+    public async Task ADropAnotherEntryGotToFirst_IsNotAFailure_WhenTheSessionIsGoneOrNowMatches(object? after)
+    {
+        var failure = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(15151, 16, "Cannot drop the event session because it does not exist.");
+
+        await AlwaysOnXeSessions.DropAttentionMismatchAsync(
+            _ => throw failure, _ => Task.FromResult<object?>(after), CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ADropThatFailsWhileTheSessionIsStillAnotherDefinition_Throws()
+    {
+        var failure = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(25641, 16, "The drop was refused.");
+
+        var thrown = await Assert.ThrowsAsync<Microsoft.Data.SqlClient.SqlException>(() => AlwaysOnXeSessions.DropAttentionMismatchAsync(
+            _ => throw failure, _ => Task.FromResult<object?>(AlwaysOnXeSessions.AttentionDefinitionMismatch), CancellationToken.None));
+
+        Assert.Same(failure, thrown);
+    }
+
     /* #8146: the limit the host asks for reaches the create the ensure sends, for both ring-buffer captures. */
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]

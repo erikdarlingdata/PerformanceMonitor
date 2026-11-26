@@ -57,6 +57,15 @@ public partial class RemoteCollectorService
             (connection, token) => EnsureAttentionXeSessionOnPremAsync(connection, server, token), cancellationToken);
     }
 
+    /// <summary>The probe of the server-scoped client-timeout session: no row when it does not exist, else its state (<see cref="AlwaysOnXeSessions.BuildAttentionServerProbeSql"/>).</summary>
+    private async Task<object?> ProbeAttentionXeSessionAsync(SqlConnection connection, bool committedRead, CancellationToken cancellationToken)
+    {
+        using var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorLite", committedRead), connection);
+        cmd.CommandTimeout = CommandTimeoutSeconds;
+        cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = AttentionXeSessionName });
+        return await cmd.ExecuteScalarAsync(cancellationToken);
+    }
+
     /// <summary>
     /// On-prem / Azure MI / AWS RDS: starts the server-scoped client-timeout session when it is stopped, and creates and starts
     /// it when it is missing, with the statement the shared builder makes. A session of that name with another definition (an
@@ -64,11 +73,16 @@ public partial class RemoteCollectorService
     /// </summary>
     private async Task EnsureAttentionXeSessionOnPremAsync(SqlConnection connection, ServerConnection server, CancellationToken cancellationToken)
     {
-        using (var cmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerProbeSql("PerformanceMonitorLite"), connection))
         {
-            cmd.CommandTimeout = CommandTimeoutSeconds;
-            cmd.Parameters.Add(new SqlParameter("@session_name", SqlDbType.NVarChar, 128) { Value = AttentionXeSessionName });
-            var result = await cmd.ExecuteScalarAsync(cancellationToken);
+            var result = await ProbeAttentionXeSessionAsync(connection, committedRead: false, cancellationToken);
+
+            /* #9675: the first probe is a dirty read, so it can read another entry's session, still being created on the same instance,
+               as another definition. A mismatch is read again, committed, before anything is dropped. */
+            result = await AlwaysOnXeSessions.ConfirmAttentionMismatchAsync(
+                result,
+                token => ProbeAttentionXeSessionAsync(connection, committedRead: true, token),
+                AlwaysOnXeSessions.AttentionMismatchConfirmPause,
+                cancellationToken);
 
             if (result != null)
             {
@@ -85,9 +99,15 @@ public partial class RemoteCollectorService
                     }
 
                     AppLogger.Warn("XeSession", $"[{server.DisplayName}] The client timeout XE session {AttentionXeSessionName} has a definition other than this version's (events, actions or targets): dropping it and creating it again");
-                    using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
-                    dropCmd.CommandTimeout = CommandTimeoutSeconds;
-                    await dropCmd.ExecuteNonQueryAsync(cancellationToken);
+                    await AlwaysOnXeSessions.DropAttentionMismatchAsync(
+                        async token =>
+                        {
+                            using var dropCmd = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropSql(), connection);
+                            dropCmd.CommandTimeout = CommandTimeoutSeconds;
+                            await dropCmd.ExecuteNonQueryAsync(token);
+                        },
+                        token => ProbeAttentionXeSessionAsync(connection, committedRead: true, token),
+                        cancellationToken);
                 }
                 else
                 {
