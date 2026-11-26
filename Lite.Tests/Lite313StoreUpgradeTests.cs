@@ -455,14 +455,16 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
                 p.ParameterType == typeof(McpToolGuideCatalog) ? catalog :
                 services.TryGetValue(p.ParameterType, out var service) ? service :
                 p.Name == "server_name" ? serverName :
-                p.Name == "hours_back" && p.ParameterType == typeof(int) ? 240 :
+                p.Name == "hours_back" && p.ParameterType == typeof(int) ? McpHelpers.MaxHoursBack :
                 p.HasDefaultValue ? p.DefaultValue :
                 p.ParameterType.IsValueType ? Activator.CreateInstance(p.ParameterType) : (object?)null).ToArray();
             try
             {
                 var json = await McpReadToolBudgetTests.InvokeAsync(method, args).WaitAsync(TimeSpan.FromSeconds(60));
-                outcomes[key] = McpHelpers.IsErrorEnvelope(json)
-                    ? new ReadOutcome("answered an error: " + json[..Math.Min(json.Length, 200)], -1)
+                /* A refusal (a window past the tool's ceiling, a required argument the sweep does not bind) answers no rows on either store:
+                   it is reported as a refusal, never as a count of zero. */
+                outcomes[key] = McpHelpers.IsErrorEnvelope(json) || McpHelpers.IsRefusalEnvelope(json)
+                    ? new ReadOutcome("answered an error or a refusal: " + json[..Math.Min(json.Length, 200)], -1)
                     : new ReadOutcome("ok", McpRowCount(json));
             }
             catch (Exception ex)
