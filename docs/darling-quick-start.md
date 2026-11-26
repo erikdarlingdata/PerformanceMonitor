@@ -75,7 +75,7 @@ MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on,
      docker compose exec store psql -U darling -d darling -c "UPDATE config.config_service SET mcp_enabled = true WHERE id = 1"
      ```
 
-     No restart is needed. The service reads the switch every 5 seconds and starts the MCP listener when it changes. Allow about half a minute before you test the port.
+     No restart is needed. The service reads the store's switch on each collection sweep and starts the MCP listener when it changes. Wait for the next sweep before you test the port.
 
 `--enable-web` and `--enable-mcp` are Windows only, so they do not run in the container. The same `UPDATE` with `web_enabled` turns the web dashboard on after the first start.
 
