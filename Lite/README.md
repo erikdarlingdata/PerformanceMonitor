@@ -20,6 +20,8 @@ There is nothing to install first. `Setup.exe` and the portable `PerformanceMoni
 
 - [Lite guide](../docs/lite-guide.md): install, upgrade, where Lite keeps its files, configuration, appearance and collectors
 - [Run Lite headless](../docs/lite-guide.md#run-lite-headless): `--headless` and `--stop`, for a machine that nobody signs in to
+- [Add servers with `--add-server`](../docs/lite-guide.md#add-servers-with---add-server): add servers with no window, and [on a machine with no desktop sign-in](../docs/lite-guide.md#add-servers-on-a-machine-with-no-desktop-sign-in)
+- [Check the download](../docs/lite-guide.md#check-the-download): compare the portable ZIP with `SHA256SUMS.txt`
 - [Troubleshooting](../docs/troubleshooting.md)
 - [Changelog](../CHANGELOG.md)
 - [Root README](../README.md) for the full documentation
