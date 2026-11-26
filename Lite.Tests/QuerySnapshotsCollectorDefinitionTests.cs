@@ -60,7 +60,10 @@ public sealed class QuerySnapshotsCollectorDefinitionTests
         Assert.Contains("IF OBJECT_ID(N'msdb.dbo.cdc_jobs') IS NOT NULL", sql, StringComparison.Ordinal);
         Assert.Contains("sp_MScdc_capture_job", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("#req", sql, StringComparison.Ordinal);
-        Assert.Contains("OPTION(MAXDOP 1, RECOMPILE);", sql, StringComparison.Ordinal);
+        /* Allow-list entry (#9683): the unbounded form takes no parameters, and the lab runs on SQL Server 2022 and 2025 showed the
+           statement without RECOMPILE uses far less CPU and returns the same rows (see the comment at OnPremCachedOptions in
+           QuerySnapshotsCollector). The collector's form with excluded databases keeps the hint. */
+        Assert.Contains("OPTION(MAXDOP 1);", sql, StringComparison.Ordinal);
     }
 
     /* #7573: Active Queries STORES the monitor's own sessions now (the Monitor statements switch hides them at read time, so a monitor

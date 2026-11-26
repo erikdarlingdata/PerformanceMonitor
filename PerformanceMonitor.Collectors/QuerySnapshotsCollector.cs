@@ -447,7 +447,7 @@ OUTER APPLY
 {1}
 WHERE dest.text IS NOT NULL
 ORDER BY der.cpu_time DESC, der.parallel_worker_count DESC
-OPTION(MAXDOP 1, RECOMPILE);
+OPTION({7});
 """;
 
     private static readonly CompositeFormat s_snapshotsBaseFormat = CompositeFormat.Parse(SnapshotsBase);
@@ -779,8 +779,28 @@ OUTER APPLY
         var planState = boundPlans ? SharedPlanState : "rk.key_state";
         var template = isAzureSqlDatabase ? s_snapshotsAzureBaseFormat : s_snapshotsBaseFormat;
         return string.Format(
-            null, template, liveQueryPlanColumn, liveQueryPlanApply, heldPlansPredicate, cap, exclusionClause, livePlanOverCap, planState);
+            null, template, liveQueryPlanColumn, liveQueryPlanApply, heldPlansPredicate, cap, exclusionClause, livePlanOverCap, planState,
+            exclusionClause.Length == 0 ? OnPremCachedOptions : OnPremRecompileOptions);
     }
+
+    /* #9683: the on-prem statement carries no OPTION(RECOMPILE) when no database is excluded, the one parameterized
+       statement CONTRIBUTING.md lets drop the hint. The held-plan parameters sit in a CASE and an IN list that pick a
+       plan_state value, never in a seek or a row filter, so a plan compiled for one set of keys returns the same rows
+       for any other. The estimates for sys.dm_exec_requests and the other DMVs are fixed, so a compile at idle and a
+       compile under load read the same estimates. Measured against the hinted text, 200 runs each over pooled
+       connections in alternating blocks of 50, on SQL Server 2022 and 2025 (emulated x64 on arm64, so read the ratios):
+       idle, 5 requests, 40 requests of one plan key, 24 distinct plans, 120 requests, a server with CDC capture jobs,
+       and 0 or 20 held keys. Server CPU per run is 50 to 92% lower and the first result arrives 71 to 92% sooner. The
+       hinted text spends 23 ms of CPU compiling at idle on 2022 against 2 ms to run, and the plan compiled at idle and
+       reused under each load costs less than the hinted text in every state. Back to back hinted and unhinted runs return
+       the same rows in 2100 of 2100 pairs on 2022 and 2088 of 2100 on 2025. The 12 that differ are one boundary row or
+       cell each, under 24 or 40 requests that start in the same instant, and the pre-#9554 text differs the same way.
+       3000 repeat pairs on a fresh or aged load found none. The statement recompiles once on its first run, which
+       defers the compile of the @cdc_capture_jobs table variable, and then reuses its plan. A statement with excluded databases binds their
+       names as parameters and keeps the hint, as does the Azure SQL Database text, which was not measured. */
+    private const string OnPremCachedOptions = "MAXDOP 1";
+
+    private const string OnPremRecompileOptions = "MAXDOP 1, RECOMPILE";
 
     /// <summary>The live-plan gate: 2016 SP1+/version-unknown/MI; never on Azure SQL DB (#857).</summary>
     public static bool SupportsLiveQueryPlan(CollectorTargetInfo target)
