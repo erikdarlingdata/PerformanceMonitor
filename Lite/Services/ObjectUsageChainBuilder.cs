@@ -236,8 +236,8 @@ internal sealed class ObjectUsageChainBuilder
     /// <summary>
     /// The cutoff of the latest cap trim (<see cref="EnforceCapAsync"/>), null until one runs. A trim removes the rows older than its cutoff from every
     /// database, so a database that starts a chain from nothing starts at this floor and not at its oldest stored snapshot. Built from its oldest
-    /// snapshot, a database part way through its backfill holds only days older than the cutoff the other databases' newest days set: the trim removes
-    /// all of them, the next pass builds the same days and the trim removes them again, and the database never keeps a chain. Built from the floor, its
+    /// snapshot, a database part way through its backfill would hold only days older than the cutoff the other databases' newest days set: the trim
+    /// would remove all of them and every pass would build the same days again, so the database would never keep a chain. Built from the floor, its
     /// days are days the trim keeps. Its windows that start before the floor fold, as every database's do after a trim. The floor lives in memory, so
     /// after a restart one pass may build such a database from its oldest snapshot and lose it to one trim, which sets the floor again.
     /// </summary>
