@@ -317,8 +317,14 @@ public class ProfileManager : IProfileLookup
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to load profiles.json, attempting backup restore");
+            /* #9772: the file exists and could not be read as a profile list. The user's copy is kept before anything can
+               write profiles.json: the next save writes the list Lite is running on over it, and a fresh start with no usable
+               backup runs on no profiles. profiles.json itself is never written here, so a file the user can still fix by
+               hand is not replaced by an empty list. */
+            var keptCopy = RejectedConfigCopy.Keep(_configFilePath);
 
+            _profiles = new List<CredentialProfile>();
+            var runningOn = "no profiles (there is no profiles.json.bak)";
             var bakPath = _configFilePath + ".bak";
             if (File.Exists(bakPath))
             {
@@ -327,14 +333,18 @@ public class ProfileManager : IProfileLookup
                     string bakJson = File.ReadAllText(bakPath);
                     var bakConfig = JsonSerializer.Deserialize<ProfilesConfig>(bakJson);
                     _profiles = ProfilesWithAValidAuthType(bakConfig?.Profiles);
-                    _logger?.LogInformation("Restored {Count} credential profiles from backup", _profiles.Count);
-                    return;
+                    runningOn = $"the {_profiles.Count} profiles in profiles.json.bak";
                 }
-                catch { /* backup also corrupt, fall through to empty list */ }
+                catch (Exception bakEx)
+                {
+                    _profiles = new List<CredentialProfile>();
+                    runningOn = $"no profiles (profiles.json.bak could not be read either: {bakEx.GetType().Name})";
+                }
             }
 
-            _profiles = new List<CredentialProfile>();
-            SaveProfiles();
+            _logger?.LogWarning(
+                "Lite could not read {File}: {Error} (JSON path {JsonPath}). Lite is running on {RunningOn}. The rejected file is kept as {KeptCopy}, and profiles.json is left as it is until the next save.",
+                _configFilePath, $"{ex.GetType().Name}: {ex.Message}", (ex as JsonException)?.Path ?? "none", runningOn, keptCopy);
         }
     }
 
