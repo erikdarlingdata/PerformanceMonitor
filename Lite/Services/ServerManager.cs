@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -1029,9 +1030,14 @@ public class ServerManager
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to load servers.json, attempting backup restore");
+            /* #9761: the file exists and could not be read as a server list. The user's copy is kept before anything can
+               write servers.json: the next save writes the list Lite is running on over it, and a fresh start with no
+               usable backup runs on no servers. servers.json itself is never written here, so a file the user can still fix
+               by hand is not replaced by an empty list. */
+            var keptCopy = KeepRejectedCopy();
 
-            /* Try to restore from backup */
+            _servers = new List<ServerConnection>();
+            var runningOn = "no servers (there is no servers.json.bak)";
             var bakPath = _configFilePath + ".bak";
             if (File.Exists(bakPath))
             {
@@ -1040,21 +1046,56 @@ public class ServerManager
                     string bakJson = File.ReadAllText(bakPath);
                     var bakConfig = JsonSerializer.Deserialize<ServersConfig>(bakJson);
                     _servers = bakConfig?.Servers ?? new List<ServerConnection>();
-                    
+
                     foreach (var server in _servers)
                     {
                         _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                         _savedHosts[server.Id] = server.ServerName;
                         _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
                     }
-                    _logger?.LogInformation("Restored {Count} servers from backup file", _servers.Count);
-                    return;
+
+                    runningOn = $"the {_servers.Count} servers in servers.json.bak";
                 }
-                catch { /* backup also corrupt, fall through to empty list */ }
+                catch (Exception bakEx)
+                {
+                    _servers = new List<ServerConnection>();
+                    runningOn = $"no servers (servers.json.bak could not be read either: {bakEx.GetType().Name})";
+                }
             }
 
-            _servers = new List<ServerConnection>();
-            SaveServers();
+            _logger?.LogWarning(
+                "Lite could not read {File}: {Error} (JSON path {JsonPath}). Lite is running on {RunningOn}. The rejected file is kept as {KeptCopy}, and servers.json is left as it is until the next save.",
+                _configFilePath, $"{ex.GetType().Name}: {ex.Message}", (ex as JsonException)?.Path ?? "none", runningOn, keptCopy);
+        }
+    }
+
+    /// <summary>
+    /// #9761: copies a servers.json that could not be read to <c>servers.json.rejected-&lt;UTC stamp&gt;</c> beside it and returns
+    /// that path. A copy is never overwritten, and a rejected file that already has a byte-identical copy beside it keeps that
+    /// copy instead of adding another, so starting Lite again on a file the user has not fixed yet adds nothing. When no copy
+    /// can be made the result says so instead of a path.
+    /// </summary>
+    private string KeepRejectedCopy()
+    {
+        try
+        {
+            var bytes = File.ReadAllBytes(_configFilePath);
+            var directory = Path.GetDirectoryName(_configFilePath)!;
+            foreach (var kept in Directory.EnumerateFiles(directory, "servers.json.rejected-*"))
+            {
+                if (File.ReadAllBytes(kept).AsSpan().SequenceEqual(bytes))
+                {
+                    return kept;
+                }
+            }
+
+            var copy = _configFilePath + ".rejected-" + DateTime.UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture);
+            File.Copy(_configFilePath, copy, overwrite: false);
+            return copy;
+        }
+        catch (Exception ex)
+        {
+            return $"nowhere (no copy could be made: {ex.GetType().Name})";
         }
     }
 
