@@ -1475,9 +1475,10 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
     }
 
     /// <summary>#9219: the time a lookup span ends at when it is cut by a row count: the collection time of the sample <paramref name="rows"/> rows
-    /// back from <paramref name="ceiling"/> among those that carry a text digest, no earlier than <paramref name="floor"/>, or <paramref name="floor"/>
-    /// when fewer samples than that are in the span. A read of the span's newest samples in time order (<see cref="RowFloorSql"/>). The span keeps
-    /// every sample at that time, so it holds at least <paramref name="rows"/> such rows and its floor is strictly below its ceiling. <paramref name="statementTimeoutMs"/> is armed first as the statement timeout.</summary>
+    /// back from <paramref name="ceiling"/> among those that carry a digest (of the text or of the plan), no earlier than <paramref name="floor"/>, or
+    /// <paramref name="floor"/> when fewer samples than that are in the span. A read of the span's newest samples in time order
+    /// (<see cref="RowFloorSql"/>). The span keeps every sample at that time, so it holds at least <paramref name="rows"/> such rows and its floor is
+    /// strictly below its ceiling. <paramref name="statementTimeoutMs"/> is armed first as the statement timeout.</summary>
     private static async Task<DateTime> ReadRowFloorAsync(
         NpgsqlConnection connection, NpgsqlTransaction transaction, DateTime floor, DateTime ceiling, int rows, long statementTimeoutMs,
         CancellationToken cancellationToken)
@@ -1499,16 +1500,19 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
     }
 
     /// <summary>#9219: <see cref="ReadRowFloorAsync"/>'s statement. $1 the floor, $2 the ceiling (naive UTC), $3 the rows to skip. #9605: it counts
-    /// the samples that carry a text digest, which are the samples a lookup span reads, and that predicate lets the planner walk the time-ordered
-    /// partial index a migration ships (<c>ix_query_stats_digest_floor</c>) backward from the ceiling and stop after $3 entries. Without it the
-    /// only index that covers the range leads with <c>server_id</c>, so the read is every index entry of the span and a sort: on a seeded store
-    /// 162 ms against 13 ms for 80,000 rows back in a twelve-hour span of 1.8 million samples.</summary>
+    /// the samples that carry a digest, of the text or of the plan. That predicate is, word for word, the predicate of the time-ordered partial
+    /// index a migration ships (<c>ix_query_stats_digest_floor</c>), so the planner walks that index backward from the ceiling, stops after $3
+    /// entries and answers from the index alone: an entry needs no visit to its row to be tested. A narrower predicate (the text digest only) is
+    /// served by the same index with one row visit per entry, and with no digest predicate the only index that covers the range leads with
+    /// <c>server_id</c>, so the read is every index entry of the span and a sort. The answer only places a span's edge, so counting the few
+    /// samples that carry a plan digest and no text digest moves the edge slightly newer and changes no row: the lookup statement tests the text
+    /// digest itself (<see cref="PlanCacheAllServersLookupSpanSql"/>), and one time is one span's floor and the next span's ceiling.</summary>
     internal const string RowFloorSql = @"
 SELECT s.collection_time
 FROM query_stats AS s
 WHERE s.collection_time >= $1
 AND   s.collection_time < $2
-AND   s.query_text_digest IS NOT NULL
+AND   (s.query_text_digest IS NOT NULL OR s.query_plan_digest IS NOT NULL)
 ORDER BY s.collection_time DESC
 OFFSET $3
 LIMIT 1";
