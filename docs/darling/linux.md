@@ -454,7 +454,7 @@ There is no upgrade script for Linux ([#9688](https://github.com/erikdarlingdata
    sudo systemctl reload postgresql@18-main
    ```
 
-4. Download and verify the new tarball, as in step 4.
+4. Download and verify the new tarball, as in [step 4](#step-4-download-and-verify).
 5. Replace the service files and keep the old ones. The service stays stopped until step 6:
 
    ```bash
