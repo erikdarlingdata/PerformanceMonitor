@@ -606,7 +606,7 @@ public static class OptionalTableRunner
             using (var copyCommand = writeDb.CreateCommand())
             {
                 copyCommand.CommandText =
-                    $"COPY (SELECT * FROM {table.Name} ORDER BY server_name, queryid) TO '{absolutePath.Replace("'", "''")}' " +
+                    $"COPY (SELECT * FROM {table.Name} ORDER BY {TotalOrder.ForTable(writeDb, table.Name, "server_name", "queryid")}) TO '{absolutePath.Replace("'", "''")}' " +
                     "(FORMAT parquet, COMPRESSION zstd, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '64MB')";
                 copyCommand.ExecuteNonQuery();
             }
