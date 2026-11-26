@@ -369,7 +369,7 @@ Work the formula with those two numbers and the host's RAM. For host RAM, use th
 ## Logs
 
 - **The file log is the one to read.** It is `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, one file for each day, kept 14 days, one line for each event.
-- **The journal is the noisy one.** `journalctl -u darling` shows one line for each event, as `source[event id] message`, and the log level goes to the journal priority. To list only warnings and errors, run `journalctl -u darling -p warning`. On Ubuntu 24.04 that listed exactly the warnings, 7 lines, out of 319 lines in the journal. The rest were at priority 6 (info). Use the journal for what systemd itself reports: starts, stops and a process that exits.
+- **The journal is the noisy one.** `journalctl -u darling` shows one line for each event, as `source[event id] message`, and the log level goes to the journal priority. To list only warnings and errors, run `journalctl -u darling -p warning`. Use the journal for what systemd itself reports: starts, stops and a process that exits.
 - **The log files are mode `644` inside a `700` folder.** The service creates each file with the process umask. The folder's mode is what keeps other users out, so this is harmless. To make the files owner-only as well, add `UMask=0077` to the unit's `[Service]` section and restart the service.
 - **The log level** is set with a standard .NET logging source. In the unit, that is a line such as `Environment=Logging__LogLevel__PerformanceMonitor.Darling.Service=Debug`. See [Logs](operations.md#logs).
 - There is no Windows event log on Linux. The file log and the journal are the two surfaces.

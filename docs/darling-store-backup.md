@@ -93,7 +93,7 @@ Remove-Item Env:PGPASSWORD
 
 The port 5641 is the default of `postgres.port`. The flags `--no-owner` and `--no-acl` leave out the owners and grants. The service sets the roles and grants again on every start.
 
-On a TimescaleDB store, `pg_dump` can warn about circular foreign-key constraints on TimescaleDB's own catalog tables, such as `continuous_agg`, and suggest `--disable-triggers`. TimescaleDB's troubleshooting page says this warning can be ignored. In our test the dump restored with no errors. Restore with the two TimescaleDB steps on this page, and test a restore before you rely on the dump.
+On a TimescaleDB store, `pg_dump` can warn about circular foreign-key constraints on TimescaleDB's own catalog tables, such as `continuous_agg`, and suggest `--disable-triggers`. TimescaleDB's troubleshooting page says this warning can be ignored. Restore with the two TimescaleDB steps on this page, and test a restore before you rely on the dump.
 
 On the new machine:
 
