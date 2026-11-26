@@ -279,7 +279,7 @@ public sealed class McpAlertSettingsWriteTools
                 }
             }
 
-            return dispatcher is not null && !dispatcher.CheckAccess() ? dispatcher.Invoke(Run) : Run();
+            return Run();
         }
         catch (Exception ex)
         {
