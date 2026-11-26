@@ -54,6 +54,79 @@ public sealed class DarlingPendingPasswordKeysTests
         Assert.Null(outcome.FilePath);
     }
 
+    /* #9644: the device-style forms of a share. The dot-prefixed UNC form was exempt from the check, and a GLOBALROOT path
+       ended in an exception from the folder open. Both are refused as a network location before the folder is made. */
+    [Theory]
+    [InlineData(@"\\.\UNC\localhost\C$\pm9659d-no-such-folder\credentials")]
+    [InlineData(@"\\?\UNC\localhost\C$\pm9659d-no-such-folder\credentials")]
+    [InlineData(@"\\?\GLOBALROOT\Device\Mup\localhost\C$\pm9659d-no-such-folder\credentials")]
+    public void Create_RefusesADeviceStylePathToAShare_BeforeMakingAnything(string credentials)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "a share is a Windows path form");
+
+        var outcome = DarlingPendingPasswordKeys.Create(credentials, keyFromSetting: false, logger: null);
+
+        Assert.False(outcome.Written);
+        Assert.False(outcome.Failed);
+        Assert.Contains("network location", outcome.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void IsNetworkLocation_TakesTheDriveLetterDevicePathAsLocal_OnWindows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "a share is a Windows path form");
+
+        var local = Path.GetFullPath(Path.GetTempPath());
+
+        Assert.False(DarlingPendingPasswordKeys.IsNetworkLocation(@"\\?\" + local));
+        Assert.False(DarlingPendingPasswordKeys.IsNetworkLocation(@"\\.\" + local));
+    }
+
+    [Fact]
+    public void Create_NamesAFolderItCannotOpenInItsRefusal_InsteadOfThrowing_OnWindows()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the folder ACL is Windows's");
+        var (root, credentials, pending) = Service();
+        FileSystemAccessRule? deny = null;
+        try
+        {
+            Assert.True(DarlingPendingPasswordKeys.Create(credentials, keyFromSetting: false, logger: null).Written);
+            foreach (var file in Directory.GetFiles(pending))
+            {
+                File.Delete(file);
+            }
+
+            // Deny this account the rights an open for traverse or listing needs, and nothing that changes the ACL, so the entry can be taken off again.
+            var me = WindowsIdentity.GetCurrent().User!;
+            deny = new FileSystemAccessRule(
+                me, FileSystemRights.ListDirectory | FileSystemRights.Traverse | FileSystemRights.ReadAttributes,
+                InheritanceFlags.None, PropagationFlags.None, AccessControlType.Deny);
+            var info = new DirectoryInfo(pending);
+            var security = info.GetAccessControl();
+            security.AddAccessRule(deny);
+            info.SetAccessControl(security);
+
+            var outcome = DarlingPendingPasswordKeys.Create(credentials, keyFromSetting: false, logger: null);
+
+            Assert.False(outcome.Written);
+            Assert.False(outcome.Failed);
+            Assert.Contains(pending, outcome.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Null(outcome.FilePath);
+        }
+        finally
+        {
+            if (deny is not null)
+            {
+                var info = new DirectoryInfo(pending);
+                var security = info.GetAccessControl();
+                security.RemoveAccessRuleSpecific(deny);
+                info.SetAccessControl(security);
+            }
+
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public void Create_RefusesAnExistingFolderThatUsersMayOnlyRead_AndWritesNothing_OnWindows()
     {

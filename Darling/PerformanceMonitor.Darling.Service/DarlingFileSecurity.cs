@@ -568,6 +568,13 @@ public static class DarlingFileSecurity
 
             return null;
         }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            /* #9644: a folder in the chain that cannot be opened (an access control entry that denies this account, a device path) comes
+               back as a refusal that names that folder and the system's own words, not as an exception the caller has no case for. */
+            refusal = ex.Message;
+            return null;
+        }
         finally
         {
             foreach (var handle in held)

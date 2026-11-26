@@ -78,7 +78,7 @@ public sealed class DarlingMcpPasswordKeyStartupConfigTests : IDisposable
 
         // The file on disk now sets passwordKey, which would make the tool refuse. The startup config did not, so it writes.
         Assert.Equal("written", Status(answer));
-        var pending = Path.Combine(_root, DarlingPendingPasswordKeys.DirectoryName);
+        var pending = Path.Combine(_credentials, DarlingPendingPasswordKeys.DirectoryName);
         Assert.Single(Directory.GetFiles(pending));
         Assert.Same(_startupSet, DarlingOwnedSecrets.Current);
     }

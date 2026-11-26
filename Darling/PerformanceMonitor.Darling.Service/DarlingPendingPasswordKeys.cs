@@ -56,14 +56,21 @@ internal static class DarlingPendingPasswordKeys
             return false;
         }
 
-        if (fullPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+        /* #9644: a device-style path (the question-mark or dot prefix) reaches a share through its UNC folder or through a device such as
+           GLOBALROOT\Device\Mup, and the no-follow open of the folder fails on those with an exception no caller expects. Only the
+           drive-letter form is a local path this check can follow, so every other one is refused here, before the folder is made. */
+        if (fullPath.StartsWith(@"\\?\", StringComparison.Ordinal) || fullPath.StartsWith(@"\\.\", StringComparison.Ordinal))
         {
-            return true;
-        }
+            var afterPrefix = fullPath[4..];
+            if (afterPrefix.Length < 2 || !char.IsAsciiLetter(afterPrefix[0]) || afterPrefix[1] != ':'
+                || (afterPrefix.Length > 2 && afterPrefix[2] != '\\'))
+            {
+                return true;
+            }
 
-        if (fullPath.StartsWith(@"\\", StringComparison.Ordinal)
-            && !fullPath.StartsWith(@"\\?\", StringComparison.Ordinal)
-            && !fullPath.StartsWith(@"\\.\", StringComparison.Ordinal))
+            fullPath = afterPrefix;
+        }
+        else if (fullPath.StartsWith(@"\\", StringComparison.Ordinal))
         {
             return true;
         }
