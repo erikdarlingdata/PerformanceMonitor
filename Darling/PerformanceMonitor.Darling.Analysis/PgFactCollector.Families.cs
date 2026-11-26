@@ -27,9 +27,9 @@ public sealed partial class PgFactCollector
     /// Runs the family reads after the coverage stamp, and appends their facts to <paramref name="facts"/> in the order
     /// the families are listed, whatever order they finish in (#9149). <c>analyze_server</c> with an anchor ran about 146
     /// statements one after another, none of them slow alone, so against a store a network away the wait was the sum of
-    /// the round trips. The families do not read each other's facts: each only adds its own, and the only context state
-    /// one writes that a later family could read (the PLAN_REGRESSION candidates) is read by the drill-down after
-    /// collection ends.
+    /// the round trips. The families do not read each other's facts: each only adds its own, and the context state they
+    /// write that a later step reads (the PLAN_REGRESSION candidates, the plan-advisory plans) is read by the drill-down
+    /// after collection ends.
     ///
     /// <para>With <see cref="AnalysisContext.FamilyParallelism"/> at 1 this is the loop it replaced, byte for byte: each
     /// family runs against the shared list in turn. Above 1, each family gets its own list and its own failure buffer,

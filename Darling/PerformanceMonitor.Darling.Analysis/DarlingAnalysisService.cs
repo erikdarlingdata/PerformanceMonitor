@@ -854,9 +854,22 @@ public sealed class DarlingAnalysisService
     /// detector is the RESOLVED engine's (<see cref="AnalysisEngineSet.Detector"/>): a PostgreSQL target
     /// gets <see cref="PgTargetAnomalyDetector"/>'s <c>ANOMALY_PG_*</c> facts and a SQL Server target
     /// gets <see cref="PgAnomalyDetector"/>'s, off the one resolution this read already performs.</para>
+    ///
+    /// <para>#8570: <paramref name="sources"/>, when set, are the only sources the caller shows. The SQL Server collector then
+    /// reads the families those sources and their scoring need (<see cref="PgFactCollector.FamilySources"/>), and the
+    /// detector runs only when their scoring can read its facts, so each fact of those sources is the one the whole pass
+    /// scores. The returned list then holds only the facts of the families read.</para>
+    /// </summary>
+    public Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
+        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null, CancellationToken cancellationToken = default) =>
+        CollectAndScoreFactsAsync(serverId, serverName, hoursBack, asOfUtc, sources: null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="CollectAndScoreFactsAsync(int, string, int, DateTime?, CancellationToken)"/> for the facts of
+    /// <paramref name="sources"/> only (#8570); null reads every family.
     /// </summary>
     public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
-        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
+        int serverId, string serverName, int hoursBack, DateTime? asOfUtc, IReadOnlySet<string>? sources, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -874,6 +887,8 @@ public sealed class DarlingAnalysisService
                read while they are fresh; a past as_of reads live. */
             ReusePlanRegressionCandidates = asOfUtc is null,
             FamilyParallelism = PgFactCollector.MaxFamilyParallelism, /* #9149 */
+            /* #8570: the SQL Server collector reads only the families these sources need; null reads them all. */
+            RequestedFactSources = sources,
             CancellationToken = cancellationToken
         };
 
@@ -885,9 +900,13 @@ public sealed class DarlingAnalysisService
             {
                 /* Same detector, same context, same position as the pass (#3691). A collector that
                    observed the window but emitted no fact does not short-circuit this: the detector reads
-                   the store on its own and its facts are part of what this read shows. */
-                var anomalies = await engine.Detector.DetectAnomaliesAsync(context);
-                facts.AddRange(anomalies);
+                   the store on its own and its facts are part of what this read shows. #8570: a SQL Server
+                   read narrowed to sources whose scoring reads no ANOMALY_* fact does not need the detector's. */
+                if (engine.Collector is not PgFactCollector || PgFactCollector.NeedsAnomalyFacts(sources))
+                {
+                    var anomalies = await engine.Detector.DetectAnomaliesAsync(context);
+                    facts.AddRange(anomalies);
+                }
             }
             if (facts.Count == 0) return (facts, context.Coverage, CollectionCaveatState.From(context));
             _scorer.ScoreAll(facts);
