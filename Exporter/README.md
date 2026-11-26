@@ -197,7 +197,7 @@ A URL in the config must not carry a user name, a password, a query string, a fr
 The message names the config key (for example `destination.credentials.secret_access_key_env`) and never the variable or the profile.
 
 `prefix` is a folder path with `/` between folders. A `.` or `..` segment, a backslash and, for a `local` destination, a drive letter are refused, so a prefix cannot leave the destination.
-An `azure_blob` `container` follows the Azure naming rules: 3 to 63 characters of lowercase letters, digits and hyphens, starting and ending with a letter or digit, with no two hyphens in a row.
+An `azure_blob` `container` follows the Azure naming rules: 3 to 63 characters of lowercase letters, digits and hyphens, starting and ending with a letter or digit, with no two hyphens in a row. The special containers `$root` and `$web` are accepted too.
 An `s3` `bucket` cannot contain `/` or `\`, and cannot be `.` or `..`.
 
 A key that appears twice in the same object is an error in `check-config`, `run`, `run --plan-only` and `export --config`. The message names the key (for example `destination.bucket: duplicate key`) and exits with code 2.

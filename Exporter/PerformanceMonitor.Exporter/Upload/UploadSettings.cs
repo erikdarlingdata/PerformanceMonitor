@@ -227,9 +227,9 @@ public abstract record UploadSettings
                 }
 
                 var container = RequiredString(element, "container", "destination");
-                if (!AzureContainerName.IsMatch(container) || container.Contains("--", StringComparison.Ordinal))
+                if (container is not ("$root" or "$web") && (!AzureContainerName.IsMatch(container) || container.Contains("--", StringComparison.Ordinal)))
                 {
-                    throw new ArgumentException("destination.container must be 3 to 63 characters: lowercase letters, digits and hyphens, starting and ending with a letter or digit, with no two hyphens in a row");
+                    throw new ArgumentException("destination.container must be 3 to 63 characters: lowercase letters, digits and hyphens, starting and ending with a letter or digit, with no two hyphens in a row, or the special container '$root' or '$web'");
                 }
 
                 return new AzureBlob(accountUrl?.TrimEnd('/'), container, OptionalPrefix(element), auth, hive);

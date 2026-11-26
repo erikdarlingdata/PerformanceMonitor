@@ -314,6 +314,8 @@ public class UploadSettingsTests
     [InlineData("abc")]
     [InlineData("a-b-c")]
     [InlineData("1a2")]
+    [InlineData("$root")]
+    [InlineData("$web")]
     public void FromJson_accepts_an_azure_container_name(string container) =>
         Assert.Equal(container, Assert.IsType<UploadSettings.AzureBlob>(Json(AzureContainer(container))).Container);
 
@@ -336,7 +338,8 @@ public class UploadSettingsTests
     [InlineData("lab_secret")]
     [InlineData("lab.secret")]
     [InlineData("lab secret")]
-    [InlineData("$root")]
+    [InlineData("$logs")]
+    [InlineData("$Root")]
     [InlineData("../lab-secret")]
     public void FromJson_refuses_an_azure_container_name_that_is_not_one(string container)
     {
