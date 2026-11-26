@@ -430,17 +430,7 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
         var builder = new ObjectUsageChainBuilder(_duckDb, () => Now);
 
         /* A read held on another thread for the whole build: a builder that asked for the write lock would wait out its budget. */
-        using var release = new System.Threading.ManualResetEventSlim(false);
-        using var held = new System.Threading.ManualResetEventSlim(false);
-        var holder = Task.Factory.StartNew(() =>
-        {
-            using (_duckDb.AcquireReadLock())
-            {
-                held.Set();
-                release.Wait();
-            }
-        }, TaskCreationOptions.LongRunning);
-        held.Wait();
+        using var heldRead = new ObjectUsageChainHeldRead(_duckDb);
         try
         {
             Assert.Equal(3, await builder.BuildPairAsync(_serverId, "Wide", int.MaxValue, CancellationToken.None));
@@ -448,8 +438,7 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
         }
         finally
         {
-            release.Set();
-            await holder;
+            await heldRead.ReleaseAsync();
         }
 
         Assert.Equal(2L * Objects, await CountAsync("object_usage_runs"));
