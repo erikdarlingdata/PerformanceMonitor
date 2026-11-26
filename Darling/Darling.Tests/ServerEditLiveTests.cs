@@ -541,10 +541,17 @@ public sealed partial class ServerEditLiveTests : IDisposable
 
             Task<string> OwnerEdit(string changesJson) =>
                 Edit.EditServerByNameAsync(rig.Owner, "alpha-94.example.test", changesJson, Reachable, TestKeyRings.Healthy, null, ct);
-            Task<string> NeverEnabled(string server, bool enable) => throw new InvalidOperationException("enabled must not be touched when the edit is refused.");
+            Task<string> NeverEnabled(int serverId, bool enable) => throw new InvalidOperationException("enabled must not be touched when the edit is refused.");
+            /* The verb's target: the row as it is read once before the first send, with its modified_at as the expected value. */
+            async Task<DarlingCliCommands.EditServerTarget> TargetAsync()
+            {
+                var row = (await new Edit.PostgresServerEditStore(rig.Owner).ReadRowAsync(5194, ct))!;
+                return new DarlingCliCommands.EditServerTarget(
+                    row.ServerId, "alpha-94.example.test", row.Name, row.Host, row.Port, Edit.AuthWord(row.Auth), row.Username, Edit.ModifiedAtToken(row.ModifiedAt));
+            }
 
             Assert.True(DarlingCliCommands.TryParseEditServerArgs(["alpha-94.example.test", "--set", "host=alpha-99.example.test"], out var moveRequest, out _));
-            var (moveLines, moveExit) = await DarlingCliCommands.RunEditServerAsync(moveRequest!, OwnerEdit, NeverEnabled, _ => null);
+            var (moveLines, moveExit) = await DarlingCliCommands.RunEditServerAsync(moveRequest!, OwnerEdit, NeverEnabled, _ => null, await TargetAsync());
             Assert.Equal(1, moveExit);
             Assert.Contains(Edit.EditRemediationKeptText, string.Join('\n', moveLines), StringComparison.Ordinal);
             Assert.Equal(hostBefore, await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5194", ct));
@@ -552,7 +559,7 @@ public sealed partial class ServerEditLiveTests : IDisposable
             Assert.Equal(versionBefore, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
 
             Assert.True(DarlingCliCommands.TryParseEditServerArgs(["alpha-94.example.test", "--set", "name=Renamed-94"], out var renameRequest, out _));
-            var (renameLines, renameExit) = await DarlingCliCommands.RunEditServerAsync(renameRequest!, OwnerEdit, NeverEnabled, _ => null);
+            var (renameLines, renameExit) = await DarlingCliCommands.RunEditServerAsync(renameRequest!, OwnerEdit, NeverEnabled, _ => null, await TargetAsync());
             Assert.Equal(0, renameExit);
             Assert.Contains("Changed Renamed-94", string.Join('\n', renameLines), StringComparison.Ordinal);
             Assert.Equal("Renamed-94", await ScalarAsync<string>(rig.Owner, "SELECT name FROM config_monitored_servers WHERE server_id = 5194", ct));

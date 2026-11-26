@@ -787,7 +787,7 @@ public sealed class RegisteredServerSettingDriftTests
         var rendered = StoreConfigProvider.FormatSettingDrift(
             StoreConfigProvider.DescribeSettingDrift(new[] { file }, new[] { Registered(store) }), 10);
 
-        Assert.Equal("pgtarget: trustServerCertificate (file=true, store=false)", rendered);
+        Assert.Equal("\"pgtarget\": trustServerCertificate (file=\"true\", store=\"false\")", rendered);
     }
 
     /// <summary>
@@ -812,9 +812,9 @@ public sealed class RegisteredServerSettingDriftTests
         Assert.Equal(12, drifted.Count);
 
         var rendered = StoreConfigProvider.FormatSettingDrift(drifted, 10);
-        Assert.Contains("server00:", rendered, System.StringComparison.Ordinal);
-        Assert.Contains("server09:", rendered, System.StringComparison.Ordinal);
-        Assert.DoesNotContain("server10:", rendered, System.StringComparison.Ordinal);
+        Assert.Contains("\"server00\":", rendered, System.StringComparison.Ordinal);
+        Assert.Contains("\"server09\":", rendered, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("\"server10\":", rendered, System.StringComparison.Ordinal);
         Assert.EndsWith("and 2 more not listed", rendered, System.StringComparison.Ordinal);
     }
 

@@ -154,7 +154,10 @@ public sealed class EditServerVerbTests
             ["tested"] = true,
         }.ToJsonString();
 
-    private static Task<string> NoEnable(string server, bool enable) => throw new InvalidOperationException("enabled was not asked for");
+    private static Task<string> NoEnable(int serverId, bool enable) => throw new InvalidOperationException("enabled was not asked for");
+
+    private static readonly DarlingCliCommands.EditServerTarget Sql01 =
+        new(7, "sql01", "sql01", "sql01", 0, "sql", "darling_monitor", "2026-11-26T10:00:00.0000000");
 
     [Theory]
     [InlineData(Edit.EditPasswordNeededText)]
@@ -176,7 +179,8 @@ public sealed class EditServerVerbTests
             {
                 prompts++;
                 return TypedPassword;
-            });
+            },
+            Sql01);
 
         Assert.Equal(0, exitCode);
         Assert.Equal(1, prompts);
@@ -198,7 +202,7 @@ public sealed class EditServerVerbTests
                 calls++;
                 return Task.FromResult(Answer(Edit.EditStatus.Invalid, Edit.EditPasswordNeededText));
             },
-            NoEnable, _ => null);
+            NoEnable, _ => null, Sql01);
 
         Assert.Equal(1, exitCode);
         Assert.Equal(1, calls);
@@ -216,16 +220,17 @@ public sealed class EditServerVerbTests
                 enableCalls++;
                 return Task.FromResult("{}");
             },
-            _ => throw new InvalidOperationException("no password is needed for this answer"));
+            _ => throw new InvalidOperationException("no password is needed for this answer"),
+            Sql01);
 
         Assert.Equal(1, exitCode);
         Assert.Equal(0, enableCalls);
     }
 
     [Fact]
-    public async Task Enabled_is_applied_after_the_edit_to_the_server_as_it_was_saved()
+    public async Task Enabled_is_applied_after_the_edit_to_the_server_found_at_the_start_by_its_id_whatever_the_edit_renamed_it_to()
     {
-        string? enabledServer = null;
+        int? enabledServer = null;
         bool? enabledState = null;
         var (_, exitCode) = await DarlingCliCommands.RunEditServerAsync(
             Parsed("sql01", "--set", "host=moved", "--set", "enabled=false"),
@@ -236,10 +241,11 @@ public sealed class EditServerVerbTests
                 enabledState = enable;
                 return Task.FromResult(new JsonObject { ["status"] = "changed", ["what_changed"] = "sql01 is now disabled." }.ToJsonString());
             },
-            _ => null);
+            _ => null,
+            Sql01);
 
         Assert.Equal(0, exitCode);
-        Assert.Equal("moved", enabledServer);
+        Assert.Equal(Sql01.ServerId, enabledServer);
         Assert.False(enabledState);
     }
 
@@ -250,7 +256,8 @@ public sealed class EditServerVerbTests
             Parsed("sql01", "--set", "enabled=true"),
             _ => throw new InvalidOperationException("there is no edit to send"),
             (_, _) => Task.FromResult(Answer("not_found", "No such server.")),
-            _ => null);
+            _ => null,
+            Sql01);
 
         Assert.Equal(1, exitCode);
     }

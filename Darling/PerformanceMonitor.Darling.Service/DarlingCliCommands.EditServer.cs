@@ -130,7 +130,7 @@ public static partial class DarlingCliCommands
 
         if (StoreConfigProvider.HasControlCharacter(rest[0]))
         {
-            errorMessage = "The server's name holds a control character, which a registered server's name never does.";
+            errorMessage = "The server's name holds a character that does not print (a control or format character), which the verb does not take.";
             return false;
         }
 
@@ -201,7 +201,7 @@ public static partial class DarlingCliCommands
             var text = value[(split + 1)..];
             if (StoreConfigProvider.HasControlCharacter(text))
             {
-                errorMessage = $"{canonical} holds a control character (a newline, a tab or another character below U+0020, DEL or a line separator), which the verb does not take.";
+                errorMessage = $"{canonical} holds a character that does not print (a newline, a tab or another control character, a line separator, or a format character such as a right-to-left override or a zero-width space), which the verb does not take.";
                 return false;
             }
 
@@ -329,7 +329,22 @@ public static partial class DarlingCliCommands
         {
             var where = StoreConfigProvider.DriftText(Host) + (Port > 0 ? ":" + Port.ToString(CultureInfo.InvariantCulture) : "");
             var login = string.IsNullOrEmpty(Username) ? $"{Auth} authentication" : $"login {StoreConfigProvider.DriftText(Username)} ({Auth})";
-            return $"'{StoreConfigProvider.DriftText(DisplayName)}' (id {ServerId.ToString(CultureInfo.InvariantCulture)}) at {where}, {login}";
+            return $"{StoreConfigProvider.DriftValue(DisplayName)} (id {ServerId.ToString(CultureInfo.InvariantCulture)}) at {where}, {login}";
+        }
+
+        /// <summary>Where the edit connects once <paramref name="changes"/> (an edit_server request) is applied: the host, port,
+        /// authentication and login a typed password is sent to for the connection test. Each value is in quotes with the
+        /// characters that do not print escaped, so a host or a login cannot add words to the line.</summary>
+        internal string DescribeAfter(JsonObject changes)
+        {
+            string? Changed(string key) => changes[key] is JsonValue v ? (v.TryGetValue<string>(out var s) ? s : v.ToJsonString()) : null;
+
+            var port = changes["port"] is JsonValue p && p.TryGetValue<int>(out var number) ? number : Port;
+            var username = changes.ContainsKey("username") ? Changed("username") : Username;
+            return $"host {StoreConfigProvider.DriftValue(Changed("host") ?? Host)}, "
+                + (port > 0 ? $"port {port.ToString(CultureInfo.InvariantCulture)}, " : "")
+                + $"authentication {StoreConfigProvider.DriftValue(Changed("auth") ?? Auth)}, "
+                + (string.IsNullOrEmpty(username) ? "no login name" : $"login {StoreConfigProvider.DriftValue(username)}");
         }
     }
 
@@ -343,7 +358,7 @@ public static partial class DarlingCliCommands
     {
         var match = DarlingMcpServerAdminTools.ResolveForRemoval(servers, name, nameClash: NameClash.Refuse);
         string List(IEnumerable<PerformanceMonitor.Darling.Storage.RegisteredServer> candidates) =>
-            string.Join(Environment.NewLine, candidates.Select(c => $"    {StoreConfigProvider.DriftText(c.DisplayName)} ({StoreConfigProvider.DriftText(c.ServerName)})"));
+            string.Join(Environment.NewLine, candidates.Select(c => $"    {StoreConfigProvider.DriftValue(c.DisplayName)} ({StoreConfigProvider.DriftValue(c.ServerName)})"));
         if (match.Candidates.Count == 0)
         {
             return (null, "  Not changed: no registered server is named that. Nothing was changed.");
@@ -367,37 +382,52 @@ public static partial class DarlingCliCommands
 
     /// <summary>
     /// The verb's body over its two writes, so a test drives it without a store. <paramref name="edit"/> takes an edit_server
-    /// request and returns its answer; <paramref name="setEnabled"/> takes a server name and the enabled state and returns the
-    /// enable_server or disable_server answer. When the edit answers that it needs the server's password, the password is read
-    /// with <paramref name="readPassword"/> and the same request is sent once more with it. With a <paramref name="target"/> both
-    /// sends carry its <c>modified_at</c> as <c>expected_modified_at</c>, so a server that changed while the password was typed is
-    /// refused before the password is used, and the prompt names the server, its host and its login. The enabled state is applied
-    /// only after the edit, if there is one, has succeeded. An enabled step that fails keeps the edit's lines and says the settings
-    /// were saved.
+    /// request and returns its answer; <paramref name="setEnabled"/> takes the server's id and the enabled state and returns the
+    /// enable_server or disable_server answer, so the enabled step reaches the row found at the start and never a name looked up
+    /// again. When the edit answers that it needs the server's password, <paramref name="announce"/> first prints where the
+    /// password will be sent (the host, port, authentication and login the edit sets), then the password is read with
+    /// <paramref name="readPassword"/> and the same request is sent once more with it. Both sends carry the target's
+    /// <c>modified_at</c> as <c>expected_modified_at</c>, so a server that changed while the password was typed is refused before
+    /// the password is used. A server that changed during the connection test is refused by the write, after the password was
+    /// sent: <paramref name="passwordWasSent"/> tells the two apart, and without it the line says only that nothing was saved.
+    /// The enabled state is applied only after the edit, if there is one, has succeeded. An enabled step that fails keeps the
+    /// edit's lines and says the settings were saved. Every line returned has the characters that do not print escaped
+    /// (<see cref="StoreConfigProvider.DriftText"/>), whatever a store answer, a server's name or a driver's message holds.
     /// </summary>
     internal static async Task<(IReadOnlyList<string> Lines, int ExitCode)> RunEditServerAsync(
         EditServerRequest request,
         Func<string, Task<string>> edit,
-        Func<string, bool, Task<string>> setEnabled,
+        Func<int, bool, Task<string>> setEnabled,
         Func<string, string?> readPassword,
-        EditServerTarget? target = null)
+        EditServerTarget target,
+        Action<string>? announce = null,
+        Func<bool>? passwordWasSent = null)
+    {
+        var (lines, exitCode) = await RunEditServerCoreAsync(request, edit, setEnabled, readPassword, target, announce, passwordWasSent);
+        return (lines.Select(StoreConfigProvider.DriftText).ToList(), exitCode);
+    }
+
+    private static async Task<(List<string> Lines, int ExitCode)> RunEditServerCoreAsync(
+        EditServerRequest request,
+        Func<string, Task<string>> edit,
+        Func<int, bool, Task<string>> setEnabled,
+        Func<string, string?> readPassword,
+        EditServerTarget target,
+        Action<string>? announce,
+        Func<bool>? passwordWasSent)
     {
         var lines = new List<string>();
-        var storageName = target?.StorageName ?? request.ServerName;
         var saved = false;
         if (request.Changes is { } changes)
         {
             var first = (JsonObject)changes.DeepClone();
-            if (target is not null)
-            {
-                first["expected_modified_at"] = target.ModifiedAt;
-            }
+            first["expected_modified_at"] = target.ModifiedAt;
 
             var answer = await edit(first.ToJsonString());
             if (DarlingMcpServerAdminTools.IsPasswordNeededAnswer(answer))
             {
-                var who = target?.Describe() ?? $"'{StoreConfigProvider.DriftText(request.ServerName)}'";
-                var typed = readPassword($"  This change sets how {who} is reached, and a saved password is never sent with changed connection settings unless it is typed again. Password for it (tested with the change, then saved with it): ");
+                announce?.Invoke($"  The password is sent to {target.DescribeAfter(changes)} to test the change.");
+                var typed = readPassword($"  This change sets how {target.Describe()} is reached, and a saved password is never sent with changed connection settings unless it is typed again. Password for it (tested with the change, then saved with it): ");
                 if (string.IsNullOrEmpty(typed))
                 {
                     lines.Add("  Not changed: this change needs the server's password, and none was entered.");
@@ -409,11 +439,16 @@ public static partial class DarlingCliCommands
                 answer = await edit(withPassword.ToJsonString());
                 if (StatusOf(answer) == DarlingMcpServerAdminTools.EditStatus.Conflict)
                 {
-                    lines.Add("  The server changed while the password prompt was open, so the password was not used.");
+                    lines.Add(passwordWasSent switch
+                    {
+                        null => "  The server changed after its password was asked for, so the password was not saved.",
+                        var sent when sent() => "  The server changed while the connection was tested. The password was sent for that test, to the host named above, and it was not saved.",
+                        _ => "  The server changed while the password prompt was open, so the password was not used.",
+                    });
                 }
             }
 
-            var (editLines, exitCode, savedName) = FormatEditServerOutcome(answer);
+            var (editLines, exitCode, _) = FormatEditServerOutcome(answer);
             lines.AddRange(editLines);
             if (exitCode != 0)
             {
@@ -426,7 +461,6 @@ public static partial class DarlingCliCommands
             }
 
             saved = StatusOf(answer) == DarlingMcpServerAdminTools.EditStatus.Updated;
-            storageName = savedName ?? storageName;
         }
 
         if (request.Enabled is { } enable)
@@ -434,7 +468,7 @@ public static partial class DarlingCliCommands
             JsonObject? answer;
             try
             {
-                answer = JsonNode.Parse(await setEnabled(storageName, enable)) as JsonObject;
+                answer = JsonNode.Parse(await setEnabled(target.ServerId, enable)) as JsonObject;
             }
             catch (JsonException)
             {
@@ -442,7 +476,7 @@ public static partial class DarlingCliCommands
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                lines.Add("  enabled was not changed: could not reach the store: " + StoreConfigProvider.DriftText(ex.Message));
+                lines.Add("  enabled was not changed: could not reach the store: " + ex.Message);
                 if (saved)
                 {
                     lines.Add("  The settings above were saved.");
@@ -470,6 +504,28 @@ public static partial class DarlingCliCommands
         }
 
         return (lines, 0);
+    }
+
+    /// <summary>
+    /// The answer for an edit send that threw. A send that carried the typed password answers with one fixed sentence and the
+    /// exception's type and never its message: a driver or store message can repeat the password, and taking the password out of
+    /// a message would show which of its words was the password. A send without a password keeps the message.
+    /// </summary>
+    internal static string EditServerSendFailure(string changesJson, Exception failure)
+    {
+        bool carriesPassword;
+        try
+        {
+            carriesPassword = JsonNode.Parse(changesJson) is JsonObject sent && sent.ContainsKey("password");
+        }
+        catch (JsonException)
+        {
+            carriesPassword = true;
+        }
+
+        return McpHelpers.FormatError("edit_server", carriesPassword
+            ? new InvalidOperationException($"the change failed after the password was typed ({failure.GetType().Name}). The failure's own text is not printed, because it can repeat the password. Nothing was reported as saved: run the verb again to see the server's settings.")
+            : failure);
     }
 
     private static string? StatusOf(string answerJson)
@@ -570,7 +626,7 @@ public static partial class DarlingCliCommands
         }
         catch (Exception ex)
         {
-            error.WriteLine($"Could not load configuration: {ex.Message}");
+            error.WriteLine($"Could not load configuration: {StoreConfigProvider.DriftText(ex.Message)}");
             return 1;
         }
 
@@ -610,12 +666,14 @@ public static partial class DarlingCliCommands
         /* The connection test of a Windows-authentication server is also run by the service, as its own account, when the service
            can be asked: the same test --add-server makes. */
         var identityNotes = new List<string>();
+        var probes = 0;
         await using var tester = OperatingSystem.IsWindows()
             ? new DarlingServiceConnectionTest.LazyStoreServiceConnectionTester(connectionString)
             : null;
         var consoleIdentity = DarlingServiceConnectionTest.ConsoleIdentity();
         async Task<ConnectionProbeResult> ProbeAsync(MonitoredServer server, CancellationToken token)
         {
+            probes++;
             var (probe, notes) = await DarlingServiceConnectionTest.TestAsync(
                 server, tester, DarlingMcpServerAdminTools.ProbeAsConsoleUserAsync, consoleIdentity, OperatingSystem.IsWindows(), token);
             identityNotes.AddRange(notes);
@@ -664,8 +722,8 @@ public static partial class DarlingCliCommands
                password is sealed to, and the server it is for, so a configuration or a name that is not the one the operator meant
                is seen before a password is spent on it. */
             var firstKey = await DarlingCliSealKey.ResolveAsync(config, configPath, dataSource, null, cancellationToken);
-            output.WriteLine("  " + StoreAndKeyLine(dataSource.ConnectionString, firstKey.Ring));
-            output.WriteLine($"  Configuration: {configPath ?? "(none)"}");
+            output.WriteLine("  " + StoreConfigProvider.DriftText(StoreAndKeyLine(dataSource.ConnectionString, firstKey.Ring)));
+            output.WriteLine($"  Configuration: {StoreConfigProvider.DriftText(configPath ?? "(none)")}");
             output.WriteLine($"  Server: {target.Describe()}.");
             output.WriteLine();
 
@@ -682,18 +740,14 @@ public static partial class DarlingCliCommands
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    var typed = JsonNode.Parse(changesJson) is JsonObject sent && sent["password"] is JsonValue pw && pw.TryGetValue<string>(out var text) ? text : null;
-                    var message = string.IsNullOrEmpty(typed) ? ex.Message : ex.Message.Replace(typed, "[redacted]", StringComparison.Ordinal);
-                    return McpHelpers.FormatError("edit_server", new InvalidOperationException(message));
+                    return EditServerSendFailure(changesJson, ex);
                 }
             }
 
             (lines, exitCode) = await RunEditServerAsync(
                 request,
                 EditAsync,
-                (server, enable) => enable
-                    ? DarlingMcpCollectionStateTools.EnableServer(dataSource, server, null, cancellationToken)
-                    : DarlingMcpCollectionStateTools.DisableServer(dataSource, server, null, cancellationToken),
+                (serverId, enable) => DarlingMcpCollectionStateTools.SetServerEnabledByIdAsync(dataSource, serverId, enable, null, cancellationToken),
                 readPassword ?? ((Func<string, string?>)(label =>
                 {
                     var typed = ReadLoginPassword(label, input, output, Console.IsInputRedirected, out var inputRefusal);
@@ -704,7 +758,9 @@ public static partial class DarlingCliCommands
 
                     return typed;
                 })),
-                target);
+                target,
+                line => output.WriteLine(line),
+                () => probes > 0);
 
             foreach (var line in lines)
             {
@@ -713,12 +769,12 @@ public static partial class DarlingCliCommands
 
             foreach (var note in identityNotes)
             {
-                output.WriteLine("    " + note);
+                output.WriteLine("    " + StoreConfigProvider.DriftText(note));
             }
 
             if (sealedWith is { Ring: DarlingCliSealKey.PublishedKeyRing { SealedCount: > 0 }, Notice: { } notice })
             {
-                output.WriteLine(notice);
+                output.WriteLine(StoreConfigProvider.DriftText(notice));
             }
 
             return exitCode;

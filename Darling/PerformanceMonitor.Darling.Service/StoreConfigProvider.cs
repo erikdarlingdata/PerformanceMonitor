@@ -692,7 +692,7 @@ public sealed class StoreConfigProvider
 
         /* #9693: one line per server, each with the --edit-server command that applies the file's values, so a host with no
            Viewer, web dashboard or MCP still has a way to make the registry agree. */
-        foreach (var line in BuildSettingDriftWarnings(live, MaxDriftedServersLogged, OperatorVerbForm.EntryPointHere()))
+        foreach (var line in BuildSettingDriftWarnings(live, MaxDriftedServersLogged, OperatorVerbForm.PasteableEntryPointHere()))
         {
             _logger?.LogWarning("{DriftLine}", line);
         }
@@ -714,13 +714,18 @@ public sealed class StoreConfigProvider
     /// per server, naming every field that differs with both values and the <c>--edit-server</c> command that applies the
     /// file's values. A field the verb does not set is named with where it is changed instead. At most
     /// <paramref name="maxServers"/> servers get a line of their own, and one more line names the rest. No password is in a
-    /// line: the comparison never reads one, so a field list cannot carry it. Every value is printed with control
-    /// characters escaped (<see cref="DriftText"/>), so a name or host that holds a newline cannot start a second log line.
-    /// The command is safe to paste into the shell of <paramref name="windows"/> (PowerShell) or of every other host (bash):
-    /// <see cref="CommandWord"/>. A server whose values cannot be quoted safely gets no command. Pure, so a test reads the lines.
+    /// line: the comparison never reads one, so a field list cannot carry it. Every value is in double quotes with the
+    /// characters that do not print escaped (<see cref="DriftValue"/>), so a name or host cannot start a second log line, reorder
+    /// how the line displays or add words that read as the line's own.
+    /// The command runs as printed in the shell the line names: bash everywhere but Windows, PowerShell (Windows PowerShell 5.1
+    /// and PowerShell 7) when <paramref name="windows"/> is true, where <paramref name="entryPoint"/> is the call operator and
+    /// the full path of the service executable (<see cref="OperatorVerbForm.PasteableEntryPoint"/>). A server with a value
+    /// <see cref="CommandWord"/> does not print gets no command, and so does every server when <paramref name="entryPoint"/> is
+    /// null: the line says to run <c>--edit-server</c> by hand. The command is the end of the line, so copying from its first
+    /// word to the end of the line copies the command and nothing else. Pure, so a test reads the lines.
     /// </summary>
     internal static IReadOnlyList<string> BuildSettingDriftWarnings(
-        IReadOnlyList<ServerSettingDrift> live, int maxServers, string entryPoint, bool? windows = null)
+        IReadOnlyList<ServerSettingDrift> live, int maxServers, string? entryPoint, bool? windows = null)
     {
         var lines = new List<string>();
         if (live is null || live.Count == 0)
@@ -732,16 +737,24 @@ public sealed class StoreConfigProvider
         var shown = maxServers > 0 && live.Count > maxServers ? maxServers : live.Count;
         foreach (var server in live.Take(shown))
         {
-            var fields = string.Join(", ", server.Fields.Select(f => $"{f.Field} (file={DriftText(f.FileValue)}, store={DriftText(f.StoreValue)})"));
+            var fields = string.Join(", ", server.Fields.Select(f => $"{f.Field} (file={DriftFieldValue(f.FileValue)}, store={DriftFieldValue(f.StoreValue)})"));
             var other = server.Fields.Where(f => !DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field).ToList();
             var args = EditServerArgsFor(server);
             /* args is the name, then "--set" and a field=value pair for each field: the flag is printed as it is, the rest is quoted. */
             var words = args.Select((a, i) => i > 0 && i % 2 == 1 ? a : CommandWord(a, powershell)).ToList();
-            var remedy = args.Count == 0
-                ? ""
-                : words.Contains(null)
-                    ? $" --edit-server is not printed for this server because a value holds a control character or another character a shell cannot take safely. Type the values yourself: {entryPoint} --edit-server <server name> followed by --set <field>=<value> for {string.Join(", ", server.Fields.Where(f => DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field))}."
-                    : $" To apply the file's values, run: {entryPoint} --edit-server {string.Join(" ", words)}";
+            var remedy = "";
+            if (args.Count > 0 && entryPoint is not null && !words.Contains(null))
+            {
+                remedy = $" To apply the file's values, {(powershell ? "in PowerShell, run" : "run")}: {entryPoint} --edit-server {string.Join(" ", words)}";
+            }
+            else if (args.Count > 0)
+            {
+                remedy = " No command is printed for this server because "
+                    + (words.Contains(null) ? "a value holds characters" : "the folder the service is installed in holds characters")
+                    + $" that cannot be pasted safely. Run --edit-server by hand{(powershell ? " in PowerShell" : "")}: {entryPoint ?? OperatorVerbForm.EntryPoint(powershell, null)} --edit-server <server name>"
+                    + $" followed by --set <field>=<value> for {string.Join(", ", server.Fields.Where(f => DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field))}.";
+            }
+
             var otherNote = other.Count == 0
                 ? ""
                 : (other.Contains("engine", StringComparer.Ordinal)
@@ -754,16 +767,16 @@ public sealed class StoreConfigProvider
                 ? " Note --test-connection reads darling.json, so it probes the FILE's settings and can report PASS for a connection the service will never make."
                 : "";
             lines.Add(
-                $"darling.json disagrees with the registry about monitored server '{DriftText(server.Server)}', and the registry is what the service uses: {fields}. "
+                $"darling.json disagrees with the registry about monitored server {DriftValue(server.Server)}, and the registry is what the service uses: {fields}. "
                 + "The store is authoritative after the first seed, so editing a registered server's settings in the file changes nothing and a restart cannot change that."
-                + remedy + otherNote + connectionCaveat + DescribePasswordNotUsed([server], 1));
+                + otherNote + connectionCaveat + DescribePasswordNotUsed([server], 1) + remedy);
         }
 
         if (shown < live.Count)
         {
             lines.Add(
                 $"darling.json also disagrees with the registry about {live.Count - shown} more monitored server(s): "
-                + string.Join(", ", live.Skip(shown).Select(d => DriftText(d.Server)))
+                + string.Join(", ", live.Skip(shown).Select(d => DriftValue(d.Server)))
                 + ". Fix the ones listed above and restart to see these, or compare them in the Viewer's Manage Servers window or on the web dashboard's Admin page.");
         }
 
@@ -790,9 +803,12 @@ public sealed class StoreConfigProvider
     }
 
     /// <summary>
-    /// A value as it appears in a log line: every control character (below U+0020, DEL and U+0080 to U+009F), U+2028 and U+2029
-    /// is written as <c>\uXXXX</c>, so a value a person can set (a server name, a host, a login) never ends a log line and starts a
-    /// forged one (#9693).
+    /// A value as it appears in a log line or in a line the <c>--edit-server</c> verb prints (#9693): every character that does not
+    /// print is written as <c>\uXXXX</c>, so a value a person can set (a server name, a host, a login) never ends a line and
+    /// starts a forged one, and never reorders how the line displays. Those are the control characters (below U+0020, DEL and
+    /// U+0080 to U+009F), U+2028 and U+2029, the format characters (a right-to-left override, an isolate, a zero-width space),
+    /// private-use and unassigned code points, a lone surrogate and U+FFFD. A character outside the first plane is written as its
+    /// two code units.
     /// </summary>
     internal static string DriftText(string? value)
     {
@@ -802,85 +818,77 @@ public sealed class StoreConfigProvider
         }
 
         var builder = new StringBuilder(value.Length);
-        foreach (var c in value)
+        for (var i = 0; i < value.Length; i++)
         {
-            if (IsLogControl(c))
+            var units = UnitsAt(value, i, out var escaped);
+            for (var u = i; u < i + units; u++)
             {
-                builder.Append("\\u").Append(((int)c).ToString("X4", CultureInfo.InvariantCulture));
+                if (escaped)
+                {
+                    builder.Append("\\u").Append(((int)value[u]).ToString("X4", CultureInfo.InvariantCulture));
+                }
+                else
+                {
+                    builder.Append(value[u]);
+                }
             }
-            else
-            {
-                builder.Append(c);
-            }
+
+            i += units - 1;
         }
 
         return builder.ToString();
     }
 
-    /// <summary>True for the characters <see cref="DriftText"/> escapes.</summary>
-    internal static bool IsLogControl(char c) => char.IsControl(c) || c is '\u2028' or '\u2029';
+    /// <summary>A value between double quotes in a drift line: <see cref="DriftText"/>, with a double quote in the value written
+    /// as <c>\u0022</c>, so the value ends at the closing quote and nothing in it reads as the line's own words (#9693).</summary>
+    internal static string DriftValue(string? value) =>
+        "\"" + DriftText(value).Replace("\"", "\\u0022", StringComparison.Ordinal) + "\"";
+
+    /// <summary>One side of a drifted field: <see cref="DriftValue"/>, or the bare <c>(none)</c> for a value that is not set, so
+    /// a value that is set is always the one in quotes.</summary>
+    private static string DriftFieldValue(string value) => value == NoneText ? NoneText : DriftValue(value);
+
+    /// <summary>How many code units the character at <paramref name="index"/> takes (two for a surrogate pair) and whether
+    /// <see cref="DriftText"/> escapes it.</summary>
+    private static int UnitsAt(string value, int index, out bool escaped)
+    {
+        var c = value[index];
+        if (char.IsHighSurrogate(c) && index + 1 < value.Length && char.IsLowSurrogate(value[index + 1]))
+        {
+            escaped = IsLogControl(char.GetUnicodeCategory(value, index));
+            return 2;
+        }
+
+        escaped = char.IsSurrogate(c) || IsLogControl(c);
+        return 1;
+    }
+
+    private static bool IsLogControl(UnicodeCategory category) =>
+        category is UnicodeCategory.Control or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator
+            or UnicodeCategory.Format or UnicodeCategory.PrivateUse or UnicodeCategory.OtherNotAssigned or UnicodeCategory.Surrogate;
+
+    /// <summary>True for a single code unit <see cref="DriftText"/> escapes. Half of a surrogate pair is not one: the pair is
+    /// judged together.</summary>
+    internal static bool IsLogControl(char c) => !char.IsSurrogate(c) && (c == '\uFFFD' || IsLogControl(char.GetUnicodeCategory(c)));
 
     /// <summary>True when <paramref name="value"/> holds a character <see cref="DriftText"/> escapes.</summary>
-    internal static bool HasControlCharacter(string? value) => value is not null && value.Any(IsLogControl);
-
-    private const string CommandBareCharacters = "._:/=-";
-
-    /// <summary>
-    /// One word of a printed command, safe to paste into a bash or zsh shell or, when <paramref name="powershell"/> is true, into
-    /// PowerShell (#9693). A word whose every character is a letter, digit or one of <c>. _ : / = -</c> and that does not start
-    /// with <c>-</c> or <c>@</c> is printed as it is. Any other word is put in single quotes: bash takes nothing inside them
-    /// (a quote in the word is written <c>'\''</c>), and PowerShell takes the same single quote, doubled, as the only special
-    /// character, which includes the four curly quotes U+2018 to U+201B it treats as single quotes too. Null when the word holds
-    /// a control character, a line or paragraph separator or any other character that does not print (a format character such
-    /// as a right-to-left override, an unassigned or private-use code point, a lone surrogate): no quoting makes those
-    /// safe to read or paste, so the caller prints no command and tells the operator to type the values.
-    /// </summary>
-    internal static string? CommandWord(string text, bool powershell)
+    internal static bool HasControlCharacter(string? value)
     {
-        foreach (var rune in text.EnumerateRunes())
+        for (var i = 0; value is not null && i < value.Length; i++)
         {
-            switch (Rune.GetUnicodeCategory(rune))
+            i += UnitsAt(value, i, out var escaped) - 1;
+            if (escaped)
             {
-                case UnicodeCategory.Control:
-                case UnicodeCategory.Format:
-                case UnicodeCategory.LineSeparator:
-                case UnicodeCategory.ParagraphSeparator:
-                case UnicodeCategory.Surrogate:
-                case UnicodeCategory.OtherNotAssigned:
-                case UnicodeCategory.PrivateUse:
-                    return null;
-            }
-
-            if (rune.Value == 0xFFFD)
-            {
-                return null;
+                return true;
             }
         }
 
-        if (text.Length > 0 && text[0] is not ('-' or '@') && text.All(c => char.IsAsciiLetterOrDigit(c) || CommandBareCharacters.Contains(c, StringComparison.Ordinal)))
-        {
-            return text;
-        }
-
-        var quoted = new StringBuilder(text.Length + 2).Append('\'');
-        foreach (var c in text)
-        {
-            if (c == '\'')
-            {
-                quoted.Append(powershell ? "''" : "'\\''");
-            }
-            else if (powershell && c is >= '\u2018' and <= '\u201B')
-            {
-                quoted.Append(c).Append(c);
-            }
-            else
-            {
-                quoted.Append(c);
-            }
-        }
-
-        return quoted.Append('\'').ToString();
+        return false;
     }
+
+    /// <summary>One word of the printed <c>--edit-server</c> command, or null when it cannot be printed safely:
+    /// <see cref="OperatorVerbForm.ShellWord"/>, the quoter the entry point is printed with too.</summary>
+    internal static string? CommandWord(string text, bool powershell) => OperatorVerbForm.ShellWord(text, powershell);
 
     /// <summary>
     /// The clause for the drift warning about a password: a server whose darling.json entry carries a password or a
@@ -900,7 +908,7 @@ public sealed class StoreConfigProvider
         }
 
         var shown = maxServers > 0 && names.Count > maxServers ? maxServers : names.Count;
-        var listed = string.Join(", ", names.Take(shown).Select(DriftText)) + (shown < names.Count ? $" and {names.Count - shown} more" : "");
+        var listed = string.Join(", ", names.Take(shown).Select(DriftValue)) + (shown < names.Count ? $" and {names.Count - shown} more" : "");
         return $" For a drifted connection setting on an entry that carries a password or a reference ({listed}), "
             + "its password from darling.json is not used until the two agree.";
     }
@@ -1460,8 +1468,8 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
         for (int i = 0; i < shown; i++)
         {
             var server = drifted[i];
-            var fields = server.Fields.Select(f => $"{f.Field} (file={DriftText(f.FileValue)}, store={DriftText(f.StoreValue)})");
-            parts.Add($"{DriftText(server.Server)}: {string.Join(", ", fields)}");
+            var fields = server.Fields.Select(f => $"{f.Field} (file={DriftFieldValue(f.FileValue)}, store={DriftFieldValue(f.StoreValue)})");
+            parts.Add($"{DriftValue(server.Server)}: {string.Join(", ", fields)}");
         }
 
         if (shown < drifted.Count)
