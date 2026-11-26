@@ -259,8 +259,13 @@ public sealed class McpServerEditSafetyTests : IDisposable
         var manager = Seeded();
         var database = "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645";
 
-        /* A changed database is a changed address, so the call carries the password, as the Edit Server window's own question asks for. */
-        var answer = await Edit(manager, System.Text.Json.JsonSerializer.Serialize(new { database, password = NewSecret }));
+        /* A changed database is a setting this Windows user has not confirmed, which a tool call cannot answer, so the window's own
+           confirmation is recorded first and the call then reaches the save. */
+        var confirmed = Reread();
+        confirmed.DatabaseName = database;
+        manager.ConfirmHost(confirmed);
+
+        var answer = await Edit(manager, System.Text.Json.JsonSerializer.Serialize(new { database }));
 
         Assert.True(Status(answer) == "updated", answer);
         Assert.Equal(database, Reread().DatabaseName);

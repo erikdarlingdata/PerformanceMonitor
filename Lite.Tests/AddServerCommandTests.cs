@@ -389,6 +389,35 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Equal("Or\u202Eders", Reload().GetAllServers().Single().DisplayName);
     }
 
+    /// <summary>#9787: Import Settings skips and counts an entry whose display name, host or database holds a control character, writes its
+    /// name to the log escaped, and still imports a clean neighbour.</summary>
+    [Fact]
+    public void ImportSettings_SkipsAndCountsAnEntryHoldingAControlCharacter_LogsItEscaped_AndImportsTheNeighbour()
+    {
+        var file = Path.Combine(_root, "import-servers.json");
+        File.WriteAllText(file, JsonSerializer.Serialize(new
+        {
+            Servers = new[]
+            {
+                new ServerConnection { ServerName = "sql01", DisplayName = "prod\nFAKE" },
+                new ServerConnection { ServerName = "sql02\u202Efake", DisplayName = "bidi" },
+                new ServerConnection { ServerName = "sql03", DisplayName = "tag", DatabaseName = "db\U000E0041" },
+                new ServerConnection { ServerName = "sql04", DisplayName = "clean" },
+            },
+        }));
+        var manager = new ServerManager(_root, _log, HostsFile, new CredentialService(_store));
+
+        var (imported, skipped, collided) = manager.ImportServersFromFile(file);
+
+        Assert.Equal((1, 3, 0), (imported, skipped, collided));
+        Assert.Equal("sql04", manager.GetAllServers().Single().ServerName);
+        Assert.Equal(["sql04"], ServerNames());
+        var refusals = _log.Lines.Where(l => l.Contains("holds a control character", StringComparison.Ordinal)).ToList();
+        Assert.Equal(3, refusals.Count);
+        Assert.All(refusals, line => Assert.DoesNotContain(line, ServerFieldText.IsControl));
+        Assert.Contains(refusals, l => l.Contains("prod\\u000AFAKE", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("""[{"host":"np:sql01","auth":"windows"}]""")]
     [InlineData("""[{"host":"sql01","auth":"sql","password":"p"}]""")]

@@ -1161,6 +1161,16 @@ public class ServerManager
                    intent), in any letter case. The database is part of the identity. Several monitored
                    databases on one Azure SQL Database server share an address, and each of them is its own
                    server, so comparing the address alone dropped every sibling after the first. */
+                /* #9787: an imported entry is a new registration, so a display name, host or database holding a control character is not
+                   imported, as AddServer refuses it. It counts as skipped, and the name is written escaped so it cannot start a second
+                   log entry. servers.json carries no login. */
+                if (ServerFieldText.FirstRefusal(server.DisplayName, server.ServerName, server.DatabaseName, null) is { } fieldRefusal)
+                {
+                    skipped++;
+                    _logger?.LogWarning("Import Settings did not import server '{DisplayName}': {Refusal}", ServerFieldText.Escape(NameForMessage(server)), fieldRefusal);
+                    continue;
+                }
+
                 /* #6352: an imported entry is a new registration here, so a host SqlClient would read as a named pipe or
                    an admin connection is not imported. It counts as skipped, and the log says which. */
                 if (HostRefusal(server.ServerName, null) is { } hostRefusal)
