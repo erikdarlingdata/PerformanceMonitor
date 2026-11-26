@@ -695,20 +695,7 @@ public static class DarlingRetention
                already the wider of the two guards, so #4503's 6-hour width fits inside the SAME margin with
                no widening needed (PayloadDimensionGuardMarginTests, in Darling.Tests, pins guard <= margin so
                a future guard change that outgrows it fails loudly rather than silently). */
-            var widestFactRetentionDays = 1;
-            foreach (var definition in CollectorCatalog.All)
-            {
-                if (PayloadDimensions.ForTable(definition.TargetTable).Count == 0)
-                {
-                    continue;
-                }
-
-                var factRetentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name)
-                    ?? (CollectorScheduleDefaults.All.TryGetValue(definition.Name, out var dimSchedule)
-                        ? dimSchedule.RetentionDays
-                        : 1));
-                widestFactRetentionDays = Math.Max(widestFactRetentionDays, factRetentionDays);
-            }
+            var widestFactRetentionDays = WidestDimensionFactRetentionDays(retentionDaysFor);
 
             /* That assumed cutoff embeds one assumption: facts older than their retention are GONE. Two
                legitimate mechanisms break it — a dim-feeding table whose purge FAILED (#1782), and one the
@@ -980,9 +967,12 @@ public static class DarlingRetention
                 }
             }
 
-            /* collect.query_tag_sightings (#5977): a sighting is the record of a query key (or caller) seen in the fact tables
-               that carry query statistics, so it is kept as long as the longest raw retention of those tables
-               (widestFactRetentionDays, resolved above through the same resolver the fact purge uses) and no longer. last_seen is
+            /* collect.query_tag_sightings (#5977): a sighting is the record of a query key (or caller) seen in the rows of a
+               collector that writes sightings, so it is kept as long as the longest raw retention of any such collector and no
+               longer (#9705). The writers are the definitions that override DescribeQueryTagSightings (ICollectorSchemaInfo.
+               WritesQueryTagSightings), not only the two with payload dimensions, and each retention resolves through the same
+               resolver the fact purge uses, so a retention raised on any writer keeps its keys tagged as long as its rows. The
+               horizon is never narrower than widestFactRetentionDays (QueryTagSightingsRetentionDays). last_seen is
                NOT NULL and defaulted, so no row can slip past the horizon by never being stamped. A re-sighted key's stamp trails by at
                most QueryTagSightingWriter.ReSightingRefreshWidth (6 hours, #9456) plus its backdate, against a cutoff at least a day
                back, so a live key is never purged. Only this table is aged: the
@@ -992,7 +982,7 @@ public static class DarlingRetention
             var sightingsDeleted = await PurgeOneAsync(
                 postgres, "collect.query_tag_sightings",
                 TimeSlicedDeleteSql("collect.query_tag_sightings", "last_seen"),
-                utcNow.AddDays(-widestFactRetentionDays), logger, cancellationToken,
+                utcNow.AddDays(-QueryTagSightingsRetentionDays(widestFactRetentionDays, retentionDaysFor)), logger, cancellationToken,
                 pacer: walPacer);
             if (sightingsDeleted is not null)
             {
@@ -1433,23 +1423,26 @@ public static class DarlingRetention
                 tablesFailed++;
             }
 
-            /* #8784 follow-up: the dependency lists of databases the server no longer has. The loop above keeps each database's newest
-               list however old (DeleteSqlFor's ObjectDependenciesSliceDeleteSql), so this is the only way a dropped database's list
-               goes. One statement; the horizon is the collector's own retention. */
-            var droppedDatabaseDependenciesDeleted = await PurgeOneAsync(
-                postgres, ObjectDependenciesTable, DroppedDatabaseDependenciesDeleteSql,
-                utcNow.AddDays(-EffectivePurgeRetentionDays(
-                    "object_dependencies",
-                    retentionDaysFor?.Invoke("object_dependencies") ?? CollectorScheduleDefaults.All["object_dependencies"].RetentionDays)),
-                logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
-            if (droppedDatabaseDependenciesDeleted is not null)
+            /* #8784 follow-up, #9706: the daily lists of databases the server no longer has, dependencies and object inventory. The
+               loop above keeps each database's newest list however old (DeleteSqlFor's ObjectListSliceDeleteSql), so this is the only
+               way a dropped database's list goes. One statement per table; the horizon is that collector's own retention. */
+            foreach (var (listTable, listCollector) in ObjectListTables)
             {
-                tablesPurged++;
-                totalRowsDeleted += droppedDatabaseDependenciesDeleted.Value;
-            }
-            else
-            {
-                tablesFailed++;
+                var droppedDatabaseListDeleted = await PurgeOneAsync(
+                    postgres, listTable, DroppedDatabaseObjectListDeleteSql(listTable),
+                    utcNow.AddDays(-EffectivePurgeRetentionDays(
+                        listCollector,
+                        retentionDaysFor?.Invoke(listCollector) ?? CollectorScheduleDefaults.All[listCollector].RetentionDays)),
+                    logger, cancellationToken, batchSize: SingleShotStatement, pacer: walPacer);
+                if (droppedDatabaseListDeleted is not null)
+                {
+                    tablesPurged++;
+                    totalRowsDeleted += droppedDatabaseListDeleted.Value;
+                }
+                else
+                {
+                    tablesFailed++;
+                }
             }
 
             /* collect.query_stats_hour_ledger (#4605, V164): the hourly row-count ledger that the long-window count
@@ -2050,39 +2043,57 @@ AND   c.hypertable_name = $1", connection) { CommandTimeout = DeleteTimeoutSecon
         => schema switch
         {
             AttentionCollector => ServerIndexedTimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName),
-            ObjectDependenciesCollector => ObjectDependenciesSliceDeleteSql,
+            ObjectDependenciesCollector => ObjectListSliceDeleteSql(ObjectDependenciesTable),
+            ObjectInventoryCollector => ObjectListSliceDeleteSql(ObjectInventoryTable),
             _ => TimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName),
         };
 
-    /// <summary>The dependency list table (#8784 part 2), as <see cref="DeleteSqlFor"/> and <see cref="DroppedDatabaseDependenciesDeleteSql"/> name it.</summary>
+    /// <summary>The dependency list table (#8784 part 2), as <see cref="DeleteSqlFor"/> and <see cref="DroppedDatabaseObjectListDeleteSql"/> name it.</summary>
     internal const string ObjectDependenciesTable = "collect.object_dependencies";
 
+    /// <summary>The object list table (#8784), as <see cref="DeleteSqlFor"/> and <see cref="DroppedDatabaseObjectListDeleteSql"/> name it.</summary>
+    internal const string ObjectInventoryTable = "collect.object_inventory";
+
     /// <summary>
-    /// #8784 follow-up: the time-sliced purge of the dependency lists. Every read takes only a database's NEWEST capture, and a view a
-    /// database's list names counts as used, so a list must not age out while it is still the newest one: a database whose capture fails
-    /// for a few days (a lost grant, a collector failing there) would otherwise take its references with it, and another database's view
-    /// that only it named would read "Not used in window". So an expired row goes only while a newer capture of the same (server, database)
-    /// exists. A dropped database's list goes through <see cref="DroppedDatabaseDependenciesDeleteSql"/>. A removed server's last lists
-    /// stay, one capture per database: no read looks at them, and the same server added again (the same server_id) finds them until its
-    /// first capture replaces them.
-    /// <para>Each (server_id, database_name) pair is listed with a skip scan over <c>idx_object_dependencies_database</c>, and its newest
-    /// capture is one backward seek on the same index. The first shape wrote this as <c>EXISTS (newer capture)</c> inside
-    /// <see cref="TimeSlicedDeleteSql"/>. The planner turned that into a hash semi join on (server_id, database_name) with the time test as
-    /// a join filter, so every row the EXISTS rejected walked its whole hash bucket, and a kept list of R rows cost about R squared checks
-    /// (a 150,000-row list ran past 180 s, and a list can reach 200,000 rows, <c>MaxRowsPerDatabase</c>). Here the newest time is found once
-    /// per pair.</para>
+    /// The daily per-database list tables with the collector that owns each (#9706): the tables <see cref="ObjectListSliceDeleteSql"/> and
+    /// <see cref="DroppedDatabaseObjectListDeleteSql"/> run over, each at its own collector's retention.
+    /// </summary>
+    internal static readonly (string Table, string Collector)[] ObjectListTables =
+    [
+        (ObjectDependenciesTable, "object_dependencies"),
+        (ObjectInventoryTable, "object_inventory"),
+    ];
+
+    /// <summary>
+    /// #8784 follow-up, #9706: the time-sliced purge of a daily per-database list table, <see cref="ObjectDependenciesTable"/> or
+    /// <see cref="ObjectInventoryTable"/>. Every read takes only a database's NEWEST capture: a view a database's dependency list names
+    /// counts as used, and a database's object list is what <c>get_object_usage</c> reports. A list must not age out while it is still the
+    /// newest one: a database whose capture fails for longer than the retention (a lost grant, the database leaving
+    /// <c>index_object_stats</c>'s scope, a collector failing there) would otherwise read as having no list, and another database's view that
+    /// only it named would read "Not used in window". So an expired row goes only while a newer capture of the same (server, database)
+    /// exists. A dropped database's list goes through <see cref="DroppedDatabaseObjectListDeleteSql"/>. A removed server's last lists stay,
+    /// one capture per database: no read looks at them, and the same server added again (the same server_id) finds them until its first
+    /// capture replaces them.
+    /// <para>Each (server_id, database_name) pair is listed with a skip scan over the table's <c>(server_id, database_name, collection_time)</c>
+    /// index (<c>idx_object_dependencies_database</c>, <c>idx_object_inventory_database</c>), and its newest capture is one backward seek on
+    /// the same index. Written as <c>EXISTS (newer capture)</c> inside <see cref="TimeSlicedDeleteSql"/>, the planner turns the test into a
+    /// hash semi join on (server_id, database_name) with the time test as a join filter, so every row the EXISTS rejects walks its whole hash
+    /// bucket, and a kept list of R rows costs about R squared checks (a 150,000-row list runs past 180 s, and a list can reach 200,000 rows,
+    /// <c>MaxRowsPerDatabase</c>). Here the newest time is found once per pair.</para>
     /// <para>The slice is the shape <see cref="TimeSlicedDeleteSql"/> writes: the oldest expired day that has a row to delete, one
     /// <see cref="TimescaleSupport.ChunkIntervalDays"/> wide, per execution. <c>slice_start</c> is taken over the deletable rows only, so a
     /// kept row never anchors an empty slice. When none is left it is NULL, every comparison is unknown, nothing is deleted, and the drain
     /// loop stops as it does for every other table. <c>$1</c> is the cutoff.</para>
     /// </summary>
-    internal static readonly string ObjectDependenciesSliceDeleteSql = @"
+    /// <param name="table">One of <see cref="ObjectListTables"/>' tables, schema-qualified. A catalog constant, never user input, so
+    /// interpolating it is safe.</param>
+    internal static string ObjectListSliceDeleteSql(string table) => $@"
 WITH RECURSIVE
     pairs AS
 (
     (
         SELECT o.server_id, o.database_name
-        FROM collect.object_dependencies AS o
+        FROM {table} AS o
         WHERE o.database_name IS NOT NULL
         ORDER BY o.server_id, o.database_name
         LIMIT 1
@@ -2093,7 +2104,7 @@ WITH RECURSIVE
     CROSS JOIN LATERAL
     (
         SELECT o.server_id, o.database_name
-        FROM collect.object_dependencies AS o
+        FROM {table} AS o
         WHERE (o.server_id, o.database_name) > (p.server_id, p.database_name)
         ORDER BY o.server_id, o.database_name
         LIMIT 1
@@ -2106,7 +2117,7 @@ WITH RECURSIVE
         p.database_name,
         (
             SELECT max(o.collection_time)
-            FROM collect.object_dependencies AS o
+            FROM {table} AS o
             WHERE o.server_id = p.server_id
             AND   o.database_name = p.database_name
         ) AS newest_time
@@ -2115,31 +2126,32 @@ WITH RECURSIVE
     slice AS MATERIALIZED
 (
     SELECT min(d.collection_time) AS slice_start
-    FROM collect.object_dependencies AS d
+    FROM {table} AS d
     JOIN newest AS n ON n.server_id = d.server_id AND n.database_name = d.database_name
     WHERE d.collection_time < $1
     AND   d.collection_time < n.newest_time
 )
-DELETE FROM collect.object_dependencies AS d
+DELETE FROM {table} AS d
 USING newest AS n, slice AS s
 WHERE n.server_id = d.server_id
 AND   n.database_name = d.database_name
 AND   d.collection_time < $1
 AND   d.collection_time < n.newest_time
 AND   d.collection_time >= s.slice_start
-AND   d.collection_time < s.slice_start + INTERVAL '" + TimescaleSupport.ChunkIntervalDays + @" days'";
+AND   d.collection_time < s.slice_start + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
 
     /// <summary>
-    /// #8784 follow-up: the dependency rows of a database the server no longer has. A kept newest list (<see cref="ObjectDependenciesSliceDeleteSql"/>)
-    /// of a dropped database would keep its references alive for good, so it goes once both hold: it is past the retention cutoff ($1),
-    /// and the server's newest <c>collect.database_states</c> capture (an unfiltered <c>sys.databases</c> read, every minute by default)
-    /// is newer than the list and does not name the database. The cutoff keeps a database that is briefly gone (detached and attached
-    /// again, renamed and renamed back) until its next capture replaces the list.
+    /// #8784 follow-up, #9706: the rows of a database the server no longer has, in a daily per-database list table
+    /// (<see cref="ObjectDependenciesTable"/> or <see cref="ObjectInventoryTable"/>). A kept newest list (<see cref="ObjectListSliceDeleteSql"/>)
+    /// of a dropped database would stay for good, and a dependency list would keep its references alive, so it goes once both hold: it is
+    /// past the retention cutoff ($1), and the server's newest <c>collect.database_states</c> capture (an unfiltered <c>sys.databases</c>
+    /// read, every minute by default) is newer than the list and does not name the database. The cutoff keeps a database that is briefly
+    /// gone (detached and attached again, renamed and renamed back) until its next capture replaces the list.
     /// <para>Each server's newest <c>database_states</c> capture is found with one backward seek on the (server_id, collection_time) index.
     /// Its names are read once, behind the MATERIALIZED and <c>OFFSET 0</c> fence. The keep or drop decision is made per (server_id,
-    /// database_name) pair, never per row, and only the dropped pairs' rows are deleted, by a range on
-    /// <c>idx_object_dependencies_database</c>. The first shape tested NOT EXISTS against <c>database_states</c> for every expired row,
-    /// which the planner made a hash anti join over every <c>database_states</c> row (millions on a large store, decompressed and spilled
+    /// database_name) pair, never per row, and only the dropped pairs' rows are deleted, by a range on the table's
+    /// <c>(server_id, database_name, collection_time)</c> index. Testing NOT EXISTS against <c>database_states</c> for every expired row
+    /// makes the planner build a hash anti join over every <c>database_states</c> row (millions on a large store, decompressed and spilled
     /// to disk on TimescaleDB).</para>
     /// <para>The <c>u</c> EXISTS keeps every list on a server whose newest capture names no user database (<c>database_id</c> above 4).
     /// That is what a login that lost VIEW ANY DATABASE sees: <c>sys.databases</c> then shows only master, tempdb and the databases the
@@ -2147,13 +2159,15 @@ AND   d.collection_time < s.slice_start + INTERVAL '" + TimescaleSupport.ChunkIn
     /// exists to survive. A server with no <c>database_states</c> rows (that collector off, or Azure SQL Database, where it does not run)
     /// has no <c>newest</c> row, so it keeps its lists too: that errs toward "used".</para>
     /// </summary>
-    internal const string DroppedDatabaseDependenciesDeleteSql = @"
+    /// <param name="table">One of <see cref="ObjectListTables"/>' tables, schema-qualified. A catalog constant, never user input, so
+    /// interpolating it is safe.</param>
+    internal static string DroppedDatabaseObjectListDeleteSql(string table) => $@"
 WITH RECURSIVE
     pairs AS
 (
     (
         SELECT o.server_id, o.database_name
-        FROM collect.object_dependencies AS o
+        FROM {table} AS o
         WHERE o.database_name IS NOT NULL
         ORDER BY o.server_id, o.database_name
         LIMIT 1
@@ -2164,7 +2178,7 @@ WITH RECURSIVE
     CROSS JOIN LATERAL
     (
         SELECT o.server_id, o.database_name
-        FROM collect.object_dependencies AS o
+        FROM {table} AS o
         WHERE (o.server_id, o.database_name) > (p.server_id, p.database_name)
         ORDER BY o.server_id, o.database_name
         LIMIT 1
@@ -2204,7 +2218,7 @@ WITH RECURSIVE
     WHERE EXISTS (SELECT 1 FROM named AS u WHERE u.server_id = n.server_id AND u.database_id > 4)
     AND   NOT EXISTS (SELECT 1 FROM named AS m WHERE m.server_id = p.server_id AND m.database_name = p.database_name)
 )
-DELETE FROM collect.object_dependencies AS d
+DELETE FROM {table} AS d
 USING gone AS g
 WHERE d.server_id = g.server_id
 AND   d.database_name = g.database_name
@@ -2659,6 +2673,52 @@ WHERE NOT EXISTS
     /// </summary>
     internal static DateTime ComputeStatementTextCutoff(DateTime utcNow, int widestFactRetentionDays) =>
         utcNow.AddDays(-(Math.Max(widestFactRetentionDays, BaselineMath.BaselineWindowDays) + PgStatementText.PruneMarginDays));
+
+    /// <summary>
+    /// The widest raw retention of the collectors whose tables carry payload dimensions (<c>query_stats</c> and <c>procedure_stats</c>
+    /// today), at least one day, each resolved through <paramref name="retentionDaysFor"/> and falling back to
+    /// <see cref="CollectorScheduleDefaults"/>. It is the horizon the dimension, map and statement-text cutoffs assume their facts
+    /// reach. Pure, so a test can drive a raised override through it.
+    /// </summary>
+    internal static int WidestDimensionFactRetentionDays(Func<string, int>? retentionDaysFor)
+    {
+        var widest = 1;
+        foreach (var definition in CollectorCatalog.All)
+        {
+            if (PayloadDimensions.ForTable(definition.TargetTable).Count == 0)
+            {
+                continue;
+            }
+
+            var factRetentionDays = Math.Max(1, retentionDaysFor?.Invoke(definition.Name)
+                ?? (CollectorScheduleDefaults.All.TryGetValue(definition.Name, out var dimSchedule)
+                    ? dimSchedule.RetentionDays
+                    : 1));
+            widest = Math.Max(widest, factRetentionDays);
+        }
+
+        return widest;
+    }
+
+    /// <summary>
+    /// The collectors that write query-tag sightings (#9705): every catalog definition whose
+    /// <see cref="ICollectorSchemaInfo.WritesQueryTagSightings"/> is true, which the definition derives from overriding
+    /// <c>DescribeQueryTagSightings</c>, so a new writer is counted without anyone editing a list here.
+    /// </summary>
+    internal static IReadOnlyList<string> QueryTagSightingFeeders() =>
+        CollectorCatalog.All.Where(definition => definition.WritesQueryTagSightings).Select(definition => definition.Name).ToList();
+
+    /// <summary>
+    /// The days the purge keeps a <c>collect.query_tag_sightings</c> row after its <c>last_seen</c> (#9705): the widest horizon
+    /// the purge applies to any collector that writes sightings (<see cref="QueryTagSightingFeeders"/>, through
+    /// <see cref="WidestEffectiveRetentionDays"/>), and never less than <paramref name="widestFactRetentionDays"/>, the widest
+    /// retention of the payload-dimension collectors. A key's tags read against rows that live as long as their collector's
+    /// retention, so a sighting that ages out sooner leaves those rows untagged. At the shipped defaults every feeder keeps 30
+    /// days except <c>query_snapshots</c> (7), so the result equals <paramref name="widestFactRetentionDays"/>. Pure, so a test
+    /// can drive a raised override through it.
+    /// </summary>
+    internal static int QueryTagSightingsRetentionDays(int widestFactRetentionDays, Func<string, int>? retentionDaysFor) =>
+        Math.Max(widestFactRetentionDays, WidestEffectiveRetentionDays(QueryTagSightingFeeders(), retentionDaysFor));
 
     /// <summary>
     /// The widest horizon the purge applies to any of <paramref name="collectorNames"/>: each one's resolved retention,
