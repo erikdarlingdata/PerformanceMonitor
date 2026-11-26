@@ -37,6 +37,7 @@ internal static class ServerCredentialIds
             AppLogger.Warn("Credentials",
                 $"No saved password was found for server '{displayName}' under this Windows logon. "
                 + "Lite keeps each password in the Windows Credential Manager of the user that saved it. "
+                + "A scheduled task set to Do not store password can read saved passwords only while that user is signed in. "
                 + "A password saved from a remote PowerShell session can be unreadable to a scheduled task. "
                 + "Add the server again with --add-server as the Windows user that runs Lite, in a session on this machine, "
                 + "or open the server in Edit Server and save the password.");
@@ -80,6 +81,7 @@ internal static class ServerCredentialIds
             AppLogger.Warn("Credentials",
                 $"No saved password was found for credential profile '{profileName}' (first used by server '{serverDisplayName}') under this Windows logon. "
                 + "Lite keeps each password in the Windows Credential Manager of the user that saved it. "
+                + "A scheduled task set to Do not store password can read saved passwords only while that user is signed in. "
                 + "Open the profile and save its password as the Windows user that runs Lite, in a session on this machine.");
         }
     }

@@ -215,6 +215,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _windowState.Attach(this);
         /* Each fleet tab's status line is kept for that tab and shown while it is the tab on screen. */
         AlertsHistoryContent.StatusChanged += StatusWriterFor(AlertsTab);
         JobHistoryContent.StatusChanged += StatusWriterFor(JobHistoryTabItem);
@@ -2583,15 +2584,14 @@ public partial class MainWindow : Window
     /// restore, and the single-instance second-launch surface, so the window can never be left hidden-but-blank.
     /// Reconciles a tray-hidden window — minimize-to-tray calls <see cref="Window.Hide"/>, which sets
     /// Visibility=Hidden; only <see cref="Window.Show"/> re-runs layout/render (a raw Win32 ShowWindow would
-    /// leave it blank, Lite #1050) — and restores a minimized window to the viewer's Maximized startup state.
+    /// leave it blank, Lite #1050) — and restores a minimized window to the state it had before it was minimized.
     /// Must run on the UI thread.
     /// </summary>
     public void SurfaceWindow()
     {
-        if (WindowState == WindowState.Minimized)
-        {
-            WindowState = WindowState.Maximized;
-        }
+        /* #9735: a minimized window goes back to the state it had before it was minimized (Maximized by default),
+           so a window that was Normal does not come back Maximized. A window that is not minimized keeps its state. */
+        WindowState = _windowState.RestoreTarget(WindowState);
 
         Show();
         ShowInTaskbar = true;
@@ -2600,6 +2600,9 @@ public partial class MainWindow : Window
         Topmost = true;
         Topmost = false;
     }
+
+    /// <summary>The last non-minimized window state, which <see cref="SurfaceWindow"/> restores to (#9735).</summary>
+    private readonly WindowStateMemory _windowState = new();
 
     /// <summary>
     /// The full-window message state. <paramref name="details"/> is the non-secret configuration block

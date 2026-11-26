@@ -91,7 +91,9 @@ $bin = 'C:\Program Files\PerformanceMonitorDarling\pg-runtime\pgsql\bin'
 Remove-Item Env:PGPASSWORD
 ```
 
-The port 5641 is the default of `postgres.port`. The flags `--no-owner` and `--no-acl` leave out the owners and grants. The service sets the roles and grants again on every start. `pg_dump` can print warnings about circular foreign-key constraints in the TimescaleDB catalog. In our test the dump restored with no errors.
+The port 5641 is the default of `postgres.port`. The flags `--no-owner` and `--no-acl` leave out the owners and grants. The service sets the roles and grants again on every start.
+
+On a TimescaleDB store, `pg_dump` can warn about circular foreign-key constraints on TimescaleDB's own catalog tables, such as `continuous_agg`, and suggest `--disable-triggers`. TimescaleDB's troubleshooting page says this warning can be ignored. Restore with the two TimescaleDB steps on this page, and test a restore before you rely on the dump.
 
 On the new machine:
 
@@ -151,6 +153,8 @@ Dump the `darling` database:
 pg_dump -h <host> -p <port> -U <owner> --format=custom --no-owner --no-acl --file darling-store.dump darling
 ```
 
+On a TimescaleDB store the same circular foreign-key warning as above is expected, and you can ignore it.
+
 Restore it into an empty database. If the store has the TimescaleDB extension (`\dx` lists `timescaledb`), you need the two TimescaleDB steps. They must be in this order.
 
 ```
@@ -203,6 +207,8 @@ To move to another host, use a dump. The store container has `pg_dump` and `pg_r
 ```
 docker compose exec -T store pg_dump -U darling --format=custom --no-owner --no-acl darling > darling-store.dump
 ```
+
+The store is a TimescaleDB store, so the same circular foreign-key warning as above is expected, and you can ignore it.
 
 On the new host, copy the compose folder (`darling.json` and `secrets/`), start only the store, and restore into its empty `darling` database:
 
