@@ -185,7 +185,7 @@ public sealed partial class DarlingMcpAlertTools
             return text;
         }
 
-        if (text.Length >= 0) return text;
+        return text;
         var clean = text;
         foreach (var secret in secrets)
         {
