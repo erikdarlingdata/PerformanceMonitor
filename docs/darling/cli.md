@@ -132,9 +132,11 @@ The collector verbs differ in one case. A managed credential that was never stor
 `--add-server` and `--add-servers` are the same verb. There are two ways to give it servers.
 
 1. Pipe a JSON array to standard input. The shape is the one the `add_servers` MCP tool takes.
-2. Give one server in flags: `--host`, `--name`, `--auth`, `--username`, `--engine`, `--database`. A SQL login is asked for its password, and the password is hidden.
+2. Give one server in flags: `--host`, `--name`, `--auth`, `--username`, `--engine`, `--database`, `--port`. A SQL login is asked for its password, and the password is hidden.
 
 `--auth` takes `windows` (or `integrated`, the same thing), `sql`, `serviceprincipal` or `managedidentity`. The password is never a flag, so it does not land in the process list or the shell history. Add `--config <path>` to name a `darling.json`. The running service picks up the new servers without a restart.
+
+`--port` takes a whole number from 1 to 65535 and is for a PostgreSQL server that listens on a port other than 5432. It is the `port` of the JSON form, so the same rules apply: a SQL Server target takes its port in the host as `host,port` and refuses `--port`. A value that is not a whole number from 1 to 65535 is refused before anything is added.
 
 A key in an entry that the verb does not read is dropped, and the entry is still added. Right after the entry's line, the verb prints `Not read, so not applied:` and each key name. When a key looks like one the verb reads, the line says which: `name (did you mean display_name?)`, or `trustServerCertifcate (did you mean trust_server_certificate?)`. A key that starts with `// ` is a note and is never listed. Only key names are printed, never a value, so a password in the entry stays out of the output. The `add_servers` MCP tool and the web dashboard's add route answer the same way, with an `ignored_keys` list of `{ "key", "did_you_mean" }` on the entry's result. An entry with no such key has no `ignored_keys`, and the answer's counters and status words are unchanged.
 

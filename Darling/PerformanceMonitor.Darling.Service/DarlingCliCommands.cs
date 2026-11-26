@@ -7297,11 +7297,11 @@ public static partial class DarlingCliCommands
     /// </summary>
     public sealed record AddServerFlags(
         string? Host = null, string? DisplayName = null, string? Auth = null, string? Username = null,
-        string? Engine = null, string? Database = null)
+        string? Engine = null, string? Database = null, int? Port = null)
     {
         /// <summary>True when any flag was given, so the verb builds the one entry itself instead of reading JSON from stdin.</summary>
         public bool Any => Host is not null || DisplayName is not null || Auth is not null || Username is not null
-            || Engine is not null || Database is not null;
+            || Engine is not null || Database is not null || Port is not null;
     }
 
     /// <summary>The <c>--auth</c> word <c>--add-server</c> hands on: "integrated" (the word <c>--grant-script</c> takes) is Windows authentication,
@@ -7312,7 +7312,8 @@ public static partial class DarlingCliCommands
     /// <summary>
     /// Parses the arguments after <c>--add-server</c> (#6476): at most one bare argument, the config path (as before), or
     /// <c>--config &lt;path&gt;</c>, and the flags <c>--host</c>, <c>--name</c>, <c>--auth</c>, <c>--username</c> (or <c>--login</c>),
-    /// <c>--engine</c> and <c>--database</c>, each as <c>--flag value</c> or <c>--flag=value</c>. A password flag is refused with the reason.
+    /// <c>--engine</c>, <c>--database</c> and <c>--port</c> (a whole number from 1 to 65535, #9750), each as <c>--flag value</c> or
+    /// <c>--flag=value</c>. A password flag is refused with the reason.
     /// Anything else starting with '-' is refused rather than taken as a path. Pure so the grammar pins.
     /// </summary>
     public static bool TryParseAddServerArgs(string[] rest, out string? configPath, out AddServerFlags flags, out string? errorMessage)
@@ -7320,6 +7321,7 @@ public static partial class DarlingCliCommands
         configPath = null;
         errorMessage = null;
         string? host = null, displayName = null, auth = null, username = null, engine = null, database = null;
+        int? port = null;
 
         for (var i = 0; i < rest.Length; i++)
         {
@@ -7355,7 +7357,8 @@ public static partial class DarlingCliCommands
             if (name.Equals("--config", StringComparison.OrdinalIgnoreCase) || name.Equals("--host", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("--name", StringComparison.OrdinalIgnoreCase) || name.Equals("--auth", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("--username", StringComparison.OrdinalIgnoreCase) || name.Equals("--login", StringComparison.OrdinalIgnoreCase)
-                || name.Equals("--engine", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase))
+                || name.Equals("--engine", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--port", StringComparison.OrdinalIgnoreCase))
             {
                 if (value is null)
                 {
@@ -7377,17 +7380,36 @@ public static partial class DarlingCliCommands
                     case "--username":
                     case "--login": username = value; break;
                     case "--engine": engine = value; break;
+                    case "--port":
+                        /* #9750: the JSON form's range (1 to 65535), refused here with a plain message instead of failing inside the add core.
+                           Invariant culture and integer styles only, so "5432.0", "5,432" and " 5432x" are refused, not guessed at. */
+                        if (!int.TryParse(value.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsedPort)
+                            || parsedPort is < 1 or > 65535)
+                        {
+                            errorMessage = "--port needs a whole number from 1 to 65535.";
+                        }
+                        else
+                        {
+                            port = parsedPort;
+                        }
+
+                        break;
                     default: database = value; break;
+                }
+
+                if (errorMessage is not null)
+                {
+                    break;
                 }
 
                 continue;
             }
 
-            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database and --config.";
+            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database, --port and --config.";
             break;
         }
 
-        flags = new AddServerFlags(host, displayName, auth, username, engine, database);
+        flags = new AddServerFlags(host, displayName, auth, username, engine, database, port);
         return errorMessage is null;
     }
 
@@ -7412,6 +7434,13 @@ public static partial class DarlingCliCommands
         if (!string.IsNullOrWhiteSpace(flags.Database))
         {
             entry["database"] = flags.Database.Trim();
+        }
+
+        /* #9750: the entry's port is the JSON form's "port", so the add core range-checks it, refuses it on a SQL Server target
+           (#6583) and stores it on a PostgreSQL one exactly as it does for the JSON form. */
+        if (flags.Port is { } port)
+        {
+            entry["port"] = port;
         }
 
         var auth = flags.Auth?.Trim();
@@ -7507,7 +7536,8 @@ public static partial class DarlingCliCommands
         Environment.NewLine +
         "For ONE server, no JSON is needed; give the non-secret fields as flags and a SQL login is asked for its password with nothing echoed:" + Environment.NewLine +
         "  " + OperatorVerbForm.EntryPointHere() + " --add-server --host sql01 --auth windows      (integrated means the same)" + Environment.NewLine +
-        "  " + OperatorVerbForm.EntryPointHere() + " --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres]" + Environment.NewLine +
+        "  " + OperatorVerbForm.EntryPointHere() + " --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres] [--port <1-65535>]" + Environment.NewLine +
+        "--port is for a PostgreSQL server on a port other than 5432. A SQL Server target takes its port in the host as host,port." + Environment.NewLine +
         "There is no password flag. A Windows-authentication server is tested by the running service, as the account it runs under." + Environment.NewLine +
         Environment.NewLine +
         "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
@@ -7646,7 +7676,7 @@ public static partial class DarlingCliCommands
 
         if (fromFlags && string.IsNullOrWhiteSpace(flags!.Host))
         {
-            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>]");
+            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>] [--engine postgres] [--port <1-65535>]");
             return 1;
         }
 
