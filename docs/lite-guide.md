@@ -126,6 +126,7 @@ Make a task in Task Scheduler with these settings:
 |---|---|
 | Run as | The dedicated user |
 | Run whether the user is logged on or not | On |
+| Do not store password | Off. With it on, the task can read Lite's saved passwords only while the dedicated user is signed in. An "At startup" task runs before anyone signs in. |
 | Trigger | At startup |
 | Action | `PerformanceMonitorLite.exe` with the argument `--headless` |
 | If the task fails, restart every | 1 minute, up to 3 times. This does not restart a Lite that gave up and exited with code 3. |
