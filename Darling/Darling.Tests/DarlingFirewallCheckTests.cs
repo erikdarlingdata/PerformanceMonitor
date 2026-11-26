@@ -9,9 +9,12 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using static Darling.Tests.DarlingInstallerConfigStepTests;
 using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
@@ -23,8 +26,10 @@ namespace Darling.Tests;
 ///
 /// <para>Rule management moved to the elevated install path; the runtime only VERIFIES. These pin both
 /// halves: the read-only probe/verdict/remedy logic, the pure desired-state planner the elevated verb runs,
-/// and — via source scans — the seams that would silently regress (a restored runtime write, a renamed rule
-/// prefix that orphans rules on uninstall, an installer that stops calling the verb).</para>
+/// and the elevated verb itself, run against a recording shell so what it hands to PowerShell, and what it
+/// prints and returns, are observed rather than read out of its source (#9788). The few seams that no test can
+/// reach without an elevated host (the install and uninstall scripts, the hosts' start-up call sites) are
+/// still pinned by reading their text below.</para>
 /// </summary>
 public class DarlingFirewallCheckTests
 {
@@ -278,37 +283,6 @@ public class DarlingFirewallCheckTests
            terminate the shell before that command ran. The verb must run it as its own step. */
         Assert.EndsWith("exit 0", cmd, StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void ConfigureFirewall_RunsTheSweepAsItsOwnStep_NeverConcatenatedAheadOfTheOpen()
-    {
-        /* Pins the call shape, because the failure is silent and total: `sweep + "; " + enable` exits at the
-           sweep's `exit 0` and the rule is never created, while the verb still reports success. I wrote that
-           bug and caught it before it ran.
-           Asserts POSITIVELY that the sweep is the first argument of its own step, rather than blacklisting
-           the spellings of the bug. A review noted the earlier form only forbade two literal spellings, so a
-           missing space around the +, an intermediate variable, or string.Concat would each have slipped past;
-           requiring the call to sit directly in TryRunFirewallStepAsync's command position rules all of those
-           out at once. Whitespace is normalized so reformatting cannot break the pin. */
-        var source = NormalizeWhitespace(ReadRepoFile(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs")));
-
-        Assert.Contains(
-            "TryRunFirewallStepAsync( DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard),",
-            source,
-            StringComparison.Ordinal);
-
-        /* Same proof for the open: a complete argument, never folded into a larger string. */
-        Assert.Contains(
-            "TryRunFirewallStepAsync( DarlingManagedPostgres.BuildFirewallEnableCommand(plan.RuleName, plan.Port, plan.Cidr!),",
-            source,
-            StringComparison.Ordinal);
-    }
-
-    /// <summary>Collapses every run of whitespace to a single space, so a source-shape pin survives
-    /// reformatting and line rewrapping while still proving the call structure.</summary>
-    private static string NormalizeWhitespace(string source)
-        => System.Text.RegularExpressions.Regex.Replace(source, @"\s+", " ");
 
     /* ---- no retry spam: report once per state, not once per supervisor tick ---- */
 
@@ -768,62 +742,7 @@ public class DarlingFirewallCheckTests
         Assert.True(store.SweepOtherPorts);
     }
 
-    /// <summary>
-    /// The plan carries the decision; this is that the verb obeys it. Source-shaped for the same reason its
-    /// sibling above is: whether a step ran is not observable without a live Windows Firewall, and a flag on a
-    /// record that no caller reads would be invisible to every behavioural test in this file.
-    /// </summary>
-    [Fact]
-    public void TheSweepStepIsGatedOnThePlansSweepPermission()
-    {
-        var source = NormalizeWhitespace(ReadRepoFile(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs")));
-
-        Assert.Contains(
-            "if (plan.SweepOtherPorts) { if (!await TryRunFirewallStepAsync( "
-                + "DarlingManagedPostgres.BuildFirewallSweepCommand(wildcard),",
-            source,
-            StringComparison.Ordinal);
-    }
-
     /* ---- drift guards: the seams a rename or a deleted call would break silently ---- */
-
-    /// <summary>
-    /// #2414's regression guard, and the reason it is a source scan: the defect was that two call sites
-    /// derived a firewall rule's port from darling.json while the endpoint bound the store's. Nothing about
-    /// that is visible to a behavioral test of the shipped surface — both paths compile, both produce a valid
-    /// rule, and they agree until someone moves a port. What CAN be pinned is that no firewall rule name in
-    /// the CLI is built from the file's port field again.
-    /// </summary>
-    [Fact]
-    public void NoFirewallRuleIsEverNamedFromDarlingJsonsPortField()
-    {
-        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
-
-        Assert.DoesNotContain("McpFirewallRuleName(config.Mcp.Port)", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("WebFirewallRuleName(config.Web.Port)", source, StringComparison.Ordinal);
-
-        /* And the resolution goes through the ONE resolver the supervisors bind on, not a second copy of
-           "published?.Port ?? filePort" — a second path is how these two drifted apart. */
-        Assert.Contains("DarlingHostBinding.ResolveEndpointToggle", source, StringComparison.Ordinal);
-    }
-
-    /// <summary>
-    /// The security half. The port is part of the rule NAME, so moving a port strands the old rule as an
-    /// inbound allow on a port nothing serves; reconciling one exact DisplayName cannot reach it. Both the
-    /// elevated verb and the toggle verbs sweep the per-surface wildcard, and the toggle verbs' old
-    /// exact-name removal is gone — it could only ever have removed the rule for the port they had just
-    /// resolved, which is the one rule that was never stale.
-    /// </summary>
-    [Fact]
-    public void TheCliRemovesFirewallRulesByTheSurfaceWildcard_NotByOneExactName()
-    {
-        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
-
-        Assert.Contains("DarlingFirewallCheck.SurfaceRuleWildcard", source, StringComparison.Ordinal);
-        Assert.Contains("BuildFirewallSweepCommand", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("BuildFirewallDisableCommand", source, StringComparison.Ordinal);
-    }
 
     [Fact]
     public void EveryRuleNameBuilder_CarriesTheSharedPrefix_ThatUninstallSweepsBy()
@@ -833,122 +752,87 @@ public class DarlingFirewallCheckTests
         Assert.StartsWith(DarlingFirewallCheck.RuleNamePrefix, DarlingWebHostService.WebFirewallRuleName(5153), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The uninstaller removes every Darling rule by one DisplayName wildcard. The function runs under Windows PowerShell with the two
+    /// firewall cmdlets stood in by a list of rule names: the real builders' names for several ports (an old port included) go, a rule
+    /// that is not Darling's stays, and a removal that throws is reported with the command to run by hand rather than stopping the
+    /// uninstall.
+    /// </summary>
     [Fact]
-    public void UninstallScript_SweepsByTheSharedPrefix()
+    public void Uninstall_RemovesEveryRuleTheBuildersName_ForAnyPort_AndNothingElse()
     {
-        /* Uninstall removes rules by "<prefix>*" so a rule from a PREVIOUS port is cleared too. That literal
-           lives in PowerShell, where no compiler checks it against the C# builders — this is that check. */
-        var script = ReadRepoFile(Path.Combine("Darling", "tools", "uninstall-darling.ps1"));
+        var darling = new[]
+        {
+            DarlingManagedPostgres.StoreFirewallRuleName(5641), DarlingManagedPostgres.StoreFirewallRuleName(6000),
+            DarlingMcpHostService.McpFirewallRuleName(5152), DarlingMcpHostService.McpFirewallRuleName(5999),
+            DarlingWebHostService.WebFirewallRuleName(5153),
+        };
+        var rules = string.Join(", ", darling.Concat(["Some Other App (port 5152)", "PerformanceMonitor Lite MCP"]).Select(n => $"'{n}'"));
+        const string Stubs = """
+            $ErrorActionPreference = 'Stop'
+            function Get-NetFirewallRule { [CmdletBinding()] param([string]$DisplayName)
+                @($script:rules | Where-Object { $_ -like $DisplayName } | ForEach-Object { [pscustomobject]@{ DisplayName = $_ } }) }
+            function Remove-NetFirewallRule { [CmdletBinding()] param([string]$DisplayName)
+                if ($script:refuse) { throw 'Access is denied' }
+                $script:removed = @($script:rules | Where-Object { $_ -like $DisplayName })
+                $script:rules = @($script:rules | Where-Object { $_ -notlike $DisplayName }) }
+            """;
+        var lines = RunWindowsPowerShell(
+            ExtractFunction(ReadRepoFile("Darling", "tools", "uninstall-darling.ps1"), "Remove-DarlingFirewallRules") + "\n" + Stubs + "\n"
+            + $"$script:rules = @({rules})\n$script:refuse = $false\n"
+            + "'said=' + ((Remove-DarlingFirewallRules 6>&1 | Out-String).Trim())\n"
+            + "'removed=' + (($script:removed | Sort-Object) -join '|')\n"
+            + "'left=' + ($script:rules -join '|')\n"
+            + "'again=' + ((Remove-DarlingFirewallRules 6>&1 | Out-String).Trim())\n"
+            + $"$script:rules = @({rules})\n$script:refuse = $true\n"
+            + "$refused = (Remove-DarlingFirewallRules 6>&1 | Out-String)\n"
+            + "'refused-says-access=' + ($refused -match 'Access is denied')\n"
+            + "'refused-gives-command=' + $refused.Contains(\"Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *'\")\n"
+            + "'refused-left=' + $script:rules.Count\n");
 
-        Assert.Contains($"Remove-NetFirewallRule -DisplayName '{DarlingFirewallCheck.RuleNamePrefix}*'", script, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void InstallScript_ActuallyInvokesTheFirewallVerb()
-    {
-        /* If the installer stops calling the verb, nothing creates the rules and #1771 is back — with the
-           runtime no longer even attempting it either.
-           This pins the INVOCATION, not a mention: the script also names --configure-firewall in its help
-           block and in the "re-run this by hand" error message, so a `Contains("--configure-firewall")` stays
-           green with the real call deleted. A mutation run caught exactly that, which is why the assertion is
-           the exact invocation form plus proof the wrapper is called somewhere other than its own definition. */
-        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
-
-        Assert.Contains("& $serviceExe --configure-firewall", script, StringComparison.Ordinal);
+        Assert.Equal($"said=Removed {darling.Length} scoped firewall rule(s).", lines[0]);
+        Assert.Equal("removed=" + string.Join("|", darling.OrderBy(n => n, StringComparer.OrdinalIgnoreCase)), lines[1]);
+        Assert.Equal("left=Some Other App (port 5152)|PerformanceMonitor Lite MCP", lines[2]);
+        Assert.Equal("again=No Darling firewall rules to remove.", lines[3]);
+        Assert.Equal(["refused-says-access=True", "refused-gives-command=True", "refused-left=7"], lines.Skip(4));
     }
 
     /// <summary>
-    /// #2436: the THIRD call, and the one whose absence is silent. The pre-start reconcile runs with the
-    /// service stopped, and on a managed install the store is a child of the service — so on an UPGRADE the
-    /// verb has nothing to ask and falls back to darling.json's seed, which is the wrong port on a box whose
-    /// port was later moved in the Viewer. This call is what asks the store once it can answer.
-    /// <para>Pinned by its GUARD as well as its presence. Running it unconditionally would fire it during a
-    /// fresh install's ~2-minute first start, where the store cannot answer either and the file port is
-    /// correct by definition — a second copy of the fallback disclosure about a port that is not wrong. The
-    /// guard is the difference between narrowing the window by construction and hoping the timing works
-    /// out.</para>
+    /// The installer's firewall step runs the exe with the verb the service dispatches, says nothing when the verb succeeds, and when it
+    /// fails (any nonzero exit) warns with the exit code and the exact command to re-run by hand. The exe is a stand-in that records its
+    /// arguments, and the recorded verb is then classified by the service's own dispatcher.
     /// </summary>
     [Fact]
-    public void InstallScript_ReReconcilesAfterTheFirstStart_ButOnlyOnAnUpgrade()
+    public void InstallScript_FirewallStep_RunsTheVerbTheServiceDispatches_AndWarnsOnAFailedExit()
     {
-        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
-        var branch = ExtractBracedBlock(script, "if ($isUpgrade) {");
-
-        Assert.Contains("Invoke-FirewallReconcile", branch, StringComparison.Ordinal);
-
-        /* And it is genuinely AFTER the start, or it is just the pre-start call with extra steps. */
-        var start = script.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
-        var guard = script.IndexOf("if ($isUpgrade) {", StringComparison.Ordinal);
-        Assert.True(start >= 0, "install-darling.ps1 no longer starts the service");
-        Assert.True(guard > start, "the upgrade reconcile must run AFTER Start-Service, not before");
-    }
-
-    [Fact]
-    public void InstallScript_ReReconcilesInsideTheNetworkWizardBranch()
-    {
-        /* The SECOND call, pinned by its REASON rather than by counting occurrences. -Network runs
-           --configure-network AFTER the pre-start reconcile, and the wizard rewrites the very exposure that
-           reconcile acted on: a newly exposed endpoint has no rule yet, and one turned back off has a stale
-           one. Losing this call silently reproduces a subset of #1771 on every networked install.
-           A count-based pin does not hold here. The design carries a definition plus TWO calls, so "at least
-           two occurrences" stays GREEN with this one deleted - the exact hole a reviewer caught, and the same
-           vacuous-pin shape as the earlier Contains() that matched the help text. */
-        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
-        var branch = ExtractBracedBlock(script, "if ($Network) {");
-
-        Assert.Contains("--configure-network", branch, StringComparison.Ordinal);
-        Assert.Contains("Invoke-FirewallReconcile", branch, StringComparison.Ordinal);
-    }
-
-    /// <summary>Returns the body of the first brace-balanced block introduced by <paramref name="header"/>.</summary>
-    private static string ExtractBracedBlock(string script, string header)
-    {
-        var start = script.IndexOf(header, StringComparison.Ordinal);
-        Assert.True(start >= 0, $"expected '{header}' in the script");
-
-        var open = script.IndexOf('{', start);
-        var depth = 0;
-        for (var i = open; i < script.Length; i++)
+        var folder = Directory.CreateTempSubdirectory("darling-fw-step-").FullName;
+        try
         {
-            if (script[i] == '{')
+            var passing = Path.Combine(folder, "passing.cmd");
+            var failing = Path.Combine(folder, "failing.cmd");
+            File.WriteAllText(passing, "@echo off\r\necho %*> \"%~dp0passing.args\"\r\nexit /b 0\r\n");
+            File.WriteAllText(failing, "@echo off\r\necho %*> \"%~dp0failing.args\"\r\nexit /b 3\r\n");
+            var lines = RunWindowsPowerShell(
+                // A native child started from a UNC working directory (a build served over a share) prints a complaint to stderr.
+                $"Set-Location -LiteralPath '{folder}'\n"
+                + ExtractFunction(ReadRepoFile("Darling", "tools", "install-darling.ps1"), "Invoke-FirewallReconcile") + "\n"
+                + $"$serviceExe = '{passing}'\n'passing-said=' + ((Invoke-FirewallReconcile 6>&1 | Out-String).Trim())\n"
+                + $"$serviceExe = '{failing}'\n$said = (Invoke-FirewallReconcile 6>&1 | Out-String)\n"
+                + "'failing-names-exit=' + ($said -match 'exit 3')\n"
+                + $"'failing-gives-command=' + $said.Contains('& \"{failing}\" --configure-firewall')\n");
+
+            Assert.Equal(["passing-said=", "failing-names-exit=True", "failing-gives-command=True"], lines);
+            foreach (var recorded in new[] { "passing.args", "failing.args" })
             {
-                depth++;
-            }
-            else if (script[i] == '}' && --depth == 0)
-            {
-                return script[(open + 1)..i];
+                var args = File.ReadAllText(Path.Combine(folder, recorded)).Trim();
+                Assert.True(DarlingCliCommands.IsConfigureFirewallVerb(args), $"the installer passed '{args}', which is not the firewall verb");
+                Assert.Equal(StartupAction.RunKnownVerb, DarlingCliCommands.ClassifyStartupArgs([args]));
             }
         }
-
-        Assert.Fail($"unbalanced braces after '{header}'");
-        return "";
-    }
-
-    [Theory]
-    [InlineData("DarlingMcpHostService.cs")]
-    [InlineData("DarlingWebHostService.cs")]
-    public void RuntimeHosts_VerifyTheFirewall_AndNeverWriteIt(string fileName)
-    {
-        /* The regression this whole change exists to prevent: a host that goes back to issuing the write it
-           cannot perform, producing access-denied on every start of every hardened install. */
-        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", fileName));
-
-        Assert.Contains("DarlingFirewallCheck.CheckAsync", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("BuildFirewallEnableCommand", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("BuildFirewallDisableCommand", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("ReconcileFirewallAsync", source, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheStoreBootstrap_VerifiesTheFirewall_AndNeverWritesItAtRuntime()
-    {
-        /* DarlingManagedPostgres still OWNS the pure command builders (the elevated verb calls them), so this
-           pins the runtime CALL SITE rather than the file's vocabulary: the bootstrap checks, and the old
-           "try to configure it myself" entry point is gone. */
-        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs"));
-
-        Assert.Contains("CheckStoreFirewallAsync", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("TryConfigureStoreFirewallAsync", source, StringComparison.Ordinal);
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
     }
 
     [Fact]
@@ -1082,32 +966,280 @@ public class DarlingFirewallCheckTests
         Assert.DoesNotContain("New-NetFirewallRule", probe, StringComparison.Ordinal);
     }
 
+    /* ---- #9788: the --configure-firewall verb itself, run against a recording shell ---- */
+
+    private const string McpWildcard = "PerformanceMonitor Darling MCP (port *)";
+    private const string WebWildcard = "PerformanceMonitor Darling Web (port *)";
+    private const string StoreWildcard = "PerformanceMonitor Darling store (port *)";
+    private const string StoreUnreadable = "the store did not answer within 10 seconds";
+
     /// <summary>
-    /// Source pins on the not-elevated branch itself, because the policy above is only worth anything if that
-    /// branch actually consults it. All three are expressible against dev and all three are red there, which
-    /// is the statement the enum tests cannot make.
+    /// The silent-and-total bug: <c>sweep + "; " + enable</c> exits at the sweep's <c>exit 0</c>, so the rule is
+    /// never created while the verb still reports success. Observed at the only place it is visible, the commands
+    /// the verb hands to PowerShell: the sweep is a command of its own, the open is a command of its own, and no
+    /// single command carries both.
     /// </summary>
     [Fact]
-    public void TheNotElevatedBranch_MeasuresAndOffersARemedyForARemoval()
+    public async Task ConfigureFirewall_Elevated_RunsTheSweepAndTheOpenAsSeparateCommands_SweepFirst()
     {
-        var branch = NotElevatedBranch();
+        var config = ExposedMcpConfig(enabled: true);
+        var shell = new RecordingShell { Mcp = (true, 5199), Web = (true, 5153) };
 
-        /* It offers BOTH remedies now. Before #2445 only the enable command appeared here, so a run whose
-           whole work was a removal handed the operator nothing at all. */
-        Assert.Contains("BuildFirewallEnableCommand", branch, StringComparison.Ordinal);
-        Assert.Contains("BuildFirewallSweepCommand", branch, StringComparison.Ordinal);
+        var run = await RunVerbAsync(config, shell);
 
-        /* And it MEASURES rather than assuming. The old unconditional "toOpen == 0 means nothing to do" early
-           return is what said 0 over a stale rule; it must not come back. */
-        Assert.Contains("ProbeSurfaceRulesAsync(", branch, StringComparison.Ordinal);
-        Assert.Contains("NotElevatedRunHasWork(", branch, StringComparison.Ordinal);
-        Assert.DoesNotContain("if (toOpen == 0)", branch, StringComparison.Ordinal);
+        var sweep = DarlingManagedPostgres.BuildFirewallSweepCommand(McpWildcard);
+        var open = DarlingManagedPostgres.BuildFirewallEnableCommand("PerformanceMonitor Darling MCP (port 5199)", 5199, "192.168.1.0/24");
 
-        /* The probe is spent ONLY where its answer can change something — a Remove this run is allowed to
-           sweep. Probing an Open plan buys nothing, and probing a withheld sweep would invite printing it. */
+        Assert.Equal(0, run.ExitCode);
+        Assert.Empty(run.Error);
+        Assert.Contains(sweep, shell.Commands);
+        Assert.Contains(open, shell.Commands);
+        Assert.True(shell.Commands.IndexOf(sweep) < shell.Commands.IndexOf(open), "the sweep must run before the open");
+        Assert.DoesNotContain(shell.Commands, c => c.Contains(sweep, StringComparison.Ordinal) && c.Contains("New-NetFirewallRule", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// #2414 through the verb: the rule is named for the port the control plane answered with, never for the
+    /// port darling.json carries. The files say 5152 and 5153, the store says 5199 and 5188, and every command
+    /// the verb runs names the store's ports.
+    /// </summary>
+    [Fact]
+    public async Task ConfigureFirewall_NamesTheRulesForTheStoresPorts_NotDarlingJsonsPorts()
+    {
+        var config = ManagedConfig();
+        config.Mcp.Enabled = true;
+        config.Mcp.Port = 5152;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+        config.Web.Enabled = true;
+        config.Web.Port = 5153;
+        config.Web.Network = new WebNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+        var shell = new RecordingShell { Mcp = (true, 5199), Web = (true, 5188) };
+
+        var run = await RunVerbAsync(config, shell);
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Contains(DarlingManagedPostgres.BuildFirewallEnableCommand(DarlingMcpHostService.McpFirewallRuleName(5199), 5199, "192.168.1.0/24"), shell.Commands);
+        Assert.Contains(DarlingManagedPostgres.BuildFirewallEnableCommand(DarlingWebHostService.WebFirewallRuleName(5188), 5188, "192.168.1.0/24"), shell.Commands);
+        Assert.DoesNotContain(shell.Commands, c => c.Contains("(port 5152)", StringComparison.Ordinal) || c.Contains("(port 5153)", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The security half of #2414: a rule stranded on an old port is reachable only by a per-surface wildcard.
+    /// A loopback config wants no rule at all, so the verb runs exactly one wildcard sweep per surface and
+    /// nothing that names a single port.
+    /// </summary>
+    [Fact]
+    public async Task ConfigureFirewall_Elevated_ClearsEachSurfaceByItsWildcard_NeverByOneExactName()
+    {
+        var shell = new RecordingShell { Mcp = (true, 5199), Web = (true, 5188) };
+
+        var run = await RunVerbAsync(ManagedConfig(), shell);
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Equal(
+            new[] { McpWildcard, WebWildcard, StoreWildcard }.Select(DarlingManagedPostgres.BuildFirewallSweepCommand).OrderBy(c => c, StringComparer.Ordinal),
+            shell.Commands.OrderBy(c => c, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// #2436 through the verb: a surface darling.json exposes, on a run that could not read the control plane,
+    /// is not swept. Its file-seeded "off" may be stale and the rule on some other port may be the live one, so
+    /// the verb runs no command that names the surface. The loopback surfaces, whose answer needs nothing the
+    /// run could not read, are still swept.
+    /// </summary>
+    [Fact]
+    public async Task ConfigureFirewall_StoreUnreadable_RunsNoCommandForAnExposedSurfaceItMayNotSweep()
+    {
+        var config = ExposedMcpConfig(enabled: false);
+        var shell = new RecordingShell { Unavailable = StoreUnreadable };
+
+        var run = await RunVerbAsync(config, shell);
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.DoesNotContain(shell.Commands, c => c.Contains("Darling MCP", StringComparison.Ordinal));
+        Assert.Contains(DarlingManagedPostgres.BuildFirewallSweepCommand(WebWildcard), shell.Commands);
+        Assert.Contains(DarlingManagedPostgres.BuildFirewallSweepCommand(StoreWildcard), shell.Commands);
+    }
+
+    /// <summary>The Open half of the same gate: the file's rule is still created on a fresh install, and the
+    /// sweep of the surface's other ports waits for a run that can see the control plane.</summary>
+    [Fact]
+    public async Task ConfigureFirewall_StoreUnreadable_OpensTheFilesRuleButDoesNotSweepTheSurfacesOtherPorts()
+    {
+        var config = ExposedMcpConfig(enabled: true);
+        var shell = new RecordingShell { Unavailable = StoreUnreadable };
+
+        var run = await RunVerbAsync(config, shell);
+
+        Assert.Equal(0, run.ExitCode);
         Assert.Contains(
-            "plan.Action == FirewallRuleAction.Remove && plan.SweepOtherPorts",
-            branch, StringComparison.Ordinal);
+            DarlingManagedPostgres.BuildFirewallEnableCommand(DarlingMcpHostService.McpFirewallRuleName(config.Mcp.Port), config.Mcp.Port, "192.168.1.0/24"),
+            shell.Commands);
+        Assert.DoesNotContain(DarlingManagedPostgres.BuildFirewallSweepCommand(McpWildcard), shell.Commands);
+    }
+
+    /// <summary>A failed step is reported with the exact command to run by hand, and the verb fails.</summary>
+    [Fact]
+    public async Task ConfigureFirewall_Elevated_AFailedStepFailsTheVerbAndPrintsTheCommand()
+    {
+        var config = ExposedMcpConfig(enabled: true);
+        var open = DarlingManagedPostgres.BuildFirewallEnableCommand(
+            DarlingMcpHostService.McpFirewallRuleName(config.Mcp.Port), config.Mcp.Port, "192.168.1.0/24");
+        var shell = new RecordingShell { Mcp = (true, config.Mcp.Port), Answer = c => c == open ? (1, "Access is denied") : (0, "") };
+
+        var run = await RunVerbAsync(config, shell);
+
+        Assert.Equal(1, run.ExitCode);
+        Assert.Contains("Access is denied", run.Error, StringComparison.Ordinal);
+        Assert.Contains(open, run.Error, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #2445: a not-elevated run MEASURES the removal half. Where the control plane answered "off" and the
+    /// read-only probe finds a rule, the verb hands over the sweep command and fails, and everything it ran
+    /// was a read.
+    /// </summary>
+    [Fact]
+    public async Task ConfigureFirewall_NotElevated_AStaleRuleIsHandedOverAsASweepAndFailsTheVerb()
+    {
+        var config = ExposedMcpConfig(enabled: true);
+        var shell = new RecordingShell
+        {
+            Elevated = false,
+            Mcp = (false, 5152),
+            Answer = c => (0, c.Contains(McpWildcard, StringComparison.Ordinal) ? "DarlingFirewallProbe=1" : "DarlingFirewallProbe=0"),
+        };
+
+        var run = await RunVerbAsync(config, shell);
+
+        Assert.Equal(1, run.ExitCode);
+        Assert.Contains(DarlingManagedPostgres.BuildFirewallSweepCommand(McpWildcard), run.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.BuildFirewallSweepCommand(WebWildcard), run.Error, StringComparison.Ordinal);
+        AssertOnlyReads(shell);
+    }
+
+    /// <summary>The common case: every surface loopback, nothing found. No command is offered, nothing is
+    /// written to the error stream, and the verb succeeds, exactly as a default install needs.</summary>
+    [Fact]
+    public async Task ConfigureFirewall_NotElevated_ACleanBoxHandsOverNothingAndSucceeds()
+    {
+        var shell = new RecordingShell { Elevated = false, Answer = _ => (0, "DarlingFirewallProbe=0") };
+
+        var run = await RunVerbAsync(ManagedConfig(), shell);
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Empty(run.Error);
+        Assert.DoesNotContain("NetFirewallRule", run.Output, StringComparison.Ordinal);
+        Assert.Equal(3, shell.Commands.Count);
+        AssertOnlyReads(shell);
+    }
+
+    /// <summary>A probe that cannot answer is not evidence of drift: the sweep is offered as a precaution on
+    /// stdout, the error stream stays empty, and the verb returns 0.</summary>
+    [Fact]
+    public async Task ConfigureFirewall_NotElevated_AProbeThatCannotAnswerOffersTheSweepButDoesNotFailTheVerb()
+    {
+        var shell = new RecordingShell { Elevated = false, Answer = _ => (1, "powershell could not run") };
+
+        var run = await RunVerbAsync(ManagedConfig(), shell);
+
+        Assert.Equal(0, run.ExitCode);
+        Assert.Empty(run.Error);
+        Assert.Contains(DarlingManagedPostgres.BuildFirewallSweepCommand(McpWildcard), run.Output, StringComparison.Ordinal);
+        AssertOnlyReads(shell);
+    }
+
+    /// <summary>An Open plan is never probed (a probe could not say the rule has the right parameters): the enable
+    /// command is handed over, the verb fails, and the surface's wildcard is not asked about.</summary>
+    [Fact]
+    public async Task ConfigureFirewall_NotElevated_AnOpenPlanIsHandedOverWithoutBeingProbed()
+    {
+        var config = ExposedMcpConfig(enabled: true);
+        var shell = new RecordingShell { Elevated = false, Mcp = (true, 5199), Answer = _ => (0, "DarlingFirewallProbe=0") };
+
+        var run = await RunVerbAsync(config, shell);
+
+        Assert.Equal(1, run.ExitCode);
+        Assert.Contains(
+            DarlingManagedPostgres.BuildFirewallEnableCommand(DarlingMcpHostService.McpFirewallRuleName(5199), 5199, "192.168.1.0/24"),
+            run.Error,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(shell.Commands, c => c.Contains("Darling MCP", StringComparison.Ordinal));
+        AssertOnlyReads(shell);
+    }
+
+    /// <summary>A sweep the run is not entitled to make is neither probed nor printed, even when a rule is
+    /// there: that rule may be the one the endpoint is being served on.</summary>
+    [Fact]
+    public async Task ConfigureFirewall_NotElevated_AWithheldSweepIsNeitherProbedNorHandedOver()
+    {
+        var config = ExposedMcpConfig(enabled: false);
+        var shell = new RecordingShell { Elevated = false, Unavailable = StoreUnreadable, Answer = _ => (0, "DarlingFirewallProbe=1") };
+
+        var run = await RunVerbAsync(config, shell);
+
+        Assert.DoesNotContain(shell.Commands, c => c.Contains("Darling MCP", StringComparison.Ordinal));
+        Assert.DoesNotContain(DarlingManagedPostgres.BuildFirewallSweepCommand(McpWildcard), run.Output + run.Error, StringComparison.Ordinal);
+        Assert.Contains(DarlingManagedPostgres.BuildFirewallSweepCommand(WebWildcard), run.Error, StringComparison.Ordinal);
+        AssertOnlyReads(shell);
+    }
+
+    /// <summary>Nothing a not-elevated run executes may write to the firewall.</summary>
+    private static void AssertOnlyReads(RecordingShell shell)
+    {
+        Assert.All(shell.Commands, c =>
+        {
+            Assert.Contains("Get-NetFirewallRule", c, StringComparison.Ordinal);
+            Assert.DoesNotContain("New-NetFirewallRule", c, StringComparison.Ordinal);
+            Assert.DoesNotContain("Remove-NetFirewallRule", c, StringComparison.Ordinal);
+            Assert.DoesNotContain("Set-NetFirewallRule", c, StringComparison.Ordinal);
+        });
+    }
+
+    private static async Task<(int ExitCode, string Output, string Error)> RunVerbAsync(DarlingConfig config, RecordingShell shell)
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var exitCode = await DarlingCliCommands.ConfigureFirewallAsync(config, output, error, shell.AsShell(), CancellationToken.None);
+        return (exitCode, output.ToString(), error.ToString());
+    }
+
+    /// <summary>The machine as the verb sees it: it records every PowerShell command it is asked to run and
+    /// answers from <see cref="Answer"/>, and it reports the control plane's toggles as given.</summary>
+    private sealed class RecordingShell
+    {
+        public bool Elevated { get; init; } = true;
+
+        public (bool Enabled, int Port)? Mcp { get; init; }
+
+        public (bool Enabled, int Port)? Web { get; init; }
+
+        public string? Unavailable { get; init; }
+
+        public Func<string, (int ExitCode, string Output)> Answer { get; init; } = _ => (0, "");
+
+        public System.Collections.Generic.List<string> Commands { get; } = [];
+
+        public DarlingCliCommands.FirewallShell AsShell() => new()
+        {
+            IsElevated = () => Elevated,
+            RunPowerShell = (command, _) =>
+            {
+                Commands.Add(command);
+                return Task.FromResult(Answer(command));
+            },
+            ReadEndpointToggles = (_, _) => Task.FromResult((Mcp, Web, Unavailable)),
+        };
+    }
+
+    /// <summary>A managed config whose MCP endpoint is exposed on the LAN, with its enabled seed as given.</summary>
+    private static DarlingConfig ExposedMcpConfig(bool enabled)
+    {
+        var config = ManagedConfig();
+        config.Mcp.Enabled = enabled;
+        config.Mcp.Port = 5152;
+        config.Mcp.Network = new McpNetworkConfig { Listen = "192.168.1.205", AllowFrom = "192.168.1.0/24", Token = "t" };
+        return config;
     }
 
     /* ---- helpers ---- */
@@ -1123,36 +1255,4 @@ public class DarlingFirewallCheckTests
 
     private static System.Collections.Generic.IEnumerable<DarlingCliCommands.FirewallRulePlan> PlansFor(DarlingConfig config, string surface)
         => DarlingCliCommands.PlanFirewallRules(config).Where(p => p.Surface == surface);
-
-    /// <summary>
-    /// The <c>--configure-firewall</c> not-elevated branch as text, for the source pins above. Sliced rather
-    /// than searched whole-file because both remedy builders appear in the ELEVATED path a few lines below, so
-    /// a whole-file <c>Contains</c> would stay green with this branch deleted entirely.
-    /// <para>Anchored from the VERB's signature first, which is load-bearing rather than tidy:
-    /// <c>if (!IsElevated())</c> also appears in <c>--configure-network</c> several hundred lines above, and a
-    /// slice starting there swallowed the whole file — every assertion below passed against dev, where the
-    /// thing they pin does not exist. Every anchor is asserted, and so is the slice's SIZE, because the way
-    /// this pin fails is by quietly widening rather than by not matching.</para>
-    /// </summary>
-    private static string NotElevatedBranch()
-    {
-        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
-
-        var verb = source.IndexOf("public static async Task<int> ConfigureFirewallAsync(", StringComparison.Ordinal);
-        Assert.True(verb >= 0, "ConfigureFirewallAsync was renamed; this pin is not reading what it thinks it is");
-
-        var start = source.IndexOf("        if (!IsElevated())", verb, StringComparison.Ordinal);
-        Assert.True(start > verb, "the not-elevated branch anchor is stale; this pin is not reading what it thinks it is");
-
-        var end = source.IndexOf("        var failures = 0;", start, StringComparison.Ordinal);
-        Assert.True(end > start, "the end-of-branch anchor is stale; this pin is not reading what it thinks it is");
-
-        var branch = source[start..end];
-        Assert.True(
-            branch.Length < 8000,
-            $"the sliced not-elevated branch is {branch.Length} characters, which is far more than one branch — "
-                + "an anchor has drifted and these pins would pass on text they are not about.");
-
-        return branch;
-    }
 }

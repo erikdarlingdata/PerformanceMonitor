@@ -451,6 +451,13 @@ public partial class AddMultipleServersDialog : Window
                     StatusText.Text = ex.Message;
                     break;
                 }
+                catch (MonitoredServerFieldRefusedException ex)
+                {
+                    // #9787: a name, host, database or login holding a control character. The sentence names the field and not the
+                    // value; this row fails and the batch goes on.
+                    failed++;
+                    MarkRow(line.LineNumber, "Not added: " + ex.Message);
+                }
                 catch (Exception ex)
                 {
                     failed++;

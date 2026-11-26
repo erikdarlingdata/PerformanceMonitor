@@ -114,24 +114,29 @@ else {
 #
 # Matched by the shared DisplayName PREFIX rather than by rebuilding each port-specific name, so a store/MCP/
 # web rule left over from a PREVIOUS port is removed too - reconstructing names from the current darling.json
-# would strand those, and darling.json may not even be readable at this point. The C# side pins this literal
-# against all three real rule-name builders (DarlingFirewallCheck.RuleNamePrefix), so a rename cannot silently
-# orphan rules here. A wildcard that matches nothing is not an error (verified), but the try/catch keeps a
-# firewall hiccup from aborting the rest of an uninstall under ErrorActionPreference = 'Stop'.
-try {
-    $rules = @(Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction SilentlyContinue)
-    if ($rules.Count -gt 0) {
-        Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction Stop
-        Write-Host "Removed $($rules.Count) scoped firewall rule(s)."
+# would strand those, and darling.json may not even be readable at this point. A test runs this function over the
+# rule names all three real builders (DarlingFirewallCheck.RuleNamePrefix) produce for several ports, so a rename
+# cannot silently orphan rules here. A wildcard that
+# matches nothing is not an error (verified), but the try/catch keeps a firewall hiccup from aborting the rest of an
+# uninstall under ErrorActionPreference = 'Stop'. The firewall cmdlets are looked up by name, so a test can stand in for them.
+function Remove-DarlingFirewallRules {
+    try {
+        $rules = @(Get-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction SilentlyContinue)
+        if ($rules.Count -gt 0) {
+            Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *' -ErrorAction Stop
+            Write-Host "Removed $($rules.Count) scoped firewall rule(s)."
+        }
+        else {
+            Write-Host 'No Darling firewall rules to remove.'
+        }
     }
-    else {
-        Write-Host 'No Darling firewall rules to remove.'
+    catch {
+        Write-Host "Could not remove the firewall rules ($($_.Exception.Message)). Remove them by hand:" -ForegroundColor Yellow
+        Write-Host "  Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *'" -ForegroundColor Yellow
     }
 }
-catch {
-    Write-Host "Could not remove the firewall rules ($($_.Exception.Message)). Remove them by hand:" -ForegroundColor Yellow
-    Write-Host "  Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *'" -ForegroundColor Yellow
-}
+
+Remove-DarlingFirewallRules
 
 # The 'Darling Viewer' shortcut paths under the named special folders (#6475). A folder that does not resolve (GetFolderPath
 # returns '' when there is no such folder for the account) is left out. The folder lookup is a parameter so a test can stand in
