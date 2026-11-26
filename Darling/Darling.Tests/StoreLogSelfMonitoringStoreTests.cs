@@ -246,7 +246,7 @@ public class StoreLogSelfMonitoringStoreTests
 
         /* And the store-log capture has its OWN catch, which the two passes either side of it do not. This
            is the only pass on the tick whose PRIVILEGE is not guaranteed - reading the log needs
-           pg_read_server_files plus EXECUTE on pg_read_binary_file, which a bring-your-own store's owner may
+           pg_monitor plus EXECUTE on pg_read_binary_file, which a bring-your-own store's owner may
            not have granted - so sharing the outer catch would let one permanent condition cost the
            collector-cost flush BELOW it every hour forever. Asserted by position: a catch has to sit between
            the two calls. */

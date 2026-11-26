@@ -31,7 +31,7 @@ public class StoreLogCaptureFailureCauseTests
 
         /* The privilege cause names the roles the read needs; the missing-folder cause must name none of them. */
         Assert.NotEqual(denied, missingFolder);
-        Assert.DoesNotContain("pg_read_server_files", missingFolder, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_monitor", missingFolder, StringComparison.Ordinal);
         Assert.DoesNotContain("pg_read_binary_file", missingFolder, StringComparison.Ordinal);
     }
 
@@ -42,6 +42,11 @@ public class StoreLogCaptureFailureCauseTests
 
         Assert.Equal(denied, DarlingWorker.StoreLogCaptureFailureCause(Pg(PostgresErrorCodes.QueryCanceled)));
         Assert.Equal(denied, DarlingWorker.StoreLogCaptureFailureCause(new InvalidOperationException("x")));
-        Assert.Contains("pg_read_server_files", denied, StringComparison.Ordinal);
+        /* The read needs pg_monitor (pg_ls_logdir and the log_directory setting) and EXECUTE on pg_read_binary_file.
+           pg_read_server_files is not among them: PostgreSQL lets EXECUTE read any file under log_directory, so naming
+           it would ask for a role that reads every file the server can. */
+        Assert.Contains("pg_monitor", denied, StringComparison.Ordinal);
+        Assert.Contains("pg_read_binary_file", denied, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_server_files", denied, StringComparison.Ordinal);
     }
 }

@@ -1564,7 +1564,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             return "The store keeps no log files to read (logging_collector is off or the log folder is missing)";
         }
 
-        return "Reading the store's own log needs pg_read_server_files and EXECUTE on pg_read_binary_file; "
+        return "Reading the store's own log needs pg_monitor and EXECUTE on pg_read_binary_file; "
             + "a bring-your-own store may not grant them";
     }
 
@@ -1737,9 +1737,11 @@ AND   j.hypertable_name = '{relation}'", connection))
                how they get read side by side.
 
                ITS OWN catch, unlike the two passes either side of it, and that asymmetry is the point. This
-               is the only pass here whose PRIVILEGE is not guaranteed: reading the log needs
-               pg_read_server_files plus an explicit GRANT on pg_read_binary_file, which the managed store's
-               bootstrap superuser has and a bring-your-own store's owner may not have given. Sharing the
+               is the only pass here whose PRIVILEGE is not guaranteed: reading the log needs pg_monitor
+               (pg_ls_logdir and the log_directory setting) plus an explicit GRANT on pg_read_binary_file,
+               which the managed store's bootstrap superuser has and a bring-your-own store's owner may not
+               have given. pg_read_server_files is not needed: PostgreSQL lets a role with EXECUTE read any
+               file under log_directory, inside the data directory or not. Sharing the
                outer catch would let that one permanent condition cost the collector-cost flush below it
                every hour forever - a new failure in a pass that was working. Warning rather than Error for
                the same reason: on a store that cannot grant it this repeats hourly and would otherwise
@@ -1765,10 +1767,9 @@ AND   j.hypertable_name = '{relation}'", connection))
                 {
                     _logger.LogWarning(
                         "Store log capture failed, so this hour's store-log census is missing (get_store_log "
-                        + "reports the capture gap). {Cause}: {Message}. Capture needs logging_collector on with "
-                        + "its log folder under the data directory, and a store login that holds "
-                        + "pg_read_server_files and EXECUTE on pg_read_binary_file. This is said once per service "
-                        + "start: the same cause repeats at Debug until it changes.",
+                        + "reports the capture gap). {Cause}: {Message}. Capture needs logging_collector on and a "
+                        + "store login that holds pg_monitor and EXECUTE on pg_read_binary_file(text, bigint, bigint). "
+                        + "This is said once per service start: the same cause repeats at Debug until it changes.",
                         StoreLogCaptureFailureCause(ex), ex.Message);
                 }
                 else
