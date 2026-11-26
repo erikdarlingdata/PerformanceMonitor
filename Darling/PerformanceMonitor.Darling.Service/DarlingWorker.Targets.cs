@@ -2260,7 +2260,7 @@ LIMIT 1";
     /// <summary>
     /// Where the pg_read_file grants have to be issued, named when we know it (#3239) — function ACLs are
     /// per-database catalogs, the same fact <see cref="WhereToCreateIt"/> names for extensions. Measured
-    /// on the 20260910 dogfood soak: the pair issued in the wrong database leaves a failure identical to
+    /// on the 20260910 dogfood soak: the grants issued in the wrong database leave a failure identical to
     /// no grant at all.
     /// </summary>
     private static string WhereToGrantIt(string? connectedDatabase)
@@ -2612,19 +2612,20 @@ LIMIT 1";
 
         return fault switch
         {
-            /* #3239: the two self-hosted log readers are the exception the general sentence below used to
-               deny to their faces. Reading the log with pg_read_file needs the pg_read_server_files role
-               AND an explicit EXECUTE grant — measured on #2566, the role alone does NOT carry it, because
-               the function's ACL is postgres=X/postgres — and the EXECUTE half lives in each database's
-               own catalog, so the grants only count in the database this collector connects to. The old
-               hint said pg_monitor covers everything, which sent an operator in a circle: the product's
-               own changelog knew better. */
+            /* #3239: the self-hosted log readers are the exception to the general sentence below, which
+               says pg_monitor covers every collector and would send an operator in a circle. Reading the
+               log with pg_read_file needs an explicit EXECUTE grant, because the function's ACL is
+               postgres=X/postgres and pg_monitor does not carry it. That grant alone reads any file under
+               the data directory or log_directory, so the pg_read_server_files role, which widens the
+               login to every file the server's OS user can read, is not asked for (#9723). EXECUTE grants
+               live in each database's own catalog, so they only count in the database this collector
+               connects to. */
             CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName) => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this collector reads the server log with "
-                + "pg_read_file(), which pg_monitor does NOT cover. The monitoring login needs BOTH the "
-                + "pg_read_server_files role AND an explicit GRANT EXECUTE ON FUNCTION pg_read_file(text), "
-                + "pg_read_file(text, bigint, bigint), pg_read_file(text, bigint, bigint, boolean): the "
-                + "role alone does not carry EXECUTE, because the function's ACL is postgres=X/postgres. "
+                + "pg_read_file(), which pg_monitor does NOT cover. The monitoring login needs, on top of "
+                + "pg_monitor, an explicit GRANT EXECUTE ON FUNCTION pg_read_file(text, bigint, bigint), "
+                + "because the function's ACL is postgres=X/postgres. pg_read_server_files is not needed: "
+                + "EXECUTE alone reads any file under the data directory or log_directory. "
                 + "EXECUTE grants live in each database's own catalog, so issue them "
                 + WhereToGrantIt(connectedDatabase)
                 + " While issuing that grant, also GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, "

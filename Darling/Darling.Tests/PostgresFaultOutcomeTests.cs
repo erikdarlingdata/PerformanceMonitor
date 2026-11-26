@@ -68,23 +68,23 @@ public class PostgresFaultOutcomeTests
         Assert.Equal("PERMISSIONS", DarlingWorker.PostgresFaultOutcome(Pg("42501"), "pg_buffer_usage").Status);
 
         /* And the general sentence stays general: pg_monitor genuinely covers this collector, and the
-           #3239 log-reader grant pair named here would send an operator widening a role for nothing. */
+           #3239 log-reader EXECUTE grant named here would send an operator widening a role for nothing. */
         Assert.DoesNotContain("pg_read_server_files", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// #3239: the two self-hosted log readers are the exception the general pg_monitor sentence used to
-    /// deny to their faces. Reading the log with pg_read_file needs the pg_read_server_files role AND an
-    /// explicit EXECUTE grant — measured on #2566, the role alone does NOT carry it, because the
-    /// function's ACL is postgres=X/postgres — so the old hint told this exact failure to go check a
-    /// role that was granted and covers nothing here. The EXECUTE half is a per-database catalog fact,
-    /// so the hint names the database the way #2638's extension sentence does: measured on the 20260910
-    /// dogfood soak, the pair issued in the wrong database leaves a failure identical to no grant at all.
+    /// #3239 and #9723: the two self-hosted log readers are the exception to the general pg_monitor
+    /// sentence. Reading the log with pg_read_file needs an explicit EXECUTE grant, because the function's
+    /// ACL is postgres=X/postgres and pg_monitor does not carry it. That grant alone reads any file under
+    /// the data directory or log_directory, so the hint does not ask for the pg_read_server_files role.
+    /// The EXECUTE grant is a per-database catalog fact, so the hint names the database the way #2638's
+    /// extension sentence does: measured on the 20260910 dogfood soak, the grant issued in the wrong
+    /// database leaves a failure identical to no grant at all.
     /// </summary>
     [Theory]
     [InlineData("pg_deadlocks")]
     [InlineData("pg_plan_capture")]
-    public void ALogReaderDenialNamesTheGrantPairAndTheDatabaseItMustBeIssuedIn(string collectorName)
+    public void ALogReaderDenialNamesTheExecuteGrantsAndTheDatabaseItMustBeIssuedIn(string collectorName)
     {
         var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
             Pg("42501", "permission denied for function pg_read_file"), collectorName, "appdb");
@@ -92,12 +92,15 @@ public class PostgresFaultOutcomeTests
         /* Still the non-fatal-degradation bucket — #3239 changes the sentence, not the classification. */
         Assert.Equal("PERMISSIONS", status);
 
-        /* The pair, with every pg_read_file signature spelled out so the fix is paste-able. */
-        Assert.Contains("pg_read_server_files", explanation, StringComparison.Ordinal);
+        /* The grant, with the exact signature the collectors call spelled out so the fix is paste-able, and no
+           ask for the pg_read_server_files role, which the read does not need (#9723). The text may say the
+           role is not needed, so the assert is on the ask, not on the name. */
         Assert.Contains(
-            "GRANT EXECUTE ON FUNCTION pg_read_file(text), pg_read_file(text, bigint, bigint), "
-            + "pg_read_file(text, bigint, bigint, boolean)",
-            explanation, StringComparison.Ordinal);
+            "GRANT EXECUTE ON FUNCTION pg_read_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
+        Assert.Contains("pg_read_server_files is not needed", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_server_files role", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("BOTH", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_file(text), ", explanation, StringComparison.Ordinal);
 
         /* The per-database nuance, with the database named. */
         Assert.Contains("database 'appdb'", explanation, StringComparison.Ordinal);
@@ -162,9 +165,9 @@ public class PostgresFaultOutcomeTests
             Pg("58P01", "could not open file \"/pglogs/x.log\" for reading: No such file or directory"),
             "pg_deadlocks", "appdb").Explanation;
 
-        /* The denial sends the operator to the grant pair; the missing file must not. */
-        Assert.Contains("pg_read_server_files", denial, StringComparison.Ordinal);
-        Assert.DoesNotContain("pg_read_server_files", missing, StringComparison.Ordinal);
+        /* The denial sends the operator to the EXECUTE grant; the missing file must not. */
+        Assert.Contains("GRANT EXECUTE ON FUNCTION pg_read_file(text, bigint, bigint)", denial, StringComparison.Ordinal);
+        Assert.DoesNotContain("GRANT EXECUTE", missing, StringComparison.Ordinal);
 
         /* The missing file names what was looked for; the denial has no path to name. */
         Assert.Contains("/pglogs/x.log", missing, StringComparison.Ordinal);

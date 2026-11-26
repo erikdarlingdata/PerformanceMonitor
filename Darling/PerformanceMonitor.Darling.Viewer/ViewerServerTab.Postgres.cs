@@ -1001,8 +1001,8 @@ public partial class ViewerServerTab
     /// Plans captured by auto_explain (#2566).
     ///
     /// <para>An empty grid here almost always means a MISSING GRANT rather than a quiet server, so the
-    /// note says so: reading the log needs pg_read_server_files plus an explicit EXECUTE on pg_read_file,
-    /// and on Aurora or RDS the route does not exist at all.</para>
+    /// note says so: reading the log needs an explicit EXECUTE on pg_read_file(text, bigint, bigint) on top of
+    /// pg_monitor, and on Aurora or RDS the route does not exist at all.</para>
     /// </summary>
     private async Task LoadPgPlanCaptureAsync(DateTime startUtc, DateTime endUtc, ViewerLoadTimer? timer = null)
     {
@@ -1031,8 +1031,9 @@ public partial class ViewerServerTab
                 "No plans have been captured. The Plan Capture Readiness panel says what is missing.",
                 "No captured plans. The Plan Capture Readiness panel says which precondition is missing - "
                 + "usually auto_explain is not loaded, or the monitoring login cannot read the server log. "
-                + "That read needs pg_read_server_files AND an explicit GRANT EXECUTE on pg_read_file; the "
-                + "role alone does not carry it. On Aurora and RDS there is no filesystem to read, so this "
+                + "That read needs an explicit GRANT EXECUTE on pg_read_file(text, bigint, bigint) on top of "
+                + "pg_monitor. pg_read_server_files is not needed: EXECUTE reads files under the data "
+                + "directory and log_directory. On Aurora and RDS there is no filesystem to read, so this "
                 + "panel stays empty by design.")
             : new PanelNoteText($"{CountText.Plural(rows.Count, "plan shape")}, ranked by TOTAL time - a plan that takes 40ms constantly "
               + "costs more than one that took 900ms once. Captures counts how often the collector SAW "
