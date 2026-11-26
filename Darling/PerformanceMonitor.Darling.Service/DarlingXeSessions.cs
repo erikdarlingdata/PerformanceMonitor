@@ -419,7 +419,7 @@ public static class DarlingXeSessions
 
             try
             {
-                var blockedProcessStarted = await EnsureBlockedProcessOnPremAsync(connection, server, runner.RingBufferMaxEvents, logger, cancellationToken);
+                var blockedProcessStarted = await EnsureBlockedProcessOnPremAsync(connection, server, runner, runner.RingBufferMaxEvents, logger, cancellationToken);
                 if (blockedProcessStarted)
                 {
                     outcome?.Started.Add(BlockedProcessReportCollector.Instance.Name);
@@ -781,11 +781,14 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
 
     /// <summary>Ensures the blocked-process session. Returns true when it started a stopped session or created a missing one (#8528), false when the session was running.</summary>
     private static async Task<bool> EnsureBlockedProcessOnPremAsync(
-        SqlConnection connection, ServerRuntime server, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
+        SqlConnection connection, ServerRuntime server, DarlingCollectorRunner runner, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
-        /* Blocked process threshold bootstrap — sp_configure is unavailable on AWS RDS
-           (parameter groups there), hence the tolerant catch (mirrors Lite). */
-        try
+        /* Blocked process threshold bootstrap. A server that answers is read on every ensure, so one that fails over to a replica
+           with a threshold of 0 behind the same connection string is configured on the next ensure (#9743). A server that refuses it
+           is asked once per process and once more after its connection settings change: sp_configure is unavailable on AWS RDS
+           (parameter groups there), and a login without ALTER SETTINGS is refused too. The refusal is tolerated, logged once with
+           the platform's remedy, and not repeated (mirrors Lite). */
+        var bootstrap = await runner.BlockedProcessThresholdBootstrap.RunAsync(server.ServerId, server.ConnectionString, async () =>
         {
             using var thresholdCmd = new SqlCommand(@"
 DECLARE
@@ -814,17 +817,16 @@ END;
 SELECT @threshold;", connection);
             thresholdCmd.CommandTimeout = 60;
             var result = await thresholdCmd.ExecuteScalarAsync(cancellationToken);
-            if ((result as int? ?? 0) == 0)
-            {
-                logger?.LogInformation("[{Server}] Configured blocked process threshold to 5 seconds", server.Config.DisplayName);
-            }
-        }
-        catch (SqlException ex)
+            return result as int? ?? 0;
+        }, ErrorNumbersOf);
+
+        if (bootstrap.Outcome == BlockedProcessThresholdOutcome.Configured)
         {
-            /* Threshold could not be set: the login lacks ALTER SETTINGS, or sp_configure
-               is unavailable on the platform (AWS RDS / Azure SQL DB). Tolerated either way. */
-            logger?.LogInformation("[{Server}] Could not auto-configure 'blocked process threshold (s)' to 5 seconds. This is expected when the monitoring login lacks ALTER SETTINGS, or on AWS RDS / Azure SQL DB where it is set via platform config. It is benign: blocking is still captured by the always-on DMV blocking snapshot; only the richer blocked-process-report XE stays off until the threshold is set. Detail: {Message}",
-                server.Config.DisplayName, ex.Message);
+            logger?.LogInformation("[{Server}] Configured blocked process threshold to 5 seconds", server.Config.DisplayName);
+        }
+        else if (bootstrap.Refusal is { } refusal)
+        {
+            logger?.LogInformation("[{Server}] {Message}", server.Config.DisplayName, BlockedProcessThresholdBootstrap.RefusalMessage(server.Target, refusal.Message));
         }
 
         ServerSessionState state;
