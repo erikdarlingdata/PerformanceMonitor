@@ -17,6 +17,8 @@
 #      new build in /opt/darling with a rename, so /opt/darling never holds a mix of two builds. /etc/darling (the
 #      config, the secret files and the keys) is not touched, and the script checks that afterwards.
 #   4. Starts the service and runs the health check.
+#      Each run past the pre-flight leaves upgrade-run.json in /opt/darling, the record that the service stores in
+#      collect.upgrade_runs: in_progress before the new build starts, then succeeded or failed.
 #   5. When the start or the health check fails: stops the service, moves the new build to /opt/darling.failed, moves
 #      /opt/darling.previous back, starts the old build and checks it too. The exit code is 1 either way.
 #
@@ -82,6 +84,55 @@ case "${health_seconds}" in ''|*[!0-9]*) die "--health-seconds takes a whole num
 # Read as base 10: with a leading zero the shell would take 08 for a bad octal number, and the health check would not run (#9688).
 health_seconds=$((10#${health_seconds}))
 [ "${rollback_only}" = 0 ] || [ "${check_only}" = 0 ] || die "--rollback and --check cannot be combined."
+
+# A JSON string for the text in $1, or null when it is empty: printable ASCII on one line, 2000 characters at most
+# (the service reads no more), with the backslash and the quote escaped.
+json_text() {
+    local text
+    text="$(printf '%s' "$1" | printable | tr '\n' ' ' | cut -c1-2000)"
+    if [ -z "${text}" ]; then
+        printf 'null'
+        return 0
+    fi
+    text="${text//\\/\\\\}"
+    text="${text//\"/\\\"}"
+    printf '"%s"' "${text}"
+}
+
+# The record of this run, the file upgrade-darling.ps1 writes on Windows (#9432, #9688). The service reads
+# upgrade-run.json in its own folder at its start and every 5 minutes, and stores it in collect.upgrade_runs. $1 is
+# the folder of the build that reads it, $2 the state (in_progress, succeeded or failed), $3 the exit code and $4 the
+# first error, both left out while the run goes on. The file is written only in a folder that root owns and that no
+# other account can write, under a name that mktemp makes, and is then renamed, so the service never reads half a
+# record. A write that fails is a warning: the upgrade does not depend on the record. RUN_ID is empty, and nothing is
+# written, until the pre-flight has passed.
+RUN_RECORD_NAME=upgrade-run.json
+RUN_ID=""
+RUN_STARTED=""
+RUN_TOOL_VERSION=""
+RUN_STOP_CHECK=""
+RUN_ROLLBACK_FOLDER=""
+write_upgrade_run() {
+    local folder="$1" state="$2" exit_code="${3:-null}" first_error="${4:-}" ended=null temp
+    [ -n "${RUN_ID}" ] && [ -d "${folder}" ] && root_only_writable "${folder}" || return 0
+    [ "${state}" = in_progress ] || ended="\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+    if temp="$(mktemp "${folder}/${RUN_RECORD_NAME}.XXXXXXXX" 2>/dev/null)"; then
+        if printf '{\n  "run_id": "%s",\n  "state": "%s",\n  "tool_version": %s,\n  "target_build": %s,\n  "started_utc": "%s",\n  "ended_utc": %s,\n  "exit_code": %s,\n  "stop_check": %s,\n  "rollback_folder": %s,\n  "first_error": %s,\n  "verified_utc": null\n}\n' \
+            "${RUN_ID}" "${state}" "$(json_text "${RUN_TOOL_VERSION}")" "$(json_text "${STAGED_VERSION}")" "${RUN_STARTED}" "${ended}" "${exit_code}" \
+            "$(json_text "${RUN_STOP_CHECK}")" "$(json_text "${RUN_ROLLBACK_FOLDER}")" "$(json_text "${first_error}")" >"${temp}" \
+            && chmod 644 "${temp}" && mv -f -T "${temp}" "${folder}/${RUN_RECORD_NAME}"; then
+            return 0
+        fi
+        rm -f "${temp}"
+    fi
+    warn "Could not write the upgrade record ${folder}/${RUN_RECORD_NAME}. The upgrade does not depend on it."
+}
+
+# die for a failure after the pre-flight: the run is recorded as failed in /opt/darling, for the build there to store.
+die_recorded() {
+    write_upgrade_run "${INSTALL_ROOT}" failed 1 "$1"
+    die "$1"
+}
 
 # One "hash path" line for the config, each secret file beside it and each key file. The upgrade writes none of them. The
 # service may add a key file at a start, so the check afterwards is that every line from before is still there. The
@@ -198,22 +249,39 @@ fi
 # ---- 2. stop ----
 config_checked=1
 config_before="$(config_listing)" || config_checked=0
+# The run id is the kernel's random UUID. Without one this run writes no record.
+RUN_ID="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+[[ "${RUN_ID}" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || RUN_ID=""
+RUN_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# The tool version is the version of the build beside this script, as on Windows.
+if [ "${SOURCE_KIND}" = folder ] && [ "${SOURCE_PATH}" = "${SCRIPT_DIR}" ]; then
+    RUN_TOOL_VERSION="${STAGED_VERSION}"
+elif [ -f "${SCRIPT_DIR}/${SERVICE_DLL}" ]; then
+    RUN_TOOL_VERSION="$(build_version "${SCRIPT_DIR}")"
+else
+    RUN_TOOL_VERSION=unknown
+fi
 note "Stopping ${UNIT_NAME}..."
 if ! stop_and_confirm; then
-    die "A process still runs from ${INSTALL_ROOT} after the stop, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'.
+    RUN_STOP_CHECK="blocked: ${LEFT_RUNNING:-}"
+    die_recorded "A process still runs from ${INSTALL_ROOT} after the stop, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'.
 ${LEFT_RUNNING:-}"
 fi
+RUN_STOP_CHECK=clear
 
 # ---- 3. the rollback copy and the new build ----
 # -T on each move of a whole folder: when the target is still there, the move fails, where a plain mv would put the
 # folder inside it.
-rm -rf "${PREVIOUS_ROOT}" || die "Could not remove the old rollback copy ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+rm -rf "${PREVIOUS_ROOT}" || die_recorded "Could not remove the old rollback copy ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
 # The rollback copy is a copy on new files that root owns, whatever owners the old build's files record and whoever
 # holds one of them open. The old files go into the staging folder, which goes when the script ends.
-fresh_copy "${INSTALL_ROOT}" "${STAGED_PREVIOUS}" || die "Could not copy ${INSTALL_ROOT} onto new files for the rollback copy, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
-mv -T "${STAGED_PREVIOUS}" "${PREVIOUS_ROOT}" || die "Could not move the rollback copy to ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
-mv -T "${INSTALL_ROOT}" "${STAGED_REPLACED}" || die "Could not move ${INSTALL_ROOT} out of the way, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
-mv -T "${STAGED_BUILD}" "${INSTALL_ROOT}" || die "Could not move the new build into ${INSTALL_ROOT}. The service is STOPPED, ${old_version} is in ${PREVIOUS_ROOT} and ${INSTALL_ROOT} holds no build. Fix the cause, then run this script again: it puts that build back first."
+fresh_copy "${INSTALL_ROOT}" "${STAGED_PREVIOUS}" || die_recorded "Could not copy ${INSTALL_ROOT} onto new files for the rollback copy, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+mv -T "${STAGED_PREVIOUS}" "${PREVIOUS_ROOT}" || die_recorded "Could not move the rollback copy to ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+RUN_ROLLBACK_FOLDER="${PREVIOUS_ROOT}"
+# The new build starts with the record of this run in its folder, so its first read stores the run as in_progress.
+write_upgrade_run "${STAGED_BUILD}" in_progress
+mv -T "${INSTALL_ROOT}" "${STAGED_REPLACED}" || die_recorded "Could not move ${INSTALL_ROOT} out of the way, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+mv -T "${STAGED_BUILD}" "${INSTALL_ROOT}" || die_recorded "Could not move the new build into ${INSTALL_ROOT}. The service is STOPPED, ${old_version} is in ${PREVIOUS_ROOT} and ${INSTALL_ROOT} holds no build. Fix the cause, then run this script again: it puts that build back first."
 note "The rollback copy of ${old_version} is ${PREVIOUS_ROOT}."
 
 if [ -n "${SHIPPED_UNIT}" ] && ! cmp -s "${SHIPPED_UNIT}" "${UNIT_PATH}"; then
@@ -241,6 +309,7 @@ if start_and_check "${health_seconds}"; then
     else
         warn "The check that the config, the secret files and the keys in ${CONFIG_DIR} are unchanged could NOT run: the listing that the '${SERVICE_USER}' user takes of them came back empty or did not finish in 60 seconds. The script writes nothing there. Compare them with your backup yourself."
     fi
+    write_upgrade_run "${INSTALL_ROOT}" succeeded 0
     note "Darling ${STAGED_VERSION} is in ${INSTALL_ROOT}, and ${UNIT_NAME} is active."
     note "To go back: run this script with --rollback. Remove ${PREVIOUS_ROOT} when you no longer need it."
     [ ! -e "${FAILED_ROOT}" ] || note "${FAILED_ROOT} holds a build that an earlier upgrade or rollback set aside. Nothing uses it: remove it when you have looked at it."
@@ -253,7 +322,7 @@ failure="${HEALTH_REASON}"
 warn "The new build failed its start or its health check: ${failure}"
 note "Rolling back to ${old_version}..."
 if restore_previous; then
-    die "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT} and is healthy. The new build is in ${FAILED_ROOT} for a look. Migrations the new build applied stay applied in the store."
+    die_recorded "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT} and is healthy. The new build is in ${FAILED_ROOT} for a look. Migrations the new build applied stay applied in the store."
 fi
-[ "${RESTORED}" = 1 ] || die "The upgrade to ${STAGED_VERSION} failed (${failure}), and the rollback did NOT finish: ${HEALTH_REASON}. The service is STOPPED and ${old_version} is still in ${PREVIOUS_ROOT}. Fix what stopped the move, then run this script with --rollback. Migrations the new build applied stay applied in the store."
-die "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT}, and its own health check failed too: ${HEALTH_REASON}. So the cause is probably not the new build: read 'journalctl -u darling' and the file log in ${LOG_DIR}. The new build is in ${FAILED_ROOT}."
+[ "${RESTORED}" = 1 ] || die_recorded "The upgrade to ${STAGED_VERSION} failed (${failure}), and the rollback did NOT finish: ${HEALTH_REASON}. The service is STOPPED and ${old_version} is still in ${PREVIOUS_ROOT}. Fix what stopped the move, then run this script with --rollback. Migrations the new build applied stay applied in the store."
+die_recorded "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT}, and its own health check failed too: ${HEALTH_REASON}. So the cause is probably not the new build: read 'journalctl -u darling' and the file log in ${LOG_DIR}. The new build is in ${FAILED_ROOT}."
