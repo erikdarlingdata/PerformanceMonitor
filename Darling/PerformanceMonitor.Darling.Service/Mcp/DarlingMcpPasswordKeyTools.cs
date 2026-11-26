@@ -92,7 +92,7 @@ public sealed class DarlingMcpPasswordKeyTools
         "To do it, call again with confirm: true and confirm_fingerprint set to that fingerprint. A missing or wrong fingerprint is refused and nothing is changed. " +
         "After a reset, without passwordKey in darling.json the next service start retires the key file and makes a new key: restart the service. With passwordKey set the service never makes a key, so put a new one in that source (new_password_key makes one) and then restart. " +
         "Key files are not touched. Until the restart the service refuses to seal or open a saved password. " +
-        "Returns {status:\"reset\"|\"needs_confirmation\"|\"nothing_to_reset\"|\"refused\"|\"failed\", saved_passwords_to_re_enter, key_fingerprint, message}.")]
+        "Returns {status:\"reset\"|\"needs_confirmation\"|\"nothing_to_reset\"|\"refused\", saved_passwords_to_re_enter, key_fingerprint, message}.")]
     public static Task<string> ResetPasswordKey(
         [Description("Must be true to reset. A reset has no undo and makes every saved password be entered again.")] bool confirm = false,
         [Description("The fingerprint the call without confirm answered. Required with confirm: true.")] string? confirm_fingerprint = null,
@@ -151,9 +151,9 @@ public sealed class DarlingMcpPasswordKeyTools
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // The store's own error text names no key and no password, and the log needs it to say why.
+            // The log gets the store's own error text, which names no key and no password.
             logger?.LogWarning("{Tool} failed: {Type}: {Message}", ResetKeyToolName, ex.GetType().Name, ex.Message);
-            return Outcome("failed", "Could not reset the password key in the store. The service log has the details.");
+            return McpHelpers.FormatError(ResetKeyToolName, ex);
         }
     }
 
