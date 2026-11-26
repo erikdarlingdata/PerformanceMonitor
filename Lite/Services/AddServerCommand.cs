@@ -594,7 +594,7 @@ internal static class AddServerCommand
         if (manager.HostRecordSaveProblem is { } recordProblem)
         {
             error.WriteLine(recordProblem);
-            UndoWrites(error, env, manager, undo, reached, saved, null, null);
+            UndoWrites(error, env, manager, undo, reached, saved, null, null, everyEntrySaved: true);
             return ExitRefused;
         }
 
@@ -606,9 +606,10 @@ internal static class AddServerCommand
     /// Lite (#9640) the server manager holds the list in memory and writes it back on its own changes, so putting the file back would only make
     /// the file and the list disagree. The entry that failed changes nothing: a new one is removed from the list, and an updated one is put
     /// back as it was (<paramref name="failedUpdateListed"/>, the instance the list held, and its saved login). The entries saved before it
-    /// stay saved, and the message says which.
+    /// stay saved, and the message says which. When <paramref name="everyEntrySaved"/> is set (only the host record write failed) no entry failed
+    /// and the message says every entry stays saved.
     /// </summary>
-    private static void UndoWrites(TextWriter error, Machine env, ServerManager manager, WriteUndo undo, int reached, SaveLog saved, ServerConnection? failedNew, ServerConnection? failedUpdateListed)
+    private static void UndoWrites(TextWriter error, Machine env, ServerManager manager, WriteUndo undo, int reached, SaveLog saved, ServerConnection? failedNew, ServerConnection? failedUpdateListed, bool everyEntrySaved = false)
     {
         if (!env.InsideRunningLite)
         {
@@ -630,6 +631,14 @@ internal static class AddServerCommand
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException) { error.WriteLine("The listed entry for this server could not be put back and may still hold the changes of this call."); }
             if (undo.RestoreCredential(reached - 1) is { } credentialProblem)
                 error.WriteLine(credentialProblem);
+        }
+
+        var names = string.Join(", ", saved.Select(row => $"{row.DisplayName} ({row.Host})"));
+        if (everyEntrySaved)
+        {
+            /* #9640: every entry saved and only the host record write failed, so there is no failed entry to speak of. */
+            error.WriteLine($"Every entry stays saved: {names}. The host record could not be written, so the Add Server window asks about their settings the next time. Remove one with remove_server if it is not wanted.");
+            return;
         }
 
         error.WriteLine(saved.Count == 0
