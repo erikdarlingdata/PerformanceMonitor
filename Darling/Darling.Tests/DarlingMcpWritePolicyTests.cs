@@ -129,7 +129,7 @@ public sealed class DarlingMcpWritePolicyTests
 
         /* Every server admin tool is one an agent is never offered, so a tool added to the set cannot reach an agent token unlisted. */
         Assert.All(DarlingMcpWritePolicy.ServerAdminTools, t => Assert.Contains(t, DarlingMcpWritePolicy.NeverAgentTools));
-        Assert.All(six, t => Assert.False(DarlingMcpWritePolicy.IsAgentAction(t, new HashSet<string>(six))));
+        Assert.All(six, t => Assert.False(DarlingMcpWritePolicy.IsAgentAction(t, new System.Collections.Generic.HashSet<string>(six))));
     }
 
     [Fact]
