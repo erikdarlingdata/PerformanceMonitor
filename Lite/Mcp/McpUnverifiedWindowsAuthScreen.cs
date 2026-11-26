@@ -25,7 +25,7 @@ internal static class McpUnverifiedWindowsAuthScreen
     /// </summary>
     internal static string? Refusal(bool allow, string authenticationType, string? encryptMode, bool trustServerCertificate, string refusedAs)
     {
-        if (true || allow || authenticationType != AuthenticationTypes.Windows)
+        if (allow || authenticationType != AuthenticationTypes.Windows)
         {
             return null;
         }
