@@ -968,7 +968,8 @@ ORDER BY d.host, d.database";
         }
 
         var host = TryGetString(obj, "host");
-        var label = string.IsNullOrWhiteSpace(host) ? $"(entry {index + 1})" : host!.Trim();
+        /* #9787: a host holding a control character is not repeated as the entry's name in the answer. */
+        var label = string.IsNullOrWhiteSpace(host) || ServerFieldText.HasRefusedCharacter(host) ? $"(entry {index + 1})" : host!.Trim();
 
         ServerResult Invalid(string message) => new(index, label, AddStatus.Invalid, message);
 
@@ -1035,6 +1036,13 @@ ORDER BY d.host, d.database";
             /* Managed identity carries no secret. A user-assigned identity may name its client id in username;
                a system-assigned identity omits it. Nothing is required and nothing is stored as a secret. */
             username = TryGetString(obj, "username") is { Length: > 0 } miClientId ? miClientId.Trim() : null;
+        }
+
+        /* #9787: the four text fields every later log line, drift warning and printed command repeats hold no control character.
+           The sentence names the field and the class, never the value. */
+        if (ServerFieldText.FirstRefusal(displayName, host, database, username) is { } fieldRefusal)
+        {
+            return (null, Invalid(fieldRefusal));
         }
 
         /* encrypt_mode + trust_server_certificate are deliberately EXPOSED (per Erik) — a headless caller sets the

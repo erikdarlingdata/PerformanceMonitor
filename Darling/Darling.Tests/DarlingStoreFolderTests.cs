@@ -1711,7 +1711,7 @@ public sealed class DarlingStoreContentsGateTests
 
     private static int Icacls(params string[] arguments)
     {
-        var startInfo = new ProcessStartInfo("icacls.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        var startInfo = new ProcessStartInfo("icacls.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true }.InLocalFolder();
         foreach (var argument in arguments)
         {
             startInfo.ArgumentList.Add(argument);
@@ -2196,7 +2196,7 @@ public sealed class DarlingStoreContentsGateTests
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
-            });
+            }.InLocalFolder());
             process!.StandardOutput.ReadToEnd();
             process.WaitForExit();
 
@@ -2224,7 +2224,7 @@ public sealed class DarlingStoreContentsGateTests
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
-        });
+        }.InLocalFolder());
         process!.StandardOutput.ReadToEnd();
         process.WaitForExit();
     }

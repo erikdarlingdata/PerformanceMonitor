@@ -833,6 +833,13 @@ public partial class AddServerDialog : Window
             return;
         }
 
+        /* #9787: refused before any connect or save: a display name, host, database or login holding a control character. */
+        if (ServerFieldText.FirstRefusal(DisplayNameBox.Text, serverName, DatabaseNameBox.Text, UseProfileRadio.IsChecked == true ? null : UsernameBox.Text) is { } fieldRefusal)
+        {
+            StatusText.Text = fieldRefusal;
+            return;
+        }
+
         /* #6352: refused before any connect or save: a host that SqlClient would read as a named pipe or an admin
            connection (np:, lpc:, admin:, \host\pipe, //host). An edit that leaves the host as it was is not held to it. */
         if (HostBoxRefusal() is { } hostRefusal)

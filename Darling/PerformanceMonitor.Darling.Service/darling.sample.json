@@ -144,7 +144,7 @@
       // server you add has no remediation login. On a server that is already registered, omitting them changes nothing.
       // Both halves are required; one alone counts as unarmed and the service says so at connect.
       // Least privilege: ALTER on each database you intend to force a plan in. ALTER SERVER STATE only if you want
-      // to evict a plan. ALTER ANY CONNECTION only if you want an agent to kill a session (it can kill ANY session).
+      // to evict a plan. ALTER ANY CONNECTION only if you want an agent to kill a session (it can kill ANY session), together with VIEW SERVER PERFORMANCE STATE (SQL Server 2022 and later) or VIEW SERVER STATE (earlier versions).
       // An agent action also needs a Level 3 route and that server's action switch, which is off until the store owner
       // turns it on (docs/darling-agent-dispatch.md).
       // An env:NAME or file:/path reference works everywhere. A DPAPI blob (--encrypt-password on THIS

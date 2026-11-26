@@ -497,12 +497,20 @@ internal static class AddServerCommand
         foreach (var entry in entries)
         {
             number++;
-            var label = $"Entry {number} ({entry.Host})";
+            var label = $"Entry {number} ({ServerFieldText.Escape(entry.Host)})";
             /* The read-only intent is part of the server's identity, so a run that does not give it names the server without it. */
             var candidate = new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database, ReadOnlyIntent = entry.ReadOnlyIntent ?? false };
             /* Against every earlier entry, refused or not, so a duplicate of a refused entry is reported in this run and not the next. */
             var listedTwice = seen.Any(p => ServerManager.IsSameServerIgnoringCase(p, candidate));
             seen.Add(candidate);
+
+            /* #9787: the display name, host, database and login hold no control character, the rule every Darling writer applies. */
+            if (ServerFieldText.FirstRefusal(entry.DisplayName, entry.Host, entry.Database, entry.Username) is { } fieldRefusal)
+            {
+                error.WriteLine($"{label}: {fieldRefusal}");
+                refused++;
+                continue;
+            }
 
             if (ServerManager.HostRefusal(entry.Host, null) is { } hostRefusal)
             {

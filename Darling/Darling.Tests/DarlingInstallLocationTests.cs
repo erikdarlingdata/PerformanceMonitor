@@ -4866,7 +4866,7 @@ function Get-CimInstance {
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
-            };
+            }.InLocalFolder();
             Process? process;
             try { process = Process.Start(startInfo); }
             catch (System.ComponentModel.Win32Exception) { return null; }
