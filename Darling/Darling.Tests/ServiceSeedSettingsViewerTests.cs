@@ -10,6 +10,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -59,26 +60,38 @@ public sealed class ServiceSeedSettingsTests
     }
 
     [Theory]
-    [InlineData(0, 0)]
-    [InlineData(-5, 0)]
-    [InlineData(3, 7)]
-    [InlineData(21, 21)]
-    [InlineData(9000, 365)]
-    public void TheWindowShowsTheRetentionTheServiceUses(int stored, int shown)
+    [InlineData(-5)]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(ServiceFlagLimits.PlanContentRetentionDaysMin - 1)]
+    [InlineData(ServiceFlagLimits.PlanContentRetentionDaysMin)]
+    [InlineData(21)]
+    [InlineData(ServiceFlagLimits.PlanContentRetentionDaysMax)]
+    [InlineData(ServiceFlagLimits.PlanContentRetentionDaysMax + 1)]
+    [InlineData(9000)]
+    public void TheWindowShowsTheRetentionTheServiceUses(int stored)
     {
-        Assert.Equal(shown, ServiceSeedSettings.EffectiveRetentionDays(stored));
+        var shown = ServiceSeedSettings.EffectiveRetentionDays(stored);
+        Assert.Equal(ServiceFlagLimits.ClampPlanContentRetentionDays(stored), shown);
+        Assert.Equal(StoreConfigProvider.ClampPlanContentRetentionDays(stored), shown);
         Assert.Null(ServiceFlagLimits.PlanContentRetentionDaysError(shown));
     }
 
     [Theory]
-    [InlineData(0, 60)]
-    [InlineData(-1, 60)]
-    [InlineData(2, 5)]
-    [InlineData(15, 15)]
-    [InlineData(5000, 600)]
-    public void TheWindowShowsTheTimeoutTheServiceUses(int stored, int shown)
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(ServiceFlagLimits.ComposeStatementTimeoutSecondsMin - 1)]
+    [InlineData(ServiceFlagLimits.ComposeStatementTimeoutSecondsMin)]
+    [InlineData(15)]
+    [InlineData(ServiceFlagLimits.ComposeStatementTimeoutSecondsMax)]
+    [InlineData(ServiceFlagLimits.ComposeStatementTimeoutSecondsMax + 1)]
+    [InlineData(5000)]
+    public void TheWindowShowsTheTimeoutTheServiceUses(int stored)
     {
-        Assert.Equal(shown, ServiceSeedSettings.EffectiveTimeoutSeconds(stored));
+        var shown = ServiceSeedSettings.EffectiveTimeoutSeconds(stored);
+        Assert.Equal(ServiceFlagLimits.ClampComposeStatementTimeoutSeconds(stored), shown);
+        Assert.Equal(StoreConfigProvider.ClampComposeStatementTimeoutSeconds(stored), shown);
         Assert.Null(ServiceFlagLimits.ComposeStatementTimeoutSecondsError(shown));
     }
 

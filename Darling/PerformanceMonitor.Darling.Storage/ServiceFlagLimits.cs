@@ -50,6 +50,9 @@ public static class ServiceFlagLimits
     /// <summary>The longest compose statement timeout, in seconds.</summary>
     public const int ComposeStatementTimeoutSecondsMax = 600;
 
+    /// <summary>The compose statement timeout a stored 0 or negative value reads as, in seconds.</summary>
+    public const int ComposeStatementTimeoutSecondsDefault = 60;
+
     /// <summary>The plan XML compression mode that stores plans as gzip bytes.</summary>
     public const string PlanXmlCompressionGzip = "gzip";
 
@@ -93,6 +96,20 @@ public static class ServiceFlagLimits
     /// <summary>The refusal for a compose statement timeout outside its range, or null.</summary>
     public static string? ComposeStatementTimeoutSecondsError(int seconds) =>
         seconds is >= ComposeStatementTimeoutSecondsMin and <= ComposeStatementTimeoutSecondsMax ? null : ComposeStatementTimeoutSecondsMessage;
+
+    /// <summary>
+    /// The plan content retention the service uses for a stored value: 0 or less is off, anything else is held to the range. The one copy
+    /// the service, the Viewer's Settings window and the store readers all call.
+    /// </summary>
+    public static int ClampPlanContentRetentionDays(int value) =>
+        value <= 0 ? 0 : Math.Clamp(value, PlanContentRetentionDaysMin, PlanContentRetentionDaysMax);
+
+    /// <summary>
+    /// The compose statement timeout the service uses for a stored value: 0 or less is the default, anything else is held to the range.
+    /// The one copy the service, the Viewer's Settings window and the Viewer's compose reads all call.
+    /// </summary>
+    public static int ClampComposeStatementTimeoutSeconds(int value) =>
+        Math.Clamp(value <= 0 ? ComposeStatementTimeoutSecondsDefault : value, ComposeStatementTimeoutSecondsMin, ComposeStatementTimeoutSecondsMax);
 
     /// <summary>The refusal for a plan XML compression mode the store's CHECK constraint would reject, or null. Case and edge spaces are ignored.</summary>
     public static string? PlanXmlCompressionError(string? mode) =>

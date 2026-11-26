@@ -28,8 +28,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// The service-flags write (#6393): <c>update_service_flags</c> sets plan capture, Query Store backfill, the Query Store text budget,
 /// the concurrent server sweeps and the Query Store fetch top N on the single <c>config.config_service</c> row, the five flags the
 /// Viewer's Settings window saves through <c>ViewerDataService.UpdateServiceFlagsAsync</c>, (#8978) the two trigram text index
-/// options, and (#9638) the three darling.json seeds that had no editor: the plan content retention days, the compose statement
-/// timeout and the plan XML compression mode. Served under <c>mcp.allowWrites</c> and never offered to an investigation agent
+/// options, and (#9638) the three darling.json seeds that the Viewer's Settings window also saves: the plan content retention days, the
+/// compose statement timeout and the plan XML compression mode. Served under <c>mcp.allowWrites</c> and never offered to an investigation agent
 /// (<see cref="DarlingMcpWritePolicy.NeverAgentTools"/>).
 ///
 /// <para><b>The trigram index options are tri-state.</b> <c>query_text_trigram_index_enabled</c> and
@@ -97,14 +97,15 @@ RETURNING old.capture_plans, old.query_store_backfill_enabled, old.query_store_t
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_service_flags"), Description(
-        "PARTIAL update of the ten service-wide settings: the five collection flags the Viewer's Settings window saves, capture_plans (global plan capture), " +
-        "query_store_backfill_enabled, query_store_text_budget_mb (4-256 MB), max_concurrent_sweeps (1-16) and query_store_fetch_top_n " +
-        "(0-100000; 0 fetches every new plan), and the two trigram text index options, query_text_trigram_index_enabled (plan-cache text) and " +
-        "query_store_text_trigram_index_enabled (Query Store text), which speed up find_queries_by_text, and three that darling.json only seeds: " +
+        "PARTIAL update of the ten service-wide settings. The Viewer's Settings window saves eight of them: the five collection flags, capture_plans " +
+        "(global plan capture), query_store_backfill_enabled, query_store_text_budget_mb (4-256 MB), max_concurrent_sweeps (1-16) and " +
+        "query_store_fetch_top_n (0-100000; 0 fetches every new plan), and three that darling.json only seeds: " +
         "plan_content_retention_days (0 turns it off, else 7-365; a stored plan is dropped that many days after its last sighting, at the next purge), " +
         "compose_statement_timeout_seconds (5-600; the statement_timeout of the viewer and mcp roles, applied to each role's next session, and the " +
         "answer says when the service does not set it for you) and plan_xml_compression (gzip or none; applies to plans written from now on, " +
-        "plans already stored keep their format and still read). The two index options are null until set, " +
+        "plans already stored keep their format and still read). The other two are the trigram text index options, " +
+        "query_text_trigram_index_enabled (plan-cache text) and query_store_text_trigram_index_enabled (Query Store text), which speed up " +
+        "find_queries_by_text and are set only here. The two index options are null until set, " +
         "and null means darling.json's queryTextTrigramIndexEnabled / queryStoreTextTrigramIndexEnabled governs; a value set here wins over the file, " +
         "and reset_to_file clears it back to null. Send only the flags to change; an omitted flag keeps its stored value. An out-of-range value " +
         "returns status invalid, names the argument and its range, and writes NOTHING. Cannot change the MCP or web on/off flag or port, or " +

@@ -25,7 +25,7 @@ internal static class ServiceSeedSettings
     public const int DefaultRetentionDays = 21;
 
     /// <summary>The default for <c>compose_statement_timeout_seconds</c>.</summary>
-    public const int DefaultTimeoutSeconds = 60;
+    public const int DefaultTimeoutSeconds = ServiceFlagLimits.ComposeStatementTimeoutSecondsDefault;
 
     /// <summary>The default for <c>plan_xml_compression</c>.</summary>
     public const string DefaultCompression = ServiceFlagLimits.PlanXmlCompressionGzip;
@@ -51,11 +51,11 @@ internal static class ServiceSeedSettings
     /// rather than a hand-edited raw value, so a store holding 3 shows 7 and saving without a change does not trip the range check.
     /// </summary>
     public static int EffectiveRetentionDays(int stored) =>
-        stored <= 0 ? 0 : Math.Clamp(stored, ServiceFlagLimits.PlanContentRetentionDaysMin, ServiceFlagLimits.PlanContentRetentionDaysMax);
+        ServiceFlagLimits.ClampPlanContentRetentionDays(stored);
 
     /// <summary>The timeout the service uses for a stored value: 0 or less is the default, anything else is held to the range.</summary>
     public static int EffectiveTimeoutSeconds(int stored) =>
-        Math.Clamp(stored <= 0 ? DefaultTimeoutSeconds : stored, ServiceFlagLimits.ComposeStatementTimeoutSecondsMin, ServiceFlagLimits.ComposeStatementTimeoutSecondsMax);
+        ServiceFlagLimits.ClampComposeStatementTimeoutSeconds(stored);
 
     /// <summary>The storage form the service uses for a stored value: its own spelling when it is one of the two, otherwise gzip.</summary>
     public static string EffectiveCompression(string? stored) =>

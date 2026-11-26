@@ -2213,7 +2213,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal const int MaxPlanContentRetentionDays = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.PlanContentRetentionDaysMax;
 
     internal static int ClampPlanContentRetentionDays(int value) =>
-        value <= 0 ? 0 : Math.Clamp(value, MinPlanContentRetentionDays, MaxPlanContentRetentionDays);
+        PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ClampPlanContentRetentionDays(value);
 
     /* #2357: the compose statement_timeout bounds WORK -- a LIMIT bounds output, a group-by scans and sorts
        before it -- so it is clamped rather than trusted. A floor of 5s keeps the backstop meaningful; a
@@ -2229,7 +2229,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal const int MaxComposeStatementTimeoutSeconds = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ComposeStatementTimeoutSecondsMax;
 
     internal static int ClampComposeStatementTimeoutSeconds(int value) =>
-        Math.Clamp(value <= 0 ? 60 : value, MinComposeStatementTimeoutSeconds, MaxComposeStatementTimeoutSeconds);
+        PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ClampComposeStatementTimeoutSeconds(value);
 
     /// <summary>#2171: unknown values normalize to 'gzip' (fail to the shipped default) so a hand-edited
     /// row cannot switch the writer into an undefined mode; the V62 CHECK constraint enforces the same
