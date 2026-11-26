@@ -414,7 +414,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 
 ## Changing a registered server
 
-After the first start the server list lives in the store, and an edit to `servers` in `darling.json` does nothing for a server that is already registered. At start-up the service logs one WARN line for each enabled registered server whose entry in the file differs from the store. The line names each differing field with the file's value and the store's value, and gives the `--edit-server` command that applies the file's values.
+After the first start the server list lives in the store, and an edit to `servers` in `darling.json` does nothing for a server that is already registered. At start-up the service logs one WARN line for each enabled registered server whose entry in the file differs from the store. The line names each differing field with the file's value and the store's value, and gives the `--edit-server` command that applies the file's values, with each word that is not plain in single quotes.
 
 - **To add a server**, use `--add-server` in its Linux form. It cannot change a server that is already registered.
 - **To change a registered server**, for example its `trustServerCertificate` or its `encryptMode`, use `--edit-server` in its Linux form. It works while the service runs, and the service applies the change within one sweep with no restart. When the change affects how a server with a saved password is reached, the verb asks for that password again, at a hidden prompt or as one line from stdin when input is redirected. It tests the connection with the new settings and saves only if the server answers.
