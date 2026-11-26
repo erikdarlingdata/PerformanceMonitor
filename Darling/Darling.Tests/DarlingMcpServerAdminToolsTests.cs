@@ -619,7 +619,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 
         Assert.Contains("status:\"ambiguous\"", description, StringComparison.Ordinal);
         Assert.Contains("NOTHING is deleted", description, StringComparison.Ordinal);
-        Assert.Contains("ONLY when exactly one", description, StringComparison.Ordinal);
+        Assert.Contains("status:\"partial_match\"", description, StringComparison.Ordinal);
         Assert.DoesNotContain("resolved the same way the read tools resolve", description, StringComparison.Ordinal);
 
         /* #3653 A15/A16: the description says WHICH table the name is resolved against (the definitions the DELETE
@@ -1127,8 +1127,8 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 /// config_monitored_servers rows (SQL-auth password DPAPI-encrypted at rest, Windows-auth server secret-free),
 /// the case-folded duplicate is skipped, the write self-bumps config_version (the reload beacon) via the existing
 /// trigger, a #2280 collision is refused and COUNTED (#3541 A14: <c>collided</c>, with the four counters summing
-/// to <c>requested</c>), and remove_server refuses an ambiguous fragment with both candidates named, honors a unique
-/// partial, and DELETEs on an exact name. Own-scoped per the shared-store doctrine (GUID-suffixed hosts + a finally
+/// to <c>requested</c>), and remove_server refuses an ambiguous fragment with both candidates named, answers a unique
+/// partial with the server named and removes nothing, and DELETEs on an exact name. Own-scoped per the shared-store doctrine (GUID-suffixed hosts + a finally
 /// cleanup). No live SQL Server connection is made in CI — the real end-to-end probe is what the human dogfoods
 /// (remove sql2016, re-add via MCP).
 /// </summary>
@@ -1312,14 +1312,25 @@ public sealed class DarlingMcpServerAdminToolsLivePostgresTests
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {winId}")));
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {dbAppId}")));
 
-            /* A partial that only ONE defined name contains is honored, and says so — on a server that never
-               connected (THE #3653 case: the old tool could not see it at all). */
+            /* #9665: a partial that only ONE defined name contains is not removed either. The answer names that one
+               server (a server that never connected, THE #3653 case) and the definition is still in the store. */
             using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, "add-win-" + suffix)))
+            {
+                Assert.Equal("partial_match", doc.RootElement.GetProperty("status").GetString());
+                Assert.Equal("partial", doc.RootElement.GetProperty("matched_by").GetString());
+                Assert.Equal("config_monitored_servers", doc.RootElement.GetProperty("matched_in").GetString());
+                var guess = Assert.Single(doc.RootElement.GetProperty("candidates").EnumerateArray());
+                Assert.Equal(winHost, guess.GetProperty("server").GetString());
+                Assert.False(guess.GetProperty("ever_connected").GetBoolean());
+            }
+            Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(connection, ct, $"SELECT count(*) FROM config_monitored_servers WHERE server_id = {winId}")));
+
+            /* The exact name the answer gave removes it, on a server that never connected. */
+            using (var doc = JsonDocument.Parse(await DarlingMcpServerAdminTools.RemoveServer(postgres, winHost)))
             {
                 Assert.Equal("removed", doc.RootElement.GetProperty("status").GetString());
                 Assert.Equal(winHost, doc.RootElement.GetProperty("server").GetString());
-                Assert.Equal("partial", doc.RootElement.GetProperty("matched_by").GetString());
-                Assert.Equal("config_monitored_servers", doc.RootElement.GetProperty("matched_in").GetString());
+                Assert.Equal("exact", doc.RootElement.GetProperty("matched_by").GetString());
                 Assert.False(doc.RootElement.GetProperty("ever_connected").GetBoolean());
                 Assert.Contains("never connected", doc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
             }
