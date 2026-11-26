@@ -42,7 +42,7 @@ The MCP token gates the entire read surface. It also gates `analyze_server`, whi
 
 1. Turn MCP on. It is off by default, and its port is `5152`. Use one of these:
    - In the Viewer, open Settings and turn on MCP.
-   - On Windows with the bundled (managed) store, run `PerformanceMonitor.Darling.Service.exe --enable-mcp`. The running service applies it within one collection sweep, with no restart. With your own PostgreSQL, or on Linux and in the compose container, run `UPDATE config.config_service SET mcp_enabled = true;` against the store's PostgreSQL instead. The service picks it up within one sweep.
+   - On Windows with the bundled (managed) store, run `PerformanceMonitor.Darling.Service.exe --enable-mcp`. The running service applies it within one collection sweep, with no restart. With your own PostgreSQL, or on Linux and in the compose container, run `UPDATE config.config_service SET mcp_enabled = true WHERE id = 1;` against the store's PostgreSQL instead. The service picks it up within one sweep.
    - Set `mcp.enabled` to `true` in `darling.json`. The service reads this value only to seed the store at its first start. After that, the Viewer or `--enable-mcp` and `--disable-mcp` decide.
 2. Set a token. A Darling MCP server that is on but has no token does not start. The service log names the settings to add. Make a token of at least 16 characters with at least 6 different ones. A shorter or more repetitive token still gates every request, but the write and investigation tools stay off. Put the token in `darling.json` and restart the service:
 
