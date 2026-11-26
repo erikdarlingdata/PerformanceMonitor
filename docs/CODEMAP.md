@@ -15,9 +15,9 @@ The Full Dashboard and the CLI installer are frozen in a zip file. Nothing in th
 In numbers:
 
 - 23 projects (4 app, 10 library, 5 test, 4 tool).
-- 304 Darling MCP tools and 119 Lite MCP tools.
+- 304 Darling MCP tools and 121 Lite MCP tools.
 - 317 store migrations. The newest is version 318.
-- 4922 test classes in 5 test projects.
+- 4933 test classes in 5 test projects.
 - 19 CI workflows.
 
 To build, run these from the repository root:
@@ -543,7 +543,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `wait_for_investigation_requests` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationTools.cs) |
 | `write_investigation_note` | [`Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs`](../Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpInvestigationAdminTools.cs) |
 
-### Lite MCP tools (119)
+### Lite MCP tools (121)
 
 | Tool | Declared in |
 |---|---|
@@ -576,6 +576,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `get_client_timeouts` | [`Lite/Mcp/McpClientTimeoutTools.cs`](../Lite/Mcp/McpClientTimeoutTools.cs) |
 | `get_collection_health` | [`Lite/Mcp/McpHealthTools.cs`](../Lite/Mcp/McpHealthTools.cs) |
 | `get_collection_log` | [`Lite/Mcp/McpHealthTools.cs`](../Lite/Mcp/McpHealthTools.cs) |
+| `get_collector_schedules` | [`Lite/Mcp/McpCollectorScheduleTools.cs`](../Lite/Mcp/McpCollectorScheduleTools.cs) |
 | `get_cpu_by_database` | [`Lite/Mcp/McpWhoDroveItTools.cs`](../Lite/Mcp/McpWhoDroveItTools.cs) |
 | `get_cpu_scheduler_pressure` | [`Lite/Mcp/McpPlanCacheSchedulerTools.cs`](../Lite/Mcp/McpPlanCacheSchedulerTools.cs) |
 | `get_cpu_utilization` | [`Lite/Mcp/McpCpuTools.cs`](../Lite/Mcp/McpCpuTools.cs) |
@@ -658,6 +659,7 @@ A tool is a method that carries the `McpServerTool` attribute. Each row names th
 | `list_query_tags` | [`Lite/Mcp/McpQueryTagTools.cs`](../Lite/Mcp/McpQueryTagTools.cs) |
 | `list_servers` | [`Lite/Mcp/McpDiscoveryTools.cs`](../Lite/Mcp/McpDiscoveryTools.cs) |
 | `mute_analysis_finding` | [`Lite/Mcp/McpAnalysisTools.cs`](../Lite/Mcp/McpAnalysisTools.cs) |
+| `reset_collector_schedules` | [`Lite/Mcp/McpCollectorScheduleTools.cs`](../Lite/Mcp/McpCollectorScheduleTools.cs) |
 | `set_notification_route_enabled` | [`Lite/Mcp/McpAlertTools.cs`](../Lite/Mcp/McpAlertTools.cs) |
 | `set_server_excluded_databases` | [`Lite/Mcp/McpServerAdminTools.cs`](../Lite/Mcp/McpServerAdminTools.cs) |
 | `submit_investigation_report` | [`Lite/Mcp/McpInvestigationTools.cs`](../Lite/Mcp/McpInvestigationTools.cs) |
@@ -674,10 +676,10 @@ A test class is a file whose name ends in `Tests.cs`.
 | Test project | Test classes |
 |---|---|
 | [`Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj`](../Darling/Darling.Tests.Standin/Darling.Tests.Standin.csproj) | 0 |
-| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3629 |
+| [`Darling/Darling.Tests/Darling.Tests.csproj`](../Darling/Darling.Tests/Darling.Tests.csproj) | 3635 |
 | [`Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj`](../Exporter/PerformanceMonitor.Exporter.TestChild/PerformanceMonitor.Exporter.TestChild.csproj) | 0 |
-| [`Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj`](../Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj) | 73 |
-| [`Lite.Tests/Lite.Tests.csproj`](../Lite.Tests/Lite.Tests.csproj) | 1220 |
+| [`Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj`](../Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj) | 74 |
+| [`Lite.Tests/Lite.Tests.csproj`](../Lite.Tests/Lite.Tests.csproj) | 1224 |
 
 ## CI
 
@@ -705,4 +707,4 @@ A test class is a file whose name ends in `Tests.cs`.
 
 ---
 
-Generated from commit `80ffe0ef1`. To refresh it, run `python tools/codemap/codemap.py`.
+Generated from commit `9abed9cb1`. To refresh it, run `python tools/codemap/codemap.py`.

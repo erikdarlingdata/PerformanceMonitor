@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #9576: the detail of an alert another service submitted reaches the drain with its line breaks, and each channel shows them its
-/// own way: Slack mrkdwn keeps the line feed, a Teams MessageCard needs a doubled one, email HTML turns it into a break tag after
+/// own way: Slack mrkdwn keeps the line feed, a Teams card's TextBlock needs a doubled one, email HTML turns it into a break tag after
 /// the text is encoded, plain-text email and the Generic webhook keep the line feed. Text a source sends is still escaped.
 /// </summary>
 public class ExternalAlertDetailBreaksTests
@@ -54,7 +54,7 @@ public class ExternalAlertDetailBreaksTests
     }
 
     [Fact]
-    public void Teams_AnExternalDetailWithBreaks_GetsTheDoubledLineFeedAMessageCardNeeds_AndStillEscapesTheText()
+    public void Teams_AnExternalDetailWithBreaks_GetsTheDoubledLineFeedATextBlockNeeds_AndStillEscapesTheText()
     {
         var payload = WebhookAlertService.BuildTeamsPayload(
             Metric, "SRV1", "7", "", Branding,
@@ -81,10 +81,7 @@ public class ExternalAlertDetailBreaksTests
         var payload = WebhookAlertService.BuildTeamsPayload(
             Metric, "SRV1", "7", "", Branding, context: context, detailText: detailText, displayName: "Report");
 
-        using var document = JsonDocument.Parse(payload);
-        var section = document.RootElement.GetProperty("sections").EnumerateArray()
-            .Single(item => item.TryGetProperty("activityTitle", out var title) && title.GetString() == "Details");
-        return section.GetProperty("text").GetString()!;
+        return Assert.Single(TeamsCard.Parse(payload).Section("Details").Texts);
     }
 
     [Fact]
@@ -96,12 +93,12 @@ public class ExternalAlertDetailBreaksTests
     }
 
     [Fact]
-    public void Teams_AMarkerAfterIndentation_IsEscapedAfterTheIndentation()
+    public void Teams_AnIndentedLine_IsSentWithoutItsIndent_AndAMarkerAfterTheIndentIsEscaped()
     {
         var details = TeamsDetails("Report\n  - one\n  ## two\n    + three\n  2) four\n==== five\n-\n#", External());
 
         Assert.Equal(
-            "Report\n\n  \\- one\n\n  \\#\\# two\n\n    \\+ three\n\n  2\\) four\n\n\\=\\=\\=\\= five\n\n\\-\n\n\\#",
+            "Report\n\n\\- one\n\n\\#\\# two\n\n\\+ three\n\n2\\) four\n\n\\=\\=\\=\\= five\n\n\\-\n\n\\#",
             details);
     }
 

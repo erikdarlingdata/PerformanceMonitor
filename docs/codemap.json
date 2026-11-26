@@ -574,7 +574,7 @@
       ]
     }
   ],
-  "generated_from": "80ffe0ef1",
+  "generated_from": "9abed9cb1",
   "mcp_tools": [
     {
       "file": "Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingMcpServerAdminTools.cs",
@@ -2242,6 +2242,11 @@
       "product": "Lite"
     },
     {
+      "file": "Lite/Mcp/McpCollectorScheduleTools.cs",
+      "name": "get_collector_schedules",
+      "product": "Lite"
+    },
+    {
       "file": "Lite/Mcp/McpWhoDroveItTools.cs",
       "name": "get_cpu_by_database",
       "product": "Lite"
@@ -2652,6 +2657,11 @@
       "product": "Lite"
     },
     {
+      "file": "Lite/Mcp/McpCollectorScheduleTools.cs",
+      "name": "reset_collector_schedules",
+      "product": "Lite"
+    },
+    {
       "file": "Lite/Mcp/McpAlertTools.cs",
       "name": "set_notification_route_enabled",
       "product": "Lite"
@@ -2921,7 +2931,7 @@
     {
       "name": "Darling.Tests",
       "project": "Darling/Darling.Tests/Darling.Tests.csproj",
-      "test_classes": 3629
+      "test_classes": 3635
     },
     {
       "name": "PerformanceMonitor.Exporter.TestChild",
@@ -2931,12 +2941,12 @@
     {
       "name": "PerformanceMonitor.Exporter.Tests",
       "project": "Exporter/PerformanceMonitor.Exporter.Tests/PerformanceMonitor.Exporter.Tests.csproj",
-      "test_classes": 73
+      "test_classes": 74
     },
     {
       "name": "Lite.Tests",
       "project": "Lite.Tests/Lite.Tests.csproj",
-      "test_classes": 1220
+      "test_classes": 1224
     }
   ]
 }
