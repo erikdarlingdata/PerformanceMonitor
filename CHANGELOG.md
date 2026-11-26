@@ -37,7 +37,9 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Upgrading runs Darling store migrations V304 through V314 and V316 through V318 on the service's first start** ([#9410], [#9419], [#9411], [#9415], [#9413], [#9414], [#9452], [#9438], [#9432], [#9427], [#9437], [#9439], [#9433], [#9485])
 - **Upgrading runs Darling store migration V315 on the service's first start, and rolling back past it needs one statement** ([#9434], [#9504])
 - **Upgrading builds three more Darling store indexes at the next service start** ([#9229], [#9288], [#9385])
+- **Upgrading runs Darling store migration V319 on the service's first start** ([#9667])
 - **Lite's DuckDB schema moves to version 85 on its first start, and an older Lite build then refuses the file** ([#8784], [#8886], [#8887], [#9243], [#9241])
+- **Upgrading to 3.14.0 from 3.12 or earlier: a compose install needs the ownership change from the 3.13.0 notes** ([#8141])
 
 ### Added
 
@@ -87,6 +89,15 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **`get_store_lock_waits` lists the store's slow lock waits** ([#9510])
 - **The Collector Schedules editor has an Off preset** ([#9570])
 - **Lite `--add-server` sets encryption, certificate trust, read-only intent and multi-subnet failover** ([#9589])
+- **`send_test_notification` sends a test message from the service** ([#9650])
+- **MCP tools add, rotate, remove and list external alert sources** ([#9656])
+- **MCP lists, creates, changes, rotates and deletes web access groups** ([#9657])
+- **MCP tools make a new password key and reset the password key** ([#9659])
+- **MCP tools make, revoke and list personal MCP tokens** ([#9661])
+- **Lite's MCP server gains `get_collector_schedules` and `reset_collector_schedules`** ([#9654])
+- **Lite's MCP server gains `update_alert_settings`** ([#9658])
+- **The exporter's `run` command uploads to S3-compatible stores and Azure Blob Storage** ([#9647])
+- **A Linux systemd install page** ([#9712], [#9719])
 
 ### Changed
 
@@ -205,6 +216,27 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Drill-down plan analysis fetches a bad actor's own statement plan** ([#9561])
 - **The clutter plan summary tables get the insert autovacuum setting** ([#9483])
 - **`find_tools` says a tool the client cannot call needs a reconnect** ([#9592])
+- **MCP `update_service_flags` sets the plan retention, compose timeout and plan compression** ([#9653])
+- **`edit_server` and `add_servers` set a server's plan collection and alert delivery override** ([#9655])
+- **The Lite agent example shows the `basis` of each evidence entry** ([#9663])
+- **`remove_server` removes nothing on a partial name** ([#9666])
+- **Lite's `get_object_usage` reads a persisted per-snapshot chain** ([#9645])
+- **The exporter README explains the `dpapi_file` password file** ([#9646])
+- **The exporter refuses a store without the C collation early** ([#9622])
+- **The exporter reports configuration errors before the first window** ([#9623])
+- **The exporter's usage text, plan-only windows, log path and output are corrected** ([#9620])
+- **A re-export of a one-part table writes the same bytes** ([#9619])
+- **Query Store regressions read the open day from the daily totals** ([#9621])
+- **`analyze_server` reads plan advisories once per pass** ([#9633])
+- **`find_queries_by_text` across all servers reads the newest samples first** ([#9634])
+- **A failed Strict connection test says what Strict needs** ([#9677])
+- **A rejected SQL Server certificate says so in the connection failure text** ([#9717])
+- **Lite's plan regression read takes about half the CPU** ([#9682])
+- **The on-prem `query_snapshots` statement no longer recompiles when no databases are excluded** ([#9687])
+- **The host hourly rollup of query stats keeps only as much as the raw query stats** ([#9685], [#9718])
+- **The hourly Query Store clutter rollup keeps only the hours raw Query Store data holds** ([#9708])
+- **A new install's logs no longer read like a store in trouble** ([#9715])
+- **Self-hosted PostgreSQL log readers ask for EXECUTE on the read functions, not `pg_read_server_files`** ([#9727])
 
 ### Fixed
 
@@ -253,6 +285,22 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **`DB_CONFIG` leaves the Amazon RDS `rdsadmin` database out** ([#9595])
 - **`get_collector_readiness` counts set-time collectors apart from not-yet-due ones** ([#9598])
 - **`/version` and `get_service_starts` name the build's commit on nightly and release builds** ([#9599])
+- **`get_client_timeouts` fits its reply to the response budget** ([#9600])
+- **Lite Store Health's "Read at" time says UTC and the history columns stay in the window** ([#9609], [#9610])
+- **Teams cards and email keep an external alert's detail, and Teams shows the triage button** ([#9624], [#9625], [#9626])
+- **Agent actions over MCP read the notification routes on a managed store** ([#9729])
+- **The Query Store closed-day step shows as failed when its clutter steps cannot run** ([#9726])
+- **On Linux, the service names the commands that run there** ([#9720], [#9710])
+- **The Linux systemd steps create the service user and the folders it writes** ([#9679])
+- **The service's Connected line names the engine type and the edition** ([#9724])
+- **Every first connect starts at once when the fleet fits the sweep gate** ([#9725])
+- **A bring-your-own store can run custom alerts, and `provision-roles.sql` is quiet** ([#9713])
+- **Several entries on one SQL Server instance no longer drop each other's Attention session** ([#9676])
+- **Turning advanced web access on or off over MCP names the caller in the journal** ([#9667])
+- **Lite's MCP `add_servers` says every entry stayed saved when only the host record failed** ([#9670])
+- **Query tag sightings are kept as long as the longest collector that writes them** ([#9709])
+- **The `object_inventory` purge keeps each database's newest object list** ([#9716])
+- **Retention adopts missing liveness rows in keyset slices under a per-table budget** ([#9669])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8428,3 +8476,55 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9595]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9595
 [#9598]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9598
 [#9599]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9599
+[#9600]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9600
+[#9609]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9609
+[#9610]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9610
+[#9619]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9619
+[#9620]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9620
+[#9621]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9621
+[#9622]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9622
+[#9623]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9623
+[#9624]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9624
+[#9625]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9625
+[#9626]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9626
+[#9633]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9633
+[#9634]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9634
+[#9645]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9645
+[#9646]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9646
+[#9647]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9647
+[#9650]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9650
+[#9653]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9653
+[#9654]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9654
+[#9655]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9655
+[#9656]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9656
+[#9657]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9657
+[#9658]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9658
+[#9659]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9659
+[#9661]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9661
+[#9663]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9663
+[#9666]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9666
+[#9667]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9667
+[#9669]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9669
+[#9670]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9670
+[#9676]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9676
+[#9677]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9677
+[#9679]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9679
+[#9682]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9682
+[#9685]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9685
+[#9687]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9687
+[#9708]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9708
+[#9709]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9709
+[#9710]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9710
+[#9712]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9712
+[#9713]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9713
+[#9715]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9715
+[#9716]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9716
+[#9717]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9717
+[#9718]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9718
+[#9719]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9719
+[#9720]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9720
+[#9724]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9724
+[#9725]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9725
+[#9726]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9726
+[#9727]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9727
+[#9729]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9729
