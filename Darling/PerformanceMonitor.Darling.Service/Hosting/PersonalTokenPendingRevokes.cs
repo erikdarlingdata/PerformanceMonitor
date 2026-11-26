@@ -119,7 +119,10 @@ internal sealed class PersonalTokenPendingRevokes
             }
             else
             {
-                logger?.LogWarning("The MCP personal token revoke queue is kept in memory only, so a restart would lose it: {Folder} is not used because {Problem}.", directory, problem);
+                var folderNote = DarlingLogHashKeyFile.ContainerFolderNote(config);
+                logger?.LogWarning(
+                    "The MCP personal token revoke queue is kept in memory only, so a restart would lose it: {Folder} is not used because {Problem}.{FolderNote}",
+                    directory, problem, folderNote is null ? "" : " " + folderNote);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

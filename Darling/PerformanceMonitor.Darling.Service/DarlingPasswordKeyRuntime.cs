@@ -43,6 +43,10 @@ internal sealed record PasswordKeyStartOptions
     /// <summary>The <c>passwordKey</c> reference (#8006) the key is loaded from instead of the key file. Null means the key
     /// file in the credentials directory.</summary>
     public string? KeySetting { get; init; }
+
+    /// <summary>The sentence <see cref="DarlingLogHashKeyFile.ContainerFolderNote"/> gives when the directory was chosen because
+    /// <c>DOTNET_RUNNING_IN_CONTAINER</c> is true (#9734). A refused start carries it at the end of its reason. Null adds nothing.</summary>
+    public string? FolderNote { get; init; }
 }
 
 /// <summary>
@@ -133,6 +137,13 @@ internal sealed class DarlingPasswordKeyRuntime
         var options = string.IsNullOrWhiteSpace(config.PasswordKey)
             ? null
             : new PasswordKeyStartOptions { KeySetting = config.PasswordKey };
+        // The note is about the key folder, so it is only given when the key comes from the folder: with passwordKey set the folder is never read.
+        var folderNote = string.IsNullOrWhiteSpace(config.PasswordKey) ? DarlingLogHashKeyFile.ContainerFolderNote(config) : null;
+        if (folderNote is not null)
+        {
+            options = (options ?? new PasswordKeyStartOptions()) with { FolderNote = folderNote };
+        }
+
         return await StartAsync(directory, postgres, logger, ct, options).ConfigureAwait(false);
     }
 
@@ -158,6 +169,12 @@ internal sealed class DarlingPasswordKeyRuntime
         try
         {
             var outcome = await DecideAndActAsync(directory, postgres, logger, selfTest, host, options.KeySetting, ct).ConfigureAwait(false);
+            if (options.FolderNote is not null && outcome.State == "refused" && outcome.FromKeyFolder)
+            {
+                /* #9734: only a refusal that read or wrote the key folder names why that folder was chosen. */
+                outcome = outcome with { Note = $"{outcome.Note} {options.FolderNote}" };
+            }
+
             held = outcome.Key;
             IPasswordKeyRing ring;
             if (held is not null && outcome.State == "ok")
@@ -305,7 +322,7 @@ internal sealed class DarlingPasswordKeyRuntime
     /// loaded (<see cref="PasswordKeyAction.PublishFile"/>), so the log can tell a passwordKey bootstrap from a reload.</summary>
     private sealed record Outcome(
         PasswordPrivateKey? Key, string State, string? Note, string? KeyId, bool Generated, bool TriggersOk, string? Warning,
-        bool Published = false);
+        bool Published = false, bool FromKeyFolder = false);
 
     private static async Task<Outcome> DecideAndActAsync(
         string directory, NpgsqlDataSource postgres, ILogger logger, Func<PasswordPrivateKey, PublishedKey, bool> selfTest,
@@ -388,7 +405,7 @@ internal sealed class DarlingPasswordKeyRuntime
                 }
                 catch (Exception ex) when (ex is IOException or ArgumentException)
                 {
-                    return new Outcome(null, "refused", ex.Message, null, false, true, null);
+                    return new Outcome(null, "refused", ex.Message, null, false, true, null, FromKeyFolder: true);
                 }
 
                 fileKey?.Dispose();
@@ -398,7 +415,10 @@ internal sealed class DarlingPasswordKeyRuntime
             switch (decision.Action)
             {
                 case PasswordKeyAction.Refused:
-                    return new Outcome(null, "refused", decision.Reason, null, false, true, null);
+                    // From the key folder when the file was there or untrusted. The passwordKey refusal and the inconsistent published key never read it.
+                    return new Outcome(
+                        null, "refused", decision.Reason, null, false, true, null,
+                        FromKeyFolder: keySetting is null && (facts.FilePresent || facts.FileUntrusted));
 
                 case PasswordKeyAction.Mismatch:
                     return new Outcome(null, "mismatch", decision.Reason, fileKey?.PublicKey.KeyId, false, true, null);
@@ -425,7 +445,7 @@ internal sealed class DarlingPasswordKeyRuntime
                         }
                         catch (Exception ex) when (ex is IOException or InvalidOperationException)
                         {
-                            return new Outcome(null, "refused", ex.Message, null, false, true, null);
+                            return new Outcome(null, "refused", ex.Message, null, false, true, null, FromKeyFolder: true);
                         }
                     }
 
@@ -457,7 +477,7 @@ internal sealed class DarlingPasswordKeyRuntime
                     if (!written.Present || written.Pkcs8 is null)
                     {
                         made.Dispose();
-                        return new Outcome(null, "refused", written.Refusal ?? "The password key file could not be written.", null, false, true, null);
+                        return new Outcome(null, "refused", written.Refusal ?? "The password key file could not be written.", null, false, true, null, FromKeyFolder: true);
                     }
 
                     var conflict = await TryPublishAsync(c, made, ct).ConfigureAwait(false);

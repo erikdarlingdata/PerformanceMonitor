@@ -4,6 +4,26 @@ Audience: operators.
 
 Part of the [Performance Monitor documentation](../README.md#documentation).
 
+### AWS RDS for SQL Server: the server certificate
+
+Lite checks the server certificate by default. The certificate of an RDS for SQL Server instance chains to an Amazon RDS certificate authority, such as `rds-ca-rsa2048-g1`, and Windows does not trust those authorities by default. A connection test or `--add-server` then fails with `The certificate chain was issued by an authority that is not trusted.` A self-signed certificate gives the same message, but the cause and the fix are different.
+
+Choose one of these:
+
+1. **Trust the RDS certificate authority on the Lite machine.** Download the certificate bundle for the Region of the instance from the [AWS list of certificate bundles](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.SSL.html#UsingWithRDS.SSL.CertificatesAllRegions). Use the PKCS7 file for that Region, `https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.p7b`. The bundle for one Region holds the root certificates of that Region. AWS says to register only root certificates, not intermediate ones. Import every certificate in the file into the trusted roots of the machine, from an elevated PowerShell:
+
+   ```powershell
+   $certs = [System.Security.Cryptography.X509Certificates.X509Certificate2Collection]::new()
+   $certs.Import("$PWD\<region>-bundle.p7b")
+   $store = [System.Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+   $store.Open('ReadWrite')
+   $store.AddRange($certs)
+   $store.Close()
+   ```
+
+   `Import-Certificate` is not a substitute here: it imports only the first certificate of a `.p7b` file. The machine store covers every Windows user, so it also covers the dedicated user of a headless Lite. Lite then verifies the server, and the connection needs no trust setting.
+2. **Trust the certificate for that server.** Check **Trust server certificate (skip certificate validation)** in **Edit Server**, or give `--trust-server-certificate`, or `trust_server_certificate` in JSON, to `--add-server`. The connection stays encrypted, but Lite no longer checks who answers. Use it only on a network that you trust. `Strict` encryption ignores this setting.
+
 ### AWS RDS Parameter Group Configuration
 
 `sp_configure` is not available on AWS RDS for SQL Server. Features that depend on server-level configuration must be set through **AWS RDS Parameter Groups** instead.
