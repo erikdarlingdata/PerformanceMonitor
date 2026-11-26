@@ -111,6 +111,13 @@ jobs:
         timeout-minutes: 30
         run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release -p:DarlingTestsWithoutViewer=true -v m -nologo
 
+      # The suite starts a few hundred web hosts in one process, and a host that watches its configuration files holds an
+      # inotify instance. Ubuntu's default is 128 for one user. A lab run of the whole suite held more than 250 at once, and at
+      # 128 every later host failed to start with "The configured user limit (128) on the number of inotify instances has been
+      # reached", which failed several hundred tests that have nothing wrong with them.
+      - name: Raise the inotify instance limit
+        run: sudo sysctl -q -w fs.inotify.max_user_instances=8192
+
       # The whole suite in one test host. Only the failures and the summary are printed; the full output is in the artifact.
       - name: Run the suite
         timeout-minutes: 80
@@ -121,6 +128,8 @@ jobs:
           set -uo pipefail
           results="${RUNNER_TEMP}/darling-linux-suite"
           mkdir -p "${results}"
+          # Which test files the build left out, and why (the LeaveOutViewerTestFiles target of the project file).
+          cp Darling/Darling.Tests/obj/Release/net10.0/left-out-test-files.txt "${results}/" || true
           dotnet Darling/Darling.Tests/bin/Release/net10.0/Darling.Tests.dll -noColor -trait- "Platform=Windows" \
             -xml "${results}/results.xml" > "${results}/output.log" 2>&1
           code=$?
