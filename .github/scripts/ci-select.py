@@ -2318,6 +2318,55 @@ def named_classes(match: dict) -> "dict[str, set[str]]":
     return out
 
 
+# #9779: the classes that measure every served MCP tool description (the `[Description]` text of each tool method) through
+# reflection never name a tool's method or class, and the attribute text runs no code, so neither the changed-symbol rule nor a
+# coverage map links a description edit to them. A change to a file that declares MCP tools therefore selects them by rule: per
+# suite, the product tree whose tools the suite measures, and the classes of that suite that do the measuring (the two catalog
+# classes and the McpToolGuideHeads* family, found by name in the test sources).
+MCP_TOOL_TREES = {"lite": "Lite/", "darling": "Darling/PerformanceMonitor.Darling.Service/"}
+# A tool method carries the attribute at the start of a line; a doc comment that mentions `[McpServerTool]` does not declare one.
+_MCP_TOOL_DECL = re.compile(r"^[ \t]*\[McpServerTool\b", re.MULTILINE)
+_MCP_DESCRIPTION_CLASS = re.compile(r"^(?:McpToolGuideTests|McpToolsListBudgetTests|McpToolGuideHeads\w+Tests)$")
+
+
+def description_classes(files: "list[str]", root: str = ROOT,
+                        classes: "dict[str, dict[str, set[str]]] | None" = None) -> "dict[str, set[str]]":
+    """{suite: {Class, ...}} of the description-measuring classes a change selects (#9779): for each suite, when a changed file
+    under its product tree (MCP_TOOL_TREES) that still exists at `root` declares an MCP tool, every class of that suite named
+    McpToolGuideTests, McpToolsListBudgetTests or McpToolGuideHeads<Name>Tests that holds a test. `classes` is scan_classes()'s
+    answer (read from `root` when None). A suite with no such file is absent from the result, and the result only ever adds classes."""
+    out: "dict[str, set[str]]" = {}
+    for suite, tree in MCP_TOOL_TREES.items():
+        for rel in files:
+            if not (rel.startswith(tree) and rel.endswith(".cs")):
+                continue
+            path = os.path.join(root, rel)
+            try:
+                declares = _MCP_TOOL_DECL.search(read_source(path, "replace")) is not None if os.path.isfile(path) else False
+            except OSError:
+                declares = False
+            if declares:
+                if classes is None:
+                    classes = scan_classes(root)
+                out[suite] = {c for c, t in classes.get(suite, {}).items()
+                              if _MCP_DESCRIPTION_CLASS.match(c) and NO_TESTS_TRAIT not in t}
+                break
+    return out
+
+
+def with_description_classes(named: "dict[str, set[str]] | dict[str, list[str]] | None", files: "list[str]", root: str = ROOT,
+                             classes: "dict[str, dict[str, set[str]]] | None" = None) -> "dict[str, set[str]] | None":
+    """`named` (the classes a change names) joined with description_classes() of `files`; None stays None when nothing joins, so a
+    caller that could not read the change keeps saying so. Never removes a class."""
+    extra = description_classes(files, root, classes)
+    if not extra:
+        return None if named is None else {s: set(v) for s, v in named.items()}
+    out = {s: set(v) for s, v in (named or {}).items()}
+    for suite, names in extra.items():
+        out.setdefault(suite, set()).update(names)
+    return out
+
+
 def commit_diff_text(root: str, base: str, head: str) -> "str | None":
     """symbol_diff_text() of `head` against its merge base with `base`: the diff map_select()'s `shared_diff` reads
     for a replayed commit (#5951). None when this clone lacks the commit, so a shared-project row stays FULL."""
@@ -2390,8 +2439,8 @@ def local_classes(root: str, base: str, map_path: "str | None" = None, wide: boo
         discovered = scan_classes(root)
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
-        sel = map_select(test_map, paths, drift, discovered, named=named_classes(match), shared_diff=text,
-                         listed=listed_checker(root), **selection_args(Rules()))
+        sel = map_select(test_map, paths, drift, discovered, named=with_description_classes(named_classes(match), paths, root),
+                         shared_diff=text, listed=listed_checker(root), **selection_args(Rules()))
         lines.append(f"MAP coverage answer ({map_path}):")
         if sel["full"]:
             lines.append(f"MAP FULL: {sel['reason']}")
@@ -2468,6 +2517,9 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
     ranked = ordered_hits(match)
     own = [(s, c) for s, c, h in ranked if h["own"] and c in holders and runnable(s, c)]
     named = [(s, c) for s, c, h in ranked if not h["own"] and c in holders and runnable(s, c)]
+    # #9779: the description-measuring classes of a changed MCP tool file; CI selects them too, so the lane's part holds them.
+    named += [(s, c) for s, cs_ in sorted(description_classes(paths, root, discovered).items()) for c in sorted(cs_)
+              if (s, c) not in named and runnable(s, c)]
     pattern: list[tuple[str, str]] = []
     chosen: dict[str, set[str]] = {}
     notes = [f"local-filter: merge base {mb[:10]} of {base}, {len(paths)} changed files"]
@@ -2480,8 +2532,8 @@ def local_filter(root: str, base: str, map_path: "str | None" = None, cap: "int 
         if isinstance(test_map, dict) and isinstance(test_map.get("classes"), dict):
             mapped = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         args = selection_args(Rules())
-        sel = map_select(test_map, paths, drift, mapped, named=named_classes(match), shared_diff=text,
-                         listed=listed_checker(root), **args)
+        sel = map_select(test_map, paths, drift, mapped, named=with_description_classes(named_classes(match), paths, root),
+                         shared_diff=text, listed=listed_checker(root), **args)
         count = sum(len(v) for v in sel["selected"].values())
         part = ("the classes that name a changed symbol, sit in a changed test file or have a text pattern in the "
                 "map that matches a changed file")
@@ -2883,6 +2935,8 @@ def main(argv: list[str]) -> int:
             discovered = {s: v for s, v in discovered.items() if s in test_map["classes"]}
         # #5776: with the base, the classes that name a changed symbol are one more reason (it only adds classes).
         named = symbol_classes(args.root, args.base) if args.base else None
+        # #9779: a changed file that declares MCP tools also selects the classes that measure served descriptions.
+        named = with_description_classes(named, files, args.root)
         # #5951: the diff a shared-project change is judged by: a planted file, else the change against the base.
         shared_diff: "str | None" = None
         if args.diff_file:
