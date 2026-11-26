@@ -385,14 +385,16 @@ public sealed partial class McpAlertTools
                     var trimmed = s.Trim();
                     if (trimmed.Length == 0)
                     {
-                        return $"'{name}' is blank. Pass null to clear the field, or a non-blank value to set it.";
+                        var blank = $"'{name}' is blank. Pass null to clear the field, or a non-blank value to set it.";
+                        return blank;
                     }
 
                     changes.Add((name, r => set(r, trimmed)));
                     return null;
                 }
 
-                return $"'{name}' must be a string, or null to clear it.";
+                var notText = $"'{name}' must be a string, or null to clear it.";
+                return notText;
             }
 
             foreach (var prop in body)
