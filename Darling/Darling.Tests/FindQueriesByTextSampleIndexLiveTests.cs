@@ -58,10 +58,17 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         return (int)field!.GetRawConstantValue()!;
     }
 
+    /// <summary>The samples the newest lookup span reads in these tests. The all-servers search reads the newest samples first and the matched
+    /// texts only when samples are left after them, and the seed's 3,002 samples are fewer than that span reads by default, so the search would
+    /// end there with the texts never matched. At two samples the span ends at the newest collection time and the read under test (the probe,
+    /// or the lookup spans past the cap) has the rest of the window.</summary>
+    private const int NewestSpanRows = 2;
+
     private static Task<string> RunTool(NpgsqlDataSource data, string pattern, QueryTextTrigramIndexTracker tracker, int limit, CancellationToken ct) =>
         DarlingMcpFindQueriesByTextTools.FindQueriesByText(
             data, pattern, null, null, limit, McpDataDetail.Full,
-            DarlingMcpFindQueriesByTextTools.SourceBudget.Default, DarlingMcpFindQueriesByTextTools.SourceBudget.Default, ct, tracker);
+            DarlingMcpFindQueriesByTextTools.SourceBudget.Default,
+            new DarlingMcpFindQueriesByTextTools.SourceBudget(DarlingMcpFindQueriesByTextTools.BudgetMilliseconds) { SpanRows = NewestSpanRows }, ct, tracker);
 
     private static async Task<bool?> SampleIndexValidAsync(NpgsqlDataSource data, CancellationToken ct)
     {
@@ -389,6 +396,7 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         string? timeout = null;
         var budget = new DarlingMcpFindQueriesByTextTools.SourceBudget(4000)
         {
+            SpanRows = NewestSpanRows,
             ElapsedClock = () => TimeSpan.FromMilliseconds(1500),
             BeforeStatement = async (connection, transaction, token) =>
             {
