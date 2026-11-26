@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
