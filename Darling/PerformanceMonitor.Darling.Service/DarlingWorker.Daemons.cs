@@ -650,15 +650,16 @@ public sealed partial class DarlingWorker
     /// #5985: the shutdown drain's query-tag step. Waits (briefly) for the map pass in flight, which on the stop's cancellation
     /// puts back the sightings its own flush had taken, and then flushes the buffer once more under its own time limit
     /// (<see cref="QueryTagSightingBuffer.ShutdownFlushLimit"/>), because the service's token is already cancelled. Never throws.
+    /// Sightings a store that is going down did not take go to <paramref name="stopNotice"/> (#9794).
     /// </summary>
-    internal static async Task DrainQueryTagSightingsAsync(Task? mapPass, QueryTagSightingBuffer sightings)
+    internal static async Task DrainQueryTagSightingsAsync(Task? mapPass, QueryTagSightingBuffer sightings, StoreStopNotice? stopNotice = null)
     {
         if (mapPass is { IsCompleted: false })
         {
             await Task.WhenAny(mapPass, Task.Delay(QueryTagSightingBuffer.ShutdownFlushLimit, CancellationToken.None));
         }
 
-        await sightings.FlushOnShutdownAsync(QueryTagSightingBuffer.ShutdownFlushLimit);
+        await sightings.FlushOnShutdownAsync(QueryTagSightingBuffer.ShutdownFlushLimit, stopNotice);
     }
 
     /// <summary>

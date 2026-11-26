@@ -122,9 +122,13 @@ public sealed partial class DarlingWorker
            holds what it hears until the history's tables exist (a rung makes them). It flushes when the store is ready, after a failed attempt (so a
            start that dies in a rung shows it), once a minute for the ERROR and WARN counts, and once more at shutdown. Never fails or delays the start. */
         using var startRecorder = ServiceStartRecorder.ForThisProcess(ServiceLogTally.Shared, ProcessStartUtc());
+        /* #9794: what the stop-time writes (the sightings flush, the start history's last flush, the collector-cost and read-latency flush) leave
+           unwritten when the store is going down with the service, said as one Information line instead of a Warning each. Declared before the
+           flush loop, so it is disposed after the loop's last flush on every exit and reports what that flush added. */
+        using var stopNotice = new StoreStopNotice(_logger);
         /* Declared after the recorder and the data source it reads through, so EVERY exit of this method (a return, an exception, the store-retry
            wait's cancellation) stops the loop, runs its last flush and awaits it before either is disposed. */
-        await using var startHistory = startRecorder.StartFlushLoop(postgres, _logger, stoppingToken);
+        await using var startHistory = startRecorder.StartFlushLoop(postgres, _logger, stoppingToken, stopNotice: stopNotice);
         /* #4508: set once, the first time the fast budget above runs out on a failure that is still
            retryable — see the arm below. Gates CRITICAL-once/WARNING-per-retry the same way the config
            and bootstrap sites' single terminal LogCritical already is "once": this is the sustained arm's
@@ -179,7 +183,9 @@ public sealed partial class DarlingWorker
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
-                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
+                /* #9794: startIsRetrying, because the line above already says the store cannot be reached: the row is written by the flush
+                   after a later attempt or by the one that follows "Postgres store ready". */
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken, startIsRetrying: true);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException
@@ -219,7 +225,7 @@ public sealed partial class DarlingWorker
 
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts, sustained: true);
-                await startRecorder.FlushAsync(postgres, _logger, stoppingToken);
+                await startRecorder.FlushAsync(postgres, _logger, stoppingToken, startIsRetrying: true);
                 await Task.Delay(next.Delay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1952,7 +1958,7 @@ public sealed partial class DarlingWorker
 
         /* #5985: the last query-tag sightings flush. The collection bodies have drained, so nothing appends any more; what
            they sighted since the map step's last pass is still in memory and would be lost with the process. */
-        await DrainQueryTagSightingsAsync(_queryTagMapPass, runner.QueryTagSightings);
+        await DrainQueryTagSightingsAsync(_queryTagMapPass, runner.QueryTagSightings, stopNotice);
 
         /* #4130: drain the in-flight daily purge the same way as the per-server sweeps above, rather than
            abandoning it mid-DELETE. RunTrackedAsync's own try/catch swallows the OperationCanceledException
@@ -2190,7 +2196,10 @@ public sealed partial class DarlingWorker
            above, so the collector runs that finished during the drain are counted. The MCP and web hosts stopped before this
            worker did (the host stops hosted services in reverse registration order and the worker is registered first), so no
            read is recorded after this. Budgeted at ShutdownSampleFlushBudget inside the host's 30 s ShutdownTimeout. */
-        await FlushSamplesOnStopAsync(postgres, _collectorCost, _readLatency, ShutdownSampleFlushBudget, _logger);
+        await FlushSamplesOnStopAsync(postgres, _collectorCost, _readLatency, ShutdownSampleFlushBudget, _logger, stopNotice);
+
+        /* #9794: the last stop-time write has run, so the one line for a store that went down with the service goes here, ahead of the stopped line. */
+        stopNotice.Report();
 
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
     }
