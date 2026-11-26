@@ -53,7 +53,13 @@ public static class ServerCertificateTrustFailure
 
         /// <summary>The certificate was rejected for a reason the text does not name, such as an expired certificate.</summary>
         Rejected,
+
+        /// <summary>A rejection the text does not name, and the name mismatch as well.</summary>
+        RejectedAndNameMismatch,
     }
+
+    /// <summary>The way out that skips the check, for an entry that can take it.</summary>
+    private const string SkipTheCheck = ", or set trustServerCertificate for this server knowing that it skips the check.";
 
     /// <summary>
     /// True when <paramref name="exception"/>, or an exception inside it (through <see cref="Exception.InnerException"/> and the
@@ -64,33 +70,39 @@ public static class ServerCertificateTrustFailure
     /// <summary>
     /// The sentence that says the server certificate was rejected and what fixes it, or null when
     /// <paramref name="exception"/> is some other failure. It names no certificate subject, because none of the exception
-    /// shapes carries one.
+    /// shapes carries one. <paramref name="strict"/> is true when the connection used <c>encrypt_mode</c> Strict, which ignores
+    /// trustServerCertificate, so the sentence names only the fixes that work under Strict. The connection tests add
+    /// <see cref="StrictEncryptionHint"/>'s line for that case, and it names the way out (Mandatory with trustServerCertificate).
     /// </summary>
-    public static string? Describe(Exception? exception) => Classify(exception) switch
+    public static string? Describe(Exception? exception, bool strict = false)
     {
-        Verdict.UntrustedChain =>
-            "The server's certificate chain is not trusted by this machine, so add the issuing CA to the system trust store, "
-            + "or set trustServerCertificate for this server knowing that it skips the check.",
-        Verdict.NameMismatch =>
-            "The server's certificate was not issued to the name used to connect, so connect with a name the certificate covers, "
-            + "or set trustServerCertificate for this server knowing that it skips the check.",
-        Verdict.UntrustedChainAndNameMismatch =>
-            "The server's certificate chain is not trusted by this machine and it was not issued to the name used to connect, "
-            + "so add the issuing CA to the system trust store and connect with a name the certificate covers, "
-            + "or set trustServerCertificate for this server knowing that it skips the check.",
-        Verdict.Rejected =>
-            "This machine rejected the server's certificate, so check that it is current and issued by a CA in the system trust store, "
-            + "or set trustServerCertificate for this server knowing that it skips the check.",
-        _ => null,
-    };
+        var problemAndFix = Classify(exception) switch
+        {
+            Verdict.UntrustedChain =>
+                "The server's certificate chain is not trusted by this machine, so add the issuing CA to the system trust store",
+            Verdict.NameMismatch =>
+                "The server's certificate was not issued to the name used to connect, so connect with a name the certificate covers",
+            Verdict.UntrustedChainAndNameMismatch =>
+                "The server's certificate chain is not trusted by this machine and it was not issued to the name used to connect, "
+                + "so add the issuing CA to the system trust store and connect with a name the certificate covers",
+            Verdict.Rejected =>
+                "This machine rejected the server's certificate, so check that it is current and issued by a CA in the system trust store",
+            Verdict.RejectedAndNameMismatch =>
+                "This machine rejected the server's certificate and it was not issued to the name used to connect, "
+                + "so check that it is current and issued by a CA in the system trust store and connect with a name the certificate covers",
+            _ => null,
+        };
+
+        return problemAndFix is null ? null : problemAndFix + (strict ? "." : SkipTheCheck);
+    }
 
     /// <summary>
     /// <paramref name="failureText"/> with <see cref="Describe"/>'s sentence after it on the same line, or
     /// <paramref name="failureText"/> unchanged when the exception is some other failure.
     /// </summary>
-    public static string Append(string failureText, Exception? exception)
+    public static string Append(string failureText, Exception? exception, bool strict = false)
     {
-        var sentence = Describe(exception);
+        var sentence = Describe(exception, strict);
         return sentence is null ? failureText : failureText + " " + sentence;
     }
 
@@ -140,7 +152,7 @@ public static class ServerCertificateTrustFailure
 
         if (chainFailed)
         {
-            return Verdict.Rejected;
+            return nameMismatch ? Verdict.RejectedAndNameMismatch : Verdict.Rejected;
         }
 
         if (nameMismatch)

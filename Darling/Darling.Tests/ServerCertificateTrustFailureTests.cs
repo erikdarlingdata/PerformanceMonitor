@@ -114,6 +114,53 @@ public sealed class ServerCertificateTrustFailureTests
     }
 
     [Fact]
+    public void AChainFailureThatIsNotAboutTrust_WithANameMismatch_NamesBoth()
+    {
+        var both = ConnectFailure(
+            "Certificate failed chain validation. Error(s): 'The certificate has expired., [Status: NotTimeValid]\n'. " + NameOnly);
+
+        var description = ServerCertificateTrustFailure.Describe(both);
+
+        Assert.NotNull(description);
+        Assert.Contains("check that it is current", description, StringComparison.Ordinal);
+        Assert.Contains("not issued to the name used to connect", description, StringComparison.Ordinal);
+        Assert.Contains("connect with a name the certificate covers", description, StringComparison.Ordinal);
+    }
+
+    /// <summary>Strict ignores trustServerCertificate, so no sentence offers it to a Strict entry, and each keeps its own fixes.</summary>
+    [Theory]
+    [InlineData(ChainOnly, TrustStoreText)]
+    [InlineData(NameOnly, "connect with a name the certificate covers")]
+    [InlineData(ChainAndName, TrustStoreText)]
+    [InlineData("Certificate failed chain validation. Error(s): 'The certificate has expired., [Status: NotTimeValid]\n'.", "check that it is current")]
+    public void AStrictEntry_IsNotOfferedTrustServerCertificate(string certificateMessage, string fix)
+    {
+        var strict = ServerCertificateTrustFailure.Describe(ConnectFailure(certificateMessage), strict: true);
+        var mandatory = ServerCertificateTrustFailure.Describe(ConnectFailure(certificateMessage));
+
+        Assert.NotNull(strict);
+        Assert.Contains(fix, strict, StringComparison.Ordinal);
+        Assert.DoesNotContain("trustServerCertificate", strict, StringComparison.Ordinal);
+        Assert.EndsWith(".", strict, StringComparison.Ordinal);
+        Assert.Contains(TrustServerCertificateText, mandatory, StringComparison.Ordinal);
+    }
+
+    /// <summary>The service reads Strict the way its connection builders and the Strict line do: any casing, trimmed, SQL Server only.</summary>
+    [Theory]
+    [InlineData("Strict", "sqlserver", true)]
+    [InlineData(" strict ", "sqlserver", true)]
+    [InlineData("Mandatory", "sqlserver", false)]
+    [InlineData(null, "sqlserver", false)]
+    [InlineData("Strict", "postgres", false)]
+    public void TheServiceReadsStrict_AsTheStrictLineDoes(string? encryptMode, string engine, bool expected)
+    {
+        var server = new MonitoredServer { Name = "srv-a", Host = "srv-a", EncryptMode = encryptMode!, Engine = engine };
+
+        Assert.Equal(expected, DarlingServerConnector.ConnectsStrict(server));
+        Assert.Equal(StrictEncryptionHint.IsStrict(encryptMode), StrictEncryptionHint.For(encryptMode, transportFailure: true) is not null);
+    }
+
+    [Fact]
     public void AggregateChildren_AreSearched()
     {
         var aggregate = new AggregateException(
@@ -191,5 +238,11 @@ public sealed class ServerCertificateTrustFailureTests
         Assert.Contains(TrustStoreText, certificate, StringComparison.Ordinal);
         Assert.Contains(log.Entries, e => e.Contains(Handshake, StringComparison.Ordinal) && e.Contains(TrustStoreText, StringComparison.Ordinal));
         Assert.Equal("connection refused", other);
+
+        var strictServer = new DarlingWorker.ServerLoopState { Config = new MonitoredServer { Name = "srv-b", Host = "srv-b", EncryptMode = "Strict" } };
+        var strict = worker.LogConnectFailure(strictServer, ConnectFailure(ChainOnly), 60);
+
+        Assert.Contains(TrustStoreText, strict, StringComparison.Ordinal);
+        Assert.DoesNotContain("trustServerCertificate", strict, StringComparison.Ordinal);
     }
 }

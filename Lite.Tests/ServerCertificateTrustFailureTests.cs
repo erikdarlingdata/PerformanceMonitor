@@ -37,6 +37,26 @@ public sealed class ServerCertificateTrustFailureTests
         Assert.Contains("set trustServerCertificate for this server knowing that it skips the check", text, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Strict ignores trustServerCertificate, so a Strict entry's sentence does not offer it. Lite connects with Strict only for the
+    /// exact word, the way the Strict line reads it, so "strict" builds Mandatory and keeps the offer.
+    /// </summary>
+    [Theory]
+    [InlineData("Strict", false)]
+    [InlineData("strict", true)]
+    [InlineData("Mandatory", true)]
+    public void FailureText_OffersTrustServerCertificate_OnlyWhenTheEntryIsNotStrict(string encryptMode, bool offered)
+    {
+        var ex = new InvalidOperationException(Handshake, new AuthenticationException(
+            "Certificate failed chain validation. Error(s): 'The certificate was not trusted., [Status: UntrustedRoot]\n'."));
+
+        var text = ServerEntryRules.FailureText(ex, encryptMode);
+
+        Assert.Contains("add the issuing CA to the system trust store", text, StringComparison.Ordinal);
+        Assert.Equal(offered, text.Contains("trustServerCertificate", StringComparison.Ordinal));
+        Assert.Equal(!offered, ServerEntryRules.UsesStrict(encryptMode));
+    }
+
     [Fact]
     public void FailureText_AnotherHandshakeFailure_KeepsTheDriversText()
     {

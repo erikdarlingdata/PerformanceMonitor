@@ -88,6 +88,12 @@ internal static class ServerEntryRules
     internal static SqlConnectionEncryptOption EncryptOptionFor(string? encryptMode) => ServerConnection.EncryptOptionFor(encryptMode);
 
     /// <summary>
+    /// True when a stored mode builds <c>encrypt_mode</c> Strict (<see cref="EncryptOptionFor"/>), which ignores trust_server_certificate.
+    /// The certificate sentence and the Strict line both read it, so a Strict entry gets one piece of advice (#9692).
+    /// </summary>
+    internal static bool UsesStrict(string? encryptMode) => EncryptOptionFor(encryptMode) == SqlConnectionEncryptOption.Strict;
+
+    /// <summary>
     /// The connection test <c>--add-server</c> runs: opens the server with the entry's own credentials and reads the detection
     /// query, as the window's Test Connection does. Returns null when it connected, otherwise the failure text. The text is the
     /// driver's message, which never carries the password.
@@ -123,16 +129,17 @@ internal static class ServerEntryRules
     /// </summary>
     internal static string FailureText(Exception ex, string? encryptMode)
     {
+        /* Lite connects with Strict only for the exact stored word, so a "strict" it builds as Mandatory gets no Strict line, and
+           its certificate sentence still offers trustServerCertificate. */
+        var usedStrict = UsesStrict(encryptMode);
         /* #9692: a server certificate this machine rejects gets the shared sentence that says so after the driver's text. */
-        var text = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex);
+        var text = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex, usedStrict);
         /* A native-library load failure is not a Strict problem: no SQL Server connection can work from this install. */
         if (ex is OperationCanceledException || SqlClientNativeLoadFailure.IsMatch(ex))
         {
             return text;
         }
 
-        /* Lite connects with Strict only for the exact stored word, so a "strict" it builds as Mandatory gets no Strict line. */
-        var usedStrict = EncryptOptionFor(encryptMode) == SqlConnectionEncryptOption.Strict;
         return StrictEncryptionHint.Append(text, usedStrict ? "Strict" : null, IsTransportFailure(ex));
     }
 
