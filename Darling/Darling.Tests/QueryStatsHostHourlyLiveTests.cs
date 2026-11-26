@@ -742,9 +742,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE", ct, ("a", ServerId), (
         columns.Add("MAX(last_execution_time) AS last_execution_time");
         columns.Add("MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0) AS worker_time_per_second");
         columns.Add($"array_agg(DISTINCT query_text_digest) FILTER (WHERE {Honest} AND query_text_digest IS NOT NULL) AS digests");
-        columns.Add(@"MAX(timestamp_send(collection_time) || int8send(collection_id)
-            || CASE WHEN query_text IS NOT NULL THEN '\x00'::bytea || convert_to(query_text, 'UTF8') ELSE '\x01'::bytea || query_text_digest END)
-            FILTER (WHERE query_text IS NOT NULL OR query_text_digest IS NOT NULL) AS latest_text_key");
+        /* #9802: the oracle takes the largest key as the first element of the largest one-element array, because PostgreSQL 16 and 17 have no max(bytea). */
+        columns.Add(@"(MAX(ARRAY[timestamp_send(collection_time) || int8send(collection_id)
+            || CASE WHEN query_text IS NOT NULL THEN '\x00'::bytea || convert_to(query_text, 'UTF8') ELSE '\x01'::bytea || query_text_digest END])
+            FILTER (WHERE query_text IS NOT NULL OR query_text_digest IS NOT NULL))[1] AS latest_text_key");
 
         var reference = await ReadJsonByKeyAsync(connection, @$"
 SELECT concat_ws('|', r.server_id, r.bucket, COALESCE(r.database_name, '<null>'), COALESCE(r.query_hash, '<null>'), COALESCE(r.host_object_name, '<null>')),
