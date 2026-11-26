@@ -809,13 +809,18 @@ public sealed partial class DarlingWorker
            single sweep tick and slamming the N=4 gate (the field herd). Reconcile-ADDED servers below keep the
            MinValue default and launch promptly. */
         var coldStartInstant = DateTime.UtcNow;
+        /* #9696: the spread exists so first bodies do not queue behind the connect gate or the sweep gate. A fleet no
+           larger than either gate's first width has nothing to queue, so every server launches its first body at once,
+           the way a reconcile-added server does, instead of one of two servers waiting up to the whole spread for its
+           first connect. */
+        var spreadColdStart = SpreadsColdStart(
+            initialServers.Count, StoreConfigProvider.ClampConcurrentSweeps(config.MaxConcurrentSweeps), ServerConnectProbe.GateWidth);
         foreach (var server in initialServers)
         {
             servers.Add(new ServerLoopState
             {
                 Config = server,
-                FirstSweepDueUtc = ColdStartFirstSweepDue(
-                    coldStartInstant, server.ServerId),
+                FirstSweepDueUtc = spreadColdStart ? ColdStartFirstSweepDue(coldStartInstant, server.ServerId) : DateTime.MinValue,
             });
         }
 
@@ -1517,6 +1522,14 @@ public sealed partial class DarlingWorker
                 if (server.InFlightSweep is null
                     && !StampIsDue(server.FirstSweepDueUtc, TimeSpan.FromSeconds(ColdStartSpreadSeconds), DateTime.UtcNow))
                 {
+                    /* One line per held server, so a server whose first connect is up to ColdStartSpreadSeconds away is not silent. */
+                    if (FirstConnectHold.ColdStartRemainingToAnnounce(server.ColdStartHoldAnnounced, server.FirstSweepDueUtc, DateTime.UtcNow) is { } holdSeconds)
+                    {
+                        server.ColdStartHoldAnnounced = true;
+                        _logger.LogInformation(
+                            FirstConnectHold.ColdStartHoldTemplate, server.Config.DisplayName, holdSeconds, ColdStartSpreadSeconds);
+                    }
+
                     continue;
                 }
 
@@ -2225,6 +2238,14 @@ public sealed partial class DarlingWorker
         var waiter = SlotWaiters.Enter(DateTime.UtcNow);
         try
         {
+            /* One line per server whose connect attempt has run and whose connect is not recorded yet, because every collection slot is held. */
+            if (FirstConnectHold.SlotsInUseToAnnounce(
+                    server.SlotWaitAnnounced, server.Runtime is null && connectAttempt is not null, gate.CurrentCount, () => EffectiveSweepWidth) is { } slots)
+            {
+                server.SlotWaitAnnounced = true;
+                _logger.LogInformation(FirstConnectHold.SlotWaitTemplate, server.Config.DisplayName, slots.InUse, slots.Width);
+            }
+
             await gate.WaitAsync(stoppingToken);
         }
         finally

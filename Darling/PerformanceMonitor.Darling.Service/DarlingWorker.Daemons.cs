@@ -1968,6 +1968,15 @@ public sealed partial class DarlingWorker
     internal static DateTime ColdStartFirstSweepDue(DateTime coldStartInstant, int serverId)
         => coldStartInstant.Add(CadencePhaseOffset(serverId, ColdStartSpreadSeconds));
 
+    /// <summary>
+    /// #9696: whether the initial fleet's first launches are spread across <see cref="ColdStartSpreadSeconds"/>. The spread keeps first
+    /// bodies from queueing, so it applies only when the fleet is larger than the narrower of the sweep gate's width
+    /// (<paramref name="sweepWidth"/>) and the connect gate's (<paramref name="connectWidth"/>, which every first body passes
+    /// before it takes a sweep slot). A fleet that fits both launches every first body at once.
+    /// </summary>
+    internal static bool SpreadsColdStart(int initialServers, int sweepWidth, int connectWidth)
+        => initialServers > Math.Min(sweepWidth, connectWidth);
+
     /// <summary>#4732: the longest a connect-retry stamp can sit ahead of now when it is written: the backoff cap plus
     /// its jitter (<see cref="ServerConnectBackoff"/>), so a stamp further out than this came from a clock that
     /// stepped backwards.</summary>

@@ -2122,6 +2122,14 @@ LIMIT 1";
            steady-state cadence is untouched. */
         public DateTime FirstSweepDueUtc { get; set; } = DateTime.MinValue;
 
+        /* The cold-start hold's one Information line (FirstConnectHold.ColdStartRemainingToAnnounce). Read and written only by
+           the OUTER launch loop, like InFlightSweep, and never reset: a server logs it for its first launch only. */
+        public bool ColdStartHoldAnnounced { get; set; }
+
+        /* The first-connect slot wait's one Information line (FirstConnectHold.SlotsInUseToAnnounce). Read and written only by
+           this server's body, which runs one at a time (INV-2), so it needs no Interlocked. */
+        public bool SlotWaitAnnounced { get; set; }
+
         /* Retired containment (#1553 D1): set TRUE (write-once) by the reconcile-remove branch when this server
            is disabled/deleted, alongside Runtime=null and _selfAlerts.Forget. A body launched — or gate-queued —
            before the removal re-checks this as its FIRST statement after acquiring the fleet gate and no-ops, so
