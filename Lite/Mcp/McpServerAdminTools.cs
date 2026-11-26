@@ -70,7 +70,7 @@ public sealed class McpServerAdminTools
         catch (Exception ex)
         {
             AppLogger.Error("MCP", $"add_servers failed: {ex.GetType().Name}");
-            return McpHelpers.Status("error", "Error during add_servers: " + ex.GetType().Name + ". No password is logged or returned; check the Lite log.", new { operation = "add_servers" });
+            return McpHelpers.FormatError("add_servers", ex);
         }
     }
 
@@ -158,7 +158,7 @@ public sealed class McpServerAdminTools
         catch (Exception ex)
         {
             AppLogger.Error("MCP", $"remove_server failed: {ex.GetType().Name}");
-            return McpHelpers.Status("error", "Error during remove_server: " + ex.GetType().Name + ". Check the Lite log, then list_servers to see whether the server is still listed.", new { operation = "remove_server" });
+            return McpHelpers.FormatError("remove_server", ex);
         }
     }
 
@@ -171,7 +171,7 @@ public sealed class McpServerAdminTools
 
         if (hooks?.RemoveServer is null)
         {
-            return McpHelpers.Status("error", "This host cannot remove a server: it has no server removal to run. Nothing was removed.", new { operation = "remove_server" });
+            return McpHelpers.Status("unavailable", "This host cannot remove a server: it has no server removal to run. Nothing was removed.", new { operation = "remove_server" });
         }
 
         /* Every listed server, the disabled ones too: a server whose collection is off can still be removed. A write never guesses, so a tie is refused. */

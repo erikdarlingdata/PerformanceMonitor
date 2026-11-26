@@ -126,7 +126,7 @@ public sealed class McpWritePolicyTests
 
     /// <summary>The host's own registration (<see cref="McpHostService.RegisterMcpServer"/>) and JSON guard behind a
     /// test web server: what a client reaches when it calls a tool on the real endpoint.</summary>
-    internal static async Task<TestServer> BuildServer(bool allowWrites, McpHostService.McpServing? serving = null)
+    internal static async Task<TestServer> BuildServer(bool allowWrites, McpHostService.McpServing? serving = null, bool serverAdmin = false)
     {
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -146,7 +146,7 @@ public sealed class McpWritePolicyTests
             builder.Services.AddSingleton(serviceType, _ => null!);
         }
 
-        McpHostService.RegisterMcpServer(builder.Services, allowWrites, serving: serving);
+        McpHostService.RegisterMcpServer(builder.Services, allowWrites, serving: serving, allowServerAdmin: serverAdmin);
 
         var app = builder.Build();
         McpHostService.UseJsonPostGuard(app);
@@ -285,7 +285,7 @@ public sealed class McpWritePolicyTests
     [InlineData(true)]
     public async Task InitializeInstructions_CountTheToolsThatToolsListServes(bool allowWrites)
     {
-        using var server = await BuildServer(allowWrites);
+        using var server = await BuildServer(allowWrites, serverAdmin: allowWrites);
 
         var listBody = await PostAsync(server, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}");
         var initBody = await PostAsync(server,
@@ -405,7 +405,7 @@ public sealed class McpWritePolicyTests
         });
 
         var full = RegisteredTools();
-        McpWritePolicy.Apply(full, allowWrites: true);
+        McpWritePolicy.Apply(full, allowWrites: true, allowServerAdmin: true);
         Assert.Equal(before, full.Count);
         foreach (var tool in full.Where(t => McpWritePolicy.IsWrite(t.ProtocolTool.Name)))
         {

@@ -26,6 +26,7 @@ namespace PerformanceMonitorLite.Tests;
 /// tools run over a real <see cref="ServerManager"/> on a temp folder and an in-memory credential store, and each result is read back through the
 /// server list and the credential store the Add Server and Manage Servers windows use.
 /// </summary>
+[InMemoryCredentials]
 public sealed class McpServerAdminToolsTests : IDisposable
 {
     private const string Secret = "not-a-real-secret-value";
@@ -215,7 +216,7 @@ public sealed class McpServerAdminToolsTests : IDisposable
         Assert.Contains("server_name", blank.GetProperty("message").GetString(), StringComparison.Ordinal);
 
         var noRemoval = Parse(await McpServerAdminTools.RemoveServerCore(manager, new McpServerAdminHooks(), "sql01a"));
-        Assert.Equal("error", noRemoval.GetProperty("status").GetString());
+        Assert.Equal("unavailable", noRemoval.GetProperty("status").GetString());
 
         Assert.Empty(hooks.Removed);
         Assert.Equal(2, NewManager().GetAllServers().Count);
