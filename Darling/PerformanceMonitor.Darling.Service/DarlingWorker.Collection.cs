@@ -2231,12 +2231,11 @@ public sealed partial class DarlingWorker
         try
         {
             /* One line per server whose connect attempt has run and whose connect is not recorded yet, because every collection slot is held. */
-            var slotWidth = EffectiveSweepWidth;
             if (FirstConnectHold.SlotsInUseToAnnounce(
-                    server.SlotWaitAnnounced, server.Runtime is null && connectAttempt is not null, gate.CurrentCount, slotWidth) is { } slotsInUse)
+                    server.SlotWaitAnnounced, server.Runtime is null && connectAttempt is not null, gate.CurrentCount, () => EffectiveSweepWidth) is { } slots)
             {
                 server.SlotWaitAnnounced = true;
-                _logger.LogInformation(FirstConnectHold.SlotWaitTemplate, server.Config.DisplayName, slotsInUse, slotWidth);
+                _logger.LogInformation(FirstConnectHold.SlotWaitTemplate, server.Config.DisplayName, slots.InUse, slots.Width);
             }
 
             await gate.WaitAsync(stoppingToken);

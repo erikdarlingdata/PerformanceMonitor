@@ -170,17 +170,20 @@ internal static class FirstConnectHold
     }
 
     /// <summary>
-    /// The number of slots in use to name when a body about to wait for a slot has not connected yet, or null when the line
-    /// was already logged for this server, the server is already connected or has made no attempt, or a slot is free.
+    /// The slots in use and the gate's width to name when a body about to wait for a slot has not connected yet, or null when
+    /// the line was already logged for this server, the server is already connected or has made no attempt, or a slot is free.
+    /// The width is read only when the line is logged: the worker reads it under the gate's lock, which a body that logs
+    /// nothing has no reason to take.
     /// </summary>
-    internal static int? SlotsInUseToAnnounce(bool alreadyAnnounced, bool notConnectedAfterAttempt, int freeSlots, int width)
+    internal static (int InUse, int Width)? SlotsInUseToAnnounce(bool alreadyAnnounced, bool notConnectedAfterAttempt, int freeSlots, Func<int> width)
     {
         if (alreadyAnnounced || !notConnectedAfterAttempt || freeSlots > 0)
         {
             return null;
         }
 
-        return Math.Max(0, width - freeSlots);
+        var slots = width();
+        return (Math.Max(0, slots - freeSlots), slots);
     }
 }
 

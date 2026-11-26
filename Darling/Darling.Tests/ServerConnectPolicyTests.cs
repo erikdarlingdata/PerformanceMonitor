@@ -123,6 +123,8 @@ public sealed class ServerConnectGateOccupancyTests
             .SetValue(worker, NullLogger<DarlingWorker>.Instance);
         typeof(DarlingWorker).GetField("_collectorFaultStacks", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, new CollectorFaultStackLog());
+        typeof(DarlingWorker).GetField("_gateLock", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new object());
         typeof(DarlingWorker).GetField("_connectProbeGate", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, probeGate);
         /* A dead server: the connect parks (SqlClient's 15 s) and never answers. */
@@ -281,8 +283,8 @@ public sealed class FirstConnectHoldTests
     [Fact]
     public void ABodyAboutToWaitWithEveryCollectionSlotHeld_NamesTheSlotsInUse()
     {
-        Assert.Equal(4, FirstConnectHold.SlotsInUseToAnnounce(alreadyAnnounced: false, notConnectedAfterAttempt: true, freeSlots: 0, width: 4));
-        Assert.Equal(2, FirstConnectHold.SlotsInUseToAnnounce(alreadyAnnounced: false, notConnectedAfterAttempt: true, freeSlots: 0, width: 2));
+        Assert.Equal((4, 4), FirstConnectHold.SlotsInUseToAnnounce(alreadyAnnounced: false, notConnectedAfterAttempt: true, freeSlots: 0, width: () => 4));
+        Assert.Equal((2, 2), FirstConnectHold.SlotsInUseToAnnounce(alreadyAnnounced: false, notConnectedAfterAttempt: true, freeSlots: 0, width: () => 2));
     }
 
     [Theory]
@@ -291,7 +293,9 @@ public sealed class FirstConnectHoldTests
     [InlineData(false, true, 1)]
     public void ABodyThatHasAnnouncedConnectedOrFindsASlotFree_AnnouncesNothing(bool alreadyAnnounced, bool notConnectedAfterAttempt, int freeSlots)
     {
-        Assert.Null(FirstConnectHold.SlotsInUseToAnnounce(alreadyAnnounced, notConnectedAfterAttempt, freeSlots, width: 4));
+        /* The width is not read when nothing is announced: the worker reads it under the sweep gate's lock. */
+        Assert.Null(FirstConnectHold.SlotsInUseToAnnounce(
+            alreadyAnnounced, notConnectedAfterAttempt, freeSlots, width: () => throw new InvalidOperationException("width read")));
     }
 }
 
@@ -313,6 +317,8 @@ public sealed class ServerConnectStageStampTests
             .SetValue(worker, NullLogger<DarlingWorker>.Instance);
         typeof(DarlingWorker).GetField("_collectorFaultStacks", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, new CollectorFaultStackLog());
+        typeof(DarlingWorker).GetField("_gateLock", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new object());
         typeof(DarlingWorker).GetField("_connectProbeGate", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, probeGate);
         worker.ConnectOverride = connect;
@@ -441,6 +447,8 @@ public sealed class ServerConnectDefinitionEditTests
             .SetValue(worker, NullLogger<DarlingWorker>.Instance);
         typeof(DarlingWorker).GetField("_collectorFaultStacks", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, new CollectorFaultStackLog());
+        typeof(DarlingWorker).GetField("_gateLock", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new object());
         typeof(DarlingWorker).GetField("_connectProbeGate", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(worker, new SemaphoreSlim(ServerConnectProbe.GateWidth, ServerConnectProbe.GateWidth));
         return worker;
