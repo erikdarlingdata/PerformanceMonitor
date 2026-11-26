@@ -716,8 +716,6 @@ LIMIT 1";
         multi_subnet_failover = row.MultiSubnetFailover,
         query_store_replica = row.QueryStoreReplica,
         monthly_cost_usd = row.MonthlyCostUsd,
-        capture_plans = row.CapturePlans,
-        alert_delivery_mode_override = row.AlertDeliveryModeOverride,
         aws_role_arn = row.AwsRoleArn,
         aws_external_id_set = row.AwsExternalIdSet,
         modified_at = ModifiedAtToken(row.ModifiedAt),
@@ -983,24 +981,27 @@ LIMIT 1";
                     changes.MonthlyCostUsd = cost;
                     break;
                 case "capture_plans":
-                    var (captureValue, captureError) = ParseCapturePlansSetting(node);
-                    if (captureError is not null)
+                    /* #9635: the values the Viewer's dialog stores: on (true), off (false), or the service setting (null). */
+                    if (node is not null && !(node is JsonValue capture && capture.TryGetValue<bool>(out _)))
                     {
-                        return (null, captureError);
+                        return (null, "capture_plans must be true, false, or null (follow the service setting).");
                     }
 
                     changes.HasCapturePlans = true;
-                    changes.CapturePlans = captureValue;
+                    changes.CapturePlans = node is null ? null : node.GetValue<bool>();
                     break;
                 case "alert_delivery_mode_override":
-                    var (deliveryValue, deliveryError) = ParseAlertDeliveryOverrideSetting(node);
-                    if (deliveryError is not null)
+                    /* #9635: the values the Viewer's dialog stores: the enum name, or null to inherit the global mode. Matched against the
+                       names, never Enum.TryParse, which would also take a number. */
+                    string? deliveryOverride = null;
+                    if (node is not null && (!TryEditString(node, out var deliveryText)
+                        || (deliveryOverride = AlertDeliveryOverrideValues.FirstOrDefault(v => string.Equals(v, deliveryText?.Trim(), StringComparison.OrdinalIgnoreCase))) is null))
                     {
-                        return (null, deliveryError);
+                        return (null, "alert_delivery_mode_override must be \"Summary\", \"PerEvent\", or null (inherit the global setting).");
                     }
 
                     changes.HasAlertDeliveryModeOverride = true;
-                    changes.AlertDeliveryModeOverride = deliveryValue;
+                    changes.AlertDeliveryModeOverride = deliveryOverride;
                     break;
                 case "query_store_replica":
                     if (node is not null && !TryEditString(node, out _))
@@ -1065,42 +1066,6 @@ LIMIT 1";
     }
 
     private static string TruncateKey(string key) => key.Length <= 40 ? key : key[..40] + "...";
-
-    /// <summary>
-    /// #9635: the one parse of <c>capture_plans</c>, shared by <c>edit_server</c> and <c>add_servers</c>: the values the Viewer's dialog stores,
-    /// on (true), off (false), or the service setting (null, which an absent key also is). A string or a number is refused.
-    /// </summary>
-    internal static (bool? Value, string? Error) ParseCapturePlansSetting(JsonNode? node)
-    {
-        if (node is null)
-        {
-            return (null, null);
-        }
-
-        return node is JsonValue capture && capture.TryGetValue<bool>(out var on)
-            ? (on, null)
-            : (null, "capture_plans must be true, false, or null (follow the service setting).");
-    }
-
-    /// <summary>
-    /// #9635: the one parse of <c>alert_delivery_mode_override</c>, shared by <c>edit_server</c> and <c>add_servers</c>: the
-    /// <see cref="AlertNotificationMode"/> name in its stored spelling, or null (which an absent key also is) to inherit the global mode.
-    /// Matched against the names, never <c>Enum.TryParse</c>, which would also take a number.
-    /// </summary>
-    internal static (string? Value, string? Error) ParseAlertDeliveryOverrideSetting(JsonNode? node)
-    {
-        if (node is null)
-        {
-            return (null, null);
-        }
-
-        var matched = TryEditString(node, out var text)
-            ? AlertDeliveryOverrideValues.FirstOrDefault(v => string.Equals(v, text?.Trim(), StringComparison.OrdinalIgnoreCase))
-            : null;
-        return matched is null
-            ? (null, "alert_delivery_mode_override must be \"Summary\", \"PerEvent\", or null (inherit the global setting).")
-            : (matched, null);
-    }
 
     private static bool TryEditString(JsonNode? node, out string? value)
     {

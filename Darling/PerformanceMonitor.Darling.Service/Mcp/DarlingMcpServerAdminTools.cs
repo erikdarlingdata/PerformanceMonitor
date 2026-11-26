@@ -158,10 +158,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "arn:aws:iam::123456789012:role/darling-monitor; accepted only if darling.json's allowedAwsRoles lists it) and " +
         "aws_external_id (optional, write-only, needs aws_role_arn); query_store_replica (optional, SQL Server only: a " +
         "readable secondary as host or host,port, or an availability group listener, to read Query Store from instead of " +
-        "the server; same login; empty = off; not used on Azure SQL Database); capture_plans (optional: true keeps this server's plan XML, " +
-        "false collects its statistics without plan XML, null or absent follows the service-wide setting) and alert_delivery_mode_override " +
-        "(optional: \"Summary\" or \"PerEvent\" for this server's deadlock and blocking alerts, null or absent inherits the global mode; the " +
-        "same values edit_server sets). Servers are processed " +
+        "the server; same login; empty = off; not used on Azure SQL Database). Servers are processed " +
         "IN ORDER, one at a time. A case-variant or exact duplicate of an already-monitored server (or an earlier " +
         "entry in the same array) is skipped as status \"duplicate\". A server that fails to connect is recorded as " +
         "status \"connection_failed\" and does NOT stop the rest of the batch. If saving an entry fails, that entry " +
@@ -759,7 +756,7 @@ public sealed partial class DarlingMcpServerAdminTools
     internal const string RemoveUndoNote =
         "The undo re-adds the definition, but its password is a placeholder (the stored one cannot be read back) and the add probes the connection first, so replace the placeholder before running it. " +
         "A re-add does not bring back this server's tag assignments, query-tag assignments and rules, collector schedule overrides and run times, " +
-        "monthly cost, excluded databases, or an AWS external ID; the server comes back enabled. " +
+        "monthly cost, excluded databases, plan-capture and alert-delivery settings, or an AWS external ID; the server comes back enabled. " +
         "Collected history and the connected-servers registry row were never deleted and reattach by the server id.";
 
     /// <summary>The removed definition without its password and AWS external ID, in the keys add_servers takes, so it is also the undo's one entry.</summary>
@@ -804,17 +801,6 @@ public sealed partial class DarlingMcpServerAdminTools
         if (row.AwsRoleArn is not null)
         {
             entry["aws_role_arn"] = row.AwsRoleArn;
-        }
-
-        /* #9635: the two per-server settings come back with the re-add. NULL (follow the service) is what an entry without them stores. */
-        if (row.CapturePlans is not null)
-        {
-            entry["capture_plans"] = row.CapturePlans;
-        }
-
-        if (row.AlertDeliveryModeOverride is not null)
-        {
-            entry["alert_delivery_mode_override"] = row.AlertDeliveryModeOverride;
         }
 
         return entry;
@@ -1108,24 +1094,8 @@ ORDER BY d.host, d.database";
             return (null, Invalid(replicaError));
         }
 
-        /* #9635: the two per-server settings, with the values and the refusals edit_server gives (one parse for both tools). An absent key or a
-           null is "follow the service setting" and "inherit the global mode", the NULL a new row had before. */
-        var (capturePlans, captureError) = ParseCapturePlansSetting(obj["capture_plans"]);
-        if (captureError is not null)
-        {
-            return (null, Invalid(captureError));
-        }
-
-        var (deliveryOverride, deliveryError) = ParseAlertDeliveryOverrideSetting(obj["alert_delivery_mode_override"]);
-        if (deliveryError is not null)
-        {
-            return (null, Invalid(deliveryError));
-        }
-
         var probeConfig = new MonitoredServer
         {
-            CapturePlans = capturePlans,
-            AlertDeliveryModeOverride = deliveryOverride is null ? null : Enum.Parse<AlertNotificationMode>(deliveryOverride),
             QueryStoreReplica = queryStoreReplica,
             AwsRoleArn = awsRole,
             AwsExternalId = awsExternalId,
@@ -1310,7 +1280,7 @@ ORDER BY d.host, d.database";
 
     /// <summary>The INSERT — column set + shape mirrored from <c>StoreConfigProvider.SeedMonitoredServersAsync</c>
     /// (the seed authority), so a tool-added row is byte-identical to a seeded one. <c>capture_plans</c> and
-    /// <c>alert_delivery_mode_override</c> are the entry's own values (#9635), NULL when it names none (inherit the globals), <c>monthly_cost_usd</c>/
+    /// <c>alert_delivery_mode_override</c> default to NULL (inherit the globals), <c>monthly_cost_usd</c>/
     /// <c>excluded_databases</c> are the neutral defaults, and <c>is_enabled</c> is TRUE (collection starts at
     /// once). The dedupe gate is the first guard and <see cref="IdentityLockSql"/> the second: the INSERT runs in a
     /// transaction that holds the identity lock, after the storage keys were read again under it (#5240). ON CONFLICT
@@ -1323,7 +1293,7 @@ INSERT INTO config_monitored_servers (
     trust_server_certificate, read_only_intent, multi_subnet_failover, excluded_databases,
     monthly_cost_usd, capture_plans, alert_delivery_mode_override, engine, port, is_enabled, created_at, modified_at,
     aws_role_arn, aws_external_id, query_store_replica)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $20, $21, $15, $16, TRUE, $14, $14, $17, $18, $19)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NULL, NULL, $15, $16, TRUE, $14, $14, $17, $18, $19)
 ON CONFLICT (server_id) DO NOTHING";
 
     /// <summary>
@@ -1479,8 +1449,6 @@ ON CONFLICT (server_id) DO NOTHING";
         AddNullableText(command, config.AwsRoleArn);                                                                                  // $17
         AddNullableText(command, config.AwsRoleArn is null ? null : config.AwsExternalId);                                            // $18
         AddNullableText(command, QueryStoreReplicaSetting.Normalize(config.QueryStoreReplica));                                       // $19 (#6254)
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = (object?)config.CapturePlans ?? DBNull.Value }); // $20 (#9635)
-        AddNullableText(command, config.AlertDeliveryModeOverride?.ToString());                                                       // $21 (#9635)
         var written = await command.ExecuteNonQueryAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return written;
