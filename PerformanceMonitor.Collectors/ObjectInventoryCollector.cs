@@ -30,7 +30,7 @@ namespace PerformanceMonitor.Collectors;
 /// listed here: <c>index_object_stats</c> already holds every table.</para>
 ///
 /// <para><b>Load.</b> One catalog read per database per day, bounded by <see cref="MaxRowsPerDatabase"/>. A plain table on every store
-/// (<see cref="StaysPlainTable"/>), kept 30 days: only the newest capture is read.</para>
+/// (<see cref="StaysPlainTable"/>), kept 30 days (the schedule's retention): only the newest capture is read, and the purge keeps a database's newest list however old.</para>
 /// </summary>
 public sealed class ObjectInventoryCollector : CollectorDefinitionBase<ObjectInventoryCollector.Row>
 {
