@@ -33,7 +33,7 @@ public static class StrictEncryptionHint
     /// 40532 (cannot open the server the login asked for, Azure), 40615 (the Azure SQL Database firewall refused
     /// the client address).
     /// </summary>
-    private static readonly int[] ServerRefusalNumbers = [18456, 18452, 18470, 18486, 18487, 18488, 4060, 40532, 40615];
+    private static readonly int[] ServerRefusalNumbers = [18456, 18452, 18470, 18486, 18487, 18488];
 
     /// <summary>
     /// The hint for a failed connection test, or null when none applies. It applies only when <paramref name="encryptMode"/>
