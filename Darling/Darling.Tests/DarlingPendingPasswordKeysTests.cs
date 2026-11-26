@@ -155,11 +155,18 @@ public sealed class DarlingPendingPasswordKeysTests
         {
             var outcome = DarlingPendingPasswordKeys.Create(credentials, keyFromSetting: false, logger: null, afterFolderChecked: folder =>
             {
+                var moved = false;
                 try
                 {
                     Directory.Move(folder, folder + "-moved");
+                    moved = true;
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    Assert.NotNull(ex.Message);
+                }
+
+                if (!moved)
                 {
                     return;
                 }
