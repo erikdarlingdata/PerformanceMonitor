@@ -222,6 +222,80 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
     }
 
     [Fact]
+    public async Task AStoreThatGainedItsNodeNameAndMemoryFlagLate_AnswersFromTheChainAsTheFoldDoes_BuiltInOneCallAndOneSnapshotAtATime()
+    {
+        /* Every store written before the two columns was added holds the same two transitions: unnamed snapshots then named ones, and a null
+           memory flag then false. The one-snapshot-at-a-time build restores the stepper from the stored rows between every pair of snapshots, so
+           it takes the unnamed-to-named takeover through the restore as well. */
+        var rows = ObjectUsageChainHistory.GenerateUpgraded();
+        Assert.Contains(rows, r => r.Node is null);
+        Assert.Contains(rows, r => r.Node is not null);
+        Assert.Contains(rows, r => r.MemoryOptimized is null);
+        Assert.Contains(rows, r => r.MemoryOptimized is not null);
+        await SeedAsync("Sales", rows, firstId: -1);
+        await SeedAsync("SalesStepped", rows, firstId: -100000);
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now);
+
+        var backfill = await builder.BuildPairAsync(_serverId, "Sales", int.MaxValue, CancellationToken.None);
+        Assert.Equal(ObjectUsageChainHistory.SnapshotDays().Count(), backfill);
+        var stepped = 0;
+        int built;
+        while ((built = await builder.BuildPairAsync(_serverId, "SalesStepped", 1, CancellationToken.None)) > 0)
+        {
+            stepped += built;
+        }
+
+        Assert.Equal(backfill, stepped);
+        const string SnapshotsSql = "SELECT collection_time, step_version, answering_server_name, sqlserver_start_time, node_key, compared_with, kept_start, reasons, "
+            + "counted, index_resets, blind_from FROM object_usage_snapshots WHERE database_name = $1 ORDER BY collection_time";
+        const string RunsSql = "SELECT object_id, index_id, first_time, last_time, schema_name, object_name, is_indexed_view, is_memory_optimized FROM object_usage_runs "
+            + "WHERE database_name = $1 ORDER BY object_id, index_id, first_time";
+        foreach (var sql in new[] { SnapshotsSql, RunsSql })
+        {
+            var expected = await QueryAsync(sql, "Sales");
+            Assert.NotEmpty(expected);
+            Assert.Equal(expected, await QueryAsync(sql, "SalesStepped"));
+        }
+
+        /* The null-to-false change reopened every index: runs that end at the change and runs that start there. */
+        Assert.Contains(await QueryAsync(RunsSql, "Sales"), l => l.Split('|')[^1] == "~");
+        Assert.Contains(await QueryAsync(RunsSql, "Sales"), l => l.Split('|')[^1] == "False");
+
+        /* Windows on both sides of each transition, across the first restart and the failover, and the two the tool is called with. */
+        var starts = new[]
+        {
+            1, 3, 7, 15, 22, 26, 30, 41, 48, 55, 61, 64, 66, 67, 68, 70, 72, 76, 79, 80, 81, 82, 84, 90, 99, 100, 120, 400,
+        };
+        foreach (var database in new[] { "Sales", "SalesStepped" })
+        {
+            var persistedCount = 0;
+            foreach (var daysBack in starts)
+            {
+                var full = await _dataService.GetObjectUsageWindowFullAsync(_serverId, database, Start(daysBack));
+                var (persisted, reason) = await _dataService.TryReadObjectUsageChainAsync(_serverId, database, Start(daysBack));
+                if (persisted is not null)
+                {
+                    persistedCount++;
+                    Assert.Equal(Json(full), Json(persisted));
+                }
+                else
+                {
+                    Assert.False(string.IsNullOrEmpty(reason), $"a window of {daysBack} days of {database} fell back with no reason");
+                }
+
+                Assert.Equal(Json(full), Json(await _dataService.GetObjectUsageWindowAsync(_serverId, database, Start(daysBack))));
+                if (daysBack is 7 or 90)
+                {
+                    Assert.NotNull(persisted);
+                    Assert.True(full.SnapshotCount > 1);
+                }
+            }
+
+            Assert.True(persistedCount >= starts.Length / 2, $"only {persistedCount} of {starts.Length} windows of {database} read from the chain");
+        }
+    }
+
+    [Fact]
     public async Task AChainBehindTheNewestSnapshot_TakesTheFold_UntilThePassCatchesUp()
     {
         var rows = ObjectUsageChainHistory.Generate();

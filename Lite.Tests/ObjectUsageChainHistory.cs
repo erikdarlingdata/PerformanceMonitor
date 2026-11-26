@@ -121,6 +121,27 @@ internal static class ObjectUsageChainHistory
         return rows;
     }
 
+    /// <summary>Snapshots older than this many days hold no <c>answering_server_name</c>: the column was added after they were collected.</summary>
+    internal const int NamedFromDaysAgo = 80;
+
+    /// <summary>Snapshots older than this many days hold no <c>is_memory_optimized</c>.</summary>
+    internal const int MemoryFlagFromDaysAgo = 66;
+
+    /// <summary>
+    /// <see cref="Generate"/> as a store upgraded through the two column additions holds it, which is every store written before them: the early
+    /// snapshots carry a null <c>answering_server_name</c> (the first node is named for the first time at <see cref="NamedFromDaysAgo"/>) and a null
+    /// <c>is_memory_optimized</c> (every index's identity changes from null to false at <see cref="MemoryFlagFromDaysAgo"/>, so every run closes and
+    /// reopens).
+    /// </summary>
+    internal static List<Row> GenerateUpgraded() =>
+        Generate()
+            .Select(r => r with
+            {
+                Node = r.CollectionTime < Day(NamedFromDaysAgo) ? null : r.Node,
+                MemoryOptimized = r.CollectionTime < Day(MemoryFlagFromDaysAgo) ? null : r.MemoryOptimized,
+            })
+            .ToList();
+
     private static IEnumerable<(int ObjectId, string Table, int IndexId)> Indexes()
     {
         yield return (1, "Orders", 1);
