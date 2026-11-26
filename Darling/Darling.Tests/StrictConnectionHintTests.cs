@@ -23,8 +23,9 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #9674: a connection test that failed with encrypt_mode Strict says what Strict needs, because the driver's text alone does not.
-/// The line is not added for a login failure or another server refusal, a cancellation, any other mode, or a PostgreSQL target. The wiring tests dial a
-/// closed local port, so the failure is the driver's own and no server is involved.
+/// The line is for a transport failure only. It is not added for an error the server sent (a login failure, 4064, 40613), for a failure
+/// that is not a SqlException (a secret that could not be read before any connection), for a cancellation, any other mode, or a PostgreSQL
+/// target. The wiring tests dial a closed local port, so the failure is the driver's own and no server is involved.
 /// </summary>
 [Collection("darling-owned-secrets")]
 public sealed class StrictConnectionHintTests : IDisposable
@@ -36,44 +37,67 @@ public sealed class StrictConnectionHintTests : IDisposable
     public void Dispose() => DarlingOwnedSecrets.Set(_ownedBefore);
 
     [Theory]
-    [InlineData("Strict", null, true)]
+    [InlineData("Strict", true, true)]
     /* darling.json is hand-edited and the connection builders read the mode trimmed and case-insensitively, so these are Strict too. */
-    [InlineData("strict", null, true)]
-    [InlineData(" STRICT ", null, true)]
-    [InlineData("strict", 18456, false)]
-    [InlineData("Strict", 0, true)]
-    [InlineData("Strict", -1, true)]
-    [InlineData("Strict", 18456, false)]
-    [InlineData("Strict", 18452, false)]
-    [InlineData("Strict", 18470, false)]
-    [InlineData("Strict", 18486, false)]
-    [InlineData("Strict", 18487, false)]
-    [InlineData("Strict", 18488, false)]
-    [InlineData("Strict", 4060, false)]
-    [InlineData("Strict", 40532, false)]
-    [InlineData("Strict", 40615, false)]
-    [InlineData("Mandatory", null, false)]
-    [InlineData("Optional", null, false)]
-    [InlineData("", null, false)]
-    [InlineData(null, null, false)]
-    public void Hint_AppliesToAStrictTransportFailureOnly(string? mode, int? number, bool expected)
+    [InlineData("strict", true, true)]
+    [InlineData(" STRICT ", true, true)]
+    [InlineData("Strict", false, false)]
+    [InlineData("strict", false, false)]
+    [InlineData("Mandatory", true, false)]
+    [InlineData("Mandatory", false, false)]
+    [InlineData("Optional", true, false)]
+    [InlineData("", true, false)]
+    [InlineData(null, true, false)]
+    public void Hint_AppliesToAStrictTransportFailureOnly(string? mode, bool transportFailure, bool expected)
     {
-        Assert.Equal(expected, StrictEncryptionHint.For(mode, number) is not null);
+        Assert.Equal(expected, StrictEncryptionHint.For(mode, transportFailure) is not null);
     }
 
     [Fact]
     public void Append_PutsTheHintOnTheLineAfterTheDriverText()
     {
-        var text = StrictEncryptionHint.Append("The driver said no.", "Strict", null);
+        var text = StrictEncryptionHint.Append("The driver said no.", "Strict", true);
 
         Assert.StartsWith("The driver said no." + Environment.NewLine, text, StringComparison.Ordinal);
         Assert.EndsWith(StrictEncryptionHint.Text, text, StringComparison.Ordinal);
-        Assert.Equal("The driver said no.", StrictEncryptionHint.Append("The driver said no.", "Mandatory", null));
+        Assert.Equal("The driver said no.", StrictEncryptionHint.Append("The driver said no.", "Mandatory", true));
+        Assert.Equal("The driver said no.", StrictEncryptionHint.Append("The driver said no.", "Strict", false));
     }
 
-    private static ConnectionProbeResult Failed(int? number, bool nativeLoad = false) =>
+    /// <summary>
+    /// The product's own rule on real SqlExceptions: the server sent the error (class below 20, positive number) or it did not. A
+    /// reset connection arrives as class 20 or above, and a timeout as -2.
+    /// </summary>
+    [Theory]
+    [InlineData(4064, 11, false)]
+    [InlineData(40613, 17, false)]
+    [InlineData(18456, 14, false)]
+    [InlineData(18401, 14, false)]
+    [InlineData(17892, 20, true)]
+    [InlineData(10054, 20, true)]
+    [InlineData(-2, 11, true)]
+    [InlineData(0, 11, true)]
+    public void IsTransportFailure_ReadsTheErrorsTheServerDidNotSend(int number, int errorClass, bool expected)
+    {
+        var ex = LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(number, (byte)errorClass, "synthetic");
+
+        Assert.Equal(expected, DarlingServerConnector.IsTransportFailure(ex));
+        Assert.Equal(expected, DarlingServerConnector.IsTransportFailure(new InvalidOperationException("wrapped", ex)));
+    }
+
+    [Fact]
+    public void IsTransportFailure_AnExceptionThatIsNotASqlException_IsNot()
+    {
+        Assert.False(DarlingServerConnector.IsTransportFailure(new InvalidOperationException("The secret could not be read.")));
+    }
+
+    private static ConnectionProbeResult Failed(bool transportFailure, bool nativeLoad = false) =>
         new(false, 0, 0, null, false, false, false, false, "Driver-Text-Only",
-            SqlClientNativeLoadFailed: nativeLoad, SqlErrorNumber: number);
+            SqlClientNativeLoadFailed: nativeLoad, TransportFailure: transportFailure);
+
+    /// <summary>The probe fact a failed connect with this SqlException produces.</summary>
+    private static ConnectionProbeResult FailedWith(int number, int errorClass) =>
+        Failed(DarlingServerConnector.IsTransportFailure(LongQueryTraceReadOnlyIntentTests.SqlExceptionFactory.Create(number, (byte)errorClass, "synthetic")));
 
     private static MonitoredServer Server(string mode, string engine = "sqlserver") =>
         new() { Name = "alpha", Host = "alpha.example.test", EncryptMode = mode, Engine = engine };
@@ -83,16 +107,26 @@ public sealed class StrictConnectionHintTests : IDisposable
     [InlineData(false)]
     public void ConnectFailureReply_StrictTransportFailure_CarriesTheLine_ForBothReplyShapes(bool reveal)
     {
-        var reply = Core.ConnectFailureReply(Server("Strict"), Failed(null), null, reveal);
+        var reply = Core.ConnectFailureReply(Server("Strict"), Failed(true), null, reveal);
 
         Assert.Contains(StrictEncryptionHint.Text, reply, StringComparison.Ordinal);
         Assert.Equal(reveal, reply.Contains("Driver-Text-Only", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public void ConnectFailureReply_StrictLoginFailure_HasNoLine()
+    [Theory]
+    [InlineData(18456, 14)]
+    [InlineData(4064, 11)]
+    [InlineData(40613, 17)]
+    public void ConnectFailureReply_StrictServerSentError_HasNoLine(int number, int errorClass)
     {
-        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(Server("Strict"), Failed(18456), null, true), StringComparison.Ordinal);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(Server("Strict"), FailedWith(number, errorClass), null, true), StringComparison.Ordinal);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, DarlingCommandExecutor.MapProbeResult(FailedWith(number, errorClass), Server("Strict")).ResultJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConnectFailureReply_StrictResetConnection_CarriesTheLine()
+    {
+        Assert.Contains(StrictEncryptionHint.Text, Core.ConnectFailureReply(Server("Strict"), FailedWith(10054, 20), null, true), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -100,20 +134,20 @@ public sealed class StrictConnectionHintTests : IDisposable
     [InlineData("Optional")]
     public void ConnectFailureReply_OtherModes_HaveNoLine(string mode)
     {
-        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(Server(mode), Failed(null), null, true), StringComparison.Ordinal);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(Server(mode), Failed(true), null, true), StringComparison.Ordinal);
     }
 
     [Fact]
     public void ConnectFailureReply_NativeLoadFailure_HasNoLine()
     {
-        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(Server("Strict"), Failed(null, nativeLoad: true), null, true), StringComparison.Ordinal);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(Server("Strict"), Failed(true, nativeLoad: true), null, true), StringComparison.Ordinal);
     }
 
     /// <summary>Strict does not apply to a PostgreSQL target, whatever its stored mode says.</summary>
     [Fact]
     public void ConnectFailureReply_PostgresTarget_HasNoLine()
     {
-        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(Server("Strict", "postgres"), Failed(null), null, true), StringComparison.Ordinal);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(Server("Strict", "postgres"), Failed(true), null, true), StringComparison.Ordinal);
     }
 
     /// <summary>A port that nothing listens on: bind to get a free one, then release it.</summary>
@@ -251,8 +285,8 @@ public sealed class StrictConnectionHintTests : IDisposable
     [Fact]
     public void TestConnectCommand_StrictPostgresTarget_AndNativeLoadFailure_HaveNoLine()
     {
-        var (_, postgres) = DarlingCommandExecutor.MapProbeResult(Failed(null), Server("Strict", "postgres"));
-        var (_, native) = DarlingCommandExecutor.MapProbeResult(Failed(null, nativeLoad: true), Server("Strict"));
+        var (_, postgres) = DarlingCommandExecutor.MapProbeResult(Failed(true), Server("Strict", "postgres"));
+        var (_, native) = DarlingCommandExecutor.MapProbeResult(Failed(true, nativeLoad: true), Server("Strict"));
 
         Assert.DoesNotContain(StrictEncryptionHint.Text, postgres, StringComparison.Ordinal);
         Assert.DoesNotContain(StrictEncryptionHint.Text, native, StringComparison.Ordinal);

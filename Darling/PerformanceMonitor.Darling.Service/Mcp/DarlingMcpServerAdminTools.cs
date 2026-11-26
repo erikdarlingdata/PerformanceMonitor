@@ -132,12 +132,13 @@ public sealed partial class DarlingMcpServerAdminTools
     }
 
     /// <summary>
-    /// #9674: the Strict line for a failed connection test of <paramref name="server"/>, or null. None for a PostgreSQL target (Strict
+    /// #9674: the Strict line for a failed connection test of <paramref name="server"/>, or null. Given only for a Strict entry
+    /// whose failure was a transport failure (<see cref="ConnectionProbeResult.TransportFailure"/>). None for a PostgreSQL target (Strict
     /// is a SQL Server option) and none for a native-library load failure (no connection can work from this install, whatever the mode).
     /// Shared by the add and edit replies, the <c>--test-connection</c> verb and the <c>test_connect</c> command.
     /// </summary>
     internal static string? StrictHintFor(MonitoredServer server, ConnectionProbeResult probe) =>
-        server.IsPostgres || probe.SqlClientNativeLoadFailed ? null : StrictEncryptionHint.For(server.EncryptMode, probe.SqlErrorNumber);
+        server.IsPostgres || probe.SqlClientNativeLoadFailed ? null : StrictEncryptionHint.For(server.EncryptMode, probe.TransportFailure);
 
     private static Task<ConnectionProbeResult> DefaultProbeAsync(MonitoredServer server, CancellationToken cancellationToken) =>
         DarlingServerConnector.ProbeAsync(server, null, cancellationToken);
