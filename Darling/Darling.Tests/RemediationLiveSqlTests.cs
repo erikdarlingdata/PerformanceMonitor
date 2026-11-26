@@ -455,7 +455,9 @@ public sealed class RemediationLiveSqlTests
                 refused.Add(result);
                 Assert.Equal(RemediationOutcome.Refused, result.Outcome);
                 Assert.Equal(RemediationResult.Reasons.KillViewPermissionDenied, result.Reason);
-                Assert.Contains(grant, result.Message, StringComparison.Ordinal);
+                /* Only the grant the batch names gives this sentence: the text without it names both grants inside one parenthesis. */
+                Assert.Contains("does not hold " + grant + " on this server", result.Message, StringComparison.Ordinal);
+                Assert.Contains("GRANT " + grant + " TO", result.Message, StringComparison.Ordinal);
                 Assert.False(result.Wrote);
                 Assert.Null(result.Session);
             }
