@@ -965,7 +965,8 @@ ORDER BY d.host, d.database";
         }
 
         var host = TryGetString(obj, "host");
-        var label = string.IsNullOrWhiteSpace(host) ? $"(entry {index + 1})" : host!.Trim();
+        /* #9787: a host holding a control character is not repeated as the entry's name in the answer. */
+        var label = string.IsNullOrWhiteSpace(host) || ServerFieldText.HasControlCharacter(host) ? $"(entry {index + 1})" : host!.Trim();
 
         ServerResult Invalid(string message) => new(index, label, AddStatus.Invalid, message);
 
