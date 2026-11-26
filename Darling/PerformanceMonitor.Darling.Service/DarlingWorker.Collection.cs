@@ -913,8 +913,9 @@ public sealed partial class DarlingWorker
            viewer credential (written by EnsureProvisionedAsync above), or the Linux compose store's own viewer
            role (DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync: this start's, provisioned above, or a
            trusted credential an earlier start left, accepted before use — never the owner login, unlike a
-           host's own fallback). A bring-your-own store stays out either way: its viewer role comes from
-           tools/provision-roles.sql, which does not create config.record_custom_alert_resolution. */
+           host's own fallback). #9700: a bring-your-own store takes the web login its operator names in
+           postgres.webConnectionString (tools/provision-roles.sql creates config.record_custom_alert_resolution for
+           it) and is out when that is unset. */
         string? customAlertViewerConnString = null;
         if (OperatingSystem.IsWindows() && config.Postgres.Managed)
         {
@@ -925,6 +926,11 @@ public sealed partial class DarlingWorker
         {
             customAlertViewerConnString = await DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync(
                 config.Postgres.ConnectionString, _logger, stoppingToken);
+        }
+
+        if (customAlertViewerConnString is null && !config.Postgres.Managed)
+        {
+            customAlertViewerConnString = DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(config.Postgres, _logger);
         }
 
         await using var customAlertViewerSource =
@@ -954,7 +960,7 @@ public sealed partial class DarlingWorker
         else
         {
             _logger.LogInformation(
-                "Custom alert evaluator not started: this deployment has no viewer-role login to evaluate custom alerts with — a managed Windows store or the Linux compose store's own provisioned viewer role are required; a bring-your-own store is not (#3285, #3970).");
+                "Custom alert evaluator not started: this deployment has no web-role login to evaluate custom alerts with — a managed Windows store or the Linux compose store's own provisioned role supply one, and a bring-your-own store supplies it with postgres.webConnectionString once tools/provision-roles.sql has run (#3285, #3970, #9700).");
         }
 
         /* Stage 4: the service self-alerts, over the SAME deliverer + history + mute check the engine uses.

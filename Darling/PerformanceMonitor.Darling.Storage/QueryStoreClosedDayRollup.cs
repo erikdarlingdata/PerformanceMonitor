@@ -747,7 +747,7 @@ ORDER BY day_utc;";
     /// <summary>What one tick did.</summary>
     public readonly record struct TickResult(
         int Built, int Failed, long DaysRemoved, int Deferred, int HoursBuilt = 0, int HoursFailed = 0, long HoursRemoved = 0, int HoursDeferred = 0,
-        int ClutterDaysFolded = 0);
+        int ClutterDaysFolded = 0, string? PruneFailure = null);
 
     /// <summary>The whole built UTC days a read takes from the rollups: <c>[Start, End)</c>, both at midnight.</summary>
     public readonly record struct ServedDays(DateTime Start, DateTime End);
@@ -1431,10 +1431,11 @@ WHERE b.server_id = f.server_id
     /// is purged on, which the hourly rollups follow. Null skips the hourly step.
     /// </summary>
     public static Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, CancellationToken cancellationToken,
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory = null)
     {
         var clock = Stopwatch.StartNew();
-        return RunTickAsync(dataSource, nowUtc, retentionDays, rawRetentionDays, logger, () => clock.Elapsed, cancellationToken);
+        return RunTickAsync(dataSource, nowUtc, retentionDays, rawRetentionDays, logger, () => clock.Elapsed, cancellationToken, pacerFactory);
     }
 
     /// <summary><see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/> with the elapsed time since the
@@ -1443,9 +1444,11 @@ WHERE b.server_id = f.server_id
         NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken) =>
         RunTickAsync(dataSource, nowUtc, retentionDays, null, logger, elapsed, cancellationToken);
 
-    /// <summary>The tick, with the hourly step (<paramref name="rawRetentionDays"/>) and the elapsed clock.</summary>
+    /// <summary>The tick, with the hourly step (<paramref name="rawRetentionDays"/>) and the elapsed clock. <paramref name="pacerFactory"/> builds the
+    /// WAL pacer the hourly step's sliced prune runs under (#9690); null runs it unpaced.</summary>
     public static async Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken,
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory = null)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
         ArgumentNullException.ThrowIfNull(logger);
@@ -1465,7 +1468,7 @@ WHERE b.server_id = f.server_id
             var hoursRan = false;
             try
             {
-                hours = await QueryStoreClutterHourly.RunAsync(connection, nowUtc, rawDays, logger, elapsed, cancellationToken);
+                hours = await QueryStoreClutterHourly.RunAsync(connection, nowUtc, rawDays, logger, elapsed, cancellationToken, pacerFactory);
                 hoursRan = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1520,6 +1523,6 @@ WHERE b.server_id = f.server_id
         var deferred = plan.Count - started;
         logger.LogInformation("Query Store closed-day rollups: built {Built}, failed {Failed}, deferred {Deferred}, removed {Removed} day(s), unstamped {Unstamped} empty clutter day(s), {ElapsedMs} ms",
             built, failed, deferred, removed, unstamped, (long)elapsed().TotalMilliseconds);
-        return new TickResult(built, failed, removed, deferred, hours.Built, hours.Failed, hours.Removed, hours.Deferred, folded.Built);
+        return new TickResult(built, failed, removed, deferred, hours.Built, hours.Failed, hours.Removed, hours.Deferred, folded.Built, hours.PruneFailure);
     }
 }

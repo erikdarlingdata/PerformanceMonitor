@@ -15,6 +15,7 @@ using System.Security.Principal;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
@@ -1098,6 +1099,80 @@ public sealed class DarlingStoreLoginsTests
     /* ─────────────────────────── the custom-alert evaluator's login (#3970) ─────────────────────────── */
 
     [Fact]
+    public void ConfiguredCustomAlertLogin_IsTheWebLoginTheOperatorNamed()
+    {
+        // #9700: a bring-your-own store runs the evaluator on postgres.webConnectionString, and on nothing else.
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = WebLogin };
+        Assert.Equal(WebLogin, DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, NullLogger.Instance));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ConfiguredCustomAlertLogin_WithTheSettingUnset_IsNull_NeverTheOwner(string? webConnectionString)
+    {
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = webConnectionString };
+        Assert.Null(DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, NullLogger.Instance));
+    }
+
+    [Fact]
+    public void ConfiguredCustomAlertLogin_WithAnUnresolvableReference_IsNull_NeverTheOwner()
+    {
+        var postgres = new PostgresConfig
+        {
+            ConnectionString = Owner,
+            WebConnectionString = "env:DARLING_TEST_NO_SUCH_WEB_LOGIN_9700",
+        };
+        Assert.Null(DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, NullLogger.Instance));
+    }
+
+    [Theory]
+    [InlineData("Host=store;Port=5432;Username=web;Password=LeadSecretQ7;Database=darling;NoSuchKeywordQ7=1")]
+    [InlineData("Host=store;Port=5432;Username=web;Password=LeadSecretQ7;TailSecretQ7;Database=darling")]
+    public void ConfiguredCustomAlertLogin_WithAStringNpgsqlCannotUse_IsNull_AndTheLogNamesTheSettingNotThePassword(string webConnectionString)
+    {
+        // The worker creates a data source from this string. An unparseable one would throw out of the worker and stop the service,
+        // and the host's log of that exception can quote part of the password.
+        var logger = new CapturingTestLogger();
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = webConnectionString };
+
+        Assert.Null(DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, logger));
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Error));
+        Assert.Contains("postgres.webConnectionString", logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("LeadSecretQ7", logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("TailSecretQ7", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConfiguredCustomAlertLogin_OnTheOwnerUser_WarnsOnce_AndStillReturnsTheLogin()
+    {
+        // The web host's warning does not show when web.enabled is off, so the evaluator's resolver says it.
+        var logger = new CapturingTestLogger();
+        var ownerAsWeb = "Host=store;Port=5432;Username=darling;Password=OtherSecret4;Database=darling";
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = ownerAsWeb };
+
+        Assert.Equal(ownerAsWeb, DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, logger));
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Contains("custom alert evaluator", logger.Joined, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("owner login", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ConfiguredCustomAlertLogin_OnADifferentUserThanTheOwner_WarnsNothing()
+    {
+        var logger = new CapturingTestLogger();
+        var postgres = new PostgresConfig { ConnectionString = Owner, WebConnectionString = WebLogin };
+
+        Assert.Equal(WebLogin, DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(postgres, logger));
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Fact]
     public async Task CustomAlertViewer_WithNoVerdictPublished_IsNull()
     {
         DarlingStoreLogins.ResetComposeStoreVerdictForTests();
@@ -1283,7 +1358,8 @@ public sealed class DarlingStoreLoginsTests
             + @"config\.Postgres\.ConnectionString, _logger, stoppingToken\);\s*\}",
             gate);
 
-        Assert.Equal(2, Regex.Matches(gate, @"customAlertViewerConnString\s*=(?!=)").Count);
+        // The third assignment is #9700's bring-your-own branch: the configured web login, never the owner.
+        Assert.Equal(3, Regex.Matches(gate, @"customAlertViewerConnString\s*=(?!=)").Count);
         Assert.DoesNotContain("customAlertViewerConnString = config.Postgres.ConnectionString", gate, StringComparison.Ordinal);
     }
 

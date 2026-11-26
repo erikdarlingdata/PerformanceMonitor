@@ -22,7 +22,7 @@ Pin `image.tag` to a release, because `latest` moves. Use `--set-string`, not `-
 
 The chart README is the reference. It covers:
 
-- [the two store modes](../../Darling/helm/performancemonitor-darling/README.md#the-two-store-modes), and why custom alerts need a managed or compose store for now;
+- [the two store modes](../../Darling/helm/performancemonitor-darling/README.md#the-two-store-modes), and what custom alerts need on an external store;
 - [which values the store overrides after the first start](../../Darling/helm/performancemonitor-darling/README.md#which-values-the-store-overrides-after-the-first-start) (see also [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed));
 - [secrets, and why a GitOps install must name its own Secrets](../../Darling/helm/performancemonitor-darling/README.md#secrets-and-gitops);
 - [the password key](../../Darling/helm/performancemonitor-darling/README.md#the-password-key) (see also [Keeping the key outside the service](security.md#security--least-privilege-roles));

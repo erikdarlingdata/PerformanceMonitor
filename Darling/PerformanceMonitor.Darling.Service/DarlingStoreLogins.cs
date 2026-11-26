@@ -330,8 +330,8 @@ internal static class DarlingStoreLogins
     /// rights, which the viewer-role pool exists to prevent. A bring-your-own store, and a process that never
     /// reaches compose provisioning at all (managed mode, or not running in a container), publish no verdict
     /// here (<see cref="ReadComposeStoreVerdict"/> is null), so both return null — the ruling's "a bring-your-own
-    /// store stays out": its viewer role comes from <c>tools/provision-roles.sql</c>, which does not create
-    /// <c>config.record_custom_alert_resolution</c>.
+    /// store stays out" of this method: it takes <c>postgres.webConnectionString</c> instead
+    /// (<see cref="ResolveConfiguredCustomAlertLogin"/>, #9700).
     /// </summary>
     internal static async Task<string?> ResolveComposeCustomAlertViewerAsync(
         string ownerConnectionString, ILogger logger, CancellationToken cancellationToken)
@@ -367,6 +367,64 @@ internal static class DarlingStoreLogins
             candidate, "Custom alert evaluator not started this attempt", "It stays down", DarlingManagedPostgres.WebRoleName, logger, cancellationToken)
             ? candidate
             : null;
+    }
+
+    /// <summary>
+    /// The custom-alert evaluator's login on a bring-your-own store (#9700): the web login the operator named in
+    /// <c>postgres.webConnectionString</c>, resolved the way the web host resolves it. Null when the setting is unset
+    /// (the evaluator stays down and says which setting starts it) and when it cannot resolve or resolves blank (logged,
+    /// and never the owner login in its place). The web login is the one that may execute
+    /// <c>config.record_custom_alert_resolution</c>, which <c>tools/provision-roles.sql</c> creates for it.
+    /// </summary>
+    internal static string? ResolveConfiguredCustomAlertLogin(PostgresConfig postgres, ILogger logger)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+        ArgumentNullException.ThrowIfNull(logger);
+
+        if (string.IsNullOrWhiteSpace(postgres.WebConnectionString))
+        {
+            return null;
+        }
+
+        string resolved;
+        try
+        {
+            resolved = DarlingSecretSource.Resolve(postgres.WebConnectionString, "postgres.webConnectionString");
+        }
+        catch (InvalidOperationException ex)
+        {
+            logger.LogError("Custom alert evaluator not started: {Message}", ex.Message);
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(resolved))
+        {
+            logger.LogError(
+                "Custom alert evaluator not started: postgres.webConnectionString is set but resolves to a blank connection string, and the owner login is never used in its place");
+            return null;
+        }
+
+        /* A string Npgsql cannot use would throw from the data source the worker creates from it, and the host logs that
+           exception's message, which can quote part of the string (a password with an unquoted ';' makes the text after
+           it the "keyword"). So prove it first, as every other site does, log the formatter's text and keep the
+           evaluator down while the service runs on. */
+        if (DarlingStoreConnection.TryDescribeParseFailure(resolved) is { } unusable)
+        {
+            logger.LogError(
+                "Custom alert evaluator not started: postgres.webConnectionString is unusable: {Detail}", unusable);
+            return null;
+        }
+
+        /* On a managed or compose store the evaluator gets the web role by construction. Here it gets whatever the
+           setting names, and the web host's own warning does not show when web.enabled is off, so say it here. The
+           login is still used, as the web host uses it. */
+        if (ConfiguredLoginWarning(
+                Surface.Web, resolved, postgres.ConnectionString, null, whatOverride: "The custom alert evaluator") is { } warning)
+        {
+            logger.LogWarning("{Warning}", warning);
+        }
+
+        return resolved;
     }
 
     /// <summary>
@@ -655,7 +713,8 @@ internal static class DarlingStoreLogins
     /// store and re-keys from its own credential file every start, so a password set by hand stops working.
     /// </summary>
     internal static string? ConfiguredLoginWarning(
-        Surface surface, string configuredConnectionString, string ownerConnectionString, ComposeStoreVerdict? verdict)
+        Surface surface, string configuredConnectionString, string ownerConnectionString, ComposeStoreVerdict? verdict,
+        string? whatOverride = null)
     {
         string? configuredUser;
         string? ownerUser;
@@ -677,6 +736,7 @@ internal static class DarlingStoreLogins
         }
 
         var (what, setting, role) = Describe(surface);
+        what = whatOverride ?? what;
         if (string.Equals(configuredUser, ownerUser, StringComparison.Ordinal))
         {
             return $"{setting} logs in as '{configuredUser}', the owner login postgres.connectionString uses, so {char.ToLowerInvariant(what[0])}{what[1..]} still gives up "

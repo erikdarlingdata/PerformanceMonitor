@@ -40,7 +40,11 @@ namespace PerformanceMonitor.Darling.Storage;
 /// these tables (V285 to V287) keeps the day heartbeat fresh but marks no hour, so the hours are served only while the hour heartbeat is
 /// fresh. The first tick after a gap marks the built hours that hold a row collected since the last hour heartbeat.</para>
 ///
-/// <para><b>Retention.</b> Raw's: a tick removes the hours before the first whole hour inside raw's retention from all three tables.</para>
+/// <para><b>Retention.</b> Raw's, as <see cref="RawHeldDaysAsync"/> says: where raw <c>query_store_stats</c> is a TimescaleDB hypertable only the gated raw
+/// purge drops it, at <see cref="TimescaleSupport.RawRetentionSpan"/>, and a custom retention never applies to it, so that span is the horizon (#9690).
+/// On a plain raw table it is the collector's retention. A tick removes the hours before the first whole hour inside the horizon from all three
+/// tables, oldest first, <see cref="PruneSliceHours"/> hours per transaction under the statement timeout and the retention purge's WAL pacer, and
+/// stops at <see cref="MaxPruneDuration"/>: a backlog is removed over as many ticks as it takes. The hours it plans are bounded by the same horizon.</para>
 ///
 /// <para><b>Raw floor (#9383).</b> No hour before the first whole hour at or after a server's oldest raw row is built, the way a day is not (#9287): raw
 /// holds nothing there, so a build would stamp an empty hour that the route then serves as "no plans". A tick also removes the stamp of such an
@@ -229,15 +233,39 @@ WHERE b.server_id = f.server_id
   AND NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_plan_hourly AS p WHERE p.server_id = b.server_id AND p.hour_utc = b.hour_utc)
   AND NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_collections_hourly AS c WHERE c.server_id = b.server_id AND c.hour_utc = b.hour_utc);";
 
-    /// <summary>The first hour raw's retention still holds whole, in the three tables' own terms. $1 now, $2 raw retention in days.</summary>
+    /// <summary>The first whole hour raw's retention still holds whole, in the three tables' own terms. $1 now, $2 raw retention in days.</summary>
     private const string EdgeSql = "date_trunc('hour', $1::timestamp - make_interval(days => $2)) + interval '1 hour'";
 
-    /// <summary>Removes the hours before the first one inside raw's retention. $1 now, $2 raw retention in days.</summary>
-    public static readonly string[] PruneSql =
+    /// <summary>The hours one prune transaction removes from the three tables: one hour, so each transaction deletes a small slice (on the largest
+    /// store about 430k rows and a few seconds, where six hours was about 2.8M rows and 400 MB of WAL in one statement) inside
+    /// <see cref="QueryStoreClosedDayRollup.BuildStatementTimeoutSeconds"/>. A first prune over the weeks between the collector's retention and a
+    /// hypertable raw's four days takes a hundred or more of them, spread over as many ticks as <see cref="MaxPruneDuration"/> needs (#9690).</summary>
+    public const int PruneSliceHours = 1;
+
+    /// <summary>No prune slice starts once this much of the tick has passed: half of <see cref="MaxTickDuration"/>, so a long prune leaves the
+    /// hourly builds their time. The hours left wait for the next tick.</summary>
+    public static readonly TimeSpan MaxPruneDuration = MaxTickDuration / 2;
+
+    /// <summary>
+    /// The next slice of hours to prune, or no row when no hour is older than the edge. $1 now, $2 the horizon in days, $3 the hours per slice.
+    /// <c>lo</c> is the oldest stamped hour (an hour holds rows only while it is stamped) and <c>hi</c> is the lower of the edge (the first whole
+    /// hour inside the horizon) and <c>lo</c> plus the slice. <c>servers</c> is every server the stamps hold: both rollups' unique indexes lead
+    /// with <c>server_id</c>, so a delete that names them reads a range of the index and does not scan the table.
+    /// </summary>
+    public const string NextPruneSliceSql = @"
+SELECT o.lo,
+       LEAST(c.at, o.lo + make_interval(hours => $3)) AS hi,
+       (SELECT array_agg(DISTINCT b.server_id) FROM collect.query_store_clutter_hour_built AS b) AS servers
+FROM (SELECT " + EdgeSql + @" AS at) AS c
+CROSS JOIN (SELECT min(b.hour_utc) AS lo FROM collect.query_store_clutter_hour_built AS b) AS o
+WHERE o.lo < c.at;";
+
+    /// <summary>Removes one slice of hours from the three tables, the stamps last. $1 server ids, $2 first hour, $3 the hour the slice stops before.</summary>
+    public static readonly string[] PruneSliceSql =
     [
-        $"DELETE FROM collect.query_store_clutter_plan_hourly WHERE hour_utc < {EdgeSql};",
-        $"DELETE FROM collect.query_store_clutter_collections_hourly WHERE hour_utc < {EdgeSql};",
-        $"DELETE FROM collect.query_store_clutter_hour_built WHERE hour_utc < {EdgeSql};",
+        "DELETE FROM collect.query_store_clutter_plan_hourly WHERE server_id = ANY($1::integer[]) AND hour_utc >= $2::timestamp AND hour_utc < $3::timestamp;",
+        "DELETE FROM collect.query_store_clutter_collections_hourly WHERE server_id = ANY($1::integer[]) AND hour_utc >= $2::timestamp AND hour_utc < $3::timestamp;",
+        "DELETE FROM collect.query_store_clutter_hour_built WHERE server_id = ANY($1::integer[]) AND hour_utc >= $2::timestamp AND hour_utc < $3::timestamp;",
     ];
 
     /// <summary>The enabled servers, each with its hour heartbeat (null before its first tick). Every enabled server is planned for hours.</summary>
@@ -315,8 +343,8 @@ ORDER BY b.hour_utc;";
     /// <summary>One planned build.</summary>
     public readonly record struct Build(int ServerId, DateTime Hour);
 
-    /// <summary>What the hourly step of one tick did.</summary>
-    public readonly record struct TickResult(int Built, int Failed, long Removed, int Deferred);
+    /// <summary>What the hourly step of one tick did. <paramref name="PruneFailure"/> is the one-line text of the prune slice that failed (its hours and the error), or null when the prune did not fail: the step's outcome carries it, because a prune that fails every tick leaves the rollup growing past its horizon.</summary>
+    public readonly record struct TickResult(int Built, int Failed, long Removed, int Deferred, string? PruneFailure = null);
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
@@ -531,21 +559,99 @@ ORDER BY b.hour_utc;";
         return builds;
     }
 
-    /// <summary>Removes the hours before the first one inside raw's retention from the three tables, in one transaction; returns the rollup
-    /// rows removed.</summary>
-    public static async Task<long> PruneAsync(
-        NpgsqlConnection connection, DateTime nowUtc, int rawRetentionDays, CancellationToken cancellationToken)
+    /// <summary>One slice of hours to prune: <c>[From, To)</c> for the servers the stamps hold.</summary>
+    public readonly record struct PruneSlice(DateTime From, DateTime To, int[] ServerIds);
+
+    /// <summary>The next slice of hours before the first whole hour inside <paramref name="horizonDays"/>, or null when no hour is older than that.</summary>
+    public static async Task<PruneSlice?> NextPruneSliceAsync(
+        NpgsqlConnection connection, DateTime nowUtc, int horizonDays, int sliceHours, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
+        await using var command = new NpgsqlCommand(NextPruneSliceSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = horizonDays });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = sliceHours });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? new PruneSlice(reader.GetDateTime(0), reader.GetDateTime(1), reader.GetFieldValue<int[]>(2))
+            : null;
+    }
+
+    /// <summary>
+    /// #9690: removes the hours before the first whole hour inside <paramref name="horizonDays"/> (<see cref="RawHeldDaysAsync"/>'s answer) from the
+    /// three tables, oldest first, <paramref name="sliceHours"/> hours per transaction, and returns the rollup rows removed. A slice's rows and stamps go in
+    /// one transaction, so a stamp never names an hour whose rows are gone. No slice starts once <paramref name="elapsed"/> reaches
+    /// <see cref="MaxPruneDuration"/>: the hours left wait for the next tick. After each commit the WAL the slice wrote goes to the pacer
+    /// <paramref name="pacerFactory"/> builds (null runs unpaced), which is the retention purge's. A slice that fails (it rolled back, so its hours
+    /// are untouched) is logged with its hours and ends this prune, and the rows the earlier slices removed are still returned: the next tick starts at
+    /// the same slice, and a failure there must not stop the hourly builds that follow the prune. <paramref name="onSliceFailed"/> receives the failed
+    /// slice's hours and error as one line, so the caller can report it in the step's outcome.
+    /// </summary>
+    public static async Task<long> PruneAsync(
+        NpgsqlConnection connection, DateTime nowUtc, int horizonDays, int sliceHours, Func<TimeSpan> elapsed,
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory, ILogger logger, CancellationToken cancellationToken,
+        Action<string>? onSliceFailed = null)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(elapsed);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentOutOfRangeException.ThrowIfLessThan(sliceHours, 1);
+
         long removed = 0;
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        foreach (var sql in PruneSql)
+        IBatchWalPacer? pacer = null;
+        var pacerBuilt = false;
+        while (elapsed() < MaxPruneDuration && await NextPruneSliceAsync(connection, nowUtc, horizonDays, sliceHours, cancellationToken) is { } slice)
         {
-            await using var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = rawRetentionDays });
-            removed += await command.ExecuteNonQueryAsync(cancellationToken);
+            if (!pacerBuilt && pacerFactory is not null)
+            {
+                pacer = await pacerFactory(cancellationToken);
+                pacerBuilt = true;
+            }
+
+            var walBefore = pacer is null ? null : await pacer.ReadWalPositionAsync(connection, cancellationToken);
+            try
+            {
+                removed += await PruneSliceAsync(connection, slice, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Query Store hourly clutter rollups: pruning hours {From:yyyy-MM-dd HH} to {To:yyyy-MM-dd HH} failed, the prune stops for this tick and the builds go on: {Message}",
+                    slice.From, slice.To, ex.Message);
+                onSliceFailed?.Invoke(FormattableString.Invariant($"pruning hours {slice.From:yyyy-MM-dd HH} to {slice.To:yyyy-MM-dd HH} failed: {ex.Message.ReplaceLineEndings(" ")}"));
+                break;
+            }
+
+            if (pacer is not null)
+            {
+                await pacer.AfterBatchAsync(connection, walBefore, cancellationToken);
+            }
+        }
+
+        return removed;
+    }
+
+    private static async Task<long> PruneSliceAsync(NpgsqlConnection connection, PruneSlice slice, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (var timeout = new NpgsqlCommand(StatementTimeoutSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            await timeout.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        long removed = 0;
+        for (var i = 0; i < PruneSliceSql.Length; i++)
+        {
+            await using var command = new NpgsqlCommand(PruneSliceSql[i], connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = slice.ServerIds });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(slice.From) });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(slice.To) });
+            var rows = await command.ExecuteNonQueryAsync(cancellationToken);
+            if (i < 2)
+            {
+                removed += rows;
+            }
         }
 
         await transaction.CommitAsync(cancellationToken);
@@ -607,21 +713,25 @@ ORDER BY b.hour_utc;";
     }
 
     /// <summary>
-    /// The hourly step of one tick: the hour heartbeat, the prune, then the planned builds, newest hour first, each in its own transaction. A
-    /// build that fails is logged and the loop goes on; the next tick plans it again. No build starts once <see cref="MaxTickDuration"/> has
-    /// passed on <paramref name="elapsed"/>.
+    /// The hourly step of one tick: the hour heartbeat, the horizon raw is held to (<see cref="RawHeldDaysAsync"/>, read once and used by the prune,
+    /// the unstamp and the plan alike), the sliced prune (<see cref="PruneAsync"/>), then the planned builds, newest hour first, each in its own
+    /// transaction. A build that fails is logged and the loop goes on; the next tick plans it again. No prune slice starts once
+    /// <see cref="MaxPruneDuration"/> has passed on <paramref name="elapsed"/>, and no build starts once <see cref="MaxTickDuration"/> has.
     /// </summary>
     public static async Task<TickResult> RunAsync(
-        NpgsqlConnection connection, DateTime nowUtc, int rawRetentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken)
+        NpgsqlConnection connection, DateTime nowUtc, int rawRetentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken,
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(elapsed);
 
         await HeartbeatAsync(connection, nowUtc, logger, cancellationToken);
-        var removed = await PruneAsync(connection, nowUtc, rawRetentionDays, cancellationToken);
-        removed += await UnstampBeforeFloorAsync(connection, await RawHeldDaysAsync(connection, rawRetentionDays, cancellationToken) ?? rawRetentionDays, cancellationToken);
-        var plan = await PlanBuildsAsync(connection, nowUtc, rawRetentionDays, cancellationToken);
+        var horizonDays = await RawHeldDaysAsync(connection, rawRetentionDays, cancellationToken) ?? rawRetentionDays;
+        string? pruneFailure = null;
+        var removed = await PruneAsync(connection, nowUtc, horizonDays, PruneSliceHours, elapsed, pacerFactory, logger, cancellationToken, failure => pruneFailure = failure);
+        removed += await UnstampBeforeFloorAsync(connection, horizonDays, cancellationToken);
+        var plan = await PlanBuildsAsync(connection, nowUtc, horizonDays, cancellationToken);
 
         int built = 0, failed = 0, started = 0;
         foreach (var item in plan)
@@ -647,6 +757,6 @@ ORDER BY b.hour_utc;";
 
         var deferred = plan.Count - started;
         logger.LogInformation("Query Store hourly clutter rollups: built {Built}, failed {Failed}, deferred {Deferred}, removed {Removed} row(s)", built, failed, deferred, removed);
-        return new TickResult(built, failed, removed, deferred);
+        return new TickResult(built, failed, removed, deferred, pruneFailure);
     }
 }

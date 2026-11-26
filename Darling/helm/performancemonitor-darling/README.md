@@ -97,9 +97,9 @@ The Secrets must be in the release's namespace. With `VerifyFull`, the certifica
 
 Another worked example, with an external store, two Ingresses, `configSubstitutions` and the optional pod settings, is [`ci/external-cnpg-style.yaml`](ci/external-cnpg-style.yaml), the file CI renders.
 
-### Custom alerts need a managed or compose store for now
+### Custom alerts on an external store
 
-The bundled store runs custom alerts. An external store does not, by design. If you need custom alerts today, use the bundled store, or a managed or compose store ([Security](../../../docs/darling/security.md#security--least-privilege-roles) describes the roles).
+The bundled store runs custom alerts. An external store runs them on the `web` role, so it needs the current `provision-roles.sql` and `postgres.webConnectionString`. With `store.provisionRoles.enabled: true` and `store.provisionRoles.wireConnectionStrings: true`, the chart does both (the next section says how). Without them, the service logs "Custom alert evaluator not started" and names the setting, and the built-in alerts still run ([Security](../../../docs/darling/security.md#security--least-privilege-roles) describes the roles).
 
 ### Store roles on an external store
 
