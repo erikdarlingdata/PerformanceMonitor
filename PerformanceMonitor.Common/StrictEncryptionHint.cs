@@ -36,18 +36,16 @@ public static class StrictEncryptionHint
     /// the fact from the exception, because this project has no SqlClient reference. The caller does not ask for a hint on a
     /// cancellation.
     /// </summary>
-    public static string? For(string? encryptMode, bool transportFailure)
-    {
-        /* Darling folds a stored mode with Trim and a case-insensitive match (hand-edited darling.json can say "strict"), so Strict
-           here means what Darling connects with. Lite connects with Strict only for the exact word, and its caller passes the
-           mode through <c>ServerEntryRules.EncryptOptionFor</c> first. */
-        if (!transportFailure || !string.Equals(encryptMode?.Trim(), "Strict", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
+    public static string? For(string? encryptMode, bool transportFailure) =>
+        transportFailure && IsStrict(encryptMode) ? Text : null;
 
-        return Text;
-    }
+    /// <summary>
+    /// True when <paramref name="encryptMode"/> is <c>Strict</c>, trimmed and in any casing. Darling folds a stored mode that way
+    /// (hand-edited darling.json can say "strict"), so Strict here means what Darling connects with. Lite connects with Strict only
+    /// for the exact word, so its callers pass the mode through <c>ServerEntryRules.EncryptOptionFor</c> first.
+    /// </summary>
+    public static bool IsStrict(string? encryptMode) =>
+        string.Equals(encryptMode?.Trim(), "Strict", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// <paramref name="failureText"/> with the hint on the line after it, or <paramref name="failureText"/> unchanged when
