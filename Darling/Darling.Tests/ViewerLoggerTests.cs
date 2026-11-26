@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
@@ -72,5 +73,25 @@ public sealed class ViewerLoggerTests : IDisposable
         Assert.True(File.Exists(logFile), "the batch's surviving line never reached disk");
         var written = File.ReadAllText(logFile);
         Assert.Contains($"the other line in the same batch {tag}", written, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ATwoLineMessage_IsOneEntry_WhoseSecondLineStartsWithTheIndent_AndAControlCharacterIsADot()
+    {
+        /* #9768: the viewer's log cleans each line the way Lite's AppLogger and Darling's file log do. A server's text with a
+           line feed writes its second line indented, never in column 0 where a reader looks for the next entry's timestamp, and
+           a lone carriage return or other control character is written as '.'. */
+        var tag = Guid.NewGuid().ToString("N");
+
+        ViewerLogger.Initialize(_logDir);
+
+        ViewerLogger.Info("Test", $"first {tag}\n2026-01-01 00:00:00.000 [ERROR] [Forged] second\ra\u0007b");
+        ViewerLogger.Flush();
+
+        var lines = File.ReadAllLines(ViewerLogger.GetCurrentLogFile());
+        var at = Array.FindIndex(lines, l => l.EndsWith($"first {tag}", StringComparison.Ordinal));
+        Assert.True(at >= 0, "the entry never reached disk");
+        Assert.True(at + 1 < lines.Length, "the continuation line never reached disk");
+        Assert.Equal($"{LogLineText.ContinuationIndent}2026-01-01 00:00:00.000 [ERROR] [Forged] second.a.b", lines[at + 1]);
     }
 }
