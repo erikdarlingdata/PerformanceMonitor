@@ -678,7 +678,7 @@ public partial class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 86;
+    internal const int CurrentSchemaVersion = 87;
 
     /* #9425: what this instance's start did to the schema, for the build history row. The version stamp the file carried before
        the first open (0 for a fresh file), the stamp after the last one, and the milliseconds the migration steps took. A start
@@ -3582,6 +3582,28 @@ public partial class DuckDbInitializer : IDisposable
             catch (Exception ex)
             {
                 _logger?.LogWarning("Migration to v86 encountered an error (non-fatal): {Error}", ex.Message);
+            }
+        }
+
+        if (fromVersion < 87)
+        {
+            /* v87 (#9596, twinning Darling's V299): the persisted object usage chain, three new tables (object_usage_snapshots,
+               object_usage_deltas, object_usage_runs) created empty. A database older than v87 has snapshots in index_object_stats and no
+               chain: ObjectUsageChainBuilder backfills each database from its oldest stored snapshot in the background, and get_object_usage
+               reads the full fold of every snapshot until a database's chain covers its window. Non-fatal, matching v86: the table
+               statements that follow retry each CREATE on the next start, and without the tables the builder logs and get_object_usage
+               folds. An older build refuses a file stamped v87 (SchemaVersionTooNewException). */
+            _logger?.LogInformation("Running migration to v87: adding the object usage chain tables");
+            try
+            {
+                foreach (var statement in Schema.ObjectUsageChainTableStatements())
+                {
+                    await ExecuteNonQueryAsync(connection, statement);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Migration to v87 encountered an error (non-fatal): {Error}", ex.Message);
             }
         }
     }

@@ -18,6 +18,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Service.FrontDoor;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -105,6 +106,7 @@ public sealed class DarlingMcpAlertSourceTools
         CancellationToken cancellationToken = default) =>
         ChangeAsync(RemoveToolName, "--remove-alert-source", owner.Read(), postgres, name, logger, cancellationToken, confirm);
 
+    [FrontDoorClass(FrontDoorToolClass.FanOut)]
     [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "list_alert_sources"), Description(
         "Lists the EXTERNAL ALERT SOURCES: each source's name, its database login, whether it is enabled, when it was created, when it last sent an alert and how many of its alerts are not yet delivered. The same as the command line's --list-alert-sources. No password: the store holds none. " +

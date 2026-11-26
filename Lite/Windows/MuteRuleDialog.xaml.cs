@@ -11,6 +11,7 @@ using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Windows;
 
@@ -204,16 +205,11 @@ public partial class MuteRuleDialog : Window
 
         var metric = (MetricCombo.SelectedItem as ComboBoxItem)?.Content?.ToString();
 
-        /* #1839's "Blocking Wait Time" carries the same blocked-process context as "Blocking Detected",
-           so it offers the same database/query-text pattern fields. */
-        /* Database State carries the database whose state changed, so a rule from it is scoped to that database. */
-        bool showDatabase = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Deadlocks Detected" or "Long-Running Query" or "Database State" or AlertFamily.ClientTimeoutsMetric;
-        bool showWaitType = metric is null or "(any)" or "Poison Wait" or "Long-Running Query";
-        bool showQueryText = metric is null or "(any)" or "Blocking Detected" or "Blocking Wait Time" or "Long-Running Query";
-        bool showJobName = metric is null or "(any)" or "Long-Running Job" or "Failed Agent Job";
-        /* #5640: Client Timeouts offers Database AND Client Application, the two dimensions its alert carries, so the
-           same "Mute this alert" click makes the same rule here, in the viewer and on the web page. */
-        bool showClientApp = metric is null or "(any)" or AlertFamily.ClientTimeoutsMetric;
+        bool showDatabase = MuteRulePatternFields.AllowsDatabase(metric);
+        bool showWaitType = MuteRulePatternFields.AllowsWaitType(metric);
+        bool showQueryText = MuteRulePatternFields.AllowsQueryText(metric);
+        bool showJobName = MuteRulePatternFields.AllowsJobName(metric);
+        bool showClientApp = MuteRulePatternFields.AllowsClientApp(metric);
 
         DatabaseLabel.Visibility = DatabasePatternBox.Visibility = showDatabase ? Visibility.Visible : Visibility.Collapsed;
         WaitTypeLabel.Visibility = WaitTypePatternBox.Visibility = showWaitType ? Visibility.Visible : Visibility.Collapsed;
