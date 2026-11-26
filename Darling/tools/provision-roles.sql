@@ -156,7 +156,7 @@
 -- Quiet the run (#9700). The DROP ... IF EXISTS statements below each print a NOTICE when the object is not there yet,
 -- about a hundred lines on a fresh store, which hides the WARNINGs that need a read. This keeps WARNING and above for the
 -- run and puts the session's own setting back at the very end.
-SELECT current_setting('client_min_messages') AS darling_saved_client_min_messages \gset
+SELECT set_config('darling.saved_client_min_messages', current_setting('client_min_messages'), false);
 SET client_min_messages = warning;
 
 -- 0. Keep this script's own role DDL out of pg_stat_statements (#3899). Step 1 sends each password as an
@@ -4220,4 +4220,4 @@ BEGIN
 END $personal_token$;
 
 -- Put the session's own message level back (#9700).
-SET client_min_messages = :'darling_saved_client_min_messages';
+SELECT set_config('client_min_messages', current_setting('darling.saved_client_min_messages'), false);
