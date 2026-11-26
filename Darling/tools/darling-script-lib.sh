@@ -158,7 +158,8 @@ health_check() {
             return 1
         fi
         if [ -n "${marker}" ] && [ -e "${marker}" ]; then
-            HEALTH_REASON="the service says collection has stopped: $(head -c 600 "${marker}" 2>/dev/null | tr '\n' ' ')"
+            # The marker text ends with a full stop and a line end. Both come off, because the messages that quote the reason add their own (#9688).
+            HEALTH_REASON="the service says collection has stopped: $(head -c 600 "${marker}" 2>/dev/null | tr '\n' ' ' | sed -e 's/[[:space:]]*$//' -e 's/\.$//')"
             return 1
         fi
         [ "${elapsed}" -lt "${seconds}" ] && sleep 1
