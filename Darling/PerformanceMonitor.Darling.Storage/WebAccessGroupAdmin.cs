@@ -34,7 +34,7 @@ public sealed class WebAccessGroupAdmin(WebAccessGroupStore store, Func<string, 
     public async Task<WebAccessGroupToken> CreateAsync(string name, WebAccessGroupScope scope, int[] tags, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
-        // A cancel during the write round trip must not leave a committed token that nobody received (#9642): only a cancel before it is honoured.
+        // Once the write starts it runs to the end, whatever the token says (#9642): only a cancel before it is honoured. A client that cancels or times out still never sees the answer, and rotating again gives it a token.
         var token = NewToken(Guid.NewGuid());
         var sealedToken = seal(token.Plain, token.GroupId, token.Generation);
         await WriteAsync(() => store.CreateAsync(token.GroupId, name.Trim(), scope, tags.Distinct().ToArray(),
@@ -45,7 +45,7 @@ public sealed class WebAccessGroupAdmin(WebAccessGroupStore store, Func<string, 
     public async Task<WebAccessGroupToken> RotateAsync(WebAccessGroup group, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
-        // As in CreateAsync: the write itself takes no cancellation, so a rotated token is never committed unseen.
+        // As in CreateAsync: the write itself takes no cancellation and runs to the end once started.
         var token = NewToken(group.GroupId);
         var sealedToken = seal(token.Plain, token.GroupId, token.Generation);
         await WriteAsync(() => store.RotateAsync(group.GroupId, group.Revision, token.Generation, sealedToken, actor, CancellationToken.None));

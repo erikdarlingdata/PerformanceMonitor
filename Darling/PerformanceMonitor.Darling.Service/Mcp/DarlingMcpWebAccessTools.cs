@@ -32,6 +32,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed partial class DarlingMcpWebAccessTools
 {
+    /// <summary>A test's own ring for the calls made on its async flow. Production never sets it, so every call seals with the service's ring.</summary>
+    internal static readonly AsyncLocal<IPasswordKeyRing?> RingForTests = new();
+
+    private static IPasswordKeyRing Ring() => RingForTests.Value ?? DarlingPasswordKey.Current;
+
     /// <summary>The journal actor of an MCP change: <c>mcp:</c> plus the caller the request filter worked out.</summary>
     internal static string ActorOf() => DarlingMcpServerActionTools.ActorOf();
 
@@ -65,19 +70,19 @@ public sealed partial class DarlingMcpWebAccessTools
         [Description("tags or all_servers. An empty tag grant never means all servers.")] string scope,
         [Description("For scope tags, one or more server tag ids (from get_fleet_overview tags). Leave out for all_servers.")] int[]? tag_ids = null,
         StoreOwnerSource? ownerSource = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
-        CreateAsync(ownerSource?.Read(), DarlingPasswordKey.Current, name, scope, tag_ids, ActorOf(), logger, cancellationToken);
+        CreateAsync(ownerSource?.Read(), Ring(), name, scope, tag_ids, ActorOf(), logger, cancellationToken);
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_web_access_group"), Description(
         "Changes a group's scope, tag grants or enabled flag, as the Viewer's group editor does. A group's name does not change. " +
-        "Anything left out keeps its current value. Disabling a group ends its sessions. Enabling a group, or widening it to all_servers, takes " +
+        "Anything left out keeps its current value. Disabling a group ends its sessions. Enabling a group, widening it to all_servers, or adding a tag it did not have takes " +
         "confirm=true. Needs mcp.allowWrites and mcp.allowServerAdmin.")]
     public static Task<string> UpdateWebAccessGroup(
         [Description("The group's id, or its exact name, as get_web_access_groups shows.")] string group,
         [Description("tags or all_servers. Leave out to keep the current scope.")] string? scope = null,
         [Description("For scope tags, the full list of server tag ids the group may read (replaces the current list). Leave out to keep it.")] int[]? tag_ids = null,
         [Description("True to enable the group, false to disable it. Leave out to keep it.")] bool? enabled = null,
-        [Description("Must be true when the change enables a disabled group or widens a group to all_servers. Without it nothing changes and the answer says what the change gives.")] bool confirm = false,
+        [Description("Must be true when the change enables a disabled group, widens a group to all_servers or adds a tag it did not have. Without it nothing changes and the answer says what the change gives.")] bool confirm = false,
         StoreOwnerSource? ownerSource = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
         UpdateAsync(ownerSource?.Read(), group, scope, tag_ids, enabled, confirm, ActorOf(), logger, cancellationToken);
 
@@ -89,7 +94,7 @@ public sealed partial class DarlingMcpWebAccessTools
         [Description("The group's id, or its exact name, as get_web_access_groups shows.")] string group,
         [Description("Must be true. Without it nothing changes and the answer says what a rotate does.")] bool confirm = false,
         StoreOwnerSource? ownerSource = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
-        RotateAsync(ownerSource?.Read(), DarlingPasswordKey.Current, group, confirm, ActorOf(), logger, cancellationToken);
+        RotateAsync(ownerSource?.Read(), Ring(), group, confirm, ActorOf(), logger, cancellationToken);
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "delete_web_access_group"), Description(
@@ -231,11 +236,13 @@ public sealed partial class DarlingMcpWebAccessTools
 
             var newEnabled = enabled ?? group.Enabled;
             var widensScope = newScope == WebAccessGroupScope.AllServers && group.Scope != WebAccessGroupScope.AllServers;
+            var addedTags = AddedTags(group.Scope, group.TagIds, newScope, tags);
             var enables = newEnabled && !group.Enabled;
-            if ((widensScope || enables) && !confirm)
+            if ((widensScope || addedTags.Length > 0 || enables) && !confirm)
             {
                 var gives = new List<string>();
                 if (widensScope) gives.Add("gives it every server, not only the servers its tags reach");
+                if (addedTags.Length > 0) gives.Add($"adds server tag(s) {string.Join(", ", addedTags)}, so its token reaches more servers");
                 if (enables) gives.Add("lets its token sign people in again while advanced web access is on");
                 return Refuse("confirm_required", $"This change to group '{Clip(group.Name)}' {string.Join(" and ", gives)}. Call again with confirm=true to go ahead. Nothing was changed.");
             }
@@ -243,18 +250,24 @@ public sealed partial class DarlingMcpWebAccessTools
             await Admin(store, null, actor).UpdateAsync(group, newScope, tags, newEnabled, ct);
             logger?.LogWarning("MCP web access group {GroupId} changed, caller {Caller}", group.GroupId, actor);
             var after = await TryReadGroupAsync(followUpOwner is null ? store : new WebAccessGroupStore(followUpOwner), group.GroupId);
+
+            /* The undo restores the old grant, so it needs the confirm exactly when going back gives more than the group has now. */
+            var undoArguments = new JsonObject
+            {
+                ["group"] = group.GroupId.ToString(),
+                ["scope"] = ScopeName(group.Scope),
+                ["tag_ids"] = new JsonArray(group.TagIds.Select(t => (JsonNode)JsonValue.Create(t)!).ToArray()),
+                ["enabled"] = group.Enabled,
+            };
+            var undoWidens = (group.Scope == WebAccessGroupScope.AllServers && newScope != WebAccessGroupScope.AllServers)
+                || AddedTags(newScope, tags, group.Scope, group.TagIds).Length > 0
+                || (group.Enabled && !newEnabled);
+            if (undoWidens) undoArguments["confirm"] = true;
             return new JsonObject
             {
                 ["status"] = "updated",
                 ["group"] = after is null ? null : GroupJson(after),
-                ["undo"] = Undo("update_web_access_group", new JsonObject
-                {
-                    ["group"] = group.GroupId.ToString(),
-                    ["scope"] = ScopeName(group.Scope),
-                    ["tag_ids"] = new JsonArray(group.TagIds.Select(t => (JsonNode)JsonValue.Create(t)!).ToArray()),
-                    ["enabled"] = group.Enabled,
-                    ["confirm"] = group.Enabled || group.Scope == WebAccessGroupScope.AllServers ? true : null,
-                }),
+                ["undo"] = Undo("update_web_access_group", undoArguments),
             }.ToJsonString();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -262,6 +275,10 @@ public sealed partial class DarlingMcpWebAccessTools
             return McpHelpers.FormatError("update_web_access_group", ex);
         }
     }
+
+    /// <summary>The tag ids the new grant holds that the old one did not, when both name servers by tag. A move to all_servers is the scope widening, and a move off it adds no tag.</summary>
+    private static int[] AddedTags(WebAccessGroupScope fromScope, IEnumerable<int> fromTags, WebAccessGroupScope toScope, IEnumerable<int> toTags) =>
+        fromScope == WebAccessGroupScope.Tags && toScope == WebAccessGroupScope.Tags ? toTags.Except(fromTags).Order().ToArray() : [];
 
     internal static async Task<string> RotateAsync(
         NpgsqlDataSource? owner, IPasswordKeyRing? ring, string? groupText, bool confirm, string actor, ILogger? logger, CancellationToken ct,

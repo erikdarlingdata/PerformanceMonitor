@@ -7,12 +7,18 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
@@ -270,6 +276,165 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
             var after = (await store.ReadCredentialsAsync(ct)).Single();
             Assert.Equal(second, ring.Open(after.SealedToken, PasswordBinding.ForWebAccessToken(id, after.Group.TokenGeneration)));
         });
+    }
+
+    [Fact]
+    public async Task AnUpdateThatAddsATag_NeedsConfirm_AndAnUndoNeedsOneOnlyWhenGoingBackGivesMore()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var store = new WebAccessGroupStore(owner);
+            var one = (int)(await ScalarAsync(owner, "INSERT INTO config.server_tags(name) VALUES ('t1') RETURNING id", ct))!;
+            var two = (int)(await ScalarAsync(owner, "INSERT INTO config.server_tags(name) VALUES ('t2') RETURNING id", ct))!;
+            var three = (int)(await ScalarAsync(owner, "INSERT INTO config.server_tags(name) VALUES ('t3') RETURNING id", ct))!;
+            var created = JsonNode.Parse(await DarlingMcpWebAccessTools.CreateAsync(owner, TestKeyRings.Healthy, "Tagged", "tags", [one], Actor, null, ct))!;
+            var id = Guid.Parse((string)created["group"]!["group_id"]!);
+
+            /* More tags give the group's token more servers, so the update asks first and changes nothing without the confirm. */
+            var refused = JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Tagged", null, [one, two, three], null, false, Actor, null, ct))!;
+            Assert.Equal("confirm_required", (string)refused["code"]!);
+            Assert.Equal([one], (await store.ReadAsync(id, ct))!.TagIds);
+
+            var widened = JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Tagged", null, [one, two, three], null, true, Actor, null, ct))!;
+            Assert.Equal("updated", (string)widened["status"]!);
+            Assert.Equal([one, two, three], (await store.ReadAsync(id, ct))!.TagIds.Order().ToArray());
+
+            /* Going back to the old tags gives nothing more, so the hint carries no confirm key at all (not a null one). */
+            var undoOfWiden = (JsonObject)widened["undo"]!["arguments"]!;
+            Assert.False(undoOfWiden.ContainsKey("confirm"));
+
+            /* Dropping a tag, or keeping a subset, widens nothing and takes no confirm. */
+            var narrowed = JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Tagged", null, [two], null, false, Actor, null, ct))!;
+            Assert.Equal("updated", (string)narrowed["status"]!);
+
+            /* The hint of that narrowing restores two more tags, so it carries the confirm it will need. */
+            var undoOfNarrow = (JsonObject)narrowed["undo"]!["arguments"]!;
+            Assert.True((bool)undoOfNarrow["confirm"]!);
+        });
+    }
+
+    [Fact]
+    public async Task ACreateAndARotate_CancelledWhileWaitingForTheGroupLock_StillFinishTheWrite_AndTheTokenOpensTheStoredCopy()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var ring = TestKeyRings.Healthy;
+            var store = new WebAccessGroupStore(owner);
+
+            var created = JsonNode.Parse(await CancelledWhileTheGroupLockIsHeldAsync(owner, token =>
+                DarlingMcpWebAccessTools.CreateAsync(owner, ring, "Ops", "all_servers", null, Actor, null, token), ct))!;
+            Assert.Equal("created", (string)created["status"]!);
+            var id = Guid.Parse((string)created["group"]!["group_id"]!);
+            var credential = (await store.ReadCredentialsAsync(ct)).Single(c => c.Group.GroupId == id);
+            Assert.Equal((string)created["token"]!, ring.Open(credential.SealedToken, PasswordBinding.ForWebAccessToken(id, credential.Group.TokenGeneration)));
+
+            var rotated = JsonNode.Parse(await CancelledWhileTheGroupLockIsHeldAsync(owner, token =>
+                DarlingMcpWebAccessTools.RotateAsync(owner, ring, "Ops", true, Actor, null, token), ct))!;
+            Assert.Equal("rotated", (string)rotated["status"]!);
+            var after = (await store.ReadCredentialsAsync(ct)).Single(c => c.Group.GroupId == id);
+            Assert.NotEqual(credential.Group.TokenGeneration, after.Group.TokenGeneration);
+            Assert.Equal((string)rotated["token"]!, ring.Open(after.SealedToken, PasswordBinding.ForWebAccessToken(id, after.Group.TokenGeneration)));
+        });
+    }
+
+    /// <summary>Holds the group administration lock on a second connection, starts the call, waits until it is queued behind the lock,
+    /// cancels its token, and only then lets the lock go.</summary>
+    private static async Task<string> CancelledWhileTheGroupLockIsHeldAsync(NpgsqlDataSource owner, Func<CancellationToken, Task<string>> call, CancellationToken ct)
+    {
+        await using var holder = await owner.OpenConnectionAsync(ct);
+        await using var transaction = await holder.BeginTransactionAsync(ct);
+        await using (var hold = new NpgsqlCommand("SELECT pg_advisory_xact_lock(7988, 1)", holder, transaction))
+            await hold.ExecuteNonQueryAsync(ct);
+
+        using var cancel = new CancellationTokenSource();
+        var running = call(cancel.Token);
+        const string queued = "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted " +
+            "AND database = (SELECT oid FROM pg_database WHERE datname = current_database())";
+        for (var attempt = 0; attempt < 200 && Convert.ToInt32(await ScalarAsync(owner, queued, ct), System.Globalization.CultureInfo.InvariantCulture) == 0; attempt++)
+            await Task.Delay(50, ct);
+        Assert.True(Convert.ToInt32(await ScalarAsync(owner, queued, ct), System.Globalization.CultureInfo.InvariantCulture) > 0, "the write never queued behind the lock");
+
+        await cancel.CancelAsync();
+        await transaction.CommitAsync(ct);
+        return await running;
+    }
+
+    private const string OperatorBearer = "operator-bearer-value-web-access-9657";
+
+    [Fact]
+    public async Task ACreateThroughTheServer_ByAnOperatorNarrowedToMaskLiterals_ReturnsTheToken_AndLogsNone()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var logger = new CapturingTestLogger();
+            var ownerSource = new StoreOwnerSource();
+            ownerSource.Publish(owner);
+            var mcp = new McpConfig
+            {
+                AllowWrites = true,
+                AllowServerAdmin = true,
+                Tokens = new List<McpTokenEntry> { new() { Name = "ops-lead", Token = OperatorBearer, Role = "operator", DataDetail = "maskLiterals" } },
+            };
+            using var server = await BuildServerAsync(mcp, ownerSource, logger);
+
+            DarlingMcpWebAccessTools.RingForTests.Value = TestKeyRings.Healthy;
+            try
+            {
+                var (_, body) = await DarlingMcpWritePolicyTests.ToolsCallAsync(
+                    server, "create_web_access_group", "{\"name\":\"Ops\",\"scope\":\"all_servers\"}", OperatorBearer);
+                var dataLine = body.Split('\n').FirstOrDefault(l => l.StartsWith("data:", StringComparison.Ordinal));
+                using var document = JsonDocument.Parse(dataLine is null ? body : dataLine["data:".Length..].Trim());
+                var answer = JsonNode.Parse(document.RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!)!;
+
+                /* The one-time token reaches a caller narrowed to maskLiterals: the data detail filter masks query text, not this credential. */
+                Assert.Equal("created", (string)answer["status"]!);
+                var token = (string)answer["token"]!;
+                Assert.True(token.Length >= 32);
+                var id = Guid.Parse((string)answer["group"]!["group_id"]!);
+                var credential = (await new WebAccessGroupStore(owner).ReadCredentialsAsync(ct)).Single(c => c.Group.GroupId == id);
+                Assert.Equal(token, TestKeyRings.Healthy.Open(credential.SealedToken, PasswordBinding.ForWebAccessToken(id, credential.Group.TokenGeneration)));
+
+                Assert.True(logger.CountAtLevel(LogLevel.Warning) >= 1, logger.Joined);
+                Assert.DoesNotContain(token, logger.Joined, StringComparison.Ordinal);
+            }
+            finally
+            {
+                DarlingMcpWebAccessTools.RingForTests.Value = null;
+            }
+        });
+    }
+
+    /// <summary>A built MCP server over the real tools, every provider of the host's logging replaced by <paramref name="logger"/>.</summary>
+    private static async Task<TestServer> BuildServerAsync(McpConfig mcp, StoreOwnerSource ownerSource, ILogger logger)
+    {
+        var legacy = DarlingMcpWritePolicy.ResolveForStart(mcp, "", out _);
+        var tokens = DarlingMcpTokenSet.Resolve(mcp, "", legacy, null);
+        var builder = DarlingMcpHostService.CreateHostBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Logging.ClearProviders();
+        builder.Logging.SetMinimumLevel(LogLevel.Trace);
+        builder.Logging.AddProvider(new FixedLoggerProvider(logger));
+        builder.Services.AddSingleton(NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling"));
+        builder.Services.AddSingleton(ownerSource);
+        builder.Services.AddSingleton(logger);
+        builder.Services.AddSingleton<IGcfOutputFormat>(new FixedGcfOutputFormat(false));
+        DarlingMcpHostService.RegisterDataDetail(builder.Services, McpDataDetail.Full);
+        DarlingMcpHostService.ConfigureMcpServices(builder.Services, DarlingPeerDirectory.Snapshot.Empty, writes: tokens.Union, tokens: tokens);
+
+        var app = builder.Build();
+        var host = new DarlingMcpHostService(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingMcpHostService>.Instance, new McpRuntimeState(), new MonitoredServerRegistryState());
+        host.ConfigurePipeline(
+            app, networkMode: false, networkListenIp: null, allowedCidr: System.Net.IPNetwork.Parse("192.168.1.0/24"), bearerToken: "",
+            requireTokenWhenLoopbackOnly: true, tokens: tokens);
+        await app.StartAsync();
+        return app.GetTestServer();
+    }
+
+    private sealed class FixedLoggerProvider(ILogger logger) : ILoggerProvider
+    {
+        public ILogger CreateLogger(string categoryName) => logger;
+        public void Dispose() { }
     }
 
     private static string? Code(string answer) => (string?)JsonNode.Parse(answer)!["code"];
