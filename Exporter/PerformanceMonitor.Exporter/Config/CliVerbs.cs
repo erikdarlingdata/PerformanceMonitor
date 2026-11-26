@@ -39,8 +39,8 @@ public static class CliVerbs
     }
 
     /// <summary>
-    /// check-config --config F: loads and validates the config, resolves the credential, checks the store's collation and
-    /// prints the config with secrets redacted. A store that cannot be reached is a warning on stderr and not a failure.
+    /// check-config --config F: loads and validates the config, maps it as `run` does, resolves the credential, checks the
+    /// store's collation and prints the config with secrets redacted. A store that cannot be reached is a warning on stderr and not a failure.
     /// </summary>
     public static async Task<int> CheckConfigAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct)
     {
@@ -67,7 +67,10 @@ public static class CliVerbs
         try
         {
             var config = ConfigLoader.Load(path);
+            // The mapping `run` uses, so a destination or schedule `run` refuses is refused here with the same message.
+            Run.RunConfigMapping.ToRunSettings(config, path);
             var secret = CredentialResolver.Resolve(config.Store.Credential);
+            DestinationCheck.AssertCredentials(config);
             DestinationCheck.Assert(config);
             var builder = StoreCheck.BuildConnection(config, secret);
             var notChecked = await StoreCheck.CheckCollationAsync(builder, ct).ConfigureAwait(false);
