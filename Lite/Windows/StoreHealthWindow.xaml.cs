@@ -85,7 +85,7 @@ public partial class StoreHealthWindow : Window
     private void Apply(StoreHealthSnapshot snapshot)
     {
         var ci = CultureInfo.InvariantCulture;
-        StatusText.Text = $"Read at {snapshot.ReadAtUtc.ToLocalTime():HH:mm:ss}";
+        StatusText.Text = StoreHealthText.ReadAt(snapshot.ReadAtUtc);
 
         var store = snapshot.Store;
         StoreSentenceText.Text = StoreHealthText.StoreSentence(store);
