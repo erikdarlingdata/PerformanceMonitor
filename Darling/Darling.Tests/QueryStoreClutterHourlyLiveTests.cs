@@ -391,6 +391,10 @@ VALUES (990384001, @at, @server_id, 'late', 'dbA', 7778, 77780, '0xQ', '0xP', 'S
         await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_collections_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
         await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
 
+        /* #9690: the prune deletes only when an hour is older than raw's edge, so one stamped hour past it gives the failing tick a prune to fail. */
+        await ExecuteAsync(store,
+            "INSERT INTO collect.query_store_clutter_hour_built (server_id, hour_utc, built_at) VALUES (@server_id, date_trunc('hour', @old::timestamp), @old)", ct,
+            ("server_id", A), ("old", FoldNow.AddDays(-RawRetention - 3)));
         await ExecuteAsync(store, @"
 CREATE FUNCTION collect.fail_hourly_prune() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the hourly prune is made to fail'; END $$;
 CREATE TRIGGER fail_hourly_prune BEFORE DELETE ON collect.query_store_clutter_plan_hourly FOR EACH STATEMENT EXECUTE FUNCTION collect.fail_hourly_prune();", ct);
