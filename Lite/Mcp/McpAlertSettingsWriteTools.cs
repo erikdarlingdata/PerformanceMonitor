@@ -24,6 +24,9 @@ public sealed class McpAlertSettingsWriteTools
 {
     private enum Kind { Bool, Int, Long, Double, Text, List }
 
+    /// <summary>A refusal: the wire name of the field that caused it, and the sentence.</summary>
+    private readonly record struct Refused(string Parameter, string Message);
+
     /// <summary>One writable setting: its wire path, its type and range, and how to read and set the static it maps to.
     /// The ranges are the Settings window's, so a value the window refuses is refused here too.</summary>
     private sealed record Field(string Path, Kind Kind, double Min, double Max, Func<object> Get, Action<object> Set, string[]? Allowed = null);
@@ -176,12 +179,12 @@ public sealed class McpAlertSettingsWriteTools
             }
             catch (JsonException ex)
             {
-                return McpHelpers.Status("invalid", $"settings_json is not valid JSON ({ex.Message}).");
+                return McpHelpers.Refusal("settings_json", $"settings_json is not valid JSON ({ex.Message}).");
             }
 
             if (root is not JsonObject body)
             {
-                return McpHelpers.Status("invalid", "settings_json must be a JSON object of the fields to change (see get_alert_settings for the shape).");
+                return McpHelpers.Refusal("settings_json", "settings_json must be a JSON object of the fields to change (see get_alert_settings for the shape).");
             }
 
             var parsed = new List<(Field Field, object Value)>();
@@ -189,12 +192,12 @@ public sealed class McpAlertSettingsWriteTools
             var error = Parse(body, parsed, warnings);
             if (error is null && parsed.Count == 0)
             {
-                error = "No known alert-settings fields were provided. Send fields in the shape get_alert_settings returns (e.g. {\"cpu\":{\"threshold_percent\":90}}).";
+                error = new Refused("settings_json", "No known alert-settings fields were provided. Send fields in the shape get_alert_settings returns (e.g. {\"cpu\":{\"threshold_percent\":90}}).");
             }
 
             if (error is not null)
             {
-                return McpHelpers.Status("invalid", error);
+                return McpHelpers.Refusal(error.Value.Parameter, error.Value.Message);
             }
 
             lock (s_writeLock)
@@ -202,7 +205,7 @@ public sealed class McpAlertSettingsWriteTools
                 var pairError = CheckPairs(parsed);
                 if (pairError is not null)
                 {
-                    return McpHelpers.Status("invalid", pairError);
+                    return McpHelpers.Refusal(pairError.Value.Parameter, pairError.Value.Message);
                 }
 
                 var previous = new JsonObject();
@@ -215,6 +218,7 @@ public sealed class McpAlertSettingsWriteTools
                 }
 
                 Apply(parsed);
+                string? saveFailure = null;
                 try
                 {
                     var node = (readRoot ?? App.SettingsRootForWrite)();
@@ -226,8 +230,13 @@ public sealed class McpAlertSettingsWriteTools
                 }
                 catch (Exception ex)
                 {
+                    saveFailure = ex.Message;
+                }
+
+                if (saveFailure is not null)
+                {
                     Apply(previousValues);
-                    return McpHelpers.Status("failed", $"Nothing was saved: {ex.Message} The running settings were put back as they were.");
+                    return McpHelpers.Status("failed", $"Nothing was saved: {saveFailure} The running settings were put back as they were.");
                 }
 
                 var settings = JsonNode.Parse(McpAlertTools.GetAlertSettings().GetAwaiter().GetResult());
@@ -249,13 +258,13 @@ public sealed class McpAlertSettingsWriteTools
     }
 
     /// <summary>Reads the body into typed values, one per known field. Returns the first refusal (naming the field), or null.</summary>
-    private static string? Parse(JsonObject body, List<(Field Field, object Value)> parsed, List<string> warnings)
+    private static Refused? Parse(JsonObject body, List<(Field Field, object Value)> parsed, List<string> warnings)
     {
         foreach (var (key, node) in body)
         {
             if (string.Equals(key, "smtp", StringComparison.Ordinal))
             {
-                return "smtp is not settable through update_alert_settings: delivery credentials are set in the Settings window.";
+                return new Refused("smtp", "smtp is not settable through update_alert_settings: delivery credentials are set in the Settings window.");
             }
 
             if (node is JsonObject group && !s_byPath.ContainsKey(key))
@@ -282,7 +291,7 @@ public sealed class McpAlertSettingsWriteTools
         return null;
     }
 
-    private static string? ParseOne(string path, JsonNode? node, List<(Field Field, object Value)> parsed, List<string> warnings)
+    private static Refused? ParseOne(string path, JsonNode? node, List<(Field Field, object Value)> parsed, List<string> warnings)
     {
         if (s_readOnlyCompanions.Contains(path))
         {
@@ -291,13 +300,13 @@ public sealed class McpAlertSettingsWriteTools
 
         if (!s_byPath.TryGetValue(path, out var field))
         {
-            return $"Unknown field '{path}'. Send fields in the nested shape get_alert_settings returns.";
+            return new Refused(path, $"Unknown field '{path}'. Send fields in the nested shape get_alert_settings returns.");
         }
 
         var (value, error) = Coerce(field, node);
         if (error is not null)
         {
-            return error;
+            return new Refused(path, error);
         }
 
         parsed.Add((field, value!));
@@ -382,7 +391,7 @@ public sealed class McpAlertSettingsWriteTools
 
     /// <summary>The both-or-neither rules the window applies to its three paired boxes, over the values as they would stand
     /// after this call (a lone bar is compared with the stored other one).</summary>
-    private static string? CheckPairs(List<(Field Field, object Value)> parsed)
+    private static Refused? CheckPairs(List<(Field Field, object Value)> parsed)
     {
         int Merged(string path, Func<int> stored) =>
             parsed.Any(p => p.Field.Path == path) ? (int)parsed.First(p => p.Field.Path == path).Value : stored();
@@ -390,6 +399,7 @@ public sealed class McpAlertSettingsWriteTools
         bool Sent(string a, string b) => parsed.Any(p => p.Field.Path == a || p.Field.Path == b);
 
         var errors = new List<string>();
+        var parameter = "runnable_queue.critical_per_scheduler";
         if (Sent("runnable_queue.warning_per_scheduler", "runnable_queue.critical_per_scheduler"))
         {
             RunnableQueueBarsInput.Validate(
@@ -400,6 +410,7 @@ public sealed class McpAlertSettingsWriteTools
 
         if (errors.Count == 0 && Sent("client_timeouts.warning_per_minute", "client_timeouts.critical_per_minute"))
         {
+            parameter = "client_timeouts.critical_per_minute";
             ClientTimeoutsBarsInput.Validate(
                 Merged("client_timeouts.warning_per_minute", () => App.AlertClientTimeoutsWarningPerMinute).ToString(CultureInfo.CurrentCulture),
                 Merged("client_timeouts.critical_per_minute", () => App.AlertClientTimeoutsCriticalPerMinute).ToString(CultureInfo.CurrentCulture),
@@ -408,13 +419,14 @@ public sealed class McpAlertSettingsWriteTools
 
         if (errors.Count == 0 && Sent("client_timeouts.warning_multiple", "client_timeouts.critical_multiple"))
         {
+            parameter = "client_timeouts.critical_multiple";
             ClientTimeoutsBarsInput.ValidateMultiples(
                 Merged("client_timeouts.warning_multiple", () => App.AlertClientTimeoutsWarningMultiple).ToString(CultureInfo.CurrentCulture),
                 Merged("client_timeouts.critical_multiple", () => App.AlertClientTimeoutsCriticalMultiple).ToString(CultureInfo.CurrentCulture),
                 errors);
         }
 
-        return errors.Count == 0 ? null : string.Join(" ", errors) + " Nothing was written.";
+        return errors.Count == 0 ? null : new Refused(parameter, string.Join(" ", errors) + " Nothing was written.");
     }
 
     private static void Apply(List<(Field Field, object Value)> values)
