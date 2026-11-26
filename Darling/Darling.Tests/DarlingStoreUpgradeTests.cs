@@ -1044,17 +1044,21 @@ public sealed class DarlingStoreUpgradeTests
             DarlingStoreUpgrade.UpgradeOldClusterPort,
             DarlingStoreUpgrade.UpgradeNewClusterPort));
 
-    // #9686: Needs Windows path rules (drive letters, UNC shares, the long-path prefix), which .NET applies on Windows only.
-    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("timescaledb-2.28.1.dll", "2.28.1")]
-    [InlineData(@"C:\pg\lib\timescaledb-2.24.0.dll", "2.24.0")]
     /* The TSL sibling and the unversioned loader must NOT answer, or the comparison could read a version
        off the wrong file and call two different runtimes identical. */
     [InlineData("timescaledb-tsl-2.28.1.dll", null)]
     [InlineData("timescaledb.dll", null)]
     [InlineData("libpq.dll", null)]
     public void ParseTimescaleLibraryVersion_ReadsOnlyTheVersionedLoaderName(string fileName, string? expected)
+        => Assert.Equal(expected, DarlingStoreUpgrade.ParseTimescaleLibraryVersion(fileName));
+
+    // #9686: The full path has a drive letter and backslashes, which Path.GetFileName splits into folder and file name on Windows only.
+    [Trait("Platform", "Windows")]
+    [Theory]
+    [InlineData(@"C:\pg\lib\timescaledb-2.24.0.dll", "2.24.0")]
+    public void ParseTimescaleLibraryVersion_ReadsTheVersionedLoaderName_FromAFullWindowsPath(string fileName, string? expected)
         => Assert.Equal(expected, DarlingStoreUpgrade.ParseTimescaleLibraryVersion(fileName));
 
     /// <summary>

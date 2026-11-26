@@ -1109,7 +1109,7 @@ function Get-CimInstance {
     /// declined to trust. The plain backup name keeps matching. Run under Windows PowerShell 5.1 and PowerShell 7, with
     /// both scripts.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -1169,11 +1169,7 @@ function Get-CimInstance {
     /// ships them over findings whose text differs only in case, under both shells (the way a comparer is passed to
     /// <c>New-Object</c> is the part most likely to differ between them).
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
-    [Trait("Platform", "Windows")]
     [Theory]
-    [InlineData("install-darling.ps1", "powershell.exe")]
-    [InlineData("upgrade-darling.ps1", "powershell.exe")]
     [InlineData("install-darling.ps1", "pwsh")]
     [InlineData("upgrade-darling.ps1", "pwsh")]
     public void TheWalksDeDuplication_TreatsTheSamePathInTwoCasesAsOneFinding(string scriptName, string shell)
@@ -1215,6 +1211,14 @@ function Get-CimInstance {
         Assert.Contains(@"first=BUILTIN\Users on C:\Pm\Folder", answers);
         Assert.Contains(@"second=BUILTIN\Users on C:\Pm\Other", answers);
     }
+
+    // #9686: Starts powershell.exe to run the lines taken from the Windows install and upgrade scripts, and only Windows has it.
+    [Trait("Platform", "Windows")]
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    public void TheWalksDeDuplication_TreatsTheSamePathInTwoCasesAsOneFinding_UnderWindowsPowerShell(string scriptName, string shell)
+        => TheWalksDeDuplication_TreatsTheSamePathInTwoCasesAsOneFinding(scriptName, shell);
 
     /// <summary>
     /// #5649: the pre-lock walk trusts the service account (as grantee and as owner) on EVERY file in the install root
@@ -1615,7 +1619,7 @@ function Get-CimInstance {
     /// at 5.1) and the walk, the root-file list and the path test must each still see it. Run under Windows PowerShell
     /// 5.1 and PowerShell 7, with both scripts.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -1845,7 +1849,7 @@ function Get-CimInstance {
     /// be named in what the lock returns and to leave their other name's grant as it was, while the plain file is still
     /// reset. Run under Windows PowerShell 5.1 and PowerShell 7, with both scripts.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows need the Windows system folder ([Environment]::SystemDirectory), which is empty off Windows.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -1980,7 +1984,7 @@ function Get-CimInstance {
     /// reports 1 with a count of 2, keeps its owner under both names; a junction reports its attributes and is not followed
     /// (the folder it points to keeps its owner). Run under Windows PowerShell 5.1 and PowerShell 7, with both scripts.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -2069,7 +2073,7 @@ function Get-CimInstance {
     /// Administrators needs an elevated token (CI's runner is one); a filtered token reports the root as needing an elevated
     /// session and changes no owner. Run under Windows PowerShell 5.1 and PowerShell 7, with both scripts.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -2275,7 +2279,7 @@ function Get-CimInstance {
     /// The junction itself is a name in the tree and gets its own owner (result 0). A path that no longer exists is result 2 (error 2), an owner the system refuses is result 4, and with no root open every
     /// path is result 5. The root itself, a plain file, a folder and a differently-cased spelling of the root are inside.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -2341,7 +2345,7 @@ function Get-CimInstance {
     /// with a second name outside), both made through <c>\\?\</c> paths. Without the extended spelling Windows drops the dot and
     /// the step would open <c>dn</c> twice.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -2385,7 +2389,7 @@ function Get-CimInstance {
     /// the same before the step and after it (an elevated token has both and has them off; one that is not elevated has neither,
     /// so turning them on reports false and nothing changes).
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows read the Windows identity (WindowsPrincipal), which only Windows has.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -2439,7 +2443,7 @@ function Get-CimInstance {
     /// open and not given an owner (the plain name beside it is). The owner step needs the two privileges, which only an
     /// elevated token holds; a token without them lists the root with the privilege names and changes no owner.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -2505,7 +2509,7 @@ function Get-CimInstance {
     /// without elevation: setting Administrators as owner is then refused (result 4); on an elevated token it succeeds, and the
     /// grant is removed either way.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -2556,7 +2560,7 @@ function Get-CimInstance {
     /// needs an elevated token and a file system that supports it; the case is skipped, with that reason, where it cannot be set
     /// up. The privilege call is replaced as in the test above.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -2652,11 +2656,7 @@ function Get-CimInstance {
     /// PowerShell 7, with both scripts. A name with a trailing dot or space anywhere on the way gives $null; a normal path
     /// below a UNC root still gives its names.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
-    [Trait("Platform", "Windows")]
     [Theory]
-    [InlineData("install-darling.ps1", "powershell.exe")]
-    [InlineData("upgrade-darling.ps1", "powershell.exe")]
     [InlineData("install-darling.ps1", "pwsh")]
     [InlineData("upgrade-darling.ps1", "pwsh")]
     public void TheSegmentsBelowRoot_ChecksEveryNameOfAUncPath_TheServerAndShareToo(string scriptName, string shell)
@@ -2699,6 +2699,14 @@ function Get-CimInstance {
         Assert.Contains("drive.normal=[sub|darling.json]", answers);
         Assert.Contains("drive.dot=[$null]", answers);
     }
+
+    // #9686: Starts powershell.exe to run the lines taken from the Windows install and upgrade scripts, and only Windows has it.
+    [Trait("Platform", "Windows")]
+    [Theory]
+    [InlineData("install-darling.ps1", "powershell.exe")]
+    [InlineData("upgrade-darling.ps1", "powershell.exe")]
+    public void TheSegmentsBelowRoot_ChecksEveryNameOfAUncPath_TheServerAndShareToo_UnderWindowsPowerShell(string scriptName, string shell)
+        => TheSegmentsBelowRoot_ChecksEveryNameOfAUncPath_TheServerAndShareToo(scriptName, shell);
 
     private static void AppendStepFunctions(StringBuilder probe, string? script = null)
     {
@@ -4052,7 +4060,7 @@ function Get-CimInstance {
     /// case and with a trailing backslash, and requires the same answers for each, on any machine that has 8.3 names. The
     /// trust answers are exact: only the service's own folders and its two kinds of root file, nothing else.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -4199,7 +4207,7 @@ function Get-CimInstance {
     /// names on the volume; without them those forms are left out and the test is skipped at the end, after the trailing
     /// backslash and case forms have been checked.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -4305,7 +4313,7 @@ function Get-CimInstance {
     /// backslashes) is not looked up and counts as Incomplete, so the refusal advice never waits on a remote host. A
     /// value inside the folder is still listed. Both scripts, both shells.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -4369,7 +4377,7 @@ function Get-CimInstance {
     /// however the operator typed it. This runs the two resolving lines as shipped and then asks
     /// <c>Test-DarlingSamePath</c> the way those refusals do.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
@@ -4445,7 +4453,7 @@ function Get-CimInstance {
     /// they did before the canonical form existed: the same text in another case, or with a trailing backslash, is the
     /// same folder; a child is under its parent; a sibling and a different folder are not.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows compare drive-letter paths with backslashes, which are paths on Windows only.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1", "powershell.exe")]
@@ -4497,7 +4505,7 @@ function Get-CimInstance {
     /// folder on disk (volume serial number and file index), so a junction to the install folder reads as the install
     /// folder. A folder that does not exist, or another folder, is not the same.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
@@ -4554,7 +4562,7 @@ function Get-CimInstance {
     /// each refusal is what stops it. The block is cut out of the script (from the self-overwrite refusal up to the zip
     /// handling) and run with a stand-in <c>Fail</c> that records which message was raised.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
@@ -4623,7 +4631,7 @@ function Get-CimInstance {
     /// exist yet is resolved through the part of its path that does. The check is cut out of the script, after the typed-path
     /// check, and run with a profile root of its own.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
@@ -4694,7 +4702,7 @@ function Get-CimInstance {
     /// spelling, so an install folder typed as a junction to the registered folder is the registered folder, while another
     /// folder is still refused. The check is cut out of the script and run with a stand-in <c>Fail</c>.
     /// </summary>
-    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    // #9686: The powershell.exe rows start powershell.exe, and the pwsh rows build their test folder from $env:TEMP, which only Windows sets.
     [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("powershell.exe")]
