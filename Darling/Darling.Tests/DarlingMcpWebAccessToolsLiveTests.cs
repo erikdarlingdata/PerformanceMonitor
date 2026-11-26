@@ -116,7 +116,7 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
             var journal = (string)(await ScalarAsync(owner, "SELECT coalesce(string_agg(e::text, ' '), '') FROM config.web_access_group_events e", ct))!;
             foreach (var token in tokens)
             {
-                Assert.True(logger.Lines.All(l => !l.Contains(token, StringComparison.Ordinal)), string.Join(" || ", logger.Lines.Where(l => l.Contains(token, StringComparison.Ordinal)).Select(l => l[..Math.Min(150, l.Length)])));
+                Assert.DoesNotContain(token, logger.Joined, StringComparison.Ordinal);
                 Assert.DoesNotContain(token, journal, StringComparison.Ordinal);
             }
         });
@@ -395,7 +395,7 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
                 Assert.Equal(token, TestKeyRings.Healthy.Open(credential.SealedToken, PasswordBinding.ForWebAccessToken(id, credential.Group.TokenGeneration)));
 
                 Assert.True(logger.CountAtLevel(LogLevel.Warning) >= 1, logger.Joined);
-                Assert.DoesNotContain(token, logger.Joined, StringComparison.Ordinal);
+                Assert.True(logger.Lines.All(l => !l.Contains(token, StringComparison.Ordinal)), string.Join(" || ", logger.Lines.Where(l => l.Contains(token, StringComparison.Ordinal)).Select(l => l[..Math.Min(150, l.Length)])));
             }
             finally
             {
