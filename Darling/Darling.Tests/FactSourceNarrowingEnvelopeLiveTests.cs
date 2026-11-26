@@ -30,7 +30,7 @@ public sealed class FactSourceNarrowingEnvelopeLiveTests
     private const int ServerId = -857_004;
     private const string ServerName = "FactSourceEnvelopeSrv";
 
-    /// <summary>Waits every 10 minutes over the last 200 minutes. Each statement reads $1 server id, $2 server name, $3 window end.</summary>
+    /// <summary>Waits every 10 minutes over the 200 minutes before the window end. Each statement reads $1 server id, $2 server name, $3 window end.</summary>
     private const string SeedSql = @"
 INSERT INTO servers (server_id, server_name, display_name, is_enabled, created_date, modified_date)
 VALUES ($1, $2, $2, TRUE, $3, $3);
@@ -51,7 +51,9 @@ CROSS JOIN generate_series(0, 20) AS s;";
             "Set DARLING_TEST_PG to a Postgres connection string to run the live fact source envelope test.");
         var ct = TestContext.Current.CancellationToken;
 
-        var windowEnd = LiveClock.Now();
+        /* The tool reads the product's own clock, so the window is anchored where both clocks have passed and asked for by as_of. */
+        var windowEnd = LiveClock.AnchoredEndNotAfterNow();
+        var asOf = windowEnd.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
         await using var scratch = await ScratchPostgres.CreateAsync(connectionString!, ct);
         await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
         {
@@ -72,7 +74,7 @@ CROSS JOIN generate_series(0, 20) AS s;";
         var service = new DarlingAnalysisService(postgres) { MinimumDataHours = 0 };
 
         /* The whole read has wait facts, so the server has facts to show. */
-        using (var whole = JsonDocument.Parse(await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: 4, cancellationToken: ct)))
+        using (var whole = JsonDocument.Parse(await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: 4, as_of: asOf, cancellationToken: ct)))
         {
             Assert.False(IsUnavailable(whole.RootElement), whole.RootElement.GetRawText());
             Assert.Contains(whole.RootElement.GetProperty("facts").EnumerateArray(), f => f.GetProperty("source").GetString() == "waits");
@@ -80,7 +82,7 @@ CROSS JOIN generate_series(0, 20) AS s;";
 
         foreach (var source in new[] { "jobs", "sessions", "bad_actor" })
         {
-            var json = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: 4, source: source, cancellationToken: ct);
+            var json = await DarlingMcpTools.GetAnalysisFacts(service, postgres, ServerName, hours_back: 4, source: source, as_of: asOf, cancellationToken: ct);
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
