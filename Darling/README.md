@@ -22,7 +22,7 @@ A collector, alert, or analysis change lands once in the shared libraries and bo
 | Data lives | Locally per seat (DuckDB + Parquet) | Centrally (PostgreSQL / TimescaleDB) |
 | Execution plans | Not stored (fetched live when you view a query) | Captured and stored, TOAST-compressed (`capturePlans`, default on) |
 | Viewers | The app is the viewer | Any number of viewer seats read the central store |
-| Setup | Download and run | On Windows, extract the release zip and run `install-darling.ps1` (on Linux, see [Run on Linux](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd)). The shipped default is the bundled store (managed mode), so you provision no database. To use your own PostgreSQL, provision it and set its connection string. |
+| Setup | Download and run | On Windows, extract the release zip and run `install-darling.ps1` (on Linux, see [Run on Linux](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd) for Docker Compose and [Install Darling on Linux with systemd](../docs/darling/linux.md) for systemd). The shipped default is the bundled store (managed mode), so you provision no database. To use your own PostgreSQL, provision it and set its connection string. |
 | Best for | Quick triage, consultants, a handful of servers | Always-on team monitoring, larger estates, one shared store |
 | Configuration | Settings UI | `darling.json` seeds the first start. After that, the Viewer edits servers, alert settings and notification routes in the store. The web dashboard's Admin page edits a server in place and the agent channel of a notification route, for a sign-in that can make changes. Its Alert Settings tab is read-only. |
 
@@ -34,12 +34,13 @@ Nothing is installed on the monitored SQL Servers by either edition beyond three
 
 > **Installing on Windows?** Follow [`docs/darling/install.md`](../docs/darling/install.md). It is the ordered path from a downloaded zip to a working install, with a proof point at every step.
 >
-> **Installing on Linux, or turning on the web dashboard?** Read [`docs/darling-quick-start.md`](../docs/darling-quick-start.md).
+> **Installing on Linux, or turning on the web dashboard?** Read [`docs/darling-quick-start.md`](../docs/darling-quick-start.md). For Linux under systemd, read [`docs/darling/linux.md`](../docs/darling/linux.md).
 
 The install reference that was here moved to these pages:
 
 - [Install Darling](../docs/darling/install.md#install-reference): prerequisites, `darling.json`, the pre-flight, the Windows service, the install location, the service account, building from source and the CET error.
-- [The Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd): Docker Compose and systemd on Linux. The container runs as user 1654; see [Container user](../docs/darling/security.md#container-user) before upgrading an install that ran as root.
+- [Install Darling on Linux with systemd](../docs/darling/linux.md): the tarball, your own PostgreSQL store, the unit, the proof lines, the upgrade and the uninstall.
+- [The Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd): Docker Compose on Linux, and the short form of the systemd steps. The container runs as user 1654; see [Container user](../docs/darling/security.md#container-user) before upgrading an install that ran as root.
 - [Running Darling day to day](../docs/darling/admin.md#upgrading-an-existing-install): upgrade and roll back.
 - [Darling and your monitored servers](../docs/darling/monitored-servers.md): what the service does on each server, its Extended Events sessions and the permissions it needs.
 
@@ -68,7 +69,7 @@ This section moved to [The command line reference](../docs/darling/cli.md#diagno
 <a id="run-on-linux-docker-compose-or-systemd-1804"></a>
 ### Run on Linux (Docker Compose or systemd)
 
-This section moved to [the Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd).
+Docker Compose is in [the Darling quick start](../docs/darling-quick-start.md#run-on-linux-docker-compose-or-systemd). systemd is in [Install Darling on Linux with systemd](../docs/darling/linux.md).
 
 ### Install as a Windows Service
 
