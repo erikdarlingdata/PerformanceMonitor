@@ -360,7 +360,7 @@ public sealed class McpHostService : BackgroundService
             /* #5991: the query-tag and query-tag-rule tools; twin of Darling's DarlingMcpQueryTagTools and DarlingMcpQueryTagRuleTools. */
             .WithGeminiCompatibleTools<McpQueryTagTools>()
             /* #9640: add_servers and remove_server, Darling's twins, served only with mcp_allow_server_admin as well as mcp_allow_writes. */
-            .WithGeminiCompatibleTools<McpServerAdminTools>()
+            .WithGeminiCompatibleTools<McpServerRegistryTools>()
             .WithGeminiCompatibleTools<McpHealthParserTools>()
             .WithGeminiCompatibleTools<McpAnalysisTools>()
             /* #3898 D1: get_tool_guide serves the reading guides tools/list leaves out (the tails split off

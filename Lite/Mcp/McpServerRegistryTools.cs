@@ -45,7 +45,7 @@ public sealed class McpServerAdminHooks
 /// removal the Manage Servers window runs (<see cref="McpServerAdminHooks.RemoveServer"/>).</para>
 /// </summary>
 [McpServerToolType]
-public sealed class McpServerAdminTools
+public sealed class McpServerRegistryTools
 {
     [McpServerTool(Name = "add_servers"), Description(
         "Write: adds servers (a JSON ARRAY) to what Lite monitors, through the code behind --add-server: every entry is checked and connection-tested, " +

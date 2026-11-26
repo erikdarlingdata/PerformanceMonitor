@@ -27,13 +27,13 @@ namespace PerformanceMonitorLite.Tests;
 /// server list and the credential store the Add Server and Manage Servers windows use.
 /// </summary>
 [InMemoryCredentials]
-public sealed class McpServerAdminToolsTests : IDisposable
+public sealed class McpServerRegistryToolsTests : IDisposable
 {
     private const string Secret = "not-a-real-secret-value";
-    private readonly string _root = Path.Combine(Path.GetTempPath(), "McpServerAdminToolsTests_" + Guid.NewGuid().ToString("N"));
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "McpServerRegistryToolsTests_" + Guid.NewGuid().ToString("N"));
     private readonly InMemoryCredentialStore _store = new();
 
-    public McpServerAdminToolsTests() => Directory.CreateDirectory(_root);
+    public McpServerRegistryToolsTests() => Directory.CreateDirectory(_root);
 
     public void Dispose()
     {
@@ -77,7 +77,7 @@ public sealed class McpServerAdminToolsTests : IDisposable
         var manager = NewManager();
         var hooks = new Hooks();
 
-        var answer = await McpServerAdminTools.AddServersCore(manager, hooks.For(manager), OneSqlServer, Reachable);
+        var answer = await McpServerRegistryTools.AddServersCore(manager, hooks.For(manager), OneSqlServer, Reachable);
 
         var root = Parse(answer);
         Assert.Equal("ok", root.GetProperty("status").GetString());
@@ -113,7 +113,7 @@ public sealed class McpServerAdminToolsTests : IDisposable
         var manager = NewManager();
         var hooks = new Hooks();
 
-        var answer = await McpServerAdminTools.AddServersCore(manager, hooks.For(manager), serversJson, Reachable);
+        var answer = await McpServerRegistryTools.AddServersCore(manager, hooks.For(manager), serversJson, Reachable);
 
         var root = Parse(answer);
         Assert.NotEqual("ok", root.GetProperty("status").GetString());
@@ -129,7 +129,7 @@ public sealed class McpServerAdminToolsTests : IDisposable
         var json = "[{\"host\":\"sql01\"},{\"host\":\"sql02\",\"auth\":\"sql\",\"username\":\"m\",\"password\":\"" + Secret + "\"}]";
         var tested = new List<string>();
 
-        var answer = await McpServerAdminTools.AddServersCore(manager, null, json, (server, _, _, _) =>
+        var answer = await McpServerRegistryTools.AddServersCore(manager, null, json, (server, _, _, _) =>
         {
             tested.Add(server.ServerName);
             return Task.FromResult<string?>(server.ServerName == "sql02" ? "login failed" : null);
@@ -148,12 +148,12 @@ public sealed class McpServerAdminToolsTests : IDisposable
     public async Task AddServers_AListedServer_IsUpdatedInPlace_AndAFailedTestLeavesTheRunningListUntouched()
     {
         var manager = NewManager();
-        await McpServerAdminTools.AddServersCore(manager, null, OneSqlServer, Reachable);
+        await McpServerRegistryTools.AddServersCore(manager, null, OneSqlServer, Reachable);
         var listed = Assert.Single(manager.GetAllServers());
         var id = listed.Id;
 
         /* The test fails: the instance the running app holds must keep every setting it had, and the list file too. */
-        var refused = await McpServerAdminTools.AddServersCore(manager, null,
+        var refused = await McpServerRegistryTools.AddServersCore(manager, null,
             "[{\"host\":\"sql01\",\"display_name\":\"Renamed\",\"auth\":\"windows\",\"encrypt_mode\":\"Strict\"}]", Unreachable("no route to host"));
         Assert.Equal("refused", Parse(refused).GetProperty("status").GetString());
         Assert.Equal("Primary", listed.DisplayName);
@@ -161,7 +161,7 @@ public sealed class McpServerAdminToolsTests : IDisposable
         Assert.Equal(AuthenticationTypes.SqlServer, listed.AuthenticationType);
         Assert.Same(listed, Assert.Single(manager.GetAllServers()));
 
-        var updated = await McpServerAdminTools.AddServersCore(manager, null,
+        var updated = await McpServerRegistryTools.AddServersCore(manager, null,
             "[{\"host\":\"sql01\",\"display_name\":\"Renamed\",\"auth\":\"sql\",\"username\":\"monitor\",\"password\":\"another-value\",\"encrypt_mode\":\"Strict\"}]", Reachable);
         var root = Parse(updated);
         Assert.Equal(1, root.GetProperty("updated").GetInt32());
@@ -178,11 +178,11 @@ public sealed class McpServerAdminToolsTests : IDisposable
     public async Task RemoveServer_RunsTheWindowsRemoval_DropsTheLogin_AndAnswersWithAnUndoThatHoldsNoPassword()
     {
         var manager = NewManager();
-        await McpServerAdminTools.AddServersCore(manager, null, OneSqlServer, Reachable);
+        await McpServerRegistryTools.AddServersCore(manager, null, OneSqlServer, Reachable);
         var id = Assert.Single(manager.GetAllServers()).Id;
         var hooks = new Hooks();
 
-        var answer = await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), "primary");
+        var answer = await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), "primary");
 
         var root = Parse(answer);
         Assert.Equal("removed", root.GetProperty("status").GetString());
@@ -203,27 +203,27 @@ public sealed class McpServerAdminToolsTests : IDisposable
     public async Task RemoveServer_RemovesNothing_WhenTheNameIsAmbiguousUnknownOrMissing()
     {
         var manager = NewManager();
-        await McpServerAdminTools.AddServersCore(manager, null, "[{\"host\":\"sql01a\"},{\"host\":\"sql01b\"}]", Reachable);
+        await McpServerRegistryTools.AddServersCore(manager, null, "[{\"host\":\"sql01a\"},{\"host\":\"sql01b\"}]", Reachable);
         var hooks = new Hooks();
 
-        var ambiguous = Parse(await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), "sql01"));
+        var ambiguous = Parse(await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), "sql01"));
         Assert.Equal("ambiguous", ambiguous.GetProperty("status").GetString());
         Assert.Equal(2, ambiguous.GetProperty("candidates").GetArrayLength());
 
-        var unknown = Parse(await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), "nowhere"));
+        var unknown = Parse(await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), "nowhere"));
         Assert.Equal("not_found", unknown.GetProperty("status").GetString());
 
-        var blank = Parse(await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), " "));
+        var blank = Parse(await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), " "));
         Assert.Contains("server_name", blank.GetProperty("message").GetString(), StringComparison.Ordinal);
 
-        var noRemoval = Parse(await McpServerAdminTools.RemoveServerCore(manager, new McpServerAdminHooks(), "sql01a"));
+        var noRemoval = Parse(await McpServerRegistryTools.RemoveServerCore(manager, new McpServerAdminHooks(), "sql01a"));
         Assert.Equal("unavailable", noRemoval.GetProperty("status").GetString());
 
         Assert.Empty(hooks.Removed);
         Assert.Equal(2, NewManager().GetAllServers().Count);
 
         /* A full storage name picks one registration even when a part of its name fits both. */
-        var exact = Parse(await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), "sql01a"));
+        var exact = Parse(await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), "sql01a"));
         Assert.Equal("removed", exact.GetProperty("status").GetString());
         Assert.Equal("sql01b", Assert.Single(NewManager().GetAllServers()).ServerName);
     }
