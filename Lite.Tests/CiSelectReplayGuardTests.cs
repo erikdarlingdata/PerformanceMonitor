@@ -33,11 +33,20 @@ public sealed class CiSelectReplayGuardTests
 {
     private static string Script() => Path.Combine(ParitySource.RepoRoot(), ".github", "scripts", "ci-select.py");
 
+    /// <summary>The longest one run of the script may take. Each run reads every test source in both suites, so its time is the
+    /// disk's: 7 to 10 s on a local disk, and 29 to 41 s from a network share in a virtual machine (#9789, measured on an otherwise
+    /// idle machine). Under a profiler there, 53 percent of a run is the character walk over the sources and 18 percent is file-status
+    /// calls on the share. Four minutes is about six times the slowest run measured, so a machine running several suites at once still
+    /// finishes, and a script that hangs still fails.</summary>
+    private static readonly TimeSpan s_runLimit = TimeSpan.FromMinutes(4);
+
     private static (int ExitCode, string Output) RunScript(params string[] args)
     {
+        // The script finds the repository from its own path and reads nothing relative to the working folder, so it starts in the
+        // temp folder: a working folder on a network share is one a child process can refuse (#9789).
         var psi = new ProcessStartInfo("python")
         {
-            WorkingDirectory = ParitySource.RepoRoot(),
+            WorkingDirectory = Path.GetTempPath(),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -52,7 +61,7 @@ public sealed class CiSelectReplayGuardTests
         using var p = Process.Start(psi) ?? throw new InvalidOperationException("python did not start");
         var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = p.StandardError.ReadToEndAsync();
-        Assert.True(p.WaitForExit(120_000), "ci-select.py did not finish in two minutes");
+        Assert.True(p.WaitForExit((int)s_runLimit.TotalMilliseconds), $"ci-select.py did not finish in {s_runLimit.TotalMinutes} minutes");
         return (p.ExitCode, stdout.Result + stderr.Result);
     }
 
