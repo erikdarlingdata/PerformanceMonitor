@@ -174,4 +174,14 @@ internal static class DarlingProcessServices
         () => provider.GetRequiredService<IFrontDoorDirectory>(),
         provider.GetRequiredService<ILogger<DarlingFrontDoorMcpPeers>>()));
     }
+
+    /// <summary>
+    /// Puts the rolling file log on the host's loggers (#9747). The provider buffers lines for up to five seconds and writes them on a timer,
+    /// and its Dispose writes what is left. The container disposes what a factory returns and never an instance it was handed, so the
+    /// provider is registered through a factory: an instance registration would lose the lines logged in the last seconds before an exit,
+    /// the <c>collection loop stopped</c> line among them. The container is disposed after the hosted services have stopped, so their
+    /// last lines are in the buffer by then.
+    /// </summary>
+    internal static void AddFileLog(ILoggingBuilder logging, DarlingFileLoggerProvider provider) =>
+        logging.Services.AddSingleton<ILoggerProvider>(_ => provider);
 }
