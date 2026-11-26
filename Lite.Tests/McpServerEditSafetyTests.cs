@@ -111,6 +111,48 @@ public sealed class McpServerEditSafetyTests : IDisposable
         Assert.Equal(("collector", Secret), new CredentialService(_store).GetCredential(live.Id)!.Value);
     }
 
+    [Fact]
+    public async Task Edit_AServerUpdatedByAddServersDuringTheConnectionTest_IsNotOverwritten_AndTheCallIsRefused()
+    {
+        var manager = Seeded();
+
+        var answer = await Edit(manager, "{\"host\":\"sql09\",\"password\":\"" + NewSecret + "\"}", async (_, _, _, _) =>
+        {
+            /* add_servers updates a listed server by swapping a copy into the list, so the instance this call read is detached from then on. */
+            await McpServerRegistryTools.AddServersCore(manager, null,
+                "[{\"host\":\"sql01\",\"display_name\":\"Renamed\",\"auth\":\"sql\",\"username\":\"collector\",\"password\":\"" + NewSecret + "\"}]",
+                (_, _, _, _) => Task.FromResult<string?>(null));
+            return null;
+        });
+
+        Assert.Equal("refused", Status(answer));
+        Assert.Contains("changed while the call ran", Parse(answer)["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        var live = Assert.Single(manager.GetAllServers());
+        Assert.Equal("sql01", live.ServerName);
+        Assert.Equal("Renamed", live.DisplayName);
+        Assert.Equal("sql01", Reread().ServerName);
+        Assert.Equal("Renamed", Reread().DisplayName);
+    }
+
+    [Fact]
+    public void SetExcluded_AnAnswerOfUnchanged_LogsNoChange_AndAChangedListLogsOne()
+    {
+        AppLogger.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Information);
+        var manager = Seeded();
+        McpServerAdminTools.SetExcluded(manager, "sql01", new[] { "SalesArchiveDb" });
+        AppLogger.DrainBufferedLines();
+
+        var same = McpServerAdminTools.SetExcluded(manager, "sql01", new[] { "SalesArchiveDb" });
+        var unchangedLines = AppLogger.DrainBufferedLines().Where(l => l.Contains("set_server_excluded_databases", StringComparison.Ordinal)).ToList();
+        var other = McpServerAdminTools.SetExcluded(manager, "sql01", Array.Empty<string>());
+        var changedLines = AppLogger.DrainBufferedLines().Where(l => l.Contains("set_server_excluded_databases", StringComparison.Ordinal)).ToList();
+
+        Assert.Equal("unchanged", Status(same));
+        Assert.Empty(unchangedLines);
+        Assert.Equal("changed", Status(other));
+        Assert.Single(changedLines);
+    }
+
     [Theory]
     [InlineData("display_name", "Orders\\nforged log line")]
     [InlineData("display_name", "Orders\\tDB")]

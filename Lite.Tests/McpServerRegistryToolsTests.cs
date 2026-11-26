@@ -174,6 +174,63 @@ public sealed class McpServerRegistryToolsTests : IDisposable
         Assert.Equal("another-value", credential!.Value.Password);
     }
 
+    /// <summary>A store that refuses the save for one login, and deletes the old entry first: the worst a refused update can do.</summary>
+    private sealed class RefusingStore(InMemoryCredentialStore inner, string username) : ICredentialStore
+    {
+        public bool SaveCredential(string serverId, string user, string password) => user == username ? Refuse(serverId) : inner.SaveCredential(serverId, user, password);
+        public CredentialSaveResult TrySaveCredential(string serverId, string user, string password) => inner.TrySaveCredential(serverId, user, password);
+        public CredentialSaveResult TryDeleteCredential(string serverId) => inner.TryDeleteCredential(serverId);
+        public (string Username, string Password)? GetCredential(string serverId) => inner.GetCredential(serverId);
+        public CredentialReadOutcome TryReadCredential(string serverId, out (string Username, string Password)? credential, out string? failure)
+            => inner.TryReadCredential(serverId, out credential, out failure);
+        public bool DeleteCredential(string serverId) => inner.DeleteCredential(serverId);
+        public bool CredentialExists(string serverId) => inner.CredentialExists(serverId);
+        public bool UpdateCredential(string serverId, string user, string password)
+            => user == username ? Refuse(serverId) : inner.UpdateCredential(serverId, user, password);
+        public IReadOnlyList<string> ListKeys(string keyPrefix) => inner.ListKeys(keyPrefix);
+
+        private bool Refuse(string serverId)
+        {
+            inner.DeleteCredential(serverId);
+            return false;
+        }
+    }
+
+    [Fact]
+    public async Task AddServers_AFailedUpdate_ChangesNothing_WhileTheEntryBeforeItStaysSaved_AndTheAnswerNamesIt()
+    {
+        var manager = new ServerManager(_root, null, HostsFile, new CredentialService(new RefusingStore(_store, "monitor2")));
+        await McpServerRegistryTools.AddServersCore(manager, null, OneSqlServer, Reachable);
+        var listed = Assert.Single(manager.GetAllServers());
+        var id = listed.Id;
+
+        /* The second entry updates the listed server and its login save is refused, after the list has been written with the update. */
+        var answer = await McpServerRegistryTools.AddServersCore(manager, null,
+            "[{\"host\":\"sql02\",\"display_name\":\"Second\",\"auth\":\"windows\"},"
+            + "{\"host\":\"sql01\",\"display_name\":\"Renamed\",\"auth\":\"sql\",\"username\":\"monitor2\",\"password\":\"another-value\",\"encrypt_mode\":\"Strict\"}]",
+            Reachable);
+
+        var root = Parse(answer);
+        Assert.Equal("refused", root.GetProperty("status").GetString());
+        Assert.Equal(1, root.GetProperty("added").GetInt32());
+        Assert.Equal(0, root.GetProperty("updated").GetInt32());
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("stay saved", message, StringComparison.Ordinal);
+        Assert.Contains("Second", message, StringComparison.Ordinal);
+
+        /* The failed update left the listed server as it was, in memory and in the file, and its login as it was. */
+        Assert.Equal(2, manager.GetAllServers().Count);
+        var live = manager.GetServerById(id)!;
+        Assert.Same(listed, live);
+        Assert.Equal("Primary", live.DisplayName);
+        Assert.Equal("Optional", live.EncryptMode);
+        var reloaded = NewManager().GetServerById(id)!;
+        Assert.Equal("Primary", reloaded.DisplayName);
+        Assert.Equal("Optional", reloaded.EncryptMode);
+        Assert.Equal(("monitor", Secret), _store.GetCredential(id));
+        Assert.DoesNotContain(Secret, answer, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task RemoveServer_RunsTheWindowsRemoval_DropsTheLogin_AndAnswersWithAnUndoThatHoldsNoPassword()
     {

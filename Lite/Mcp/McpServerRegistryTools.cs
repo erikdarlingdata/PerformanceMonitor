@@ -71,16 +71,17 @@ public sealed class McpServerAdminHooks
 public sealed class McpServerRegistryTools
 {
     [McpServerTool(Name = "add_servers"), Description(
-        "Write: adds servers (a JSON ARRAY) to what Lite monitors, through the code behind --add-server: every entry is checked and connection-tested, " +
-        "then all are saved at once. Served only when mcp_allow_server_admin and mcp_allow_writes are both true. One refused or unreachable entry " +
-        "refuses the whole call and nothing is saved (unlike Darling, which reports each entry). A server already listed (same host, database and " +
+        "Write: adds servers (a JSON ARRAY) to what Lite monitors, through the code behind --add-server: every entry is checked and connection-tested first, " +
+        "then saved one at a time. Served only when mcp_allow_server_admin and mcp_allow_writes are both true. One refused or unreachable entry " +
+        "refuses the whole call before anything is saved (unlike Darling, which reports each entry). If a save then fails, the entries before it stay saved, " +
+        "the answer names them (remove_server removes one) and the failed entry changes nothing. A server already listed (same host, database and " +
         "read-only intent) is updated in place, with the new password. A password is stored in Windows Credential Manager and never returned. <<GUIDE>> " +
         "Each object: host (REQUIRED); display_name (defaults to host); database; auth (\"Windows\" default, \"SQL\", \"ServicePrincipal\" (username is the " +
         "client id, password the secret), \"ManagedIdentity\" or \"EntraDefault\"); username and password (REQUIRED for \"SQL\" and \"ServicePrincipal\"); " +
         "encrypt_mode (\"Optional\"|\"Mandatory\"|\"Strict\"); trust_server_certificate, read_only_intent, multi_subnet_failover (booleans); engine, " +
         "only \"sqlserver\" (Lite monitors SQL Server only, so Darling's port, aws_role_arn, aws_external_id and query_store_replica are not read). " +
         "The password travels to this endpoint in the request. Returns {status:\"ok\", requested, added, updated, results:[{server, host, database, " +
-        "status:\"added\"|\"updated\"}]}, or {status:\"refused\", message} with nothing saved. The new server is collected from the next collection pass.")]
+        "status:\"added\"|\"updated\"}]}, or {status:\"refused\", message, requested, added, updated} (added and updated count what stayed saved, and are 0 when nothing was). The new server is collected from the next collection pass.")]
     public static async Task<string> AddServers(
         ServerManager serverManager,
         McpServerAdminHooks hooks,

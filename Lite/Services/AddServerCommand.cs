@@ -459,7 +459,7 @@ internal static class AddServerCommand
 
         var manager = env.ManagerFactory();
         saved.ServerListPath = manager.ConfigFilePath;
-        var planned = new List<(Entry Entry, ServerConnection Server, bool Exists)>();
+        var planned = new List<(Entry Entry, ServerConnection Server, bool Exists, ServerConnection? Listed)>();
         foreach (var (entry, label, candidate) in pending)
         {
             var listed = manager.GetAllServers();
@@ -551,7 +551,7 @@ internal static class AddServerCommand
                 return ExitRefused;
             }
 
-            planned.Add((entry, server, existing is not null));
+            planned.Add((entry, server, existing is not null, existing));
         }
 
         /* The tests above take seconds each: a Lite started meanwhile would write the list back over this run. */
@@ -565,7 +565,7 @@ internal static class AddServerCommand
            credential, so a refused or failed credential write part way through would leave a partial result: the run undoes it. */
         var undo = WriteUndo.Take(manager, Path.Combine(env.HostRecordFolder, ServerHostBindings.FileName), planned.Select(p => p.Server).ToList());
         var reached = 0;
-        foreach (var (entry, server, exists) in planned)
+        foreach (var (entry, server, exists, listed) in planned)
         {
             reached++;
             try
@@ -583,7 +583,7 @@ internal static class AddServerCommand
             catch (Exception ex)
             {
                 error.WriteLine($"{ManagerLabel(server)}: {ex.Message}");
-                UndoWrites(error, env, manager, undo, reached, saved, exists ? null : server);
+                UndoWrites(error, env, manager, undo, reached, saved, exists ? null : server, exists ? listed : null);
                 return ExitRefused;
             }
 
@@ -594,7 +594,7 @@ internal static class AddServerCommand
         if (manager.HostRecordSaveProblem is { } recordProblem)
         {
             error.WriteLine(recordProblem);
-            UndoWrites(error, env, manager, undo, reached, saved, null);
+            UndoWrites(error, env, manager, undo, reached, saved, null, null);
             return ExitRefused;
         }
 
@@ -604,10 +604,11 @@ internal static class AddServerCommand
     /// <summary>
     /// Puts back what a failed run wrote. The verb runs with no Lite open, so the files and credentials go back as they were. Inside a running
     /// Lite (#9640) the server manager holds the list in memory and writes it back on its own changes, so putting the file back would only make
-    /// the file and the list disagree: the entry that failed is removed from the list instead, and the entries saved before it stay saved, and
-    /// the message says which.
+    /// the file and the list disagree. The entry that failed changes nothing: a new one is removed from the list, and an updated one is put
+    /// back as it was (<paramref name="failedUpdateListed"/>, the instance the list held, and its saved login). The entries saved before it
+    /// stay saved, and the message says which.
     /// </summary>
-    private static void UndoWrites(TextWriter error, Machine env, ServerManager manager, WriteUndo undo, int reached, SaveLog saved, ServerConnection? failedNew)
+    private static void UndoWrites(TextWriter error, Machine env, ServerManager manager, WriteUndo undo, int reached, SaveLog saved, ServerConnection? failedNew, ServerConnection? failedUpdateListed)
     {
         if (!env.InsideRunningLite)
         {
@@ -620,6 +621,15 @@ internal static class AddServerCommand
         {
             try { manager.DeleteServer(failedNew.Id); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException) { /* the list was written already; the message below still stands */ }
+        }
+
+        if (failedUpdateListed is not null)
+        {
+            /* UpdateServer swapped the copy in and saved the list before it wrote the login, so the listed server goes back, and the login with it. */
+            try { manager.UpdateServerSettings(failedUpdateListed); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException) { error.WriteLine("The listed entry for this server could not be put back and may still hold the changes of this call."); }
+            if (undo.RestoreCredential(reached - 1) is { } credentialProblem)
+                error.WriteLine(credentialProblem);
         }
 
         error.WriteLine(saved.Count == 0
@@ -695,6 +705,32 @@ internal static class AddServerCommand
             return undo;
         }
 
+        /// <summary>Puts back the saved login of the server at <paramref name="index"/> in the list the undo was taken over. Null when it went back (or there was none to keep), else the problem line.</summary>
+        internal string? RestoreCredential(int index)
+        {
+            foreach (var (_, server, outcome, credential) in _saved.Where(saved => saved.Index == index))
+            {
+                var name = ManagerLabel(server);
+                try
+                {
+                    var restored = outcome switch
+                    {
+                        CredentialReadOutcome.Found => _credentials.SaveCredential(server.Id, credential!.Value.Username, credential.Value.Password),
+                        CredentialReadOutcome.NotFound => _credentials.TryDeleteCredential(server.Id).Succeeded,
+                        _ => false
+                    };
+                    if (!restored)
+                        return $"the saved credential for {name} could not be put back and may hold the password of this run.";
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException)
+                {
+                    return $"the saved credential for {name} could not be put back and may hold the password of this run.";
+                }
+            }
+
+            return null;
+        }
+
         /// <summary>Puts the files back and the credentials of the first <paramref name="reached"/> servers; returns the lines to print.</summary>
         internal List<string> Restore(int reached)
         {
@@ -719,24 +755,10 @@ internal static class AddServerCommand
                 }
             }
 
-            foreach (var (_, server, outcome, credential) in _saved.Where(saved => saved.Index < reached))
+            foreach (var index in _saved.Where(saved => saved.Index < reached).Select(saved => saved.Index).ToList())
             {
-                var name = ManagerLabel(server);
-                try
-                {
-                    var restored = outcome switch
-                    {
-                        CredentialReadOutcome.Found => _credentials.SaveCredential(server.Id, credential!.Value.Username, credential.Value.Password),
-                        CredentialReadOutcome.NotFound => _credentials.TryDeleteCredential(server.Id).Succeeded,
-                        _ => false
-                    };
-                    if (!restored)
-                        problems.Add($"the saved credential for {name} could not be put back and may hold the password of this run.");
-                }
-                catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException)
-                {
-                    problems.Add($"the saved credential for {name} could not be put back and may hold the password of this run.");
-                }
+                if (RestoreCredential(index) is { } problem)
+                    problems.Add(problem);
             }
 
             return

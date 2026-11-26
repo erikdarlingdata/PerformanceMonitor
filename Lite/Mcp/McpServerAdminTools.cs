@@ -521,26 +521,37 @@ public sealed class McpServerAdminTools
 
         /* #9640: the live server's fields change in place, so the change and its save run where the windows read and save them. */
         var changedWhileRunning = false;
+        var written = stored;
         McpServerAdminHooks.Save(hooks, () =>
         {
-            /* The connection test above can take a while, and a window Save or a second edit may land meanwhile. Writing the copy made before it
-               would undo that change, so a server that no longer reads as it did is left alone. */
-            var now = Fields(stored);
+            /* The connection test above can take a while, and a window Save, a second edit or an add_servers update may land meanwhile.
+               Writing the copy made before it would undo that change, so a server that no longer reads as it did is left alone. The
+               comparison is against what the list holds now: add_servers swaps a copy into the list, after which the instance read at
+               the start is detached and never sees a later change. A server removed meanwhile is a change too. */
+            var live = serverManager.GetServerById(stored.Id);
+            if (live is null)
+            {
+                changedWhileRunning = true;
+                return;
+            }
+
+            var now = Fields(live);
             if (baseline.Any(kv => !JsonNode.DeepEquals(kv.Value, now[kv.Key])))
             {
                 changedWhileRunning = true;
                 return;
             }
 
-            var snapshot = Copy(stored);
-            CopyOnto(stored, next);
+            written = live;
+            var snapshot = Copy(live);
+            CopyOnto(live, next);
             try
             {
-                ServerEditSave.Persist(serverManager, stored, useProfile, username, password);
+                ServerEditSave.Persist(serverManager, live, useProfile, username, password);
             }
             catch
             {
-                CopyOnto(stored, snapshot);
+                CopyOnto(live, snapshot);
                 throw;
             }
         });
@@ -567,14 +578,14 @@ public sealed class McpServerAdminTools
             current[key] = after[key]?.DeepClone();
         }
 
-        var storage = RemoteCollectorService.GetServerNameForStorage(stored);
+        var storage = RemoteCollectorService.GetServerNameForStorage(written);
         AppLogger.Info("MCP", $"{EditTool} saved server '{storage}': changed {string.Join(", ", passwordChanged ? changed.Append("password") : changed)}");
         return new JsonObject
         {
             ["status"] = "updated",
             ["tool"] = EditTool,
             ["server"] = storage,
-            ["display_name"] = stored.DisplayName,
+            ["display_name"] = written.DisplayName,
             ["changed"] = new JsonArray(changed.Select(k => (JsonNode?)JsonValue.Create(k)).ToArray()),
             ["password_changed"] = passwordChanged,
             ["tested"] = tested,
@@ -622,12 +633,17 @@ public sealed class McpServerAdminTools
 
         var after = server.ExcludedDatabases ?? new List<string>();
         var storage = RemoteCollectorService.GetServerNameForStorage(server);
-        AppLogger.Info("MCP", $"{ExcludedTool} saved server '{storage}': changed excluded_databases");
+        var listChanged = !previous.SequenceEqual(after, StringComparer.Ordinal);
+        if (listChanged)
+        {
+            AppLogger.Info("MCP", $"{ExcludedTool} saved server '{storage}': changed excluded_databases");
+        }
+
         var name = string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName;
         JsonArray Strings(IEnumerable<string> names) => new(names.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray());
         return new JsonObject
         {
-            ["status"] = previous.SequenceEqual(after, StringComparer.Ordinal) ? "unchanged" : "changed",
+            ["status"] = listChanged ? "changed" : "unchanged",
             ["tool"] = ExcludedTool,
             ["server"] = name,
             ["storage_name"] = storage,
