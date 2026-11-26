@@ -40,6 +40,8 @@ The two hex strings must match. If they differ, delete the ZIP and download it a
 
 ### Upgrade Lite
 
+**Running Lite with no window, or from a portable ZIP in a fixed folder?** The steps in this section use the window. Follow [Upgrade a headless Lite](#upgrade-a-headless-lite) instead.
+
 **Upgrading from zip?** Click **Import Settings** then **Import Data** in the sidebar. Settings imports server connections, alert thresholds, SMTP config, and schedules. Data imports historical DuckDB + Parquet archives. **Auto-update users** (installed via Setup.exe) get updates automatically — no manual import needed.
 
 **Import Settings** needs the folder that holds `config\servers.json`. **Import Data** needs the folder that holds `monitor.duckdb`. For a Lite older than 3.4.0, both are the same folder: the one you unzipped, or `%LOCALAPPDATA%\PerformanceMonitorLite`. From 3.4.0 on, `monitor.duckdb` is in `%LOCALAPPDATA%\PerformanceMonitorLite-Data`, so Import Data accepts that folder. The server list is in `%ProgramData%\PerformanceMonitorLite\config`, so Import Settings finds no `servers.json` in that data folder unless an older copy is left there. To move a current install to another PC, copy the folders instead, as in [Back up Lite and move it to another PC](#back-up-lite-and-move-it-to-another-pc).
@@ -57,7 +59,7 @@ If your version is older than 3.4.0, use one of these two ways:
 
 After option 1, the first start of 3.4.0 or later moves the old data to the new folder. Your server list and your saved passwords are not in the install folder, so a `Setup.exe` upgrade does not delete them.
 
-You can also extract the portable ZIP over your existing copy to upgrade in place.
+You can also extract the portable ZIP over your existing copy to upgrade in place. [Upgrade a headless Lite](#upgrade-a-headless-lite) has those steps, with a copy to go back to.
 
 ### Where Lite keeps its files
 
@@ -215,11 +217,42 @@ A hard end does not break the store. DuckDB replays its write-ahead log at the n
 
 #### Upgrade a headless Lite
 
-The **About** button needs a window, so a headless Lite does not update itself. It logs when a new version exists. To upgrade:
+The **About** button needs a window, so a headless Lite does not update itself. It logs when a new version exists. These steps are for a portable ZIP in a fixed folder that a scheduled task starts. Nothing of yours is in that folder. The server list is in `%ProgramData%\PerformanceMonitorLite\config`. The settings, the store, the archive and the logs are in `%LOCALAPPDATA%\PerformanceMonitorLite-Data` of the dedicated user. A new ZIP touches none of them. The `config` folder beside the exe holds the default `collection_schedule.json` and `ignored_wait_types.json`, which Lite copies into the data folder only when the file is missing there. To upgrade:
 
 1. Run the stop task. Wait until it is no longer running, and check that its last result is 0. See [Stop it](#stop-it).
-2. Install the new version as the dedicated user. Run the new `Setup.exe` as that user, or unzip the new portable ZIP over the old folder.
-3. Run the scheduled task that starts Lite with `--headless`.
+2. Copy the program folder to a rollback folder. Delete an older `<folder>.previous` first, or `Copy-Item` puts the new copy inside it:
+
+   ```powershell
+   Copy-Item -Path '<folder>' -Destination '<folder>.previous' -Recurse
+   ```
+
+3. Unzip the new portable ZIP over the folder, as an account that can write to it. Without `-Force`, `Expand-Archive` stops at the first file that already exists:
+
+   ```powershell
+   Expand-Archive -Path '<zip>' -DestinationPath '<folder>' -Force
+   ```
+
+4. Run the scheduled task that starts Lite with `--headless`.
+5. Check which build runs. The start line in the log, `Starting PerformanceMonitorLite v<version>`, holds the whole version of the build. A build from before that change wrote only the numeric version, such as `v3.14.0.0`, so two nightlies of one version read alike. The product version of the exe holds the whole version too:
+
+   ```powershell
+   (Get-Item '<folder>\PerformanceMonitorLite.exe').VersionInfo.ProductVersion
+   ```
+
+   A release reads `3.14.0`. A nightly reads `3.14.0-nightly.<date>.<run number>`. The command reads the file on disk, so it names the running build only after step 4. Lite also writes one row for every start to `build-history.json` in the data folder, newest first. The `Build` field of the first row is the build of the latest start.
+
+To upgrade an install that `Setup.exe` made, run the new `Setup.exe` as the dedicated user in place of steps 2 and 3. The rollback below is for the portable ZIP.
+
+`-Force` replaces the files that the ZIP holds and leaves every other file where it is, so a file that only an older build had stays. Lite's own code loads nothing from a plugins or lib folder. To keep only the new build's files in the folder, run `Remove-Item -Path '<folder>\*' -Recurse -Force` after step 2 and before step 3, and keep the folder itself so that the dedicated user keeps its access to it. The copy from step 2 holds the old files, including a default file that you changed in `config`.
+
+To roll back the program, run the stop task and check its last result, as in step 1. Then put the files from the copy back, and run the scheduled task that starts Lite:
+
+```powershell
+Remove-Item -Path '<folder>\*' -Recurse -Force
+Copy-Item -Path '<folder>.previous\*' -Destination '<folder>' -Recurse
+```
+
+The data folder is not in the program folder, so the rollback leaves it as it is. A new build can raise the schema version of `monitor.duckdb` at its first start. A build that is older than the schema version of the store does not open it. It refuses, and it leaves the file unchanged. A row in `build-history.json` with a `SchemaAfter` above its `SchemaBefore` is a start that raised it. To keep a way back past such a start, stop Lite and copy `%LOCALAPPDATA%\PerformanceMonitorLite-Data` of the dedicated user before the first start of the new build, as in [Back up Lite and move it to another PC](#back-up-lite-and-move-it-to-another-pc). To roll back past it, put that copy back with the old program files. What Lite collected after the copy is not in it.
 
 Suppose you start the new version with `--headless` while the old version still runs in the same session. The new version asks the old one to shut down, and then it takes over. A headless start never shows the "close it and continue?" dialog. If the old version runs as an administrator and the new one does not, the new one cannot close it. It writes the reason to the log and exits. Stop the old one first.
 
@@ -462,6 +495,8 @@ Uninstalling does not delete the data folder or the server list. If you uninstal
 | `ignored_wait_types.json` | `%LOCALAPPDATA%\PerformanceMonitorLite-Data\config\` (per-user) | 126 benign wait types excluded by default |
 
 When a second Windows user on the same machine launches Lite, they see the shared `servers.json` immediately. SQL Auth and Entra MFA passwords are scoped to each user's own Credential Manager, so they'll be prompted once per server; Windows Auth works without any prompt.
+
+Lite refuses to connect to an entry in `servers.json` until the Windows account that runs it has confirmed the host that the entry names, so an entry that you add by hand fails with `You have not connected to this server's host, <host>, from this Windows account yet.` and a `ServerHostNotConfirmedException` in the log. On a machine with no desktop, run `--add-server` as that account with the same host and database as the entry: it confirms the host, stores the password, and updates the listed entry without adding a second one (see [Add servers with `--add-server`](#add-servers-with---add-server)). `--add-server` refuses a listed entry that holds a Query Store replica, a utility database, a certificate that is trusted without a check, Optional encryption or a managed identity client id that the account has not confirmed, and it changes nothing. A run that gives the encryption mode or the certificate setting itself (`--encrypt-mode`, `--trust-server-certificate`) confirms that setting, and the other settings are confirmed in the Add Server window.
 
 **Always On AG?** Enable **ReadOnlyIntent** in the connection settings to route Lite's monitoring queries to a readable secondary, keeping the primary clear. Enable **MultiSubnetFailover** for multi-subnet failover scenarios.
 

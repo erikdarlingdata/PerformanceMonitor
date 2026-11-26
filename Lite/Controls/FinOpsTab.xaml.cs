@@ -1188,7 +1188,9 @@ public partial class FinOpsTab : UserControl
                     var id = RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
                     var collected = await Task.Run(() => _dataService!.GetServerClockAsync(id));
                     return ServerTimeHelper.ClockForServer(collected, openTabClocks.GetValueOrDefault(id));
-                });
+                },
+                /* #9769: a server left out for want of a collected row is logged with the sidebar's connection state for it. */
+                readStatus: server => _serverManager.GetConnectionStatus(server.Id));
             if (_loads.Superseded(nameof(LoadServerInventoryAsync), gen)) return;
             var data = build.Rows;
 

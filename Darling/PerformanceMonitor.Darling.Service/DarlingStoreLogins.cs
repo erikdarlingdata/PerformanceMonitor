@@ -428,6 +428,52 @@ internal static class DarlingStoreLogins
     }
 
     /// <summary>
+    /// <see cref="ResolveConfiguredCustomAlertLogin"/>, then one sign-in with what it resolved (#9760), as the compose
+    /// store's evaluator login is accepted before use: the evaluator opens a connection only when a rule is due, so a
+    /// login the store refuses (<c>tools/provision-roles.sql</c> has not run, or the password is wrong) would otherwise
+    /// show up only as a rule that never fires. A refusal, or any other failure to connect, keeps the evaluator down
+    /// for this start with a warning that names the setting, the login and the store's error text, never the string.
+    /// </summary>
+    internal static async Task<string?> ResolveConfiguredCustomAlertLoginAsync(
+        PostgresConfig postgres, ILogger logger, CancellationToken cancellationToken)
+    {
+        var resolved = ResolveConfiguredCustomAlertLogin(postgres, logger);
+        if (resolved is null)
+        {
+            return null;
+        }
+
+        var (accepted, failure) = await TryOpenLoginAsync(resolved, cancellationToken);
+        if (failure is not null)
+        {
+            logger.LogWarning(
+                "Custom alert evaluator not started: the store did not accept the {Login} login that postgres.webConnectionString names ({Message}). It stays down until the next start. Run tools/provision-roles.sql to create the web login, or fix the login and password in postgres.webConnectionString.",
+                CustomAlertLoginName(resolved), failure.Message);
+        }
+
+        return accepted ? resolved : null;
+    }
+
+    /// <summary>
+    /// The startup line that says the custom-alert evaluator is running and as which login (#9760): the login the
+    /// connection string names, and, when an operator named it, the setting it came from. Never the string.
+    /// </summary>
+    internal static void LogCustomAlertEvaluatorReady(
+        ILogger logger, string loginConnectionString, int sweepSeconds, bool fromWebConnectionString)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+
+        logger.LogInformation(
+            "Custom alert evaluator ready (#3285): evaluating user rules every {Seconds}s as the {Login} login{Source}.",
+            sweepSeconds, CustomAlertLoginName(loginConnectionString),
+            fromWebConnectionString ? " from postgres.webConnectionString" : string.Empty);
+    }
+
+    /// <summary>The user a connection string logs in as, for a log line. The string is already proven parseable.</summary>
+    private static string CustomAlertLoginName(string connectionString) =>
+        new NpgsqlConnectionStringBuilder(connectionString).Username is { Length: > 0 } user ? user : "(no Username given)";
+
+    /// <summary>
     /// The non-managed branch of both hosts' start (#3914): the connection string the host's store pool is
     /// created from, or null when the host must not start this attempt — a configured reference that cannot
     /// resolve, or that resolves to nothing (fail-closed: the operator asked for a login, so the owner is not a
@@ -667,24 +713,40 @@ internal static class DarlingStoreLogins
     private static async Task<bool> AcceptsLoginAsync(
         string connectionString, string notThisAttempt, string staysDown, string role, ILogger logger, CancellationToken cancellationToken)
     {
+        var (accepted, failure) = await TryOpenLoginAsync(connectionString, cancellationToken);
+        if (failure is not null)
+        {
+            logger.LogError(failure,
+                "{What}: the store did not accept the {Role} login an earlier start provisioned ({Message}). {StaysDown} rather than connect as the owner, until a start provisions the roles again.",
+                notThisAttempt, role, failure.Message, staysDown);
+        }
+
+        return accepted;
+    }
+
+    /// <summary>
+    /// Opens one unpooled connection with a login: accepted, refused or failed (the failure is the store's or the
+    /// driver's own exception), or cancelled (neither accepted nor a failure, so the callers stay quiet while the
+    /// service stops).
+    /// </summary>
+    private static async Task<(bool Accepted, Exception? Failure)> TryOpenLoginAsync(
+        string connectionString, CancellationToken cancellationToken)
+    {
         try
         {
             await using var connection = new NpgsqlConnection(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString));
             await connection.OpenAsync(cancellationToken);
-            return true;
+            return (true, null);
         }
         catch (OperationCanceledException)
         {
-            return false;
+            return (false, null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogError(ex, 
-                "{What}: the store did not accept the {Role} login an earlier start provisioned ({Message}). {StaysDown} rather than connect as the owner, until a start provisions the roles again.",
-                notThisAttempt, role, ex.Message, staysDown);
-            return false;
+            return (false, ex);
         }
     }
 

@@ -143,7 +143,7 @@ A superuser login for the service also clears all of this, and [Security](securi
 
 The tarball ships `provision-roles.sql`. It creates the `admin`, `viewer`, `web` and `mcp` logins on a store that you bring. You can skip it while the web dashboard and MCP are both off, which is the default. With either one on and no `postgres.webConnectionString` or `postgres.mcpConnectionString` set, that surface connects as the owner and the service warns about it. When to run the script, its placeholders and what it grants are in [Security](security.md#security--least-privilege-roles).
 
-Custom alerts run on the `web` role, so they need the script and `postgres.webConnectionString`. With the setting unset, the service logs `Custom alert evaluator not started` and names the setting ([#9700](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9700)). The built-in alerts are not affected.
+Custom alerts run on the `web` role, so they need the script and `postgres.webConnectionString`. With the setting unset, the service logs `Custom alert evaluator not started` and names the setting ([#9700](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9700)). With it set, the service signs in with that login once at start. If the store refuses it, the service logs a warning that names the setting, the login and the store's error, and the evaluator stays down until the next start ([#9760](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9760)). The built-in alerts are not affected.
 
 Run the script on the store host as the `postgres` OS user. The `darling` owner from the step above is not a superuser and has no `CREATEROLE`, so the script stops at its guard (`is not a superuser and does not have CREATEROLE`) and changes nothing. Work on a copy, so that the four passwords never sit under `/opt/darling`, where the next [upgrade by hand](#upgrade-by-hand) moves them to `/opt/darling.previous`. The run needs all four placeholders replaced, `web` and `mcp` included, even when only the custom alert evaluator's `web` login is used. Make the copy in a folder that only you can read:
 
@@ -178,7 +178,7 @@ That lets the role read any file in the data directory and in an absolute `log_d
 
 ## Step 4: Download and verify
 
-Each release on the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) has `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. Download both into one folder. The checksum file lists the compose archive too, so tell `sha256sum` to skip the file that you did not download:
+Each release on the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) has `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. Download both into a new, empty folder for this release. Every release names its checksum file `SHA256SUMS-linux.txt`, so a download into the folder of an earlier release replaces that release's file, and its archive can no longer be checked. The checksum file lists the compose archive too, so tell `sha256sum` to skip the file that you did not download:
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS-linux.txt
@@ -412,6 +412,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `--enable-collector`, `--disable-collector`, `--set-collector-run-at`, `--set-collector-frequency`, `--set-collector-retention` | The same verbs after `darling-verb`. See [Collector settings](cli.md#collector-settings) |
 | `.\PerformanceMonitor.Darling.Service.exe --backfill-rollups` | `darling-verb --backfill-rollups`. Add `--dry-run` to see the plan first |
 | `.\PerformanceMonitor.Darling.Service.exe --reset-password-key` | `darling-verb --reset-password-key`, then `sudo systemctl restart darling` |
+| `.\PerformanceMonitor.Darling.Service.exe --set-login-password --username <login>` | `<command that prints the password> \| darling-verb --set-login-password --username <login>`. Add `--dry-run` first. A sudo policy that records input (`log_input`) records the piped password: see [Set-login-password](cli.md#--set-login-password) |
 | `.\PerformanceMonitor.Darling.Service.exe --diagnostics-bundle` | `darling-verb --diagnostics-bundle`. See [Diagnostics Bundle](cli.md#diagnostics-bundle) |
 | `--add-alert-source`, `--rotate-alert-source`, `--remove-alert-source`, `--list-alert-sources` | The same verbs after `darling-verb` |
 | `--encrypt-password` | Windows only. Use a `file:` or `env:` reference in `darling.json` |

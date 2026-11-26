@@ -935,6 +935,7 @@ public sealed partial class DarlingWorker
            postgres.webConnectionString (tools/provision-roles.sql creates config.record_custom_alert_resolution for
            it) and is out when that is unset. */
         string? customAlertViewerConnString = null;
+        var customAlertLoginFromSetting = false;
         if (OperatingSystem.IsWindows() && config.Postgres.Managed)
         {
             /* The evaluator runs on the web login: it writes the resolution row through record_custom_alert_resolution, which the read-only viewer login cannot execute. */
@@ -948,7 +949,11 @@ public sealed partial class DarlingWorker
 
         if (customAlertViewerConnString is null && !config.Postgres.Managed)
         {
-            customAlertViewerConnString = DarlingStoreLogins.ResolveConfiguredCustomAlertLogin(config.Postgres, _logger);
+            /* #9760: signed in once here, so a login the store refuses keeps the evaluator down with a warning now,
+               not as a rule that never fires. */
+            customAlertViewerConnString = await DarlingStoreLogins.ResolveConfiguredCustomAlertLoginAsync(
+                config.Postgres, _logger, stoppingToken);
+            customAlertLoginFromSetting = customAlertViewerConnString is not null;
         }
 
         await using var customAlertViewerSource =
@@ -971,9 +976,8 @@ public sealed partial class DarlingWorker
                 s_customAlertSweepInterval,
                 _loggerFactory.CreateLogger<CustomAlertEvaluator>(),
                 muteRuleService.DigestWindowReason);
-            _logger.LogInformation(
-                "Custom alert evaluator ready (#3285) — evaluating user rules on the viewer-role pool every {Seconds}s.",
-                (int)s_customAlertSweepInterval.TotalSeconds);
+            DarlingStoreLogins.LogCustomAlertEvaluatorReady(
+                _logger, customAlertViewerConnString!, (int)s_customAlertSweepInterval.TotalSeconds, customAlertLoginFromSetting);
         }
         else
         {
