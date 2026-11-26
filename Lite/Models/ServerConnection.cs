@@ -413,6 +413,11 @@ public class ServerConnection : INotifyPropertyChanged
                     username = cred.Value.Username;
                     password = cred.Value.Password;
                 }
+                else if (ServerCredentialIds.IsUsable(Id))
+                {
+                    /* #9730: no saved password under this Windows logon connects with an empty user. Say why, once. */
+                    ServerCredentialIds.WarnPasswordMissing(Id, DisplayName);
+                }
             }
             // ManagedIdentity fetches no credential (no secret).
 
@@ -439,6 +444,11 @@ public class ServerConnection : INotifyPropertyChanged
             {
                 profileUser = cred.Value.Username;
                 profileSecret = cred.Value.Password;
+            }
+            else
+            {
+                /* #9730: the same empty-user connection as a server with no saved password. */
+                ServerCredentialIds.WarnProfileSecretMissing(profile.Id, profile.Name, DisplayName);
             }
         }
         // ManagedIdentity profile carries no secret.
