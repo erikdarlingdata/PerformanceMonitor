@@ -69,6 +69,8 @@ Renaming or copying the install folder does not back up the data. The install fo
 
 ### Move the store to another machine
 
+Pick the target before you start. A dump restores into the same PostgreSQL major version or a newer one. The managed Windows store is PostgreSQL 18 and the compose store is PostgreSQL 17, so a managed Windows store cannot move to the compose stack. To move it to Linux, restore into a PostgreSQL 18 server of your own, set up as in [Install Darling on Linux with systemd](darling/linux.md#step-3-set-up-the-store).
+
 Move the data with `pg_dump` and `pg_restore`. These programs ship in the managed bundle, in `pg-runtime\pgsql\bin` in the install folder. You do not need to stop the service for the dump.
 
 The new store must run the same TimescaleDB version as the old store. Install the same Darling build on the new machine. Then upgrade it after the restore. To read the version, run this in `psql` against each store:
@@ -118,7 +120,7 @@ On the new machine:
    Start-Service 'PerformanceMonitor Darling'
    ```
 
-6. Enter the saved SQL login passwords again. The key that opens them, `password-key.dpapi`, cannot move between machines. The service reports the key as mismatched or missing. Run `PerformanceMonitor.Darling.Service.exe --reset-password-key`, restart the service, and enter each password again in the Viewer.
+6. Enter the saved SQL login passwords again. The key that opens them, `password-key.dpapi`, cannot move between machines. The service reports the key as mismatched or missing. Run `PerformanceMonitor.Darling.Service.exe --reset-password-key`, restart the service, and enter each password again in the Viewer. The Viewer does not run on Linux. When the new machine runs Linux, run the verb in its Linux form (see [Service verbs on Linux](darling/linux.md#service-verbs-on-linux)) and restart with `sudo systemctl restart darling`. Then enter each password on the web dashboard's Admin page, with the MCP `edit_server` tool, or from a Windows Viewer that connects to the new store. Each server is one entry, and there is no bulk path yet ([#9689](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9689)).
 7. Run `PerformanceMonitor.Darling.Service.exe --check-settings`. It prints the store size and the TimescaleDB version.
 
 Restore into the same PostgreSQL major version or a newer one. The managed bundle is PostgreSQL 18. A dump from a compose store (PostgreSQL 17) restores into it. A dump from the managed store does not restore into the compose store.
