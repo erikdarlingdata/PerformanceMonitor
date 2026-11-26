@@ -238,6 +238,57 @@ public sealed partial class ServerEditLiveTests : IDisposable
         }
     }
 
+    /* #9635: the two per-server settings the Viewer's dialog sets, written through the tool as the mcp role and read back from the store. */
+    [Fact]
+    public async Task AsTheMcpRole_CapturePlansAndAlertDelivery_AreSetAndClearedThroughTheTool_AndTheServiceIsToldToReload()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            /* The seeded row holds capture_plans TRUE and the override PerEvent. */
+            await SeedServerAsync(rig.Owner, 5191, "gamma-01", "gamma-01.example.test", "integrated", null, null, ct);
+            var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
+
+            var set = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01", "{\"capture_plans\":false,\"alert_delivery_mode_override\":\"Summary\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", set["status"]!.GetValue<string>());
+            Assert.False(set["tested"]!.GetValue<bool>());
+            Assert.False(set["reconnects"]!.GetValue<bool>());
+            Assert.Equal("False|Summary", await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', capture_plans, alert_delivery_mode_override) FROM config_monitored_servers WHERE server_id = 5191", ct));
+            Assert.True(await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct) > versionBefore);
+
+            /* The answer's token is the row's own modified_at, so the next edit that sends it as expected_modified_at is not a conflict. */
+            var cleared = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01",
+                "{\"capture_plans\":null,\"alert_delivery_mode_override\":null,\"expected_modified_at\":\"" + set["modified_at"]!.GetValue<string>() + "\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", cleared["status"]!.GetValue<string>());
+            Assert.Equal(0L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE server_id = 5191 AND (capture_plans IS NOT NULL OR alert_delivery_mode_override IS NOT NULL)", ct));
+
+            /* An edit of another field leaves both settings as they are. */
+            var again = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01", "{\"capture_plans\":true,\"alert_delivery_mode_override\":\"PerEvent\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", again["status"]!.GetValue<string>());
+            var cost = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01", "{\"monthly_cost_usd\":9}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", cost["status"]!.GetValue<string>());
+            Assert.Equal("True|PerEvent", await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', capture_plans, alert_delivery_mode_override) FROM config_monitored_servers WHERE server_id = 5191", ct));
+
+            /* A stale token is a conflict and the settings are not written. */
+            var stale = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01",
+                "{\"capture_plans\":false,\"expected_modified_at\":\"" + set["modified_at"]!.GetValue<string>() + "\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("conflict", stale["status"]!.GetValue<string>());
+            Assert.Equal("True", await ScalarAsync<string>(rig.Owner, "SELECT capture_plans::text FROM config_monitored_servers WHERE server_id = 5191", ct));
+
+            /* The web route's role cannot write the two columns, so its parse still refuses them. */
+            var web = Parse(await Edit.EditServerByIdAsync(rig.Mcp, 5191, "{\"capture_plans\":false}", null, ct));
+            Assert.Equal("invalid", web["status"]!.GetValue<string>());
+            Assert.Equal("True", await ScalarAsync<string>(rig.Owner, "SELECT capture_plans::text FROM config_monitored_servers WHERE server_id = 5191", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
     [Fact]
     public async Task GetServerSettings_ShowsTheFieldsEditServerChanges_BeforeAndAfterAnEdit_AndNeverASecret()
     {

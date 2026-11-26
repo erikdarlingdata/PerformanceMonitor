@@ -82,6 +82,14 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// running service hot-reloads the monitored set within one sweep. <b>The SQL password transits the MCP endpoint in
 /// the request JSON</b>; on a LAN deployment serve the endpoint over HTTPS with <c>mcp.network.tls</c> (#5288), or
 /// front it with a TLS reverse proxy.</para>
+///
+/// <para><b>Left out of MCP on purpose (#9637).</b> Two admin functions have no tool, and no one should add one by accident.
+/// The store maintenance commands <c>--backfill-rollups</c>, <c>--collapse-legacy-slices</c> and <c>--recompress-plan-dim</c>
+/// need a disk check first and can run for a long time, which does not fit a tool call:
+/// <c>get_store_maintenance_readiness</c> reads their state, and the commands run from the command line. <c>--drop-xe-sessions</c>
+/// on its own has no tool because <c>remove_server</c> already drops a server's sessions before it removes the server.
+/// The credential functions (external alert sources, web access groups, personal MCP tokens, the password key) are not on
+/// this list: they get their own tools (#9641 to #9644), served when <c>mcp.allowWrites</c> and <c>mcp.allowServerAdmin</c> are both on.</para>
 /// </summary>
 [McpServerToolType]
 public sealed partial class DarlingMcpServerAdminTools
