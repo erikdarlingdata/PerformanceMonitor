@@ -404,7 +404,7 @@ public static class OptionalTables
             ResolveServerName = true,
         },
         new("query_snapshots", Collect, CollectionTime, OptionalTableKind.Window, [], Group7b, OptionalTableStatus.Candidate,
-            "Column policy drops query_plan and live_query_plan from the fact row, on purpose: plan XML reaches the lake through plan_shape, plan_features, plan_warnings and plan_missing_indexes, not inline. " +
+            "Column policy drops query_plan and live_query_plan from the fact row, on purpose: plan XML reaches the export through plan_shape, plan_features, plan_warnings and plan_missing_indexes, not inline. " +
             "live_query_plan is never selected. query_plan is read once per row only to build those plan tables. Every other column is exported. " +
             "Index idx_query_snapshots_time (server_id, collection_time) serves the window read."),
 

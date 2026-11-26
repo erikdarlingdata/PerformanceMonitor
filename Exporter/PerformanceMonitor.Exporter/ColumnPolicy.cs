@@ -112,7 +112,7 @@ public static class ColumnPolicies
                 },
                 Version: 1),
 
-            // The plan XML reaches the lake through plan_shape and the plan_* feature tables, which QuerySnapshotsExporter
+            // The plan XML reaches the export through plan_shape and the plan_* feature tables, which QuerySnapshotsExporter
             // builds from query_plan. It is never exported inline, so both plan columns are out of the fact row.
             // QuerySnapshotsExporter reads this list for its fact columns; query_plan is read separately, last, to
             // build those plan tables.
@@ -125,7 +125,7 @@ public static class ColumnPolicies
                 Version: 1),
 
             // text_sample is up to 4,000 characters of query text kept per sighting; the sighting's key, caller fields
-            // and counts are what the lake wants.
+            // and counts are what the export needs.
             "query_tag_sightings" => new TablePolicy(
                 Rules: new[] { new ColumnRule("text_sample", ColumnAction.Drop) },
                 Version: 1),
