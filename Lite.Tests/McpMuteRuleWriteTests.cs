@@ -173,9 +173,7 @@ public sealed class McpMuteRuleWriteTests : IDisposable
         var before = await OnlyStoredRuleAsync();
         File.WriteAllText(
             Path.Combine(Archive, PreservedTableRestore.RestoreMarkerFileName),
-            "pm_preserve_r6
-config_mute_rules
-");
+            "pm_preserve_r6\nconfig_mute_rules\n");
 
         var answers = new[]
         {
