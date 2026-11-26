@@ -83,12 +83,16 @@ internal static class FinOpsServerInventory
     /// <param name="readCollectedMetrics">The fleet-wide collected overlay, keyed by the storage-name hash id.</param>
     /// <param name="readClock">One server's own clock, the one its Last Updated cell reads in Server Time. Null leaves a live row
     /// without one (it reads the active tab's) and a last-known row with the clock its collected row recorded.</param>
+    /// <param name="readStatus">One server's connection status, the one the sidebar shows. A server left out for want of a collected
+    /// row is logged with it (#9769): whether Lite has connected to it, and the last connection error when it has not. Null logs the
+    /// live read's own failure alone.</param>
     public static async Task<InventoryBuild> BuildAsync(
         IEnumerable<ServerConnection> servers,
         Func<ServerConnection, Task<ServerPropertyRow>> readLive,
         Func<ServerConnection, Task<ServerPropertiesRow?>> readCollected,
         Func<Task<IReadOnlyDictionary<int, LocalDataService.ServerMetricsRow>>> readCollectedMetrics,
-        Func<ServerConnection, Task<ServerClock>>? readClock = null)
+        Func<ServerConnection, Task<ServerClock>>? readClock = null,
+        Func<ServerConnection, ServerConnectionStatus?>? readStatus = null)
     {
         var (fleetMetrics, overlayReadFailed) = await TryReadCollectedMetricsAsync(readCollectedMetrics);
 
@@ -102,7 +106,7 @@ internal static class FinOpsServerInventory
             catch (Exception ex)
             {
                 AppLogger.Error("FinOps", $"Failed to query {server.DisplayName}: {ex.Message}", ex);
-                var (lastKnown, readFailed) = await ReadLastKnownAsync(server, readCollected);
+                var (lastKnown, readFailed) = await ReadLastKnownAsync(server, readCollected, ex, readStatus?.Invoke(server));
                 if (lastKnown == null) return (Row: (ServerPropertyRow?)null, ReadFailed: readFailed);
                 item = lastKnown;
             }
@@ -137,18 +141,21 @@ internal static class FinOpsServerInventory
     /// The last-known row for a server whose live read failed: its newest collected properties, or no row when the store
     /// holds none (<c>ReadFailed</c> false) or the read throws (<c>ReadFailed</c> true), which the empty sentence tells
     /// apart. Either way the server is left out and the log says which; the throw never propagates, so it costs the grid
-    /// no other row.
+    /// no other row. The line that says a server is left out for want of a collected row also says why there is none
+    /// (<see cref="NoCollectedPropertiesReason"/>, #9769).
     /// </summary>
     internal static async Task<(ServerPropertyRow? Row, bool ReadFailed)> ReadLastKnownAsync(
         ServerConnection server,
-        Func<ServerConnection, Task<ServerPropertiesRow?>> readCollected)
+        Func<ServerConnection, Task<ServerPropertiesRow?>> readCollected,
+        Exception? liveFailure = null,
+        ServerConnectionStatus? status = null)
     {
         try
         {
             var collected = await readCollected(server);
             if (collected == null)
             {
-                AppLogger.Warn("FinOps", $"{server.DisplayName} has no collected server properties to show in its place, so it is left out of the Server Inventory.");
+                AppLogger.Warn("FinOps", $"{server.DisplayName} has no collected server properties to show in its place, so it is left out of the Server Inventory. {NoCollectedPropertiesReason(liveFailure, status)}".TrimEnd());
                 return (null, false);
             }
             return (FromCollected(collected), false);
@@ -158,6 +165,34 @@ internal static class FinOpsServerInventory
             AppLogger.Error("FinOps", $"Failed to read the collected server properties for {server.DisplayName}, so it is left out of the Server Inventory: {ex.Message}", ex);
             return (null, true);
         }
+    }
+
+    /// <summary>
+    /// The sentence that says why a server whose live read failed has no collected properties either (#9769), in the words the
+    /// connection log and the sidebar already use. A server whose host this user has not confirmed is not connected to at all, and
+    /// the live read's refusal (<see cref="ServerHostNotConfirmedException"/>, from <c>CredentialResolver.RequireConfirmedHost</c>)
+    /// carries the rule. One the connection check found down gives the check's own sentence
+    /// (<see cref="ServerConnectionStatus.UnreachableReason"/>), the last connection error with the time the outage began. One the
+    /// check found online has connected, so the sentence says the collector has stored nothing for it yet, with the live read's failure.
+    /// Anything else gives the live read's failure, the last connection attempt there is. Empty when neither is known.
+    /// </summary>
+    internal static string NoCollectedPropertiesReason(Exception? liveFailure, ServerConnectionStatus? status)
+    {
+        if (status?.IsOnline == true)
+        {
+            return liveFailure == null
+                ? "Lite has connected to it but has not collected its server properties yet."
+                : $"Lite has connected to it but has not collected its server properties yet. Its live read failed: {liveFailure.Message}";
+        }
+
+        var lastError = liveFailure is ServerHostNotConfirmedException
+            ? liveFailure.Message
+            : status?.IsOnline == false
+                ? status.UnreachableReason ?? status.ErrorMessage
+                : null;
+        lastError ??= liveFailure?.Message;
+
+        return string.IsNullOrWhiteSpace(lastError) ? "" : $"Lite is not connected to it: {lastError}";
     }
 
     /// <summary>
