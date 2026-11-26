@@ -57,6 +57,13 @@ public sealed class McpToolGuideTests
         Assert.True(overLong.Count == 0, "served head(s) over the 620 target: " + string.Join(", ", overLong));
     }
 
+    /// <summary>Shared tool names whose served head is true for one SKU only. The marker check still applies to each; only the
+    /// byte-identical head comparison is skipped. The value says why the heads differ.</summary>
+    private static readonly Dictionary<string, string> SkuSpecificHeads = new(StringComparer.Ordinal)
+    {
+        ["update_alert_settings"] = "Darling's head names the service's single settings row, retired poison_wait.threshold_ms and the health_bands and fleet_sweep groups, none of which Lite has; Lite's head says it is a write served by mcp_allow_writes and takes effect in the running app (#9639).",
+    };
+
     /// <summary>
     /// D6, generically: for every MCP tool name registered on BOTH SKUs, if either side's description carries
     /// the marker, both must, and the served heads must be byte-identical. Tool names and marker presence are
@@ -90,6 +97,11 @@ public sealed class McpToolGuideTests
             }
 
             if (!darlingConverted)
+            {
+                continue;
+            }
+
+            if (SkuSpecificHeads.ContainsKey(tool))
             {
                 continue;
             }
