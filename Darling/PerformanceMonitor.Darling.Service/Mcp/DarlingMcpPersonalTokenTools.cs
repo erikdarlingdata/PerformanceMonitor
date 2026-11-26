@@ -48,8 +48,8 @@ public sealed class DarlingPersonalTokenSeat
 
 /// <summary>
 /// The personal MCP token tools (#9643): <c>mint_personal_token</c> makes a token for a named person, <c>revoke_personal_token</c> revokes one and
-/// <c>get_personal_tokens</c> lists them. The two writes are served only under <c>mcp.allowServerAdmin</c> (with <c>mcp.allowWrites</c> and a token),
-/// like <c>add_servers</c>, and sit in <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>. They run the same core as the web page
+/// <c>get_personal_tokens</c> lists them. The two writes and the list are all served only under <c>mcp.allowServerAdmin</c> (with <c>mcp.allowWrites</c>
+/// and a token), like <c>add_servers</c>, and sit in <see cref="DarlingMcpWritePolicy.NeverAgentTools"/>. They run the same core as the web page
 /// (<see cref="DarlingPersonalTokenAdmin"/>) on the store owner's connection. The mint answer is the one place a token value ever appears: it is in
 /// no log line, no journal row and no exception text.
 /// </summary>

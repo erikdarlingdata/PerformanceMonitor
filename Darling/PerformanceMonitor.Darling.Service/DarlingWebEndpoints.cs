@@ -228,6 +228,11 @@ public static partial class DarlingWebEndpoints
         "add_servers",
         "edit_server",
         "remove_server",
+        /* #9641: the alert source tools make, change and drop database logins and read a registry the web has no page for. */
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
+        "list_alert_sources",
         "create_custom_alert_rule",
         "get_custom_alert_rule",
         "list_custom_alert_rules",

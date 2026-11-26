@@ -1462,7 +1462,15 @@ public sealed class DarlingMcpHostService : BackgroundService
            also carries the owner connection string. Nothing serializes this DI registration today,
            but injecting only the two fields GatherAsync reads means a future [McpServerTool] that
            takes a PostgresConfig parameter cannot receive the owner secret through this seat. */
-        services.AddSingleton(new PostgresConfig { Managed = configuredPostgres.Managed, DataDirectory = configuredPostgres.DataDirectory });
+        /* #9641: the alert source tools word the remote connection string and the network note from the store's port and network block (listen address,
+           allowed range, roles: no secret in them), so the copy carries those too. The connection string stays out. */
+        services.AddSingleton(new PostgresConfig
+        {
+            Managed = configuredPostgres.Managed,
+            DataDirectory = configuredPostgres.DataDirectory,
+            Port = configuredPostgres.Port,
+            Network = configuredPostgres.Network,
+        });
         /* #4535: the plan analyzer's per-rule config, read from darling.json's optional "analyzer"
            section. Null (section omitted) is AnalyzerConfig.Default; DarlingMcpPlanTools takes this
            as an [McpServerTool] method parameter the same way it takes NpgsqlDataSource above. */
