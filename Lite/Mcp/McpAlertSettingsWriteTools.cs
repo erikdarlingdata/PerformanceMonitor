@@ -172,14 +172,20 @@ public sealed class McpAlertSettingsWriteTools
     {
         try
         {
-            JsonNode? root;
+            JsonNode? root = null;
+            string? notJson = null;
             try
             {
                 root = JsonNode.Parse(settings_json);
             }
             catch (JsonException ex)
             {
-                return McpHelpers.Refusal("settings_json", $"settings_json is not valid JSON ({ex.Message}).");
+                notJson = ex.Message;
+            }
+
+            if (notJson is not null)
+            {
+                return McpHelpers.Refusal("settings_json", $"settings_json is not valid JSON ({notJson}).");
             }
 
             if (root is not JsonObject body)
