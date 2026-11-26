@@ -2254,6 +2254,10 @@ LIMIT 1";
     /// Consulted by two arms: the 42501 grant-pair sentence (#3239) and the 58P01 missing-file sentence
     /// (#3410), which is why it names the ROUTE rather than either fault.
     /// </summary>
+    /// <summary>The words PostgreSQL's file read refuses a relative path outside the data directory with (genfile.c), for a
+    /// role without pg_read_server_files.</summary>
+    internal const string RelativePathOutsideDataDirectoryRefusal = "path must be in or below the data directory";
+
     private static bool ReadsServerLogWithPgReadFile(string collectorName)
         => collectorName is "pg_deadlocks" or "pg_plan_capture" or "pg_log_events";
 
@@ -2616,16 +2620,28 @@ LIMIT 1";
                says pg_monitor covers every collector and would send an operator in a circle. Reading the
                log with pg_read_file needs an explicit EXECUTE grant, because the function's ACL is
                postgres=X/postgres and pg_monitor does not carry it. That grant alone reads any file under
-               the data directory or log_directory, so the pg_read_server_files role, which widens the
-               login to every file the server's OS user can read, is not asked for (#9723). EXECUTE grants
-               live in each database's own catalog, so they only count in the database this collector
-               connects to. */
+               the data directory or under an absolute log_directory, so the pg_read_server_files role, which
+               widens the login to every file the server's OS user can read, is not asked for (#9723).
+               EXECUTE grants live in each database's own catalog, so they only count in the database this
+               collector connects to. The one refusal no EXECUTE grant answers is a relative log_directory
+               that leads out of the data directory (genfile.c's "path must be in or below the data
+               directory"), and it gets its own arm. */
+            CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName)
+                && ex.MessageText.Contains(RelativePathOutsideDataDirectoryRefusal, StringComparison.Ordinal) => ("PERMISSIONS",
+                $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this collector reads the server log under "
+                + "log_directory, and on this server log_directory is a relative path that leads out of the "
+                + "data directory. PostgreSQL reads a file there only for a role that holds "
+                + "pg_read_server_files, whatever EXECUTE grants the login has. Set log_directory to an "
+                + "absolute path, which the EXECUTE grants on pg_read_file(text, bigint, bigint) and "
+                + "pg_read_binary_file(text, bigint, bigint) read, or grant pg_read_server_files to the "
+                + "monitoring login, knowing that it reads every file the server's OS user can."),
             CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName) => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this collector reads the server log with "
                 + "pg_read_file(), which pg_monitor does NOT cover. The monitoring login needs, on top of "
                 + "pg_monitor, an explicit GRANT EXECUTE ON FUNCTION pg_read_file(text, bigint, bigint), "
-                + "because the function's ACL is postgres=X/postgres. pg_read_server_files is not needed: "
-                + "EXECUTE alone reads any file under the data directory or log_directory. "
+                + "because the function's ACL is postgres=X/postgres. pg_read_server_files is not needed "
+                + "while log_directory is absolute or inside the data directory: EXECUTE alone reads any "
+                + "file there. "
                 + "EXECUTE grants live in each database's own catalog, so issue them "
                 + WhereToGrantIt(connectedDatabase)
                 + " While issuing that grant, also GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, "

@@ -51,7 +51,9 @@ defects survived long enough to be found here.
   twenty-minute one, against a compiler configuration you guessed.
 - **`pg_read_file`'s ACL is `postgres=X/postgres`.** The `pg_read_server_files` role does *not* carry
   EXECUTE; a superuser must grant it explicitly. That grant also exposes `pg_hba.conf`, which is why the
-  plan-capture collector reports its absence as a grant the operator must choose to give.
+  plan-capture collector reports its absence as a grant the operator must choose to give. With it, the role
+  is not needed: EXECUTE reads under the data directory and under an absolute `log_directory`. Only a
+  relative `log_directory` that leads out of the data directory is refused without the role.
 - **`pg_read_binary_file(text, bigint, bigint)` has the same ACL and needs the same explicit grant.** The
   three log readers switch to it on their own once it's granted. It returns `bytea`, so a byte that isn't
   valid UTF-8, which a failed login can plant in the log, no longer fails the whole read the way it does

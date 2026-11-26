@@ -76,7 +76,7 @@ public class PostgresFaultOutcomeTests
     /// #3239 and #9723: the two self-hosted log readers are the exception to the general pg_monitor
     /// sentence. Reading the log with pg_read_file needs an explicit EXECUTE grant, because the function's
     /// ACL is postgres=X/postgres and pg_monitor does not carry it. That grant alone reads any file under
-    /// the data directory or log_directory, so the hint does not ask for the pg_read_server_files role.
+    /// the data directory or an absolute log_directory, so the hint does not ask for the pg_read_server_files role.
     /// The EXECUTE grant is a per-database catalog fact, so the hint names the database the way #2638's
     /// extension sentence does: measured on the 20260910 dogfood soak, the grant issued in the wrong
     /// database leaves a failure identical to no grant at all.
@@ -113,6 +113,26 @@ public class PostgresFaultOutcomeTests
            the same breath, so a fresh setup never has to discover the 22021 byte the hard way. */
         Assert.Contains(
             "GRANT EXECUTE ON FUNCTION pg_read_binary_file(text, bigint, bigint)", explanation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #9723: PostgreSQL refuses a relative path that leads out of the data directory, such as a log_directory of
+    /// '../pglog', to any role without pg_read_server_files, with this 42501. No EXECUTE grant answers it, so the hint
+    /// names the setting and the two fixes instead of sending the operator after grants the login may already hold.
+    /// </summary>
+    [Theory]
+    [InlineData("pg_deadlocks")]
+    [InlineData("pg_plan_capture")]
+    public void ARelativeLogDirectoryOutsideTheDataDirectory_NamesTheSetting_NotTheExecuteGrant(string collectorName)
+    {
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
+            Pg("42501", "path must be in or below the data directory"), collectorName, "appdb");
+
+        Assert.Equal("PERMISSIONS", status);
+        Assert.Contains("log_directory is a relative path that leads out of the data directory", explanation, StringComparison.Ordinal);
+        Assert.Contains("Set log_directory to an absolute path", explanation, StringComparison.Ordinal);
+        Assert.Contains("grant pg_read_server_files", explanation, StringComparison.Ordinal);
+        Assert.DoesNotContain("pg_read_server_files is not needed", explanation, StringComparison.Ordinal);
     }
 
     /// <summary>

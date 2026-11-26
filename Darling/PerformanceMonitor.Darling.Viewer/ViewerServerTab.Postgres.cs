@@ -1033,7 +1033,7 @@ public partial class ViewerServerTab
                 + "usually auto_explain is not loaded, or the monitoring login cannot read the server log. "
                 + "That read needs an explicit GRANT EXECUTE on pg_read_file(text, bigint, bigint) on top of "
                 + "pg_monitor. pg_read_server_files is not needed: EXECUTE reads files under the data "
-                + "directory and log_directory. On Aurora and RDS there is no filesystem to read, so this "
+                + "directory and under an absolute log_directory. On Aurora and RDS there is no filesystem to read, so this "
                 + "panel stays empty by design.")
             : new PanelNoteText($"{CountText.Plural(rows.Count, "plan shape")}, ranked by TOTAL time - a plan that takes 40ms constantly "
               + "costs more than one that took 900ms once. Captures counts how often the collector SAW "

@@ -28,8 +28,9 @@ namespace PerformanceMonitor.Collectors;
 /// <para><b>This is a SELF-HOSTED capability and the collector says so rather than failing vaguely.</b>
 /// Reading the log needs an explicit <c>GRANT EXECUTE ON FUNCTION pg_read_file(text, bigint, bigint)</c> on top
 /// of <c>pg_monitor</c>, because <c>pg_read_file</c>'s ACL is <c>postgres=X/postgres</c> and <c>pg_monitor</c> does not
-/// carry EXECUTE. That grant alone reads any file under the data directory or under <c>log_directory</c>, so
-/// <c>pg_read_server_files</c> is not needed (#9723). On Aurora and RDS there is no filesystem to read; logs
+/// carry EXECUTE. That grant alone reads any file under the data directory or under an absolute <c>log_directory</c>,
+/// so <c>pg_read_server_files</c> is not needed (#9723), except for a relative <c>log_directory</c> that leads out of
+/// the data directory, which PostgreSQL reads only for that role. On Aurora and RDS there is no filesystem to read; logs
 /// come from the RDS API, which is a different integration entirely (#2538). Where the grant is absent this
 /// degrades to a named non-fatal skip, which is the honest outcome — not a hidden failure.</para>
 ///
