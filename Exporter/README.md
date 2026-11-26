@@ -188,6 +188,7 @@ An Azure Blob destination with a connection string in an environment variable:
 ```
 
 The config holds the names of environment variables and never a key. The exporter does not print a key, and `check-config` prints only the names.
+A variable name has only letters, digits and underscores. Anything else is refused, which catches a connection string or a SAS pasted in place of a name.
 A URL in the config must not carry a user name, a password or a query string. A SAS belongs in an environment variable.
 `check-config` and `run` stop with exit code 2 when a variable the destination names is not set. `run --plan-only` does not read the variables.
 

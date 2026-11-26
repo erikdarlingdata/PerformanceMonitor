@@ -133,11 +133,11 @@ public class DestinationFormsTests
         Assert.Equal("s3://example-bucket/landing/hourly", args[Array.IndexOf(args, "--upload") + 1]);
         Assert.Equal("us-east-2", args[Array.IndexOf(args, "--aws-region") + 1]);
 
-        // What `--upload` with `--aws-region` has always built: the bucket, the prefix and the region, and nothing else.
-        var before = UploadSettings.FromUri("s3://example-bucket/landing/hourly", "us-east-2");
+        // The `--upload` value with `--aws-region` builds the bucket, the prefix and the region, and nothing else.
+        var flagForm = UploadSettings.FromUri("s3://example-bucket/landing/hourly", "us-east-2");
         var target = Assert.IsType<UploadSettings.S3>(options.UploadTarget());
         Assert.Null(options.Destination);
-        Assert.Equal(before, target);
+        Assert.Equal(flagForm, target);
         Assert.Equal(new UploadSettings.S3("example-bucket", "landing/hourly", "us-east-2"), target);
         var client = S3Uploader.BuildConfig(target);
         Assert.Equal("us-east-2", client.RegionEndpoint.SystemName);
@@ -145,13 +145,13 @@ public class DestinationFormsTests
         Assert.False(client.ForcePathStyle);
 
         var (manifest, manifestPath) = UploadTestSupport.WriteRun(r.Out, "destforms", "wait_stats", "query_stats");
-        var beforeKeys = new FakeUploader();
-        var afterKeys = new FakeUploader();
-        await RunUpload.UploadRunAsync(beforeKeys, before.Layout, UploadTestSupport.Options(r.Out, "destforms"), manifest, manifestPath, TextWriter.Null, CancellationToken.None);
-        await RunUpload.UploadRunAsync(afterKeys, target.Layout, UploadTestSupport.Options(r.Out, "destforms"), manifest, manifestPath, TextWriter.Null, CancellationToken.None);
-        Assert.Equal(3, afterKeys.Keys.Count);
-        Assert.All(afterKeys.Keys, k => Assert.StartsWith("landing/hourly/destforms/", k));
-        Assert.Equal(beforeKeys.Keys, afterKeys.Keys);
+        var flagKeys = new FakeUploader();
+        var runKeys = new FakeUploader();
+        await RunUpload.UploadRunAsync(flagKeys, flagForm.Layout, UploadTestSupport.Options(r.Out, "destforms"), manifest, manifestPath, TextWriter.Null, CancellationToken.None);
+        await RunUpload.UploadRunAsync(runKeys, target.Layout, UploadTestSupport.Options(r.Out, "destforms"), manifest, manifestPath, TextWriter.Null, CancellationToken.None);
+        Assert.Equal(3, runKeys.Keys.Count);
+        Assert.All(runKeys.Keys, k => Assert.StartsWith("landing/hourly/destforms/", k));
+        Assert.Equal(flagKeys.Keys, runKeys.Keys);
     }
 
     [Theory]
@@ -160,29 +160,29 @@ public class DestinationFormsTests
     public async Task A_local_destination_keeps_the_upload_flag_and_uploads_the_same_keys_and_bytes(string prefix)
     {
         using var r = new RunRoot();
-        var landingBefore = Path.Combine(r.Root, "landing-before");
-        var landingAfter = Path.Combine(r.Root, "landing-after");
-        var rootBefore = prefix.Length == 0 ? landingBefore : Path.Combine(landingBefore, prefix);
-        var rootAfter = prefix.Length == 0 ? landingAfter : Path.Combine(landingAfter, prefix);
-        Directory.CreateDirectory(rootBefore);
-        Directory.CreateDirectory(rootAfter);
-        var destination = $$"""{ "type": "local", "path": {{Json(landingAfter)}}{{(prefix.Length == 0 ? "" : ", \"prefix\": " + Json(prefix))}} }""";
+        var landingFlag = Path.Combine(r.Root, "landing-flag");
+        var landingRun = Path.Combine(r.Root, "landing-run");
+        var rootFlag = prefix.Length == 0 ? landingFlag : Path.Combine(landingFlag, prefix);
+        var rootRun = prefix.Length == 0 ? landingRun : Path.Combine(landingRun, prefix);
+        Directory.CreateDirectory(rootFlag);
+        Directory.CreateDirectory(rootRun);
+        var destination = $$"""{ "type": "local", "path": {{Json(landingRun)}}{{(prefix.Length == 0 ? "" : ", \"prefix\": " + Json(prefix))}} }""";
 
         var (options, args, settings) = Child(Config(r, destination), Path.Combine(r.Root, "c.json"));
         Assert.False(settings.UploadDestination);
         Assert.DoesNotContain("--upload-destination", args);
-        Assert.Equal(rootAfter, args[Array.IndexOf(args, "--upload") + 1]);
+        Assert.Equal(rootRun, args[Array.IndexOf(args, "--upload") + 1]);
         Assert.Null(options.Destination);
         var target = options.UploadTarget()!;
-        Assert.Equal(UploadSettings.FromUri(rootAfter, null), target);
+        Assert.Equal(UploadSettings.FromUri(rootRun, null), target);
 
         var (manifest, manifestPath) = UploadTestSupport.WriteRun(r.Out, "destforms", "wait_stats", "query_stats");
         var exportOptions = UploadTestSupport.Options(r.Out, "destforms");
-        // Before: the folder as the `--upload` value, the only local form there was.
-        var before = UploadSettings.FromUri(rootBefore, null);
-        await using (var uploader = UploaderFactory.Create(before))
+        // One upload with a folder given as the `--upload` value, one with the target the child works out from the config.
+        var flagForm = UploadSettings.FromUri(rootFlag, null);
+        await using (var uploader = UploaderFactory.Create(flagForm))
         {
-            await RunUpload.UploadRunAsync(uploader, before.Layout, exportOptions, manifest, manifestPath, TextWriter.Null, CancellationToken.None);
+            await RunUpload.UploadRunAsync(uploader, flagForm.Layout, exportOptions, manifest, manifestPath, TextWriter.Null, CancellationToken.None);
         }
         await using (var uploader = UploaderFactory.Create(target))
         {
@@ -191,11 +191,11 @@ public class DestinationFormsTests
 
         static Dictionary<string, string> Tree(string root) => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .ToDictionary(f => Path.GetRelativePath(root, f).Replace('\\', '/'), f => Convert.ToHexString(File.ReadAllBytes(f)));
-        var treeBefore = Tree(rootBefore);
-        var treeAfter = Tree(rootAfter);
-        Assert.Equal(3, treeAfter.Count);
-        Assert.All(treeAfter.Keys, k => Assert.StartsWith("destforms/", k));
-        Assert.Equal(treeBefore.OrderBy(kv => kv.Key, StringComparer.Ordinal), treeAfter.OrderBy(kv => kv.Key, StringComparer.Ordinal));
+        var treeFlag = Tree(rootFlag);
+        var treeRun = Tree(rootRun);
+        Assert.Equal(3, treeRun.Count);
+        Assert.All(treeRun.Keys, k => Assert.StartsWith("destforms/", k));
+        Assert.Equal(treeFlag.OrderBy(kv => kv.Key, StringComparer.Ordinal), treeRun.OrderBy(kv => kv.Key, StringComparer.Ordinal));
     }
 
     // ---- export --upload-destination ----
