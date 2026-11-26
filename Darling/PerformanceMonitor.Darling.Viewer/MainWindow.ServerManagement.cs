@@ -1053,7 +1053,7 @@ public partial class MainWindow
             }
             if (refusedHostsInStore > 0)
             {
-                message += $"\n{refusedHostsInStore} not added to the monitored store: the host is a named pipe, admin or path-style one, which is not accepted (see the viewer log).";
+                message += $"\n{refusedHostsInStore} not added to the monitored store: the host is a named pipe, admin or path-style one, or a name, host, database or login holds a control character, which is not accepted (see the viewer log).";
             }
             if (copied > 0)
             {
