@@ -52,6 +52,10 @@ internal static class McpWritePolicy
         "set_notification_route_enabled",
         "delete_notification_route",
 
+        /* #9639: authoring a route, the twins of Darling's create_notification_route and update_notification_route. */
+        "create_notification_route",
+        "update_notification_route",
+
         /* #5991: the query-tag and query-tag-rule writes, Darling's twins. The three reads (list_query_tags,
            list_query_tag_rules, test_query_tag_rule) are ordinary reads. */
         "create_query_tag",

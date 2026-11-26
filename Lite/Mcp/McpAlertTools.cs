@@ -11,7 +11,7 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitorLite.Mcp;
 
 [McpServerToolType]
-public sealed class McpAlertTools
+public sealed partial class McpAlertTools
 {
     /// <summary>SQL-process CPU only. Darling's <c>cpu_mode</c> spelling, which its own
     /// <c>update_alert_settings</c> validates against — see <c>ViewerDataService.CpuModeSql</c>.</summary>
@@ -583,8 +583,8 @@ public sealed class McpAlertTools
         "Destinations (webhook URLs, the PagerDuty routing key) are bearer secrets kept in Windows Credential Manager " +
         "and are NOT reported: configured_channels lists which channels each route sets, by name; smtp_recipients is " +
         "reported because an address list is not a secret. modified_at_utc is null in Lite, which does not stamp a " +
-        "route's last change. Routes are authored in Settings > Manage Notification Routes; here they can be disabled " +
-        "or deleted (set_notification_route_enabled / delete_notification_route, served when mcp_allow_writes is true). " +
+        "route's last change. Routes are authored in Settings > Manage Notification Routes or with create_notification_route and update_notification_route; here they can also be disabled " +
+        "or deleted (set_notification_route_enabled / delete_notification_route). All four are served when mcp_allow_writes is true. " +
         "agent_level says whether a matching alert opens an investigation request for an agent (null inherits from a less " +
         "specific route, 0 is off and stops the lookup, 1 investigates, within agent_max_per_hour and agent_max_per_day); it " +
         "never changes a destination. agent_requests_last_hour and agent_requests_last_day count the requests the route " +
@@ -728,15 +728,15 @@ public sealed class McpAlertTools
                 "Change it in Settings > Manage Notification Routes.");
 
     [McpServerTool(Name = "set_notification_route_enabled"), Description(
-        "Enables or disables a notification route by route_id, WITHOUT deleting it. Changes shared alert configuration the service delivers on: a disabled route is skipped at resolution as if it did not exist, so its alerts fall to the next level (family route, then parent channels). Reversible: re-enabling restores it exactly. Returns updated (route as stored), unchanged (already that value, safe to retry), or not_found. Cannot author or re-point a route; that is Settings-window only.<<GUIDE>>" +
+        "Enables or disables a notification route by route_id, WITHOUT deleting it. Changes shared alert configuration the service delivers on: a disabled route is skipped at resolution as if it did not exist, so its alerts fall to the next level (family route, then parent channels). Reversible: re-enabling restores it exactly. Returns updated (route as stored), unchanged (already that value, safe to retry), or not_found. Creating a route or changing where it sends is create_notification_route and update_notification_route.<<GUIDE>>" +
         "Enables or disables a notification route by its route_id (from get_notification_routes) WITHOUT deleting it. " +
         "A disabled route is skipped at resolution exactly as if it did not exist, so the alerts it matched fall to " +
         "the next level (a family route, then the parent channels) on the next firing. Returns {status:\"updated\", " +
         "route:{...}} with the route AS STORED, {status:\"unchanged\", route:{...}} when it already holds that value " +
         "(a retry is safe; both carry previous {enabled} and undo, the call that sets the previous value back), or {status:\"not_found\"}. Lite only: {status:\"unavailable\"} while an earlier database " +
         "reset's saved-settings restore is pending (it finishes at the next Lite start). Served only when " +
-        "mcp_allow_writes is true. This tool cannot author or re-point a route: destinations are bearer secrets and " +
-        "are set only in Settings > Manage Notification Routes.")]
+        "mcp_allow_writes is true. This tool changes only the enabled flag: create_notification_route authors a route and " +
+        "update_notification_route changes its match, scope or destinations.")]
     public static async Task<string> SetNotificationRouteEnabled(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -812,8 +812,8 @@ public sealed class McpAlertTools
 
     [McpServerTool(Name = "delete_notification_route"), Description(
         "Deletes a notification route by its route_id (from get_notification_routes), and its saved URLs and key from Windows Credential Manager. Permanent: the alerts it matched fall to the next level (a family route, then the parent channels) on the next firing. " +
-        "Returns {status:\"deleted\", route_id, previous (the route as it was), undo: null, undo_note} (Lite has no tool that creates a route, so no call restores it), {status:\"not_found\"}, or {status:\"unavailable\"} while an earlier database reset's saved-settings restore is pending (it finishes at the next Lite start). " +
-        "Prefer set_notification_route_enabled for a temporary change - a deleted route's destinations are gone and only Settings > Manage Notification Routes can author them again. Served only when mcp_allow_writes is true.")]
+        "Returns {status:\"deleted\", route_id, previous (the route as it was), undo: null, undo_note} (no single call restores it: its destinations were secrets, so create_notification_route with them again makes a new route), {status:\"not_found\"}, or {status:\"unavailable\"} while an earlier database reset's saved-settings restore is pending (it finishes at the next Lite start). " +
+        "Prefer set_notification_route_enabled for a temporary change - a deleted route's destinations are gone and cannot be read back, so a new route needs them passed again. Served only when mcp_allow_writes is true.")]
     public static async Task<string> DeleteNotificationRoute(
         LocalDataService dataService,
         ServerManager serverManager,
@@ -849,8 +849,8 @@ public sealed class McpAlertTools
                 return McpHelpers.Status("not_found", $"No notification route with route_id {route_id}.");
             }
 
-            /* #6403: the row as it was (no destination is in it; they are secrets). Lite has no tool that creates a route, so no
-               single call restores it: undo is null and the note says where the route is authored again. */
+            /* #6403: the row as it was (no destination is in it; they are secrets): its destinations cannot be read back, so no
+               single call restores it: undo is null and the note says how to make it again. */
             return JsonSerializer.Serialize(new
             {
                 status = "deleted",
@@ -862,7 +862,7 @@ public sealed class McpAlertTools
                         servers is null ? new Dictionary<int, string>() : ServerNames(servers),
                         tags is null ? new Dictionary<int, string>() : tags.ToDictionary(t => t.Id, t => t.Name)),
                 undo = (object?)null,
-                undo_note = "No tool call restores a deleted route: Lite cannot author a route over MCP because its destinations are secrets that cannot be read back. Author it again in Settings > Manage Notification Routes.",
+                undo_note = "No tool call restores a deleted route: its destinations are secrets that cannot be read back. Make it again with create_notification_route and pass the destinations again, or in Settings > Manage Notification Routes.",
             }, McpHelpers.JsonOptions);
         }
         catch (PendingRestoreException ex)
