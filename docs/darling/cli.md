@@ -50,6 +50,7 @@ The examples on this page use the Windows form, `.\PerformanceMonitor.Darling.Se
 | `--set-collector-frequency` | Sets how often a collector runs, in minutes. | no | either (1) | `0`, `1`, `2` | [Collector settings](#collector-settings) |
 | `--set-collector-retention` | Sets how many days a collector keeps its data. | no | either (1) | `0`, `1`, `2` | [Collector settings](#collector-settings) |
 | `--reset-password-key` | Marks the current password key as replaced, so the next start makes a new one. With `passwordKey` set, the service makes no key: the verb says to put a new key in the `passwordKey` source, then restart the service. | no | either (1) | `0`, `1`, `2` | [Make a new password key](collector-settings.md#make-a-new-password-key---reset-password-key) |
+| `--set-login-password` | Saves one password, read from stdin, for every enabled server that uses a login. Use it after a store move or a password key reset. `--dry-run` lists what it would do. | no | either (1) | `0`, `1`, `2` | [Set-login-password](#--set-login-password) |
 | `--new-password-key` | Writes a new password key to a path where nothing exists, for a `passwordKey` secret. Prints the path and the key's fingerprint, never the key. The file is readable only by the account that runs it (on Windows also SYSTEM and Administrators), so run it as the service's account. On Windows, where nobody can run a command as the default service account, move the key into your secret store and delete the file, or keep it in a folder locked down as the security page shows and run `icacls <file> /reset`, so that it takes the folder's permissions. | no | no | `0`, `1` | [Keeping the key outside the service](security.md#security--least-privilege-roles) |
 | `--drop-xe-sessions` | Drops the Extended Events sessions that Darling created on a server. | no | either (1) | `0`, `1`, `2` | [Drop the sessions](collector-settings.md#drop-the-extended-events-sessions-a-removed-server-left-behind---drop-xe-sessions) |
 | `--add-alert-source` | Creates a login for a system that sends alerts, and prints its connection string once. | no | either (1) | `0`, `1`, `2` | [Alert sources](agents-and-alert-sources.md#make-a-login-for-a-system-that-sends-alerts---add-alert-source-and-friends) |
@@ -81,7 +82,7 @@ These verbs use only `0` and `1`:
 
 `--help` and `--version` always exit `0`.
 
-The collector verbs, `--reset-password-key`, the alert source verbs, `--export-investigations` and `--drop-xe-sessions` add a third number:
+The collector verbs, `--reset-password-key`, `--set-login-password`, the alert source verbs, `--export-investigations` and `--drop-xe-sessions` add a third number:
 
 | Number | Meaning |
 | --- | --- |
@@ -140,6 +141,31 @@ Re-running the same file is safe. Servers that are already registered do not cou
 ```
 PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --name sql01 --auth integrated
 ```
+
+### `--set-login-password`
+
+After a store moves to another machine, or after `--reset-password-key`, no saved SQL login password opens. This verb saves one password for every enabled server that uses one login, so a fleet that shares a login needs one entry.
+
+```
+PerformanceMonitor.Darling.Service.exe --set-login-password --username monitor --dry-run
+PerformanceMonitor.Darling.Service.exe --set-login-password --username monitor
+```
+
+The password is read from stdin, as one line. Pipe it in from a password manager, or type it at the prompt, where it is not shown. It is never an argument or an environment variable, and it is never printed or logged. An argument that is not one of the flags is refused and is not repeated in the message. `--username` is compared exactly, capitals included.
+
+The verb prints one line for each server that uses the login: the server, the login, and what it does.
+
+| Line | Meaning |
+| --- | --- |
+| `set` (`would set` in a dry run) | The password is saved for this server. This covers a server with no saved password, a saved password sealed with another password key, one in the old Windows format, and one that is a different password. |
+| `unchanged` | The saved password already opens and is the one you gave. |
+| `skip` | The server's password does not come from a saved value: it is an `env:` or `file:` reference, darling.json supplies it, or the server's authentication uses none. The verb never writes a saved value over one of these. |
+
+`--dry-run` reads the password the same way, prints the same list, and changes nothing. It also works before the password key is ready, and then says that a run would stop. A run saves every `set` server in one transaction, so it saves all of them or none, and it ends with the number of servers it changed. The service uses the new passwords at its next configuration reload, with no restart.
+
+A disabled server is not looked at. A server's remediation login is not changed. When the account that runs the verb cannot read the key file, the verb seals to the key the store publishes and prints its fingerprint, as `--add-server` does.
+
+Exit code `1` also means no password on stdin, no enabled server with the login, or a password key that is not ready (the message says why). On Linux, run it as the service's user: see [Service verbs on Linux](linux.md#service-verbs-on-linux).
 
 ### `--harden-files`
 
