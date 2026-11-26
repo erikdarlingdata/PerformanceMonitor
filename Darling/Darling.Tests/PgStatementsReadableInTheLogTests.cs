@@ -30,8 +30,6 @@ public sealed class PgStatementsReadableInTheLogTests
         yield return ["find_queries_by_text all servers", DarlingMcpFindQueriesByTextTools.PlanCacheAllServersSql];
         yield return ["find_queries_by_text all servers span", DarlingMcpFindQueriesByTextTools.PlanCacheAllServersSpanSql];
         yield return ["find_queries_by_text all servers lookup span", DarlingMcpFindQueriesByTextTools.PlanCacheAllServersLookupSpanSql];
-        yield return ["find_queries_by_text join, newest span", DarlingMcpFindQueriesByTextTools.AllServersJoinSql(0)];
-        yield return ["find_queries_by_text join, oldest span", DarlingMcpFindQueriesByTextTools.AllServersJoinSql(int.MaxValue)];
         yield return ["find_queries_by_text matched digests", DarlingMcpFindQueriesByTextTools.MatchedDigestsSql];
         yield return ["find_queries_by_text sample probe", DarlingMcpFindQueriesByTextTools.PlanCacheAllServersProbeSql];
         yield return ["find_queries_by_text plan cache probe", DarlingMcpFindQueriesByTextTools.PlanCacheProbeSql];

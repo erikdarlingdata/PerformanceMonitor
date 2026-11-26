@@ -375,7 +375,7 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
 
         Assert.Null(await SampleIndexValidAsync(data, ct));
     }
-    /// <summary>One budget covers the source: the sample statement runs under what the matched-digest read left of the 4 s, not the 4 s again. The
+    /// <summary>One budget covers the source: a sample statement runs under what the reads before it left of the 4 s, not the 4 s again. The
     /// clock is injected (1.5 s spent), so the remainder is a fixed 2.5 s, and the hook reads it back from the sample statement's connection.</summary>
     [Fact]
     public async Task TheSampleStatement_RunsUnderWhatIsLeftOfTheBudget()
@@ -405,7 +405,7 @@ public sealed class FindQueriesByTextSampleIndexLiveTests
         Assert.Equal(2500, TimeoutMilliseconds(timeout));
     }
 
-    /// <summary>A budget the matched-digest read spent leaves nothing for the sample statement: the source is stopped and the sample statement never runs.</summary>
+    /// <summary>A budget already spent leaves nothing for the sample statement: the source is stopped and the sample statement never runs.</summary>
     [Fact]
     public async Task ABudgetTheDigestReadSpent_StopsTheSource_BeforeTheSampleStatement()
     {

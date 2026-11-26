@@ -146,7 +146,7 @@ public sealed class FindQueriesByTextLookupSpanLiveTests
 
         await using var data = NpgsqlDataSource.Create(scratch.ConnectionString);
         await using var c = await data.OpenConnectionAsync(ct);
-        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingMcpFindQueriesByTextTools.AllServersJoinSql(0), c);
+        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingMcpFindQueriesByTextTools.PlanCacheAllServersLookupSpanSql, c);
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DarlingMcpFindQueriesByTextTools.EscapeLike("dbo.Common") });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 21 });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = span.Floor });
