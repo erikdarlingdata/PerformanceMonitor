@@ -7469,6 +7469,13 @@ public static partial class DarlingCliCommands
                 return (null, "No password was entered, so no server was added.");
             }
 
+            /* #9753: a password typed or piped into the flag form is a password, as it is for --set-login-password, so an env: or file:
+               reference is refused with that verb's sentence. The JSON form takes a reference as a documented feature. */
+            if (DarlingSecretSource.IsReference(password))
+            {
+                return (null, LoginPasswordIsReferenceText);
+            }
+
             entry["password"] = password;
         }
 

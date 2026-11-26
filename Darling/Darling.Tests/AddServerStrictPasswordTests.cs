@@ -177,6 +177,60 @@ public sealed class AddServerStrictPasswordTests
         Assert.Equal("from-the-seam", SavedPassword(json));
     }
 
+    [Theory]
+    [InlineData("env:SQL_MONITOR_PASSWORD\n")]
+    [InlineData("file:/run/secrets/monitor\r\n")]
+    [InlineData("env:SQL_MONITOR_PASSWORD")]
+    public void AnEnvOrFileReference_PipedIn_IsRefused_AsItIsForSetLoginPassword_AndNoServerIsAdded(string stdin)
+    {
+        var (json, problem) = Build(stdin);
+
+        Assert.Null(json);
+        Assert.Equal(DarlingCliCommands.LoginPasswordIsReferenceText, problem);
+        Assert.DoesNotContain("SQL_MONITOR_PASSWORD", problem, StringComparison.Ordinal);
+        Assert.DoesNotContain("/run/secrets", problem, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("env:SQL_MONITOR_PASSWORD")]
+    [InlineData("file:/run/secrets/monitor")]
+    public void AnEnvOrFileReference_FromTheReadPasswordSeam_IsRefusedTheSameWay(string typed)
+    {
+        var (json, problem) = DarlingCliCommands.BuildAddServerJsonFromStdin(
+            SqlLogin, new ThrowingStream(), TextWriter.Null, inputRedirected: true, readPassword: _ => typed);
+
+        Assert.Null(json);
+        Assert.Equal(DarlingCliCommands.LoginPasswordIsReferenceText, problem);
+    }
+
+    [Fact]
+    public void APasswordThatOnlyContainsAReferencePrefix_IsAPassword()
+    {
+        var (json, problem) = Build("my-env:x\n");
+
+        Assert.Null(problem);
+        Assert.Equal("my-env:x", SavedPassword(json));
+    }
+
+    [Theory]
+    [InlineData("env:LAB_SQL_PASSWORD")]
+    [InlineData("file:/run/secrets/lab-sql-password")]
+    public void TheJsonForm_StillAcceptsAReference_BecauseTheHostCommandLineTakesOne(string reference)
+    {
+        var json = "[{\"host\":\"sql01\",\"auth\":\"SQL\",\"username\":\"darling_monitor\",\"password\":\"" + reference + "\"}]";
+        var key = TestKeyRings.Healthy.Status;
+
+        var (entries, invalid, wholeError) = DarlingMcpServerAdminTools.ParseRequest(json, key, allowSecretReferences: true);
+
+        Assert.Null(wholeError);
+        Assert.Empty(invalid);
+        Assert.Single(entries);
+
+        /* The same entry from a request (MCP, web) is still refused: only the host command line takes a reference. */
+        var (_, requestInvalid, _) = DarlingMcpServerAdminTools.ParseRequest(json, key, allowSecretReferences: false);
+        Assert.Single(requestInvalid);
+    }
+
     /// <summary>A stream that never ends and counts what was read from it.</summary>
     private sealed class EndlessStream : Stream
     {
