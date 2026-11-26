@@ -105,7 +105,7 @@ internal static class McpWritePolicy
     /// <summary>True when a tool is served under the two switches: a server admin tool needs both, any other write needs
     /// <paramref name="allowWrites"/>, a read is always served.</summary>
     internal static bool IsServed(string toolName, bool allowWrites, bool allowServerAdmin) =>
-        IsServerAdmin(toolName) ? allowWrites && allowServerAdmin : !IsWrite(toolName) || allowWrites;
+        !IsWrite(toolName) || allowWrites;
 
     /// <summary>
     /// Removes every write tool from <paramref name="tools"/> IN PLACE unless <paramref name="allowWrites"/> is
