@@ -263,6 +263,39 @@ public class ConfigErrorsEarlyTests
         Assert.Contains("cfgearly", stdout);
     }
 
+    // ---- check-config, run and run --plan-only refuse the same destinations with the same line ----
+
+    public static TheoryData<string, string> RefusedDestinations => new()
+    {
+        { """{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "c", "auth": { "method": "default_credential" } }""", "destination.type: run supports s3 and local for now, got 'azure_blob'" },
+        { """{ "type": "s3", "bucket": "b", "endpoint_url": "http://127.0.0.1:9000", "force_path_style": true }""", "destination: run supports only bucket, prefix and region for s3 for now" },
+        { """{ "type": "s3", "bucket": "b", "credentials": { "access_key_id_env": "LAB_AK", "secret_access_key_env": "LAB_SK" } }""", "destination: run supports only bucket, prefix and region for s3 for now" },
+        { """{ "type": "s3", "bucket": "b", "checksum": "none" }""", "destination: run supports only bucket, prefix and region for s3 for now" },
+        { """{ "type": "s3", "bucket": "b", "regoin": "us-east-1" }""", "destination has an unknown field 'regoin'" },
+        { """{ "type": "local", "path": "/srv/landing", "prefx": "hourly" }""", "destination has an unknown field 'prefx'" },
+        { """{ "type": "ftp", "host": "h" }""", "destination.type must be 'local', 's3' or 'azure_blob', got 'ftp'" },
+    };
+
+    [Theory]
+    [MemberData(nameof(RefusedDestinations))]
+    public async Task A_destination_run_refuses_is_refused_by_check_config_and_plan_only_with_the_same_line(string destination, string message)
+    {
+        using var r = new RunRoot(); r.SeedState("cfgearly");
+        var cfg = WriteFile(r, "c.json", Config(r, Credential(r), destination));
+        var expected = $"Config error: {message}";
+
+        var run = await RunConfig(cfg);
+        var plan = await RunConfig(cfg, planOnly: true);
+        var o = new StringWriter { NewLine = "\n" }; var e = new StringWriter { NewLine = "\n" };
+        var check = await CliVerbs.CheckConfigAsync(["check-config", "--config", cfg], o, e, CancellationToken.None);
+
+        Assert.Equal((2, expected), (run.Exit, run.Error.Trim()));
+        Assert.Empty(run.Child.Calls);
+        Assert.Equal((2, expected), (plan.Exit, plan.Error.Trim()));
+        Assert.Equal((2, expected), (check, e.ToString().Trim()));
+        Assert.Empty(o.ToString());
+    }
+
     private static async Task<(int Exit, string Stdout, string Stderr)> Exe(params string[] args)
     {
         var exe = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "darling-export.exe" : "darling-export");
