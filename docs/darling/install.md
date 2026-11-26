@@ -225,7 +225,7 @@ Least-privilege roles ready (admin: ...; viewer: ...; web: ...; mcp: ...)
 TimescaleDB detected — hypertables, chunk-based retention, and compression enabled
 TimescaleDB: <n>/<n> collector table(s) are hypertables
 PerformanceMonitor Darling collection loop started
-[SQL2022] Connected (major <major>, edition <edition>, server_id <id>)
+[SQL2022] Connected (major <major>, engine <engine type>, edition <edition>, server_id <id>)
 ```
 
 `PerformanceMonitor Darling collection loop started` means ready. One `Connected` line for each server means that the service reached it. The per-collector `=> N rows (sql:Nms, pg:Nms)` lines are written at `Debug`, which the default log level does not write (see [Logs](operations.md#logs)). To see that the collectors run, open the Viewer's Collection Health tab, or read `collect.collection_log` with the check in [Watching the service from outside](operations.md#watching-the-service-from-outside). On the hypertable line, both numbers must be equal. A converted count below the total means that a table stayed plain, and the line above it names which table.

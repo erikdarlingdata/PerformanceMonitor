@@ -437,10 +437,9 @@ public sealed partial class DarlingWorker
                 return;
             }
 
-            _logger.LogInformation("[{Server}] Connected (major {Major}, edition {Edition}, server_id {ServerId}){Recovery}",
+            _logger.LogInformation("[{Server}] Connected ({Facts}, server_id {ServerId}){Recovery}",
                 server.Config.DisplayName,
-                runtime.Target.SqlMajorVersion,
-                runtime.Target.IsAzureSqlDb ? "AzureSqlDb" : runtime.Target.IsAzureManagedInstance ? "ManagedInstance" : "Box",
+                DarlingServerConnector.DescribeConnectedFacts(runtime.Target, runtime.EngineEdition, runtime.EditionName),
                 serverId,
                 recoveryNote);
 

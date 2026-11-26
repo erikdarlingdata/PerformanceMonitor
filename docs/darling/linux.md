@@ -325,14 +325,14 @@ TimescaleDB detected ...
 TimescaleDB: <n>/<n> collector table(s) are hypertables
 TimescaleDB: <n>/<n> continuous aggregate(s) ready (...)
 PerformanceMonitor Darling collection loop started
-[<display-name>] Connected (major <major>, edition <edition>, server_id <id>)
+[<display-name>] Connected (major <major>, engine <engine type>, edition <edition>, server_id <id>)
 ```
 
 `Postgres store ready` means the store is migrated. `PerformanceMonitor Darling collection loop started` means ready. One `Connected` line for each server means the service reached it. On the hypertable line and on the continuous aggregate line, both numbers must be equal.
 
 The lines that the Windows install page lists for the managed store (`Extracting the bundled Postgres runtime`, `Managed Postgres started`, `Creating the 'darling' database`, `Least-privilege roles ready`) never appear on a store that you bring. The per-collector `=> <count> rows (sql:<ms>ms, pg:<ms>ms)` lines are written at `Debug`, which the default level does not write. See [Logs](operations.md#logs) to turn them on.
 
-The first server connects about 30 seconds after the loop starts. On a 2-server install the second connected about 2 minutes after it, with no line in between that says it is waiting ([#9696](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9696)). The `Connected` line names the engine type as `edition`, so it can read `edition Box` where the pre-flight said `Enterprise` ([#9697](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9697)).
+With no more servers than `max_concurrent_sweeps` (4 by default), and no more than 8, the most connects that run at once, every server starts its first connect when the loop starts. A larger fleet spreads its first connects over 150 seconds, so that a restart does not start them all at once, and each server that waits says so once with `[<display-name>] first connect in about <n>s`. For a SQL Server target the `Connected` line names the engine type (`Box`, `AzureSqlDb` or `ManagedInstance`) and the edition in the words the pre-flight prints, such as `engine Box, edition Enterprise`. For a PostgreSQL target it names the major version and the engine, and no edition.
 
 With the web dashboard and MCP off, the service opens no listening socket, so there is no port to probe. The proof that collection works is in the store. This counts the collector runs of the last 15 minutes for each server:
 

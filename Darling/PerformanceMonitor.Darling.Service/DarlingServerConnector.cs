@@ -1214,6 +1214,26 @@ FROM pg_catalog.pg_control_system() AS s";
 
         return DescribeEngineEdition(engineEdition);
     }
+
+    /// <summary>
+    /// #9697: the facts the service's "Connected" line names. A SQL Server target gives its major version, its engine type
+    /// (<c>Box</c>, <c>AzureSqlDb</c> or <c>ManagedInstance</c>: where the engine runs) and its edition, in the words
+    /// <c>--test-connection</c> prints for it (<see cref="DescribeEditionForProbe"/>), so the two lines never name one server's
+    /// edition two ways. A PostgreSQL target has no SQL Server engine type and no edition, so it gives its own major version and
+    /// <see cref="MonitoredEngineKind.DescribeEngineKind"/>'s words.
+    /// </summary>
+    public static string DescribeConnectedFacts(CollectorTargetInfo target, int engineEdition, string? editionName)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+
+        if (target.Engine == CollectorTargetEngine.PostgreSql)
+        {
+            return $"major {target.PostgresMajorVersion}, engine {MonitoredEngineKind.DescribeEngineKind(MonitoredEngineKind.For(target))}";
+        }
+
+        var engineType = target.IsAzureSqlDb ? "AzureSqlDb" : target.IsAzureManagedInstance ? "ManagedInstance" : "Box";
+        return $"major {target.SqlMajorVersion}, engine {engineType}, edition {DescribeEditionForProbe(engineEdition, editionName)}";
+    }
 }
 
 /// <summary>
