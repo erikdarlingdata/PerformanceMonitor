@@ -43,7 +43,7 @@ public sealed class DarlingMcpPasswordKeyTools
     internal const string StoreNotReadyText = "The service has not opened its store connection yet. Try again in a moment.";
 
     [DarlingToolAccess(ToolAccess.Write)]
-    [McpServerTool(Name = NewKeyToolName), Description(
+    [McpServerTool(Name = "new_password_key"), Description(
         "Writes a new password key to the service's own pending-password-keys folder on its machine, for a passwordKey secret (the same as the --new-password-key verb), and returns the file's path and the key's fingerprint, never the key. " +
         "Takes no path: the folder is next to the folder that holds the service's active password key file, and the file is named new-password-key-<fingerprint>.key. " +
         "Needs mcp.allowWrites and mcp.allowServerAdmin. " +
@@ -85,7 +85,7 @@ public sealed class DarlingMcpPasswordKeyTools
     }
 
     [DarlingToolAccess(ToolAccess.Write)]
-    [McpServerTool(Name = ResetKeyToolName), Description(
+    [McpServerTool(Name = "reset_password_key"), Description(
         "Marks the service's current password key as replaced (the same as the --reset-password-key verb). Needs mcp.allowWrites and mcp.allowServerAdmin. " +
         "A reset has no undo: the secrets sealed with the old key can no longer be opened, so every saved password sealed to it (the SQL logins of the registered servers, the remediation logins and the mail server password) must be entered again. " +
         "Call it first without confirm: nothing is changed, and the answer gives how many saved passwords are sealed and the current key's fingerprint. " +
