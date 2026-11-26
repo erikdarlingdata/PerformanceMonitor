@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
