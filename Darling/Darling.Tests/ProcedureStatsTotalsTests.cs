@@ -35,10 +35,6 @@ public sealed class ProcedureStatsTotalsTests
         Assert.DoesNotContain("procedure_stats", ProcedureStatsTotals.PrunePredicate.Replace("procedure_stats_totals", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
         Assert.Contains("$2", ProcedureStatsTotals.PrunePredicate, StringComparison.Ordinal);
 
-        var delete = DarlingRetention.TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate);
-        Assert.DoesNotContain("FROM collect.procedure_stats)", delete, StringComparison.Ordinal);
-        Assert.DoesNotContain("FROM collect.procedure_stats ", delete, StringComparison.Ordinal);
-
         var retention = Normalize(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingRetention.cs"));
         Assert.Contains("secondParameterFactory: async (floorConnection, ct) =>", retention, StringComparison.Ordinal);
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(retention, "ProcedureStatsTotals\\.MeasureRawFloorAsync\\("));

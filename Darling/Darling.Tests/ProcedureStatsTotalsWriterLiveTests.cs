@@ -161,21 +161,12 @@ public sealed class ProcedureStatsTotalsWriterLiveTests
     {
         var floor = await ProcedureStatsTotals.MeasureRawFloorAsync(connection, timescaleAvailable, 60, ct);
         var sliced = DarlingRetention.TimeSlicedDeleteSql(ProcedureStatsTotals.Table, "collection_time", ProcedureStatsTotals.PrunePredicate);
-        await using var command = new NpgsqlCommand(sliced, connection);
-        command.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Timestamp, cutoff);
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = floor is { } value ? value : DBNull.Value });
+        var floorParameter = new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = floor is { } value ? value : DBNull.Value };
 
-        /* Drained like the sweep's loop (a one-day slice per statement, repeated until a statement deletes nothing). */
-        var total = 0;
-        int deleted;
-        do
-        {
-            deleted = await command.ExecuteNonQueryAsync(ct);
-            total += deleted;
-        }
-        while (deleted > 0);
-
-        return total;
+        /* Drained like the sweep's loop (a one-day slice per execution, each slice's end handed to the next, repeated until a slice
+           deletes nothing). The cutoff is naive UTC, as the sweep's is. */
+        return await TimeSlicedPurgeDrain.DrainAsync(
+            connection, sliced, DateTime.SpecifyKind(cutoff, DateTimeKind.Unspecified), ct, floorParameter);
     }
 
     private static string Stamp(DateTime value) => "'" + value.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "'::timestamp";

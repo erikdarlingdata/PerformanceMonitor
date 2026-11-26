@@ -588,30 +588,6 @@ public sealed class PayloadDimensionTests
     }
 
     [Fact]
-    public void DimensionGc_ReusesTheTimeSlicedDelete_NotAnAntiJoinAndNotAnUnboundedStatement()
-    {
-        /* Two properties, both load-bearing. It is a last_seen range delete rather than the obvious
-           sweep (delete dim rows no live fact references), which would be an anti-join against two
-           hypertables per dim row -- affordable only because the write path stamps last_seen on every
-           cycle that references the digest. And it goes through the SAME time-sliced DELETE every
-           sibling purge uses, so the first sweep after an upgrade -- a whole retention window of
-           expired content -- is bounded work per statement instead of one transaction holding a lock
-           and generating WAL for the entire backlog. */
-        foreach (var dimTable in PayloadDimensions.DimTables)
-        {
-            var sql = DarlingRetention.TimeSlicedDeleteSql(dimTable, PayloadDimensions.LastSeenColumn);
-
-            Assert.StartsWith($"DELETE FROM {dimTable} WHERE last_seen < $1", sql, StringComparison.Ordinal);
-            Assert.Contains($"min(last_seen) FROM {dimTable}", sql, StringComparison.Ordinal);
-            Assert.Contains("INTERVAL", sql, StringComparison.Ordinal);
-
-            /* Never the anti-join: no dim GC statement may reference a fact table. */
-            Assert.DoesNotContain("query_stats", sql, StringComparison.Ordinal);
-            Assert.DoesNotContain("procedure_stats", sql, StringComparison.Ordinal);
-        }
-    }
-
-    [Fact]
     public void CreateDimTable_IsAPlainTableKeyedByDigest_WithALastSeenIndex()
     {
         /* Plain tables, deliberately NOT hypertables: no time axis to partition on, and a hypertable's

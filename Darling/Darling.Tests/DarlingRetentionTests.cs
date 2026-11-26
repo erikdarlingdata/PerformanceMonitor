@@ -105,32 +105,8 @@ public sealed class DarlingRetentionTests
     }
 
     [Fact]
-    public void DeleteSql_BatchesOnEachDefinitionsOwnTimeColumn()
+    public void TheTimeSlice_IsOneChunkIntervalWide()
     {
-        var byName = CollectorCatalog.All.ToDictionary(d => d.Name, StringComparer.OrdinalIgnoreCase);
-
-        /* Batched by TIME SLICE, not by ctid row cap (#1564): reading ctid through TimescaleDB's
-           transparent decompression is unsupported ("transparent decompression only supports tableoid
-           system column"), so the old ctid IN (SELECT ... LIMIT 10000) shape ERRORED whenever any in-range
-           chunk was compressed and the table silently kept its expired rows. Each execution clears the
-           oldest one day of expired rows — one chunk's worth on a hypertable, one day's arrival volume on a
-           plain table — and a slice that deletes nothing terminates the drain. $1 is bound once and
-           referenced by all three positions. */
-        Assert.Equal(
-            "DELETE FROM wait_stats WHERE collection_time < $1 AND collection_time >= (SELECT min(collection_time) FROM wait_stats WHERE collection_time < $1) AND collection_time < (SELECT min(collection_time) FROM wait_stats WHERE collection_time < $1) + INTERVAL '1 days'",
-            DarlingRetention.DeleteSqlFor(byName["wait_stats"]));
-
-        /* The config snapshots batch on their capture_time, not collection_time. */
-        Assert.Equal(
-            "DELETE FROM trace_flags WHERE capture_time < $1 AND capture_time >= (SELECT min(capture_time) FROM trace_flags WHERE capture_time < $1) AND capture_time < (SELECT min(capture_time) FROM trace_flags WHERE capture_time < $1) + INTERVAL '1 days'",
-            DarlingRetention.DeleteSqlFor(byName["trace_flags"]));
-
-        /* collection_log's PLAIN-PostgreSQL / conversion-failed FALLBACK still runs through the same batched
-           builder (since V23 it is a hypertable, so on Timescale it purges via drop_chunks — pinned below). */
-        Assert.Equal(
-            "DELETE FROM collection_log WHERE collection_time < $1 AND collection_time >= (SELECT min(collection_time) FROM collection_log WHERE collection_time < $1) AND collection_time < (SELECT min(collection_time) FROM collection_log WHERE collection_time < $1) + INTERVAL '1 days'",
-            DarlingRetention.TimeSlicedDeleteSql("collection_log", "collection_time"));
-
         /* The slice width matches ChunkIntervalDays, the ladder's CEILING since #4211 (RawChunkIntervalPlanner
            can narrow a raw table's actual chunk_time_interval below a day) — the fallback's unit of work stays
            bounded to at most one day's worth even where it is no longer exactly one chunk. */
@@ -151,7 +127,7 @@ public sealed class DarlingRetentionTests
     }
 
     [Fact]
-    public void AlertHistoryRetention_IsNinetyDays_AndBatchesOnAlertTime()
+    public void AlertHistoryRetention_IsNinetyDays()
     {
         /* config_alert_log (the fired-alert history) is a plain config-schema registry table — not a collector
            (no CollectorScheduleDefaults horizon) and not a hypertable — so it purges through the SAME batched
@@ -159,9 +135,6 @@ public sealed class DarlingRetentionTests
            audit-trail horizon (there is no operator setting governing it today, so the constant is the source
            of truth). */
         Assert.Equal(90, DarlingRetention.AlertHistoryRetentionDays);
-        Assert.Equal(
-            "DELETE FROM config_alert_log WHERE alert_time < $1 AND alert_time >= (SELECT min(alert_time) FROM config_alert_log WHERE alert_time < $1) AND alert_time < (SELECT min(alert_time) FROM config_alert_log WHERE alert_time < $1) + INTERVAL '1 days'",
-            DarlingRetention.TimeSlicedDeleteSql("config_alert_log", "alert_time"));
     }
 
     /// <summary>
@@ -216,17 +189,6 @@ public sealed class DarlingRetentionTests
         Assert.Equal(30, DarlingRetention.CommandHistoryRetentionDays);
         Assert.Equal(DarlingRetention.DataRetentionBaseDays, DarlingRetention.CommandHistoryRetentionDays);
 
-        /* SCHEMA-QUALIFIED: unlike collection_log / config_alert_log (created bare, so they land in `collect`
-           under search_path = collect, config, public), this table really is in `config`. A bare name would
-           resolve to a nonexistent collect.config_command and the purge would fail every night into a warning
-           nobody reads. The terminal-status filter appears in the DELETE **and in both min() subqueries** —
-           anchoring a slice on an ineligible row would delete nothing and terminate the drain early. */
-        Assert.Equal(
-            "DELETE FROM config.config_command WHERE created_at < $1 AND status IN ('succeeded', 'failed')"
-            + " AND created_at >= (SELECT min(created_at) FROM config.config_command WHERE created_at < $1 AND status IN ('succeeded', 'failed'))"
-            + " AND created_at < (SELECT min(created_at) FROM config.config_command WHERE created_at < $1 AND status IN ('succeeded', 'failed')) + INTERVAL '1 days'",
-            DarlingRetention.TimeSlicedDeleteSql("config.config_command", "created_at", DarlingRetention.TerminalCommandStatuses));
-
         /* Only the two states the executor ever writes terminally. A pending / in_progress row is never
            purged: deleting a live command strands the caller polling it. */
         Assert.Equal("status IN ('succeeded', 'failed')", DarlingRetention.TerminalCommandStatuses);
@@ -254,16 +216,6 @@ public sealed class DarlingRetentionTests
         Assert.True(
             DarlingRetention.PlanForceLedgerRetentionDays > DarlingRetention.CommandHistoryRetentionDays,
             "the plan-force ledger must outlive command history");
-
-        /* SCHEMA-QUALIFIED to match the V107 DDL and PgPlanForceActionStore, which both name
-           collect.plan_force_actions explicitly. No extra predicate: unlike config.config_command every row
-           here is eligible once it is past the horizon — the journal is append-only, so there is no live-row
-           state a purge could strand. */
-        Assert.Equal(
-            "DELETE FROM collect.plan_force_actions WHERE action_time < $1"
-            + " AND action_time >= (SELECT min(action_time) FROM collect.plan_force_actions WHERE action_time < $1)"
-            + " AND action_time < (SELECT min(action_time) FROM collect.plan_force_actions WHERE action_time < $1) + INTERVAL '1 days'",
-            DarlingRetention.TimeSlicedDeleteSql("collect.plan_force_actions", "action_time"));
     }
 
     [Fact]

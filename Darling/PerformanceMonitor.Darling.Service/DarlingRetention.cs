@@ -821,7 +821,7 @@ public static class DarlingRetention
                     utcNow, WidestEffectiveRetentionDays(PgStatementText.ReferencingCollectors, retentionDaysFor));
                 var textDeleted = await PurgeOneAsync(
                     postgres, PgStatementText.TableName,
-                    PgStatementText.PruneSql(TimescaleSupport.ChunkIntervalDays),
+                    TimeSlicedDeleteSql(PgStatementText.TableName, PgStatementText.LastSeenColumn),
                     textCutoff, logger, cancellationToken,
                     pacer: walPacer);
                 if (textDeleted is not null)
@@ -1681,7 +1681,7 @@ public static class DarlingRetention
                "cleared >= cap means there may be more" contract inverts for an unsliced statement: any
                real work (>= 1 row) re-ran the full DELETE once more just to confirm emptiness, an extra
                whole-table statement on exactly the days the purge had something to do. */
-            foreach (var (table, sql, batch) in new (string Table, string Sql, int Batch)[]
+            foreach (var (table, sql, batch) in new (string Table, PurgeSql Sql, int Batch)[]
             {
                 (FleetSweepStore.VerdictsTableName,
                     $"DELETE FROM {FleetSweepStore.VerdictsTableName} c"
@@ -2039,7 +2039,7 @@ AND   c.hypertable_name = $1", connection) { CommandTimeout = DeleteTimeoutSecon
     /// interpolation is safe here — the same reasoning as the runner's watermark read
     /// (DarlingCollectorRunner.GetLastCollectedTimeAsync).
     /// </summary>
-    internal static string DeleteSqlFor(ICollectorSchemaInfo schema)
+    internal static PurgeSql DeleteSqlFor(ICollectorSchemaInfo schema)
         => schema switch
         {
             AttentionCollector => ServerIndexedTimeSlicedDeleteSql(schema.TargetTable, schema.PrefixTimeColumnName),
@@ -2230,28 +2230,70 @@ AND   d.collection_time < g.state_time";
     /// rows are scattered through the heap (the attention table: a large field store holds tens of millions of rows,
     /// and inserts reuse freed pages, so one day of rows sits on most of the heap). It deletes exactly the same rows
     /// as <see cref="TimeSlicedDeleteSql"/>, one oldest day per execution, ended by the same empty-slice rule.
-    /// <para>What changes is how the oldest expired time is found. Each <c>min({col})</c> in the plain shape is a scan of
-    /// every expired index entry, and once a purge has deleted rows from a page that page is no longer all-visible
-    /// until autovacuum reaches it, so the next day's two <c>min()</c> scans fetch most of those heap pages: the DELETE
-    /// then reads the heap three times instead of once. Here the server ids are listed with a loose index scan (one
+    /// <para>What changes is how the oldest expired time is found. The plain shape's <c>min({col})</c> has no index on
+    /// <c>{col}</c> alone to read here, so it is a scan of every expired index entry, and once a purge has deleted rows
+    /// from a page that page is no longer all-visible until autovacuum reaches it, so the scan fetches most of those heap
+    /// pages. Here the server ids are listed with a loose index scan (one
     /// index probe per server), each server's oldest expired time is one index probe on <c>(server_id, {col})</c>,
-    /// and the smallest of those is the same global minimum, computed once for both bounds.</para>
+    /// and the smallest of those is the same global minimum. Every probe after the first of a drain bounds each
+    /// server's lookup from below, as the plain shape does (#9796).</para>
     /// <para>Needs <c>(server_id, {col})</c> as an index: only the attention table (V179) is routed here, and the
     /// loose scan is unsafe on a table without that index. Table and column come from catalog constants (never user
     /// input), so interpolation is safe.</para>
     /// </summary>
-    internal static string ServerIndexedTimeSlicedDeleteSql(string table, string timeColumn)
-        => $"WITH RECURSIVE server_ids(server_id) AS ("
-         + $" SELECT min(server_id) FROM {table}"
-         + $" UNION ALL"
-         + $" SELECT (SELECT min(a.server_id) FROM {table} AS a WHERE a.server_id > server_ids.server_id)"
-         + $" FROM server_ids WHERE server_ids.server_id IS NOT NULL),"
-         + $" oldest AS ("
-         + $" SELECT min((SELECT min(a.{timeColumn}) FROM {table} AS a WHERE a.server_id = server_ids.server_id AND a.{timeColumn} < $1)) AS slice_start"
-         + $" FROM server_ids WHERE server_ids.server_id IS NOT NULL)"
-         + $" DELETE FROM {table} WHERE {timeColumn} < $1"
-         + $" AND {timeColumn} >= (SELECT slice_start FROM oldest)"
-         + $" AND {timeColumn} < (SELECT slice_start FROM oldest) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
+    internal static PurgeSql ServerIndexedTimeSlicedDeleteSql(string table, string timeColumn)
+    {
+        string Oldest(string lowerBound)
+            => $"WITH RECURSIVE server_ids(server_id) AS ("
+             + $" SELECT min(server_id) FROM {table}"
+             + $" UNION ALL"
+             + $" SELECT (SELECT min(a.server_id) FROM {table} AS a WHERE a.server_id > server_ids.server_id)"
+             + $" FROM server_ids WHERE server_ids.server_id IS NOT NULL)"
+             + $" SELECT min((SELECT min(a.{timeColumn}) FROM {table} AS a WHERE a.server_id = server_ids.server_id AND a.{timeColumn} < $1{lowerBound})) AS slice_start"
+             + $" FROM server_ids WHERE server_ids.server_id IS NOT NULL";
+
+        return new PurgeSql(
+            SliceDeleteSql(table, timeColumn, $"{timeColumn} < $1", 2),
+            SliceProbeSql(Oldest(string.Empty)),
+            SliceProbeSql(Oldest($" AND a.{timeColumn} >= $2")));
+    }
+
+    /// <summary>
+    /// The statements of one retention purge. A time-sliced purge (<see cref="TimeSlicedDeleteSql"/>,
+    /// <see cref="ServerIndexedTimeSlicedDeleteSql"/>) carries the two probes that find a slice and the DELETE that removes it
+    /// (<see cref="ExecuteTimeSliceAsync"/> runs them). Any other purge is its one statement, which is what a string converts to.
+    /// </summary>
+    /// <param name="DeleteSql">The statement that deletes. For a time-sliced purge it takes the slice's start and end as its last two
+    /// parameters.</param>
+    /// <param name="FirstProbeSql">Finds the first slice of a drain: the oldest expired time and that time plus the slice width. Null
+    /// for a purge that is not time-sliced.</param>
+    /// <param name="NextProbeSql">The same probe for every later slice of the drain, bounded from below by its last parameter, the end
+    /// of the slice before it (#9796).</param>
+    internal sealed record PurgeSql(string DeleteSql, string? FirstProbeSql = null, string? NextProbeSql = null)
+    {
+        public static implicit operator PurgeSql(string deleteSql) => FromString(deleteSql);
+
+        public static PurgeSql FromString(string deleteSql) => new(deleteSql);
+    }
+
+    /// <summary>The number of the first slice parameter: the one after the cutoff (<c>$1</c>), or after <c>$2</c> when the purge's
+    /// extra predicate takes a second parameter (the procedure totals' raw floor).</summary>
+    private static int FirstSliceParameter(string? extraPredicate)
+        => extraPredicate is not null && extraPredicate.Contains("$2", StringComparison.Ordinal) ? 3 : 2;
+
+    /// <summary>A slice probe's result row: the slice's start (NULL when no expired row is left) and its end, one
+    /// <see cref="TimescaleSupport.ChunkIntervalDays"/> later. The end is computed here, by the store, so the DELETE's upper bound and
+    /// the next probe's lower bound are the same value.</summary>
+    private static string SliceProbeSql(string sliceStartSql)
+        => $"SELECT s.slice_start, s.slice_start + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days' FROM ({sliceStartSql}) AS s";
+
+    /// <summary>The DELETE of one slice. The slice's start and end are bound as parameters and read through scalar subqueries on
+    /// purpose: the planner then sees two values it does not know, as it does for a <c>min()</c> subquery, so the range is costed the
+    /// same way whatever the slice holds.</summary>
+    private static string SliceDeleteSql(string table, string timeColumn, string expired, int firstSliceParameter)
+        => $"DELETE FROM {table} WHERE {expired}"
+         + $" AND {timeColumn} >= (SELECT ${firstSliceParameter})"
+         + $" AND {timeColumn} < (SELECT ${firstSliceParameter + 1})";
 
     /// <summary>
     /// The batched purge statement: delete the OLDEST one-day slice of expired rows per execution —
@@ -2265,30 +2307,91 @@ AND   d.collection_time < g.state_time";
     /// <para>The slice width doubles as the work bound: one day of arrival volume per statement — exactly
     /// what a steady-state daily purge deletes in total, so a long backlog is drained in day-sized units the
     /// store already sustains daily (the old 10k row cap served the same goal; a day is also precisely one
-    /// chunk on a hypertable, <see cref="TimescaleSupport.ChunkIntervalDays"/>). Both <c>min({col})</c>
-    /// subqueries evaluate against the same statement snapshot, so they are always equal; when no expired
-    /// rows remain, <c>min</c> is NULL, every comparison is unknown, zero rows delete, and the drain loop
-    /// stops. In production the hypertables purge via <c>drop_chunks</c>, so this path runs on plain tables
+    /// chunk on a hypertable, <see cref="TimescaleSupport.ChunkIntervalDays"/>). A slice is two statements
+    /// (<see cref="ExecuteTimeSliceAsync"/>): a probe reads <c>min({col})</c> over the expired rows and returns it with
+    /// the slice's end, and the DELETE takes both as parameters. When no expired rows remain, <c>min</c> is NULL,
+    /// nothing is deleted, and the drain loop stops. Every probe after the first of a drain is bounded from below by
+    /// the end of the slice before it (#9796), so it does not walk the index entries of the rows that slice deleted.
+    /// In production the hypertables purge via <c>drop_chunks</c>, so this path runs on plain tables
     /// (a plain-PostgreSQL store, config_alert_log) or as the fallback when a hypertable's
     /// <c>drop_chunks</c> failed — where compressed chunks are LIKELY, which is what makes the
-    /// compressed-safe shape load-bearing. <c>$1</c> is bound once and referenced by all three positions.
+    /// compressed-safe shape load-bearing. <c>$1</c> is the cutoff in the probes and in the DELETE.
     /// Table/column come from catalog constants (never user input), so interpolation is safe.</para>
     /// <para><paramref name="extraPredicate"/> narrows WHICH rows are eligible — currently only
     /// <see cref="TerminalCommandStatuses"/>, so the command purge cannot touch a live command. It is
-    /// applied to the DELETE <b>and to both <c>min()</c> subqueries</b>, which is load-bearing, not cosmetic:
+    /// applied to the DELETE <b>and to the <c>min()</c> of both probes</b>, which is load-bearing, not cosmetic:
     /// with the predicate on the DELETE alone, a slice anchored on an INELIGIBLE row's timestamp would
     /// delete zero rows, and the drain loop's "a slice that clears nothing means we are done" termination
     /// would stop the purge with older eligible rows still in the table. Like the table and column it is a
     /// compile-time constant, never user input.</para>
     /// </summary>
-    internal static string TimeSlicedDeleteSql(string table, string timeColumn, string? extraPredicate = null)
+    internal static PurgeSql TimeSlicedDeleteSql(string table, string timeColumn, string? extraPredicate = null)
     {
         var and = extraPredicate is null ? string.Empty : $" AND {extraPredicate}";
         var expired = $"{timeColumn} < $1{and}";
+        var firstSliceParameter = FirstSliceParameter(extraPredicate);
+        var sliceStart = $"SELECT min({timeColumn}) AS slice_start FROM {table} WHERE {expired}";
 
-        return $"DELETE FROM {table} WHERE {expired}"
-             + $" AND {timeColumn} >= (SELECT min({timeColumn}) FROM {table} WHERE {expired})"
-             + $" AND {timeColumn} < (SELECT min({timeColumn}) FROM {table} WHERE {expired}) + INTERVAL '{TimescaleSupport.ChunkIntervalDays} days'";
+        return new PurgeSql(
+            SliceDeleteSql(table, timeColumn, expired, firstSliceParameter),
+            SliceProbeSql(sliceStart),
+            SliceProbeSql($"{sliceStart} AND {timeColumn} >= ${firstSliceParameter}"));
+    }
+
+    /// <summary>
+    /// One slice of a time-sliced purge (#9796): the probe finds the oldest expired time, and the DELETE removes the expired rows from
+    /// that time up to one slice width later. Returns the rows deleted and the slice's end, which the drain passes back as
+    /// <paramref name="lowerBound"/> of its next slice. A probe that finds no expired row deletes nothing, and the drain ends.
+    /// <para>Nothing vacuums the table between two slices of a drain, so the time index still holds an entry for every row the slices
+    /// before deleted, and a probe from the bottom of the index visits each of those dead rows in the heap before it reaches a live
+    /// one. The bound starts the scan past them. Below it the slices before deleted every expired row their snapshots could see. A row
+    /// written below it later is left for the next drain, whose first probe has no bound.</para>
+    /// </summary>
+    /// <param name="secondParameter">The purge's <c>$2</c> when its extra predicate takes one. Each statement binds its own copy.</param>
+    /// <param name="lowerBound">Null for the first slice of a drain, else the end of the slice before, as the probe returned it.</param>
+    internal static async Task<(int Rows, object? SliceEnd)> ExecuteTimeSliceAsync(
+        NpgsqlConnection connection,
+        PurgeSql purge,
+        DateTime cutoff,
+        NpgsqlParameter? secondParameter,
+        object? lowerBound,
+        CancellationToken cancellationToken)
+    {
+        object sliceStart;
+        object sliceEnd;
+        using (var probe = new NpgsqlCommand(lowerBound is null ? purge.FirstProbeSql : purge.NextProbeSql, connection) { CommandTimeout = DeleteTimeoutSeconds })
+        {
+            probe.Parameters.AddWithValue(cutoff);
+            if (secondParameter is not null)
+            {
+                probe.Parameters.Add(secondParameter.Clone());
+            }
+
+            if (lowerBound is not null)
+            {
+                probe.Parameters.AddWithValue(lowerBound);
+            }
+
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken) || await reader.IsDBNullAsync(0, cancellationToken))
+            {
+                return (0, null);
+            }
+
+            sliceStart = reader.GetValue(0);
+            sliceEnd = reader.GetValue(1);
+        }
+
+        using var delete = new NpgsqlCommand(purge.DeleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+        delete.Parameters.AddWithValue(cutoff);
+        if (secondParameter is not null)
+        {
+            delete.Parameters.Add(secondParameter.Clone());
+        }
+
+        delete.Parameters.AddWithValue(sliceStart);
+        delete.Parameters.AddWithValue(sliceEnd);
+        return (await delete.ExecuteNonQueryAsync(cancellationToken), sliceEnd);
     }
 
     /// <summary>
@@ -3417,8 +3520,9 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     ///
     /// <para>Two shapes, chosen by <paramref name="adaptiveRowCapTimeColumn"/>. Null — every table but the
     /// plan dimension and the two Query Store interval tables (#5569) — runs <paramref name="deleteSql"/> (a <see cref="TimeSlicedDeleteSql"/> or
-    /// single-shot statement) unchanged, with the connection and command — a single bound cutoff parameter
-    /// — reused across the whole drain. Set (the plan dimension, #4130, and the interval tables, #5569) ignores <paramref name="deleteSql"/>
+    /// single-shot statement) with the connection reused across the whole drain: a time-sliced purge one
+    /// <see cref="ExecuteTimeSliceAsync"/> per slice, any other statement as one command with a single bound cutoff
+    /// parameter. Set (the plan dimension, #4130, and the interval tables, #5569) ignores <paramref name="deleteSql"/>
     /// and rebuilds each batch from <see cref="CursoredRowCappedDeleteSql"/> (the row-capped form with a
     /// keyset cursor, #5569) at whatever cap <see cref="NextPlanDimBatchCap"/> has chosen, with <see cref="RunPlanDimBatchAsync"/> retrying a
     /// COMMAND-TIMEOUT batch at half its cap instead of failing the table outright — the field failure this
@@ -3432,7 +3536,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     private static async Task<int?> PurgeOneAsync(
         NpgsqlDataSource postgres,
         string tableName,
-        string deleteSql,
+        PurgeSql deleteSql,
         DateTime cutoff,
         ILogger? logger,
         CancellationToken cancellationToken,
@@ -3493,9 +3597,29 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
             var batches = 0;
             int drained;
 
-            if (adaptiveRowCapTimeColumn is null)
+            if (adaptiveRowCapTimeColumn is null && deleteSql.FirstProbeSql is not null)
             {
-                using var command = new NpgsqlCommand(deleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
+                /* #9796: a time-sliced purge. Each slice hands its end to the next one as the probe's lower bound, so no probe after the
+                   first walks the index entries of the rows this drain has deleted. The first slice has no bound. */
+                var secondParameter = secondParameterFactory is null ? null : await secondParameterFactory(connection, cancellationToken);
+                object? lowerBound = null;
+
+                drained = await DrainBatchesAsync(
+                    async ct =>
+                    {
+                        batches++;
+                        var walBefore = await ReadWalAsync(ct);
+                        var (rows, sliceEnd) = await ExecuteTimeSliceAsync(connection, deleteSql, cutoff, secondParameter, lowerBound, ct);
+                        deleted += rows;
+                        lowerBound = sliceEnd ?? lowerBound;
+                        return (rows, batchSize, await WalSinceAsync(walBefore, ct));
+                    },
+                    pacer,
+                    cancellationToken);
+            }
+            else if (adaptiveRowCapTimeColumn is null)
+            {
+                using var command = new NpgsqlCommand(deleteSql.DeleteSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
                 command.Parameters.AddWithValue(cutoff);
                 if (secondParameterFactory is not null)
                 {

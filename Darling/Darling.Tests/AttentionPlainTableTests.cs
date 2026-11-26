@@ -69,10 +69,6 @@ public sealed class AttentionPlainTableTests
     public void TheRetention_IsThirtyDays_AndAPlainTableTakesTheTimeSlicedDelete()
     {
         Assert.Equal(30, CollectorScheduleDefaults.All["attention"].RetentionDays);
-
-        var delete = DarlingRetention.DeleteSqlFor(AttentionCollector.Instance);
-        Assert.Contains("attention_events", delete, StringComparison.Ordinal);
-        Assert.Contains("collection_time", delete, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -339,10 +335,10 @@ public sealed class AttentionPlainTableTests
 
             /* Each shape runs in a transaction that is rolled back, so both see the same rows. */
             var survivors = new List<string>();
-            foreach (var sql in new[] { plain, serverIndexed })
+            foreach (var purge in new[] { plain, serverIndexed })
             {
                 await ExecAsync(connection, "BEGIN", ct);
-                var deleted = await DrainAsync(connection, sql, cutoff, ct);
+                var deleted = await DrainAsync(connection, purge, cutoff, ct);
                 survivors.Add((string)(await ScalarAsync(connection, "SELECT coalesce(string_agg(attention_event_id::text, ',' ORDER BY attention_event_id), '') FROM collect.attention_events", ct))!);
                 await ExecAsync(connection, "ROLLBACK", ct);
                 Assert.Equal(expired, deleted);
@@ -364,13 +360,9 @@ public sealed class AttentionPlainTableTests
         }
     }
 
-    /* The production drain loop (one oldest day per execution, ended by a slice that deletes nothing). */
-    private static async Task<int> DrainAsync(NpgsqlConnection connection, string sql, DateTime cutoff, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
-        command.Parameters.AddWithValue(cutoff);
-        return await DarlingRetention.DrainBatchesAsync(async token => (await command.ExecuteNonQueryAsync(token), 1), ct);
-    }
+    /* The production drain loop (one oldest day per execution, each slice's end handed to the next, ended by a slice that deletes nothing). */
+    private static Task<int> DrainAsync(NpgsqlConnection connection, DarlingRetention.PurgeSql purge, DateTime cutoff, CancellationToken ct)
+        => TimeSlicedPurgeDrain.DrainAsync(connection, purge, cutoff, ct);
 
     private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {

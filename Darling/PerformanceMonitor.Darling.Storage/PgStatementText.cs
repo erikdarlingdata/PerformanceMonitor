@@ -538,22 +538,4 @@ AND   (pg_statement_text.query_text IS DISTINCT FROM EXCLUDED.query_text
     {
         "pg_statement_stats", "pg_kernel_stats", "pg_plan_capture", "pg_predicate_stats", "pg_session_states", "pg_wait_sampling",
     };
-
-    /// <summary>
-    /// Retires text whose statements have all aged out: an index range scan on <see cref="LastSeenColumn"/>,
-    /// time-sliced like every sibling purge so one sweep cannot take an unbounded lock.
-    ///
-    /// <para>Timestamp-driven, NOT an anti-join against <c>pg_statement_stats</c>. The anti-join is the cost this
-    /// shape avoids, and it is unnecessary because a fetch keeps <c>last_seen</c> within
-    /// <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/> hours of now for everything still in the target's
-    /// <c>pg_stat_statements</c> (#8988) — so a statement that falls out of the view stops being touched and
-    /// ages out on its own.</para>
-    /// </summary>
-    public static string PruneSql(int chunkIntervalDays) =>
-        "DELETE FROM collect.pg_statement_text WHERE " + LastSeenColumn + " < $1" +
-        " AND " + LastSeenColumn + " >= (SELECT min(" + LastSeenColumn + ") FROM collect.pg_statement_text WHERE " +
-        LastSeenColumn + " < $1)" +
-        " AND " + LastSeenColumn + " < (SELECT min(" + LastSeenColumn + ") FROM collect.pg_statement_text WHERE " +
-        LastSeenColumn + " < $1) + INTERVAL '" +
-        chunkIntervalDays.ToString(CultureInfo.InvariantCulture) + " days'";
 }

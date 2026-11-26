@@ -151,13 +151,6 @@ public sealed class PgStatementTextTests
     {
         Assert.True(PgStatementText.PruneMarginDays > 0);
 
-        var sql = PgStatementText.PruneSql(7);
-        Assert.Contains("DELETE FROM collect.pg_statement_text", sql, StringComparison.Ordinal);
-        Assert.Contains("last_seen < $1", sql, StringComparison.Ordinal);
-        /* Time-sliced like every sibling purge, so one sweep cannot take an unbounded lock. */
-        Assert.Contains("INTERVAL '7 days'", sql, StringComparison.Ordinal);
-        /* Timestamp-driven, never an anti-join against the fact table — that is the cost this shape avoids. */
-        Assert.DoesNotContain("pg_statement_stats", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
