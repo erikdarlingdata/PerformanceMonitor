@@ -14,7 +14,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// The journal events of the personal MCP tokens (#8737). Only the store owner journals them: <see cref="PersonalTokenStore"/> writes each in the
 /// transaction of its change, on the owner connection, and the journal's owner-only trigger refuses every one of them from the <c>mcp</c>,
 /// <c>admin</c>, <c>viewer</c> and <c>web</c> logins, so no other login can write a row that says a token was made, revoked or cut short.
-/// The detail of every row is exactly <c>{token_id, token_name, role, reason}</c>, and never the token's value or its hash.
+/// The detail of every row is exactly <c>{token_id, token_name, role, reason, subject, owner_key}</c>, and never the token's value or its hash.
 /// </summary>
 public static class PersonalTokenEvents
 {
