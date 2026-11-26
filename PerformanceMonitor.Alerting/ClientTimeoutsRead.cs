@@ -129,7 +129,7 @@ public static class ClientTimeoutsRead
     /// <summary>
     /// #9593: the reply that fits <see cref="McpResponseBudget.DefaultBytes"/>, for both SKUs. <paramref name="reply"/> is the SKU's whole
     /// answer (its envelope and window notice around <see cref="Payload"/>) carrying the first n sampled events, so the envelope counts
-    /// against the budget. Events are listed newest first, so the ones left off the end are the oldest. Every other field is kept whole:
+    /// against the budget. Events are listed newest collected_at first, so the ones left off the end are the oldest. Every other field is kept whole:
     /// <c>count</c>, the rates, the top lists and <c>matched_calls</c> do not shrink, so a reply whose matched calls alone are over the
     /// budget keeps no events and says so in <c>budget_note</c> (a smaller <c>limit</c> shortens that list too).
     /// </summary>
@@ -140,8 +140,8 @@ public static class ClientTimeoutsRead
     private static string? BudgetNote(int eventsReturned, int kept) =>
         kept >= eventsReturned
             ? null
-            : McpResponseBudget.PageCutNote(eventsReturned, kept, "newest first", "sampled events",
-                "Move as_of back to the oldest returned event_time or narrow hours_back to read the older ones, or pass a smaller limit. " +
+            : McpResponseBudget.PageCutNote(eventsReturned, kept, "newest collected_at first", "sampled events",
+                "Move as_of back to the oldest returned collected_at, with hours_back wide enough to reach the older events, to read them (that collector run is read again whole, so no event is skipped), or pass a smaller limit. " +
                 "count, the rates, the top lists and matched_calls are whole.");
 
     /// <summary>

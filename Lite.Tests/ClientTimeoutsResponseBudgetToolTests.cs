@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -86,6 +87,8 @@ public sealed class ClientTimeoutsResponseBudgetToolTests : IClassFixture<Shared
         Assert.Contains($"only {returned}", note, StringComparison.Ordinal);
         Assert.Contains($"{EventLimit - returned} were left out", note, StringComparison.Ordinal);
         Assert.Contains("as_of", note, StringComparison.Ordinal);
+        Assert.Contains("collected_at", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("event_time", note, StringComparison.Ordinal);
         Assert.Contains("hours_back", note, StringComparison.Ordinal);
         Assert.Contains("limit", note, StringComparison.Ordinal);
 
@@ -124,6 +127,66 @@ public sealed class ClientTimeoutsResponseBudgetToolTests : IClassFixture<Shared
         Assert.Equal(150, body.GetProperty("count").GetInt64());
     }
 
+    /// <summary>
+    /// The way <c>budget_note</c> says to read on: <c>as_of</c> bounds <c>collection_time</c> (inclusive) and every event of one collector run shares
+    /// the run's <c>collection_time</c>, so a call with <c>as_of</c> at the oldest returned <c>collected_at</c> reads that run again whole and then the
+    /// older runs. Each run holds several events, the cut lands inside a run, and each event's <c>event_time</c> is earlier than its run's
+    /// <c>collection_time</c>. Following the note page after page lists every event once or more and skips none.
+    /// </summary>
+    [Fact]
+    public async Task AsOfAtTheOldestReturnedCollectedAt_ReadsThatRunAgainWhole_AndReadsOnWithoutSkippingAnEvent()
+    {
+        const int perRun = 7;
+        const int runsWithEvents = 5;
+        const int limit = perRun * runsWithEvents;
+        var now = DateTime.UtcNow;
+        await SeedAsync(now, 0);
+        await SeedRunEventsAsync(now, runsWithEvents, perRun);
+
+        var whole = (await ReadAsync(now, limit, budgeted: false))["sampled_events"]!.AsArray();
+        Assert.Equal(limit, whole.Count);
+
+        var pages = new List<(int Returned, string[] Fingerprints, string[] CollectedAt)>();
+        var asOf = now.ToString("o");
+        while (true)
+        {
+            var json = await McpClientTimeoutTools.GetClientTimeouts(new LocalDataService(_duckDb), _serverManager, ServerName, 1, limit, asOf);
+            using var doc = JsonDocument.Parse(json);
+            var body = doc.RootElement.GetProperty("client_timeouts");
+            var listed = body.GetProperty("sampled_events").EnumerateArray().ToList();
+            var fingerprints = listed.Select(e => e.GetProperty("statement_fingerprint").GetString()!).ToArray();
+            var collectedAt = listed.Select(e => e.GetProperty("collected_at").GetString()!).ToArray();
+            Assert.Equal(listed.Count, body.GetProperty("sampled_events_returned").GetInt32());
+            Assert.False(body.GetProperty("sampled_events_truncated").GetBoolean());
+            Assert.Equal(collectedAt.OrderByDescending(c => c, StringComparer.Ordinal), collectedAt);
+            pages.Add((listed.Count, fingerprints, collectedAt));
+
+            if (!body.GetProperty("budget_truncated").GetBoolean())
+            {
+                break;
+            }
+
+            var oldest = collectedAt[^1];
+            Assert.NotEqual(asOf, oldest);
+            Assert.True(pages.Count <= runsWithEvents, "each page must move as_of back");
+            asOf = oldest;
+        }
+
+        /* The first reply cut inside a run, so the second call proves the whole run is read again, not only the events after the cut. */
+        var first = pages[0];
+        Assert.True(pages.Count > 1);
+        Assert.NotEqual(0, first.Returned % perRun);
+        var oldestRun = first.CollectedAt[^1];
+        var wholeOfOldestRun = whole.Where(e => e!["collected_at"]!.GetValue<string>() == oldestRun).Select(e => e!["statement_fingerprint"]!.GetValue<string>()).ToArray();
+        Assert.Equal(perRun, wholeOfOldestRun.Length);
+        Assert.Contains(whole[first.Returned]!["statement_fingerprint"]!.GetValue<string>(), pages[1].Fingerprints);
+        Assert.All(wholeOfOldestRun, fingerprint => Assert.Contains(fingerprint, pages[1].Fingerprints));
+
+        var every = whole.Select(e => e!["statement_fingerprint"]!.GetValue<string>()).ToHashSet(StringComparer.Ordinal);
+        Assert.Equal(limit, every.Count);
+        Assert.Equal(every, pages.SelectMany(p => p.Fingerprints).ToHashSet(StringComparer.Ordinal));
+    }
+
     /// <summary>The whole payload, unbudgeted, over the same rows the tool reads.</summary>
     private async Task<System.Text.Json.Nodes.JsonObject> ReadAsync(DateTime now, int limit, bool budgeted)
     {
@@ -139,38 +202,62 @@ public sealed class ClientTimeoutsResponseBudgetToolTests : IClassFixture<Shared
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(TestContext.Current.CancellationToken);
 
-        async Task ExecAsync(string sql, params object?[] values)
-        {
-            using var command = connection.CreateCommand();
-            command.CommandText = sql;
-            foreach (var value in values)
-            {
-                command.Parameters.Add(new DuckDBParameter { Value = value ?? DBNull.Value });
-            }
-
-            await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
-        }
-
         for (var i = 0; i < 6; i++)
         {
-            await ExecAsync(
+            await ExecAsync(connection,
                 "INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status) VALUES ($1, $2, $3, $4, $5, 5, 'SUCCESS')",
                 9_593_000L + i, _serverId, ServerName, AttentionWindowSql.CollectorName, now.AddSeconds(-30).AddMinutes(-i));
         }
 
         for (var i = 0; i < 5; i++)
         {
-            await ExecAsync(
+            await ExecAsync(connection,
                 "INSERT INTO attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count) VALUES ($1, $2, $3, $4, 'count', 30)",
                 9_593_100L + i, now.AddSeconds(-28).AddMinutes(-i), _serverId, ServerName);
         }
 
         for (var i = 0; i < events; i++)
         {
-            var text = ("SELECT /* event " + i.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) + " */ ").PadRight(2000, 'x');
-            await ExecAsync(
+            await ExecAsync(connection,
                 "INSERT INTO attention_events (attention_event_id, collection_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, interrupt_duration_us) VALUES ($1, $2, $3, $4, 'sample', 0, 'sales', 'app-' || $5, $6, $7, 30000000)",
-                9_593_200L + i, now.AddSeconds(-28).AddMilliseconds(-i * 20), _serverId, ServerName, i % 7, "fp-" + i.ToString("D4", System.Globalization.CultureInfo.InvariantCulture), text);
+                9_593_200L + i, now.AddSeconds(-28).AddMilliseconds(-i * 20), _serverId, ServerName, i % 7, "fp-" + i.ToString("D4", System.Globalization.CultureInfo.InvariantCulture), WideStatement(i));
         }
+    }
+
+    /// <summary>
+    /// <paramref name="perRun"/> sampled events for each of the <paramref name="runs"/> newest collector runs of <see cref="SeedAsync"/>. The events of one run share
+    /// the run's <c>collection_time</c>, as the collector writes them, and each one's <c>event_time</c> is earlier than that, a different time per event.
+    /// </summary>
+    private async Task SeedRunEventsAsync(DateTime now, int runs, int perRun)
+    {
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+
+        for (var run = 0; run < runs; run++)
+        {
+            var collectionTime = now.AddSeconds(-28).AddMinutes(-run);
+            for (var j = 0; j < perRun; j++)
+            {
+                var n = (run * perRun) + j;
+                await ExecAsync(connection,
+                    "INSERT INTO attention_events (attention_event_id, collection_time, event_time, server_id, server_name, event_kind, attention_count, database_name, client_app_name, statement_fingerprint, statement_text, interrupt_duration_us) VALUES ($1, $2, $3, $4, $5, 'sample', 0, 'sales', 'app-' || $6, $7, $8, 30000000)",
+                    9_593_500L + n, collectionTime, collectionTime.AddSeconds(-(5 + (6 * j))), _serverId, ServerName, n % 7, "fp-" + n.ToString("D4", System.Globalization.CultureInfo.InvariantCulture), WideStatement(n));
+            }
+        }
+    }
+
+    private static string WideStatement(int n) =>
+        ("SELECT /* event " + n.ToString("D4", System.Globalization.CultureInfo.InvariantCulture) + " */ ").PadRight(2000, 'x');
+
+    private static async Task ExecAsync(DuckDBConnection connection, string sql, params object?[] values)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var value in values)
+        {
+            command.Parameters.Add(new DuckDBParameter { Value = value ?? DBNull.Value });
+        }
+
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 }

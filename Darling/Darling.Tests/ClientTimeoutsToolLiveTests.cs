@@ -54,8 +54,9 @@ public sealed class ClientTimeoutsToolLiveTests
     private const int ShortCallsId = -5640117;
     private const int BudgetId = -9593101;
     private const int SmallStoreId = -9593102;
+    private const int PagingId = -9600101;
 
-    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, ShortCallsId, NearMissId, MetadataCallsId, NoCallsId, TwoCallsId, BudgetId, SmallStoreId };
+    private static readonly int[] AllIds = { QuietId, BusyId, StaleId, PostgresTargetId, CutId, AsOfEdgeId, OneRunId, LeakId, TieId, MissingSessionId, DurationFloorId, MatchedCallsId, ShortCallsId, NearMissId, MetadataCallsId, NoCallsId, TwoCallsId, BudgetId, SmallStoreId, PagingId };
 
     private static string Name(int id) => "ct-live" + (-id).ToString(CultureInfo.InvariantCulture);
 
@@ -755,6 +756,8 @@ public sealed class ClientTimeoutsToolLiveTests
             Assert.Contains($"only {returned}", note, StringComparison.Ordinal);
             Assert.Contains($"{limit - returned} were left out", note, StringComparison.Ordinal);
             Assert.Contains("as_of", note, StringComparison.Ordinal);
+            Assert.Contains("collected_at", note, StringComparison.Ordinal);
+            Assert.DoesNotContain("event_time", note, StringComparison.Ordinal);
             Assert.Contains("hours_back", note, StringComparison.Ordinal);
             Assert.Contains("limit", note, StringComparison.Ordinal);
             Assert.False(doc.RootElement.GetProperty("window_truncated").GetBoolean());
@@ -800,6 +803,88 @@ public sealed class ClientTimeoutsToolLiveTests
             Assert.False(body.GetProperty("budget_truncated").GetBoolean());
             Assert.Equal(JsonValueKind.Null, body.GetProperty("budget_note").ValueKind);
             Assert.Equal(55, body.GetProperty("count").GetInt64());
+        });
+    }
+
+    /// <summary>
+    /// The way <c>budget_note</c> says to read on: <c>as_of</c> bounds <c>collection_time</c> (inclusive) and every event of one collector run shares
+    /// the run's <c>collection_time</c>, so a call with <c>as_of</c> at the oldest returned <c>collected_at</c> reads that run again whole and then the
+    /// older runs. Each run holds several events, the cut lands inside a run, and each event's <c>event_time</c> is earlier than its run's
+    /// <c>collection_time</c>. Following the note page after page lists every event once or more and skips none. The Lite twin runs the same shared payload over DuckDB.
+    /// </summary>
+    [Fact]
+    public async Task AsOfAtTheOldestReturnedCollectedAt_ReadsThatRunAgainWhole_AndReadsOnWithoutSkippingAnEvent()
+    {
+        await RunAsync(async (postgres, connection, ct) =>
+        {
+            const int perRun = 7;
+            const int runsWithEvents = 5;
+            const int limit = perRun * runsWithEvents;
+            var now = Now();
+            await RegisterAsync(connection, PagingId, "sqlserver", ct);
+            var runs = await SeedRunsAsync(connection, PagingId, now.AddSeconds(-30), 12, TimeSpan.FromMinutes(1), ct);
+            foreach (var run in runs)
+            {
+                await RowAsync(connection, PagingId, run.AddSeconds(2), "count", 5, null, null, null, null, ct);
+            }
+
+            for (var r = 0; r < runsWithEvents; r++)
+            {
+                var collectionTime = runs[r].AddSeconds(2);
+                for (var j = 0; j < perRun; j++)
+                {
+                    var n = (r * perRun) + j;
+                    var text = ("SELECT /* event " + n.ToString("D4", CultureInfo.InvariantCulture) + " */ ").PadRight(2000, 'x');
+                    await RowAsync(connection, PagingId, collectionTime, "sample", 0, "sales", "app-" + (n % 7).ToString(CultureInfo.InvariantCulture),
+                        "fp-" + n.ToString("D4", CultureInfo.InvariantCulture), text, ct, durationUs: 30_000_000, eventTime: collectionTime.AddSeconds(-(5 + (6 * j))));
+                }
+            }
+
+            var (window, samples) = await DarlingMcpClientTimeoutTools.ReadRangeAsync(postgres, PagingId, now.AddHours(-1), now, limit, ct);
+            var (_, reading) = ClientTimeoutsRead.Classify(window, now);
+            var whole = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(
+                ClientTimeoutsRead.Payload(reading!, window, samples, limit, 2000), McpHelpers.JsonOptions))!.AsObject()["sampled_events"]!.AsArray();
+            Assert.Equal(limit, whole.Count);
+
+            var pages = new List<(int Returned, string[] Fingerprints, string[] CollectedAt)>();
+            string? asOf = null;
+            while (true)
+            {
+                var json = await DarlingMcpClientTimeoutTools.GetClientTimeouts(postgres, Name(PagingId), 1, limit: limit, as_of: asOf, cancellationToken: ct);
+                using var doc = JsonDocument.Parse(json);
+                var body = doc.RootElement.GetProperty("client_timeouts");
+                var listed = body.GetProperty("sampled_events").EnumerateArray().ToList();
+                var fingerprints = listed.Select(e => e.GetProperty("statement_fingerprint").GetString()!).ToArray();
+                var collectedAt = listed.Select(e => e.GetProperty("collected_at").GetString()!).ToArray();
+                Assert.Equal(listed.Count, body.GetProperty("sampled_events_returned").GetInt32());
+                Assert.False(body.GetProperty("sampled_events_truncated").GetBoolean());
+                Assert.Equal(collectedAt.OrderByDescending(c => c, StringComparer.Ordinal), collectedAt);
+                pages.Add((listed.Count, fingerprints, collectedAt));
+
+                if (!body.GetProperty("budget_truncated").GetBoolean())
+                {
+                    break;
+                }
+
+                var oldest = collectedAt[^1];
+                Assert.NotEqual(asOf, oldest);
+                Assert.True(pages.Count <= runsWithEvents, "each page must move as_of back");
+                asOf = oldest;
+            }
+
+            /* The first reply cut inside a run, so the second call proves the whole run is read again, not only the events after the cut. */
+            var first = pages[0];
+            Assert.True(pages.Count > 1);
+            Assert.NotEqual(0, first.Returned % perRun);
+            var oldestRun = first.CollectedAt[^1];
+            var wholeOfOldestRun = whole.Where(e => e!["collected_at"]!.GetValue<string>() == oldestRun).Select(e => e!["statement_fingerprint"]!.GetValue<string>()).ToArray();
+            Assert.Equal(perRun, wholeOfOldestRun.Length);
+            Assert.Contains(whole[first.Returned]!["statement_fingerprint"]!.GetValue<string>(), pages[1].Fingerprints);
+            Assert.All(wholeOfOldestRun, fingerprint => Assert.Contains(fingerprint, pages[1].Fingerprints));
+
+            var every = whole.Select(e => e!["statement_fingerprint"]!.GetValue<string>()).ToHashSet(StringComparer.Ordinal);
+            Assert.Equal(limit, every.Count);
+            Assert.Equal(every, pages.SelectMany(p => p.Fingerprints).ToHashSet(StringComparer.Ordinal));
         });
     }
 
