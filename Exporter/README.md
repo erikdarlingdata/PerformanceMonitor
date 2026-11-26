@@ -133,13 +133,69 @@ Use it to find the exporter's statements in `pg_stat_statements` and in the Post
 
 ## Destinations
 
-- **Amazon S3.** Set `type` to `s3` with `bucket`, `prefix` and `region`. Credentials come from the standard AWS chain.
-  If you leave `region` out, the AWS SDK picks it from its own sources (the environment, the shared config file or instance metadata).
-  The `export` command can also use S3-compatible stores and explicit credentials. See `destination` in the config.
-- **Azure Blob Storage.** Set `type` to `azure_blob` with a container and an `auth` method (connection string, SAS URL or default credential).
-- **Local folder.** Set `type` to `local` with a `path`.
+`destination` in the config says where the files go. `check-config`, `run --plan-only` and `run` read it with the same code, so a destination that `check-config` accepts is one that `run` can use.
+A field the exporter does not know is an error in all three.
 
-`run` supports the S3 and local forms with a bucket, a prefix and a region. For other forms, call `export` yourself.
+- **Amazon S3.** Set `type` to `s3` with a `bucket`. `prefix` and `region` are optional. Credentials come from the standard AWS chain unless you set `credentials`.
+  If you leave `region` out, the AWS SDK picks it from its own sources (the environment, the shared config file or instance metadata).
+- **An S3-compatible store**, such as MinIO or Cloudflare R2. Use the `s3` type and add `endpoint_url`. Most of these stores also need `"force_path_style": true`.
+- **Azure Blob Storage.** Set `type` to `azure_blob` with a `container` and an `auth` object. `prefix` is optional. The container must exist before the first run.
+- **Local folder.** Set `type` to `local` with a `path`. `prefix` is optional.
+
+The `s3` type takes these fields:
+
+| Field | Meaning |
+|---|---|
+| `bucket` | The bucket. Required. |
+| `prefix` | A folder inside the bucket. |
+| `region` | The region. With `endpoint_url` it is the signing region, and the default is `us-east-1`. |
+| `endpoint_url` | The `http` or `https` URL of an S3-compatible store. |
+| `force_path_style` | `true` puts the bucket in the path of the URL and not in the host name. |
+| `checksum` | `sha256` (the default) or `none`, for a store that refuses the SHA-256 checksum. |
+| `credentials` | Where the keys come from. See the next table. The default is the AWS chain. |
+
+| `credentials` | Meaning |
+|---|---|
+| `"default"` | The standard AWS chain: the environment, the shared profile or the instance role. |
+| `{ "profile": "<name>" }` | A named profile in the shared credentials file. |
+| `{ "access_key_id_env": "<variable>", "secret_access_key_env": "<variable>" }` | Keys held in the two environment variables you name. Add `session_token_env` for a session token. |
+
+The `azure_blob` type takes `container`, `prefix`, `account_url` and `auth`. `auth.method` is one of these:
+
+| `auth.method` | Meaning |
+|---|---|
+| `connection_string_env` | `auth.name` is an environment variable that holds a storage connection string. `account_url` is not needed. |
+| `sas_url_env` | `auth.name` is an environment variable that holds a SAS token or a full SAS URL. `account_url` is required. |
+| `default_credential` | The Azure default credential chain (the environment, a managed identity or a developer sign-in). `account_url` is required. |
+
+A MinIO destination with keys in two environment variables:
+
+```json
+"destination": {
+  "type": "s3", "bucket": "exports", "prefix": "landing",
+  "endpoint_url": "http://minio.internal:9000", "force_path_style": true,
+  "credentials": { "access_key_id_env": "EXPORT_S3_KEY_ID", "secret_access_key_env": "EXPORT_S3_SECRET_KEY" }
+}
+```
+
+An Azure Blob destination with a connection string in an environment variable:
+
+```json
+"destination": {
+  "type": "azure_blob", "container": "exports", "prefix": "landing",
+  "auth": { "method": "connection_string_env", "name": "EXPORT_AZURE_CONNECTION_STRING" }
+}
+```
+
+The config holds the names of environment variables and never a key. The exporter does not print a key, and `check-config` prints only the names.
+A URL in the config must not carry a user name, a password or a query string. A SAS belongs in an environment variable.
+`check-config` and `run` stop with exit code 2 when a variable the destination names is not set. `run --plan-only` does not read the variables.
+
+`run` uploads every window to the destination. `export` uploads only when you ask it to:
+
+- `export --config <file> --upload-destination` uploads to the config's destination. It works with every form above.
+- `export --upload <destination>` takes `s3://bucket/prefix` (with `--aws-region`) or a folder path. It cannot name an endpoint, keys or Azure Blob.
+- With neither flag, `export` writes the files to `--out` and uploads nothing.
 
 The Parquet files go up first and the manifest goes up last. A manifest means every file it lists is complete.
 
