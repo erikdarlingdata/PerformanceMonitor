@@ -101,17 +101,17 @@ public sealed class DarlingMcpNamedTokenTests
     private static List<string> ToolsPointedAtIn(string text, IEnumerable<string> catalog) =>
         catalog.Where(n => text.Contains("`" + n + "`", StringComparison.Ordinal)).OrderBy(n => n, StringComparer.Ordinal).ToList();
 
-    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action" };
+    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action", "mint_personal_token", "revoke_personal_token" };
 
     [Fact]
-    public void ServerAdminToolsList_IsTheFourToolsTheDocsName()
+    public void ServerAdminToolsList_IsTheToolsTheDocsName()
     {
         Assert.Equal(ServerAdminToolNames.OrderBy(n => n, StringComparer.Ordinal), DarlingMcpWritePolicy.ServerAdminTools.OrderBy(n => n, StringComparer.Ordinal));
     }
 
     /// <summary>Review round 2, finding 2 of 2: <c>mcp.allowServerAdmin</c> does nothing unless <c>mcp.allowWrites</c> is on
     /// (<see cref="DarlingMcpWritePolicy.Resolve"/>). An operator token keeps that precondition, so adding <c>mcp.tokens</c> to a
-    /// service with <c>allowServerAdmin: true, allowWrites: false</c> does not turn on the four server admin tools.</summary>
+    /// service with <c>allowServerAdmin: true, allowWrites: false</c> does not turn on the server admin tools.</summary>
     [Theory]
     [InlineData(true, false, false)]
     [InlineData(false, true, false)]

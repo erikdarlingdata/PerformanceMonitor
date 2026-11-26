@@ -20,7 +20,7 @@ public sealed class DarlingMcpWriteGateTextTests
     [Fact]
     public void SettingsParagraph_NamesEveryServerAdminTool()
     {
-        Assert.Equal(4, DarlingMcpWritePolicy.ServerAdminTools.Count);
+        Assert.Equal(6, DarlingMcpWritePolicy.ServerAdminTools.Count);
         Assert.All(DarlingMcpWritePolicy.ServerAdminTools,
             name => Assert.Contains(name, DarlingMcpWritePolicy.InstructionsLine(), StringComparison.Ordinal));
         Assert.All(DarlingMcpWritePolicy.ServerAdminTools,
