@@ -26,14 +26,16 @@ namespace PerformanceMonitorLite.Services;
 public partial class LocalDataService
 {
     /// <summary>
-    /// The window's baseline and the newest raw snapshot of one database. The baseline is the snapshot <see cref="ObjectUsageWindowRead.Sql"/>
-    /// starts from: <see cref="ObjectUsageWindowRead.BaselineCte"/> itself, else the first snapshot at or after the start. The newest snapshot is
-    /// read only from the baseline's earliest possible time onward, so the archive files before the window stay closed. $1 server_id, $2 database_name,
-    /// $3 the window start.
+    /// The window's baseline, the newest raw snapshot of one database, and how many distinct snapshots lie between them, both ends included. The
+    /// baseline is the snapshot <see cref="ObjectUsageWindowRead.Sql"/> starts from: <see cref="ObjectUsageWindowRead.BaselineCte"/> itself, else
+    /// the first snapshot at or after the start. The newest snapshot is read only from the baseline's earliest possible time onward, so the archive
+    /// files before the window stay closed. The count is what the chain's facts must equal (#9596): a snapshot that lands at or before the chain's
+    /// newest time (a late write, a clock stepped back) is a hole the facts' own links do not show. $1 server_id, $2 database_name, $3 the window start.
     /// </summary>
     internal static readonly string ObjectUsageBoundsSql = ObjectUsageWindowRead.BaselineCte + $"""
-
-
+    ,
+    span AS
+    (
         SELECT
             (
                 SELECT min(s.collection_time)
@@ -41,15 +43,28 @@ public partial class LocalDataService
                 WHERE s.server_id = $1
                 AND   s.database_name = $2
                 AND   s.collection_time >= COALESCE((SELECT collection_time FROM baseline), $3)
-            ),
+            ) AS first_time,
             (
                 SELECT max(n.collection_time)
                 FROM v_index_object_stats AS n
                 WHERE n.server_id = $1
                 AND   n.database_name = $2
                 AND   n.collection_time > $3 - interval '{ObjectUsageWindowRead.BaselineReachDays} days'
-            )
-        """;
+            ) AS last_time
+    )
+    SELECT
+        span.first_time,
+        span.last_time,
+        (
+            SELECT count(DISTINCT c.collection_time)
+            FROM v_index_object_stats AS c
+            WHERE c.server_id = $1
+            AND   c.database_name = $2
+            AND   c.collection_time >= span.first_time
+            AND   c.collection_time <= span.last_time
+        )
+    FROM span
+    """;
 
     /// <summary>The chain's per-snapshot facts of one database from the baseline to the newest snapshot, oldest first. $1 server_id, $2 database_name,
     /// $3 the baseline, $4 the newest snapshot.</summary>
@@ -158,6 +173,7 @@ public partial class LocalDataService
         var start = DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified);
         DateTime? baseline = null;
         DateTime? newest = null;
+        long snapshotCount = 0;
         var facts = new List<ObjectUsageSnapshotFact>();
         var deltas = new List<ObjectUsageDeltaTotals>();
         var runs = new List<ObjectUsageRun>();
@@ -185,6 +201,7 @@ public partial class LocalDataService
             {
                 baseline = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
                 newest = reader.IsDBNull(1) ? null : reader.GetDateTime(1);
+                snapshotCount = reader.IsDBNull(2) ? 0 : Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture);
             }
         }
 
@@ -219,6 +236,13 @@ public partial class LocalDataService
         if (replay.FallbackReason is not null)
         {
             return (null, replay.FallbackReason);
+        }
+
+        /* The replay checks the facts' own links, which a hole in the middle keeps intact: the step after it compares the snapshot before it. Only
+           the raw store knows a snapshot is missing from the chain, and the full fold steps it. */
+        if (facts.Count != snapshotCount)
+        {
+            return (null, "the chain holds a different number of snapshots than the window");
         }
 
         var boundaryTimes = replay.Boundaries.Select(b => b.Time).ToList();

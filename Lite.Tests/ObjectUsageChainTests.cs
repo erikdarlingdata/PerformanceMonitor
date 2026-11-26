@@ -245,6 +245,31 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
     }
 
     [Fact]
+    public async Task ASnapshotThatLandsInsideTheBuiltChain_IsAHoleTheFoldFills_SoTheWindowsHoldingItTakeTheFold()
+    {
+        var rows = ObjectUsageChainHistory.Generate();
+        var late = ObjectUsageChainHistory.Day(3);
+        await SeedAsync(rows: rows.Where(r => r.CollectionTime != late));
+        await new ObjectUsageChainBuilder(_duckDb, () => Now).BuildPairAsync(_serverId, Database, int.MaxValue, CancellationToken.None);
+
+        /* The snapshot lands after the chain stepped past its time (a late write, or a clock stepped back across a restart). The chain's own links
+           are consistent without it: the step after the hole compares the snapshot before it. */
+        await SeedAsync(rows: rows.Where(r => r.CollectionTime == late), firstId: -500000);
+
+        var (hole, reason) = await _dataService.TryReadObjectUsageChainAsync(_serverId, Database, Start(7));
+        Assert.Null(hole);
+        Assert.Equal("the chain holds a different number of snapshots than the window", reason);
+        var full = await _dataService.GetObjectUsageWindowFullAsync(_serverId, Database, Start(7));
+        Assert.Equal(8, full.SnapshotCount);
+        Assert.Equal(Json(full), Json(await _dataService.GetObjectUsageWindowAsync(_serverId, Database, Start(7))));
+
+        /* A window that ends its reach before the hole is still answered from the chain. */
+        var (after, none) = await _dataService.TryReadObjectUsageChainAsync(_serverId, Database, Start(2));
+        Assert.Null(none);
+        Assert.Equal(Json(await _dataService.GetObjectUsageWindowFullAsync(_serverId, Database, Start(2))), Json(after!));
+    }
+
+    [Fact]
     public async Task ASnapshotWhoseRunHasNotFinished_IsLeftUnfolded_AndFoldedWhole_OnceItsRunIsLogged()
     {
         var rows = ObjectUsageChainHistory.Generate();
