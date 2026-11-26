@@ -3,6 +3,8 @@ using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Windows;
+using System.Windows.Threading;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
@@ -164,11 +166,23 @@ public sealed class McpAlertSettingsWriteTools
         "Served only when mcp_allow_writes is true.")]
     public static Task<string> UpdateAlertSettings(
         [Description("A JSON object with ONLY the alert-settings fields to change, in the nested shape get_alert_settings returns (e.g. {\"cpu\":{\"threshold_percent\":90},\"blocking\":{\"enabled\":false},\"cooldown_minutes\":10}).")] string settings_json) =>
-        Task.FromResult(UpdateAlertSettingsCore(settings_json));
+        Task.FromResult(UpdateAlertSettingsCore(settings_json, dispatcher: Application.Current?.Dispatcher, settingsWindowOpen: IsSettingsWindowOpen));
+
+    /// <summary>True while a Settings window is open (it is shown modally from the main window). Reads the window list, so it
+    /// runs on the UI thread.</summary>
+    private static bool IsSettingsWindowOpen() => Application.Current?.Windows.OfType<SettingsWindow>().Any() == true;
 
     /// <summary>The tool body. <paramref name="readRoot"/> and <paramref name="write"/> default to the settings.json the app reads
-    /// and the Settings window writes; a test passes its own so no real file is touched.</summary>
-    internal static string UpdateAlertSettingsCore(string settings_json, Func<JsonObject>? readRoot = null, Func<JsonNode, bool>? write = null)
+    /// and the Settings window writes; a test passes its own so no real file is touched.
+    /// <para>#9639: every other settings.json writer (<c>SettingsWindow</c>'s Save, <c>App.WriteSetting</c> for the sidebar, the time
+    /// range, the overview sort, the alert window size) reads the whole document, changes it and writes it back on the UI thread,
+    /// headless or not (a headless Lite is still a WPF application with its dispatcher). This tool is called off the UI thread, so
+    /// when <paramref name="dispatcher"/> is given the whole read-modify-write runs on it, the same thread as those writers, and
+    /// none of them can interleave with it. <paramref name="settingsWindowOpen"/> (asked on that thread) refuses the call while the
+    /// Settings window is open: its Save re-applies every alert control and would undo the update. Without a dispatcher (a test)
+    /// the body runs inline.</para></summary>
+    internal static string UpdateAlertSettingsCore(string settings_json, Func<JsonObject>? readRoot = null, Func<JsonNode, bool>? write = null,
+        Func<bool>? settingsWindowOpen = null, Dispatcher? dispatcher = null)
     {
         try
         {
@@ -206,56 +220,66 @@ public sealed class McpAlertSettingsWriteTools
                 return McpHelpers.Refusal(error.Value.Parameter, error.Value.Message);
             }
 
-            lock (s_writeLock)
+            string Run()
             {
-                var pairError = CheckPairs(parsed);
-                if (pairError is not null)
+                lock (s_writeLock)
                 {
-                    return McpHelpers.Refusal(pairError.Value.Parameter, pairError.Value.Message);
-                }
-
-                var previous = new JsonObject();
-                var previousValues = new List<(Field Field, object Value)>();
-                foreach (var (field, _) in parsed)
-                {
-                    var before = field.Get();
-                    previousValues.Add((field, before));
-                    SetPath(previous, field.Path, ToNode(field, before));
-                }
-
-                Apply(parsed);
-                string? saveFailure = null;
-                try
-                {
-                    var node = (readRoot ?? App.SettingsRootForWrite)();
-                    SettingsWindow.WriteAlertKeys(node, App.AlertCooldownMinutes);
-                    if (!(write ?? (n => App.WriteSettingsDocument(n, "alert settings")))(node))
+                    if ((settingsWindowOpen ?? (() => false))())
                     {
-                        throw new IOException("settings.json could not be written.");
+                        return McpHelpers.Refusal("settings_json", "The Settings window is open, so the alert settings were not changed. Close it or change them there.");
                     }
-                }
-                catch (Exception ex)
-                {
-                    saveFailure = ex.Message;
-                }
 
-                if (saveFailure is not null)
-                {
-                    Apply(previousValues);
-                    return McpHelpers.Status("failed", $"Nothing was saved: {saveFailure} The running settings were put back as they were.");
-                }
+                    var pairError = CheckPairs(parsed);
+                    if (pairError is not null)
+                    {
+                        return McpHelpers.Refusal(pairError.Value.Parameter, pairError.Value.Message);
+                    }
 
-                var settings = JsonNode.Parse(McpAlertTools.GetAlertSettings().GetAwaiter().GetResult());
-                return JsonSerializer.Serialize(new
-                {
-                    status = "updated",
-                    updated_fields = parsed.Select(p => p.Field.Path).ToArray(),
-                    warnings = warnings.ToArray(),
-                    settings,
-                    previous,
-                    undo = new { tool = "update_alert_settings", arguments = new { settings_json = previous.ToJsonString() } },
-                }, McpHelpers.JsonOptions);
+                    var previous = new JsonObject();
+                    var previousValues = new List<(Field Field, object Value)>();
+                    foreach (var (field, _) in parsed)
+                    {
+                        var before = field.Get();
+                        previousValues.Add((field, before));
+                        SetPath(previous, field.Path, ToNode(field, before));
+                    }
+
+                    Apply(parsed);
+                    string? saveFailure = null;
+                    try
+                    {
+                        var node = (readRoot ?? App.SettingsRootForWrite)();
+                        SettingsWindow.WriteAlertKeys(node, App.AlertCooldownMinutes);
+                        if (!(write ?? (n => App.WriteSettingsDocument(n, "alert settings")))(node))
+                        {
+                            throw new IOException("settings.json could not be written.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        saveFailure = ex.Message;
+                    }
+
+                    if (saveFailure is not null)
+                    {
+                        Apply(previousValues);
+                        return McpHelpers.Status("failed", $"Nothing was saved: {saveFailure} The running settings were put back as they were.");
+                    }
+
+                    var settings = JsonNode.Parse(McpAlertTools.GetAlertSettings().GetAwaiter().GetResult());
+                    return JsonSerializer.Serialize(new
+                    {
+                        status = "updated",
+                        updated_fields = parsed.Select(p => p.Field.Path).ToArray(),
+                        warnings = warnings.ToArray(),
+                        settings,
+                        previous,
+                        undo = new { tool = "update_alert_settings", arguments = new { settings_json = previous.ToJsonString() } },
+                    }, McpHelpers.JsonOptions);
+                }
             }
+
+            return dispatcher is not null && !dispatcher.CheckAccess() ? dispatcher.Invoke(Run) : Run();
         }
         catch (Exception ex)
         {
@@ -307,6 +331,11 @@ public sealed class McpAlertSettingsWriteTools
         if (!s_byPath.TryGetValue(path, out var field))
         {
             return new Refused(path, $"Unknown field '{path}'. Send fields in the nested shape get_alert_settings returns.");
+        }
+
+        if (parsed.Any(p => p.Field.Path == path))
+        {
+            return new Refused(path, $"{path} was sent twice (nested and as a dotted key). Send it once.");
         }
 
         var (value, error) = Coerce(field, node);

@@ -12,7 +12,9 @@ using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Threading;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite;
 using PerformanceMonitorLite.Mcp;
@@ -182,6 +184,10 @@ public sealed class McpUpdateAlertSettingsTests : IDisposable
     [InlineData("""{"excluded_volumes":"C:\\"}""", "excluded_volumes")]
     [InlineData("""{"cpu":{"nonsense":1}}""", "cpu.nonsense")]
     [InlineData("""{"nonsense":1}""", "nonsense")]
+    /* A field sent nested AND as a dotted key was checked on its first value and written with its last: here 10 against 20 passes
+       the Critical-at-or-above-Warning rule and 50 is stored. It is refused, naming the path. */
+    [InlineData("""{"runnable_queue":{"warning_per_scheduler":10,"critical_per_scheduler":20},"runnable_queue.warning_per_scheduler":50}""", "runnable_queue.warning_per_scheduler")]
+    [InlineData("""{"cpu.threshold_percent":10,"cpu":{"threshold_percent":20}}""", "cpu.threshold_percent")]
     [InlineData("""{"smtp":{"server":"mail.example.test"}}""", "smtp")]
     [InlineData("""{"runnable_queue":{"warning_per_scheduler":10,"critical_per_scheduler":5}}""", "Runnable queue critical")]
     [InlineData("""{"runnable_queue":{"critical_per_scheduler":1}}""", "Runnable queue critical")]
@@ -227,6 +233,110 @@ public sealed class McpUpdateAlertSettingsTests : IDisposable
         Assert.Equal("failed", result["status"]!.GetValue<string>());
         Assert.Equal(cpu, App.AlertCpuThreshold);
         Assert.Equal(excluded, App.AlertExcludedDatabases);
+    }
+
+    /// <summary>The Settings window's Save re-applies every alert control, so it would silently undo an update made while it is open.
+    /// The call is refused, nothing is applied and nothing is written.</summary>
+    [Fact]
+    public void WhileTheSettingsWindowIsOpen_TheCallIsRefused_AndChangesAndWritesNothing()
+    {
+        var cpu = App.AlertCpuThreshold;
+        var writes = 0;
+
+        var result = JsonNode.Parse(McpAlertSettingsWriteTools.UpdateAlertSettingsCore(
+            """{"cpu":{"threshold_percent":42}}""",
+            readRoot: () => (JsonObject)_document.DeepClone(),
+            write: _ => { writes++; return true; },
+            settingsWindowOpen: () => true))!;
+
+        Assert.Equal("invalid", result["status"]!.GetValue<string>());
+        Assert.Contains("Settings window is open", result["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.Equal(cpu, App.AlertCpuThreshold);
+        Assert.Equal(0, writes);
+
+        var closed = JsonNode.Parse(Call("""{"cpu":{"threshold_percent":42}}"""))!;
+        Assert.Equal("updated", closed["status"]!.GetValue<string>());
+    }
+
+    /// <summary>Every other settings.json writer reads the whole document, changes one key and writes it back on the UI thread. The
+    /// tool is called off it, so its read-modify-write is handed to that thread: a writer of another key that arrives in the middle
+    /// of it runs after it and reads its result, so both keys are in the file. Run on the calling thread, the other writer finished
+    /// while the tool held its stale copy and the tool's write erased the other key.</summary>
+    [Fact]
+    public void AToolWrite_AndAnotherKeysWriteOnTheUiThread_BothSurvive()
+    {
+        Dispatcher? dispatcher = null;
+        using var started = new ManualResetEventSlim();
+        var thread = new Thread(() =>
+        {
+            dispatcher = Dispatcher.CurrentDispatcher;
+            started.Set();
+            Dispatcher.Run();
+        })
+        { IsBackground = true };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        started.Wait();
+
+        try
+        {
+            using var otherWriterDone = new ManualResetEventSlim();
+            var gate = new object();
+
+            JsonObject Read()
+            {
+                lock (gate) { return (JsonObject)_document.DeepClone(); }
+            }
+
+            bool Write(JsonNode node)
+            {
+                lock (gate)
+                {
+                    _document.Clear();
+                    foreach (var (key, value) in (JsonObject)node)
+                    {
+                        _document[key] = value?.DeepClone();
+                    }
+
+                    return true;
+                }
+            }
+
+            /* App.WriteSetting for the sidebar: read the document, set one key, write it back. */
+            void OtherWriter()
+            {
+                var root = Read();
+                root["sidebar_collapse_state"] = "collapsed";
+                Write(root);
+                otherWriterDone.Set();
+            }
+
+            var result = JsonNode.Parse(McpAlertSettingsWriteTools.UpdateAlertSettingsCore(
+                """{"cpu":{"threshold_percent":42}}""",
+                readRoot: () =>
+                {
+                    var stale = Read();
+                    /* The other writer arrives while the tool holds its copy. On the UI thread it queues behind the tool and this wait
+                       times out; anywhere else it runs now and finishes inside the wait. */
+                    dispatcher!.BeginInvoke(OtherWriter);
+                    otherWriterDone.Wait(TimeSpan.FromMilliseconds(500));
+                    return stale;
+                },
+                write: Write,
+                dispatcher: dispatcher))!;
+
+            Assert.Equal("updated", result["status"]!.GetValue<string>());
+            Assert.True(otherWriterDone.Wait(TimeSpan.FromSeconds(10)), "the other writer never ran");
+
+            var final = Read();
+            Assert.Equal(42, final["alert_cpu_threshold"]!.GetValue<int>());
+            Assert.Equal("collapsed", final["sidebar_collapse_state"]!.GetValue<string>());
+        }
+        finally
+        {
+            dispatcher!.InvokeShutdown();
+            thread.Join(TimeSpan.FromSeconds(5));
+        }
     }
 
     [Fact]
