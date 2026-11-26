@@ -68,9 +68,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// onto the read tools' (id, storage name, display name) identity — rather than the <c>servers</c> registry the
 /// read tools resolve against (#3653 A15/A16: that registry is written on FIRST successful connect, so a server
 /// added with a bad password or an unreachable host could not be removed by the tool that added it), by the
-/// matching rule the read tools use: an exact match, or a partial match ONLY when it is unique — a name several
-/// servers answer to is refused with the candidates named, because a DELETE must never remove whichever sibling
-/// sorts first. It then DELETEs the definition row and says whether a registry row (history) exists beside it.</para>
+/// matching rule the read tools use, but a DELETE acts on an exact name only: a name several servers answer to
+/// is refused with the candidates named, because a DELETE must never remove whichever sibling sorts first, and a
+/// name that matches one server only in part is answered <c>partial_match</c> with that server named and nothing
+/// removed, because a remove must not act on a guess (#9665). It then DELETEs the definition row and says whether a registry row (history) exists beside it.</para>
 ///
 /// <para><b>Security.</b> These tools connect (like every MCP tool) as the least-privilege <c>mcp</c> role, granted
 /// (see <see cref="DarlingManagedRoles"/>) INSERT/UPDATE/DELETE on <c>config.config_monitored_servers</c> — a single
@@ -417,32 +418,34 @@ public sealed partial class DarlingMcpServerAdminTools
         "Deletes a monitored server's definition from the shared central store (config_monitored_servers) " +
         "immediately, no confirm step; the service drops it from collection within one sweep. Already-collected " +
         "historical data is NOT deleted. Matches by exact name first (display or storage name/address, " +
-        "case-insensitive); a partial match is honored only if exactly one definition contains it, otherwise " +
-        "nothing is deleted and candidates are listed for re-issue. Matches against DEFINITIONS, not the " +
+        "case-insensitive). A partial match deletes nothing: the one definition that contains the text is " +
+        "named, and the call is repeated with its exact name. Matches against DEFINITIONS, not the " +
         "connected registry, so an unconnected server can still be removed. <<GUIDE>> " +
         "Removes a monitored server from the fleet by name (its display name or storage name / address, as " +
         "list_servers reports them). The name is resolved against the monitored-server DEFINITIONS in the central " +
         "store (config_monitored_servers, the table add_servers writes and this tool deletes from), NOT against the " +
         "registry of servers that have connected, so a server that was added but has never connected can be removed " +
         "by the tool that added it. Matching is exact first (case-insensitive, against the storage name and the " +
-        "display name); a PARTIAL match is honored ONLY when exactly one defined server contains the text. When " +
-        "the name is ambiguous: an exact name shared by two definitions, or a fragment such as \"-01\" that " +
+        "display name). A PARTIAL match never deletes: when exactly one defined server contains the text the " +
+        "response is {status:\"partial_match\", matched_by:\"partial\", candidates:[{server, display_name, " +
+        "ever_connected}], message}, nothing is deleted, and the call is repeated with that server's exact display " +
+        "name or storage name. When the name is ambiguous: an exact name shared by two definitions, or a fragment such as \"-01\" that " +
         "several servers contain, NOTHING is deleted and the response is {status:\"ambiguous\", candidates:[{server, " +
         "display_name, ever_connected}], message}; re-issue with one candidate's full name. Deletes the server's " +
         "definition from the central monitoring store; the running service drops it from its collection set within " +
         "one sweep and drops this install's own Extended Events sessions on the server, leaving the shared ones and " +
         "any session another registration of this install keeps. Already-collected historical data is NOT deleted. Returns {status:\"removed\", server, " +
-        "display_name, matched_by:\"exact\"|\"partial\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition in the keys add_servers takes; the stored password cannot be read back, so a SQL or service-principal row carries the placeholder <password> in its place, and the AWS external ID is left out), undo (the add_servers call that re-adds it, with that same password placeholder), undo_note (what a re-add does not bring back)} on " +
+        "display_name, matched_by:\"exact\", matched_in:\"config_monitored_servers\", ever_connected, previous (the removed definition in the keys add_servers takes; the stored password cannot be read back, so a SQL or service-principal row carries the placeholder <password> in its place, and the AWS external ID is left out), undo (the add_servers call that re-adds it, with that same password placeholder), undo_note (what a re-add does not bring back)} on " +
         "success: ever_connected says whether the connected-servers registry (populated on a server's first " +
         "successful connection) also had a row for it, i.e. whether any history exists under its id; " +
-        "{status:\"ambiguous\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
+        "{status:\"ambiguous\", ...} or {status:\"partial_match\", ...} as above; or {status:\"not_found\", ...} when no definition matches the name. A " +
         "not_found whose matched_in is \"servers\" means the name IS a connected server but has no definition in the " +
         "store to delete (it is defined in darling.json, or its definition was already removed); the message otherwise " +
         "lists the servers that are defined. " +
         "server_name is matched as list_servers / get_alert_history report it.")]
     public static async Task<string> RemoveServer(
         NpgsqlDataSource postgres,
-        [Description("The name of the monitored server to remove: its display name or storage name / address. A partial name is accepted only when it matches exactly one server.")] string server_name)
+        [Description("The name of the monitored server to remove: its display name or storage name / address. A partial name deletes nothing: the one server it matches is named and the call is repeated with the exact name.")] string server_name)
     {
         try
         {
@@ -467,8 +470,9 @@ public sealed partial class DarlingMcpServerAdminTools
 
                The read resolver (DarlingServerResolver) matches with this same rule. It was first-wins on a
                partial match once, and on a DELETE the payload IS the damage: "-01" against "-01"/"-02" removed
-               whichever sorted first, and said so only after the fact (#3541 A14). So the partial match survives,
-               as documented, but only when it is UNIQUE; anything else is refused with the candidates named. */
+               whichever sorted first, and said so only after the fact (#3541 A14). A unique partial was honored after
+               that, and a remove must not act on a guess either (#9665): a partial match, unique or not, is refused,
+               and the unique one is named so the caller repeats the call with the exact name. */
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
             var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name, nameClash: NameClash.Refuse);
             var everConnected = definitions.ToDictionary(d => d.Server.ServerId, d => d.EverConnected);
@@ -523,6 +527,20 @@ public sealed partial class DarlingMcpServerAdminTools
                     matched_by = target.MatchedBy,
                     matched_in = "config_monitored_servers",
                     candidates = target.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName, ever_connected = everConnected[c.ServerId] }),
+                }, McpHelpers.JsonOptions);
+            }
+
+            if (target.MatchedBy != "exact")
+            {
+                var guess = target.Candidates[0];
+                return JsonSerializer.Serialize(new
+                {
+                    status = "partial_match",
+                    message = $"'{server_name}' matches one defined server only in part ({guess.DisplayName ?? guess.ServerName}); nothing was removed. " +
+                              "Re-issue remove_server with that server's exact display name or storage name.",
+                    matched_by = target.MatchedBy,
+                    matched_in = "config_monitored_servers",
+                    candidates = new[] { new { server = guess.ServerName, display_name = guess.DisplayName, ever_connected = everConnected[guess.ServerId] } },
                 }, McpHelpers.JsonOptions);
             }
 
