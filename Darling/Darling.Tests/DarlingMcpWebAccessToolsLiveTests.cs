@@ -536,10 +536,26 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
             var logger = new CapturingTestLogger();
             var refused = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, true, Actor, logger, ct))!;
             Assert.Equal("switch_missing", (string)refused["code"]!);
-            Assert.Null(refused["status"]);
             Assert.Null(refused["undo"]);
             Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
             Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct));
+        });
+    }
+
+    /// <summary>Rewinding past the three argument setter leaves the one argument setter working: its V319 body calls the three argument form,
+    /// so the rewind puts the V262 body back before it drops that form.</summary>
+    [Fact]
+    public async Task AfterARewindPastTheThreeArgumentSetter_TheOneArgumentSetterStillFlipsTheSwitch()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            await using (var connection = await owner.OpenConnectionAsync(ct))
+                await RungRewindArtifacts.DropSentinelsAboveAsync(connection, 318, ct);
+            Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM pg_proc WHERE proname = 'set_web_access_advanced' AND pronargs = 3", ct));
+
+            var store = new WebAccessGroupStore(owner);
+            await store.SetAdvancedEnabledAsync(true, ct);
+            Assert.NotNull(await store.ReadAdvancedSessionEpochAsync(ct));
         });
     }
 

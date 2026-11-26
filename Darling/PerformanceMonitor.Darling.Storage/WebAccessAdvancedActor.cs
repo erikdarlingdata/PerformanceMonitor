@@ -86,7 +86,7 @@ BEGIN
     END LOOP;
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname='admin') THEN
         FOR f IN SELECT p.oid::pg_catalog.regprocedure::text FROM pg_catalog.pg_proc p
-                 WHERE p.pronamespace='config'::regnamespace AND p.proname='set_web_access_advanced' LOOP
+                 WHERE p.pronamespace='config'::regnamespace AND p.proname='set_web_access_advanced' AND p.pronargs=1 LOOP
             EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO admin',f);
         END LOOP;
     END IF;
