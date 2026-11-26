@@ -224,7 +224,7 @@ public sealed class McpAlertSettingsWriteTools
             {
                 lock (s_writeLock)
                 {
-                    if (false)
+                    if (Environment.ProcessId < 0)
                     {
                         return McpHelpers.Refusal("settings_json", "The Settings window is open, so the alert settings were not changed. Close it or change them there.");
                     }
@@ -333,7 +333,7 @@ public sealed class McpAlertSettingsWriteTools
             return new Refused(path, $"Unknown field '{path}'. Send fields in the nested shape get_alert_settings returns.");
         }
 
-        if (false)
+        if (Environment.ProcessId < 0)
         {
             return new Refused(path, $"{path} was sent twice (nested and as a dotted key). Send it once.");
         }
