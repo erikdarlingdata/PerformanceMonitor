@@ -194,7 +194,7 @@ public sealed partial class DarlingMcpServerAdminTools
         "stored, and is never returned. password is the password itself: a value that starts with env: or file: is " +
         "rejected as \"invalid\", because references are set in the configuration file. " +
         "Returns {requested:N, added:N, skipped:N, collided:N, failed:N, results:[{server, " +
-        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail, undo}]}. An added entry's undo is the remove_server call for it; every other entry has undo null. requested is " +
+        "status:\"added\"|\"duplicate\"|\"collides\"|\"connection_failed\"|\"not_saved\"|\"invalid\", detail, undo}]}. An added entry's undo is the remove_server call for it; every other entry has undo null. An entry that carries a key this tool does not read (name for display_name, a misspelt key) is still processed with that key dropped, and its result adds ignored_keys:[{key, did_you_mean}], the key names only (did_you_mean is the key it reads that was likely meant, or null); an entry with no such key has no ignored_keys. requested is " +
         "the number of entries you sent and the four counters SUM to it, every entry lands in exactly one: " +
         "\"added\" → added, \"duplicate\" → skipped, \"collides\" → collided, \"connection_failed\", " +
         "\"not_saved\" and \"invalid\" → failed. Only added servers are monitored; read the other three counters before treating " +
@@ -262,6 +262,9 @@ public sealed partial class DarlingMcpServerAdminTools
 
             var results = new List<ServerResult>(invalidResults);
 
+            /* #9780: the keys of each entry the parse does not read, named in that entry's result. */
+            var unread = DarlingMcpAddServerKeys.ByEntry(servers_json);
+
             /* The MCP caller's policy refuses entries here, before any store access or probe. */
             entries = DarlingMcpAddServersPolicy.Screen(policy, entries, results);
 
@@ -272,7 +275,7 @@ public sealed partial class DarlingMcpServerAdminTools
                reports only the per-entry invalids. */
             if (entries.Count == 0)
             {
-                return Aggregate(results);
+                return Aggregate(results, unread);
             }
 
             /* Seed the case-folded dedupe gate from the authoritative store rows FIRST, then partition the batch —
@@ -429,7 +432,7 @@ public sealed partial class DarlingMcpServerAdminTools
                 }
             }
 
-            return Aggregate(results);
+            return Aggregate(results, unread);
         }
         catch (Exception ex)
         {
@@ -1764,7 +1767,7 @@ ON CONFLICT (server_id) DO NOTHING";
     /// status is added as a literal and the test is skipped, the first real call says so instead of summarising
     /// the batch short.</para>
     /// </summary>
-    internal static string Aggregate(List<ServerResult> results)
+    internal static string Aggregate(List<ServerResult> results, IReadOnlyDictionary<int, IReadOnlyList<UnreadServerKey>>? unread = null)
     {
         var ordered = results.OrderBy(r => r.Order).ToList();
         var counters = new Dictionary<string, int>(StringComparer.Ordinal)
@@ -1794,14 +1797,31 @@ ON CONFLICT (server_id) DO NOTHING";
             collided = counters["collided"],
             failed = counters["failed"],
             /* #6403: an added server's undo is the remove_server call for its storage name; a skipped, refused or failed entry changed nothing and has none. */
-            results = ordered.Select(r => new
-            {
-                server = r.Server,
-                status = r.Status,
-                detail = r.Detail,
-                undo = r.UndoServer is null ? null : DarlingMcpUndoShape.Call("remove_server", new JsonObject { ["server_name"] = r.UndoServer }),
-            }),
+            results = ordered.Select(r => ResultRow(r, unread)),
         }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// One entry of the answer's <c>results</c>. An entry whose keys the parse did not all read carries <c>ignored_keys</c> (#9780):
+    /// <c>[{key, did_you_mean}]</c>, each a key name and the key the core reads that it most likely meant (null when none is near).
+    /// A clean entry has no such field, so the answer a script reads today is unchanged. Names only, never a value.
+    /// </summary>
+    private static object ResultRow(ServerResult r, IReadOnlyDictionary<int, IReadOnlyList<UnreadServerKey>>? unread)
+    {
+        var undo = r.UndoServer is null ? null : DarlingMcpUndoShape.Call("remove_server", new JsonObject { ["server_name"] = r.UndoServer });
+        if (unread is null || !unread.TryGetValue(r.Order, out var keys))
+        {
+            return new { server = r.Server, status = r.Status, detail = r.Detail, undo };
+        }
+
+        return new
+        {
+            server = r.Server,
+            status = r.Status,
+            detail = r.Detail,
+            undo,
+            ignored_keys = keys.Select(k => new { key = k.Key, did_you_mean = k.DidYouMean }),
+        };
     }
 
     /// <summary>The probed facts for an <c>added</c> server, from the same describer the
