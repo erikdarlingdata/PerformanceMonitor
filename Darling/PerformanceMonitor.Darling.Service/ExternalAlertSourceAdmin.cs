@@ -400,7 +400,7 @@ ORDER BY s.source_id", owner);
     }
 
     /// <summary>
-    /// How many sessions a source's login holds open right now (#9641): what a rotate or a remove would end, told to the caller
+    /// How many sessions a source's login holds open at the moment of the call (#9641): what a rotate or a remove would end, told to the caller
     /// before it confirms. The login name column of pg_stat_activity is readable to every role.
     /// </summary>
     public static async Task<long> CountOpenSessionsAsync(NpgsqlConnection owner, string role, CancellationToken ct)
