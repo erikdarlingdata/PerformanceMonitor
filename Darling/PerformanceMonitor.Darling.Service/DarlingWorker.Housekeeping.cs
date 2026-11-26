@@ -1555,8 +1555,14 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// The sentence the store-log capture's warning gives as the cause (#9333). A 58P01 (UndefinedFile) means the log
     /// folder is not there, which is a store that keeps no log files, not a missing privilege: the compose store ran
     /// without logging_collector and named the privilege anyway. A 42501 (InsufficientPrivilege) keeps the privilege
-    /// text. Any other fault keeps the privilege text too, as it always did.
+    /// text, except the one PostgreSQL raises for a relative log_directory that leads out of the data directory: no grant
+    /// short of pg_read_server_files reads there, and an absolute log_directory needs none. Any other fault keeps the
+    /// privilege text too, as it always did.
     /// </summary>
+    /// <summary>The words PostgreSQL's file read refuses a relative path outside the data directory with (genfile.c), for a role
+    /// without pg_read_server_files.</summary>
+    internal const string RelativePathOutsideDataDirectoryRefusal = "path must be in or below the data directory";
+
     internal static string StoreLogCaptureFailureCause(Exception ex)
     {
         if (ex is PostgresException { SqlState: PostgresErrorCodes.UndefinedFile })
@@ -1564,7 +1570,14 @@ AND   j.hypertable_name = '{relation}'", connection))
             return "The store keeps no log files to read (logging_collector is off or the log folder is missing)";
         }
 
-        return "Reading the store's own log needs pg_read_server_files and EXECUTE on pg_read_binary_file; "
+        if (ex is PostgresException { SqlState: PostgresErrorCodes.InsufficientPrivilege } refused
+            && refused.MessageText.Contains(RelativePathOutsideDataDirectoryRefusal, StringComparison.Ordinal))
+        {
+            return "The store's log_directory is a relative path that leads out of the data directory, which PostgreSQL "
+                + "reads only for a role that holds pg_read_server_files; set log_directory to an absolute path instead";
+        }
+
+        return "Reading the store's own log needs pg_monitor and EXECUTE on pg_read_binary_file; "
             + "a bring-your-own store may not grant them";
     }
 
@@ -1737,9 +1750,13 @@ AND   j.hypertable_name = '{relation}'", connection))
                how they get read side by side.
 
                ITS OWN catch, unlike the two passes either side of it, and that asymmetry is the point. This
-               is the only pass here whose PRIVILEGE is not guaranteed: reading the log needs
-               pg_read_server_files plus an explicit GRANT on pg_read_binary_file, which the managed store's
-               bootstrap superuser has and a bring-your-own store's owner may not have given. Sharing the
+               is the only pass here whose PRIVILEGE is not guaranteed: reading the log needs pg_monitor
+               (pg_ls_logdir and the log_directory setting) plus an explicit GRANT on pg_read_binary_file,
+               which the managed store's bootstrap superuser has and a bring-your-own store's owner may not
+               have given. pg_read_server_files is not needed: PostgreSQL lets a role with EXECUTE read any
+               file under the data directory or under an absolute log_directory. The one place it refuses is a
+               relative log_directory that leads out of the data directory, and the cause says to make it
+               absolute. Sharing the
                outer catch would let that one permanent condition cost the collector-cost flush below it
                every hour forever - a new failure in a pass that was working. Warning rather than Error for
                the same reason: on a store that cannot grant it this repeats hourly and would otherwise
@@ -1753,16 +1770,23 @@ AND   j.hypertable_name = '{relation}'", connection))
                     var captures = await StoreLogSweep.SweepAsync(connection, DateTime.UtcNow, _logger, budget.Token);
                     return new StorePassSteps.StepCounts(Built: captures.Count);
                 });
+                _storeLogCaptureNotice.Succeeded();
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                var unavailable = ex is PostgresException
-                {
-                    SqlState: PostgresErrorCodes.UndefinedFile or PostgresErrorCodes.InsufficientPrivilege,
-                };
-                if (unavailable && _storeLogCaptureUnavailableWarned)
+                if (!_storeLogCaptureNotice.ShouldWarn(ex))
                 {
                     _logger.LogDebug("Store log capture is still unavailable: {Message}", ex.Message);
+                }
+                else if (StoreLogCaptureNotice.IsStoreSideCause(ex))
+                {
+                    _logger.LogWarning(
+                        "Store log capture failed, so this hour's store-log census is missing (get_store_log "
+                        + "reports the capture gap). {Cause}: {Message}. Capture needs logging_collector on, a "
+                        + "log_directory that is absolute or inside the data directory, and a store login that holds "
+                        + "pg_monitor and EXECUTE on pg_read_binary_file(text, bigint, bigint). "
+                        + "This is said once per service start: the same cause repeats at Debug until it changes.",
+                        StoreLogCaptureFailureCause(ex), ex.Message);
                 }
                 else
                 {
@@ -1770,7 +1794,6 @@ AND   j.hypertable_name = '{relation}'", connection))
                         "Store log capture failed, so this hour's store-log census is missing (get_store_log "
                         + "reports the capture gap). {Cause}: {Message}",
                         StoreLogCaptureFailureCause(ex), ex.Message);
-                    _storeLogCaptureUnavailableWarned |= unavailable;
                 }
             }
 

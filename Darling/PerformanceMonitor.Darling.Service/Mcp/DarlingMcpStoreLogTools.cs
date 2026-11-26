@@ -127,7 +127,7 @@ public sealed class DarlingMcpStoreLogTools
                     + "Two conditions make this permanently empty on a store the "
                     + "operator brought themselves rather than one the service provisioned: the server may "
                     + "have no logging collector writing files for pg_ls_logdir() to list, and the role the "
-                    + "service connects as needs pg_read_server_files plus EXECUTE on pg_read_binary_file "
+                    + "service connects as needs pg_monitor plus EXECUTE on pg_read_binary_file "
                     + "(the managed store's own role is the cluster's bootstrap superuser and has both). "
                     + "The service log carries a warning naming whichever it was.");
             }

@@ -246,7 +246,7 @@ public class StoreLogSelfMonitoringStoreTests
 
         /* And the store-log capture has its OWN catch, which the two passes either side of it do not. This
            is the only pass on the tick whose PRIVILEGE is not guaranteed - reading the log needs
-           pg_read_server_files plus EXECUTE on pg_read_binary_file, which a bring-your-own store's owner may
+           pg_monitor plus EXECUTE on pg_read_binary_file, which a bring-your-own store's owner may
            not have granted - so sharing the outer catch would let one permanent condition cost the
            collector-cost flush BELOW it every hour forever. Asserted by position: a catch has to sit between
            the two calls. */
@@ -269,14 +269,8 @@ public class StoreLogSelfMonitoringStoreTests
             + "collector-cost flush, so a capture that closed it would take the re-mask and the flush "
             + "down too");
 
-        /* #3971: a capture the store will never allow (58P01 no log directory, 42501 no log read) warns once
-           per process, then drops to Debug, inside the capture's own catch. */
-        var captureCatch = body.Substring(innerCatch, reopen - innerCatch);
-        Assert.Contains("PostgresErrorCodes.UndefinedFile", captureCatch, StringComparison.Ordinal);
-        Assert.Contains("PostgresErrorCodes.InsufficientPrivilege", captureCatch, StringComparison.Ordinal);
-        Assert.Contains("_storeLogCaptureUnavailableWarned", captureCatch, StringComparison.Ordinal);
-        Assert.Contains("LogDebug(", captureCatch, StringComparison.Ordinal);
-
+        /* The once-then-Debug rule for a capture the store will never allow is behaviour, pinned by
+           NewInstallLogNoiseTests, not by what the catch's text spells. */
         /* No second timer: a new cadence field would put the two series on different grids, which is the
            thing riding this tick buys. */
         Assert.DoesNotContain("_nextStoreLog", worker, StringComparison.Ordinal);

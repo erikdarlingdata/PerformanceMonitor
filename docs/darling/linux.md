@@ -270,7 +270,7 @@ All servers reachable.
 
 Two things to expect here:
 
-- **A note about the registry on a new store.** Before the first start the store has no tables, so the command prints `NOTE: could not read the store's registry (42P01: relation "config_monitored_servers" does not exist ...), so validating darling.json's own server list instead.` That is expected on a store that has never been started ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)).
+- **A note about the registry on a new store.** Before the first start the store has no tables, so the command prints `NOTE: the store has no server registry yet, so validating darling.json's own server list instead.` That is expected on a store that has never been started ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)).
 - **A certificate failure names the certificate.** An untrusted certificate fails with `[FAIL] <display-name>: A connection was successfully established with the server, but then an error occurred during the pre-login handshake. (provider: TCP Provider, error: 35 - An internal exception was caught) The server's certificate chain is not trusted by this machine, so add the issuing CA to the system trust store, or set trustServerCertificate for this server knowing that it skips the check.` The SQL Server's certificate chains to a CA that is not in the Linux trust store. Amazon RDS for SQL Server is one such case. When the certificate was not issued to the name in `host`, the last sentence says that instead, or as well. The secure fix is to add the CA: put each CA certificate as its own `.crt` file under `/usr/local/share/ca-certificates/`, run `sudo update-ca-certificates`, and run the pre-flight again. The other fix is `"trustServerCertificate": true` on the server's entry, which keeps the connection encrypted and accepts any certificate. Choose before the first start, because `servers` is only a seed.
 
 ## Step 8: Write the unit and start the service
@@ -344,10 +344,11 @@ sudo -u postgres psql -X -d darling -c "SELECT server_id, status, count(*) FROM 
 
 ### What a new install logs that is not a fault
 
-These `WARN` lines appear on a healthy new install ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)):
+These lines appear on a healthy new install ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)):
 
-- `Retention policy for <table> HELD PAUSED` or `RE-HELD`, for the query statistics tables and their rollups. The rollups cannot cover a day that has not closed, so a new store carries these for at least its first day. While a policy is held, its purge is stopped. The message points at `--backfill-rollups`, which a new store does not need.
-- `Store log capture failed`, every hour. See [Store log capture](#store-log-capture).
+- `Retention policy for <table> HELD PAUSED` or `RE-HELD`, for the query statistics tables and their rollups. The rollups cannot cover a day that has not closed, so a new store carries these holds for at least its first day. A held policy's purge is stopped, but while the store's oldest row is newer than the policy's horizon there is nothing to purge yet. The line says so and names no remedy: `HELD PAUSED` at `Information` when the service starts and at `Debug` on the hourly pass, `RE-HELD` at `Information`. Once the oldest row is past the horizon, a hold can cost history, and the line is a `WARN` that names the remedies, among them `--backfill-rollups`. `HELD PAUSED` then warns at each start and on the first hourly pass after the crossing.
+- `Store log capture failed`, a `WARN` once per service start and then at `Debug` while the cause stays the same. See [Store log capture](#store-log-capture).
+- `Rollup coverage floor: <n> rollup(s) hold no rows yet`, one `Information` line at start. Each of those rollups writes its own floor line at `Debug`.
 
 ### Size the workers after the first start
 
@@ -362,7 +363,7 @@ Work the formula with those two numbers and the host's RAM. For host RAM, use th
 ## Logs
 
 - **The file log is the one to read.** It is `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, one file for each day, kept 14 days, one line for each event.
-- **The journal is the noisy one.** `journalctl -u darling` shows the same events in the console format, which puts the source on one line and the message on the next. Each start also writes more than 30 `Rollup coverage floor` lines there ([#9695](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9695)). Use the journal for what systemd itself reports: starts, stops and a process that exits.
+- **The journal is the noisy one.** `journalctl -u darling` shows the same events in the console format, which puts the source on one line and the message on the next. Use the journal for what systemd itself reports: starts, stops and a process that exits.
 - **The log files are mode `644` inside a `700` folder.** The service creates each file with the process umask. The folder's mode is what keeps other users out, so this is harmless. To make the files owner-only as well, add `UMask=0077` to the unit's `[Service]` section and restart the service.
 - **The log level** is set with a standard .NET logging source. In the unit, that is a line such as `Environment=Logging__LogLevel__PerformanceMonitor.Darling.Service=Debug`. See [Logs](operations.md#logs).
 - There is no Windows event log on Linux. The file log and the journal are the two surfaces.
