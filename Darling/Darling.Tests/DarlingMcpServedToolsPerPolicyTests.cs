@@ -367,6 +367,7 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
         "merge_deadlock_signatures 01111 StoreRequired server_name",
         "mint_personal_token 00100 StoreRequired",
         "mute_analysis_finding 01100 StoreRequired server_name",
+        "new_password_key 00100 StoreRequired",
         "pause_collection 01100 StoreRequired",
         "post_investigation_message 00011 StoreRequired",
         "purge_expired_mute_rules 01100 StoreRequired",
@@ -379,6 +380,7 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
         "remove_server 00100 StoreRequired server_name",
         "remove_webhook_signing_key 01100 StoreRequired",
         "reset_collector_schedules 01100 StoreRequired server_name",
+        "reset_password_key 00100 StoreRequired",
         "restore_alert_history 01100 StoreRequired",
         "resume_collection 01100 StoreRequired",
         "revoke_personal_token 00100 StoreRequired",
@@ -437,10 +439,10 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
     /// base the per-class registration was proved against. Written out by the capture, not asserted.</summary>
     private static readonly string[] ExpectedHashes =
     {
-        "off: 213 tools 2CC9D2CD9ED32CF0D1978197AA7E89FB2000B3D7CCD50390E1DF299592BE4638 instructions 0EAEE45A4524A3D21DB38D07B72F348DA9E27EDDCCD97B29BC43E3814975ABE0",
-        "writes: 297 tools AC1F3F24023C5C4AB03C563D535795D6EC4C2D151FB1ECCE395EC94BAD5E8029 instructions 321B308A9A3B1491BDB0DE53A2699D7A164FFC6546FF48F0760FDF0F2739F9FC",
-        "writes+admin: 301 tools 2D2A7B421AD51DAF66536E449DE053AAAAF4E16547515C2C46B0008EFA3920DF instructions DBD3E64F81431AFD62C6F96E70AC6FC0A0C4FE113CC792890C2B861658B1C0F7",
-        "investigations: 234 tools C0FCC99B3EFE43CCB37B46B9D03D15FC38882FAC8E2843179A1829B0512ECC08 instructions E4286DD46F5EB726E3A7EA3699CABD020D7B1AEC9AFEFF91D34A256273B5C8BF",
-        "investigations, agent mute rules off: 234 tools C0FCC99B3EFE43CCB37B46B9D03D15FC38882FAC8E2843179A1829B0512ECC08 instructions 8D67518A653088BF46F0BB84431E5D68D6C0A1750CCD9BCA75E7841679C05320",
+        "off: 213 tools 7153F759705297B5A26526CEF227483A3852ED4F53AF8A8D6241949753ADFE0B instructions 0ECF401F25F759A7FC61FE7B1DB5B51D09E1DB3099E66E7D2EF6B67E972BF796",
+        "writes: 298 tools 6EF6055064A0A51B18DDE1017611C9DD27758E9AA1D50D89EFF6274AE8194E75 instructions F391D2043863EDC5E24C0F7650A7CE1E1B18B91EB9D4F16627F983EC3E4E0E35",
+        "writes+admin: 304 tools 23DCD3800CFB3E01BE9BE8DB13E23188696FC0CEF6A6AE8555DCDCB3ADD37B51 instructions 4E8CF545871705EC5CA479052778633C447242E307E9AF889A2F323117122D02",
+        "investigations: 234 tools C0C2E12BC624AEDC5DD740FD1579D1E593DFE24B87F1C2FB7124930030C9DD14 instructions C31D4A9F002B902E55B0BA5EB35304EA883B2D27ECB95DDB6707AFBE80137B72",
+        "investigations, agent mute rules off: 234 tools C0C2E12BC624AEDC5DD740FD1579D1E593DFE24B87F1C2FB7124930030C9DD14 instructions EEE200C16B48ADE8371B84445AB1E1C5E3E5E3C824C8048184536F7BCE648FC3",
     };
 }

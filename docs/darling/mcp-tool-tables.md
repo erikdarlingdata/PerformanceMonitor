@@ -295,6 +295,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `merge_deadlock_signatures` | `config.investigation_signature_merges`<br>`config.investigation_signature_days` |
 | `mint_personal_token` | `config.mcp_personal_token` (insert)<br>`config.investigation_journal` |
 | `mute_analysis_finding` | `config.analysis_muted`<br>`collect.analysis_findings` |
+| `new_password_key` | None. It writes a key file into the service's own pending-password-keys folder on its machine and answers with the file's path and the key's fingerprint. |
 | `pause_collection` | `config.config_command`<br>`config.config_service` |
 | `post_investigation_message` | `config.investigation_requests` (claim check)<br>`config.investigation_journal` (insert) |
 | `purge_expired_mute_rules` | `config.config_mute_rules` |
@@ -308,6 +309,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `remove_webhook_signing_key` | `config.config_notification`<br>`config.config_notification_routes` |
 | `rotate_alert_source` | `config.external_alert_source` (read, as the store owner)<br>a database login (new password, as the store owner) |
 | `reset_collector_schedules` | `config.config_collector_schedules`<br>`config.config_collector_run_times` |
+| `reset_password_key` | `config.password_key` (update)<br>`config.config_monitored_servers` (read, to count the sealed passwords)<br>`config.config_notification` (read) |
 | `restore_alert_history` | `config.config_alert_log` |
 | `resume_collection` | `config.config_command`<br>`config.config_service` |
 | `rotate_web_access_group_token` | `config.web_access_groups` (update)<br>`config.web_access_group_events` (insert) |

@@ -108,6 +108,7 @@ public sealed partial class DarlingWorker
                 /* #8006 review: a passwordKey env: variable leaves the environment here, before the managed store below
                    or anything else this process starts can inherit it. Does nothing without the setting. */
                 DarlingPasswordKeySource.CaptureForService(config);
+                PublishPasswordKeyFacts(config, configPath);
                 _analyzerConfig = config.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
                 /* #7674: the trigram index option is read by get_store_metrics and by the all-servers find_queries_by_text refusal from process
                    start, long before the migrations finish (and for good when they fail). Set it the moment the file loads, not when the
@@ -641,6 +642,23 @@ public sealed partial class DarlingWorker
                     backup);
             }
         }
+    }
+
+    /* #9644: the password key tools read the credentials folder and the passwordKey fact the service started with, never the file
+       again. A folder that cannot be worked out is published as null: the tool then refuses and says so. */
+    private void PublishPasswordKeyFacts(DarlingConfig config, string configPath)
+    {
+        string? credentials = null;
+        try
+        {
+            credentials = DarlingLogHashKeyFile.DirectoryFor(config, configPath);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning("The password key folder could not be worked out ({Type}: {Message}). new_password_key refuses until the service is restarted with a readable config.", ex.GetType().Name, ex.Message);
+        }
+
+        _passwordKeyFacts?.Publish(credentials, !string.IsNullOrWhiteSpace(config.PasswordKey));
     }
 
     /* #5450: captured at the very top of ExecuteAsync, before any store work; the fallback when the process

@@ -182,6 +182,8 @@ public sealed class PlanForceNoWritePathTests
             nameof(DarlingMcpAlertSourceTools) + "." + nameof(DarlingMcpAlertSourceTools.RemoveAlertSource),
             nameof(DarlingMcpAlertSourceTools) + "." + nameof(DarlingMcpAlertSourceTools.RotateAlertSource),
             nameof(DarlingMcpAlertTools) + "." + nameof(DarlingMcpAlertTools.GenerateWebhookSigningKey),
+            /* #9644: a password key reset marks the key row replaced and counts sealed values, which only the store owner can do, and it asks for the key's fingerprint first. */
+            nameof(DarlingMcpPasswordKeyTools) + "." + nameof(DarlingMcpPasswordKeyTools.ResetPasswordKey),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.CreatePlanGuide),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.DropPlanGuide),
             nameof(DarlingMcpPlanForceTools) + "." + nameof(DarlingMcpPlanForceTools.EvictCachedPlan),

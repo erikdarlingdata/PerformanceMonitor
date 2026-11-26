@@ -104,6 +104,17 @@ It changes the store only, as the store owner, and never touches a key file. It 
 
 With [`passwordKey`](configuration.md#passwordkey-string-optional) set in `darling.json`, the service never makes a key, so the verb ends with `Put a new password key in the passwordKey source (make one with --new-password-key), then restart the service.` and the number of saved passwords to enter again. Until the new key is in that source, a start with the old key gives the state `reset_pending` and publishes no key.
 
+### The same from MCP (#9644)
+
+With `mcp.allowWrites` and `mcp.allowServerAdmin` both on (and a token), two tools do the same. Each calls the code the verb calls, so the numbers and the words are the verb's.
+
+| Tool | The verb it matches | What it does |
+|---|---|---|
+| `reset_password_key` | `--reset-password-key` | Marks the current key replaced. A reset has no undo: every saved password sealed to it must be entered again, and the answer says how many. Restart the service afterwards. Called without `confirm`, it changes nothing and answers with that count and the current key's fingerprint. To reset, call it again with `confirm: true` and `confirm_fingerprint` set to that fingerprint. A missing or wrong fingerprint is refused and nothing changes. |
+| `new_password_key` | `--new-password-key` | Takes no path. Writes a new key to the `pending-password-keys` folder inside the folder that holds the service's active password key file, as `new-password-key-<fingerprint>.key`, and returns that path and the fingerprint, never the key. It creates the folder readable only by the service's account, and refuses a folder that is a link, is owned by another account or that anyone else can read or change. It also refuses when the credentials folder is on a network location, when `passwordKey` is set (the key is then not a file the service keeps), when the service has no key file yet, and when 5 key files are already waiting there. Install the key you want, then delete the files. |
+
+There is no tool for the self-check, which stays a command-line build check (`--self-check-password-key`). There is no tool for the one-time pin step of the old-format passwords. It has no verb. The service runs it at start and again on every sweep while it waits.
+
 ## Set the time of day a daily collector runs (`--set-collector-run-at`)
 
 A collector that runs once a day or less often, such as `index_object_stats`, can start at a time you choose. The verb writes the same row as the Viewer's Collector Schedules window. It takes a collector name and one of three values:

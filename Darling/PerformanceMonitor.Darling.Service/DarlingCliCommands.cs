@@ -361,19 +361,37 @@ public static partial class DarlingCliCommands
             return 1;
         }
 
-        var path = rest[0];
-        try
+        return WriteNewPasswordKey(rest[0], pathForKeyId: null, output, error).ExitCode;
+    }
+
+    /// <summary>What <see cref="WriteNewPasswordKey"/> did: <see cref="ExitCode"/> 0 when written, and then the file's
+    /// <see cref="Path"/> and the key's display <see cref="Fingerprint"/> (never the key).</summary>
+    internal readonly record struct NewPasswordKeyWrite(int ExitCode, string? Path, string? Fingerprint);
+
+    /// <summary>
+    /// The write behind <c>--new-password-key</c> and the MCP <c>new_password_key</c> tool (#9644). With
+    /// <paramref name="fixedPath"/> the file goes there. With <paramref name="pathForKeyId"/> the path is made from the new
+    /// key's fingerprint, after the key exists (the pending folder's generated name). Never writes over anything.
+    /// </summary>
+    internal static NewPasswordKeyWrite WriteNewPasswordKey(
+        string? fixedPath, Func<string, string>? pathForKeyId, TextWriter output, TextWriter error)
+    {
+        var path = fixedPath;
+        if (path is not null)
         {
-            if (DarlingServiceKeyFile.AnythingAt(path))
+            try
             {
-                error.WriteLine($"Something is already at {path}. --new-password-key never writes over anything: give it a path that does not exist.");
-                return 1;
+                if (DarlingServiceKeyFile.AnythingAt(path))
+                {
+                    error.WriteLine($"Something is already at {path}. --new-password-key never writes over anything: give it a path that does not exist.");
+                    return new NewPasswordKeyWrite(1, null, null);
+                }
             }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
-        {
-            error.WriteLine($"Could not check {path}: {ex.Message}");
-            return 1;
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                error.WriteLine($"Could not check {path}: {ex.Message}");
+                return new NewPasswordKeyWrite(1, null, null);
+            }
         }
 
         string keyId;
@@ -387,6 +405,16 @@ public static partial class DarlingCliCommands
             {
                 keyId = key.PublicKey.KeyId;
                 pkcs8 = key.ExportPkcs8();
+            }
+
+            if (path is null)
+            {
+                path = pathForKeyId!(keyId);
+                if (DarlingServiceKeyFile.AnythingAt(path))
+                {
+                    error.WriteLine($"Something is already at {path}. A new password key is never written over anything.");
+                    return new NewPasswordKeyWrite(1, null, null);
+                }
             }
 
             /* No immutable string of the key ever exists: base64 goes into a char array and then ASCII bytes, all zeroed below. */
@@ -420,7 +448,7 @@ public static partial class DarlingCliCommands
             /* A file this call created and could not finish is removed, so no partial key is left behind; one it never
                created (another process got there first) is not this call's to touch. */
             var leftover = "";
-            if (created)
+            if (created && path is not null)
             {
                 try
                 {
@@ -432,8 +460,8 @@ public static partial class DarlingCliCommands
                 }
             }
 
-            error.WriteLine($"Could not write a new password key to {path}: {ex.Message}{leftover}");
-            return 1;
+            error.WriteLine($"Could not write a new password key to {path ?? "the pending folder"}: {ex.Message}{leftover}");
+            return new NewPasswordKeyWrite(1, null, null);
         }
         finally
         {
@@ -453,9 +481,10 @@ public static partial class DarlingCliCommands
             }
         }
 
+        var fingerprint = PasswordSeal.DisplayKeyId(keyId);
         output.WriteLine(
-            $"Wrote a new password key to {path} (fingerprint {PasswordSeal.DisplayKeyId(keyId)}). Put it in your secret store, point {DarlingPasswordKeySource.SettingName} at it, then delete this file.");
-        return 0;
+            $"Wrote a new password key to {path} (fingerprint {fingerprint}). Put it in your secret store, point {DarlingPasswordKeySource.SettingName} at it, then delete this file.");
+        return new NewPasswordKeyWrite(0, path, fingerprint);
     }
 
     /// <summary>Creates the key file, failing if anything is at the path: with the hardened ACL applied at creation on
@@ -542,15 +571,9 @@ public static partial class DarlingCliCommands
         await using var dataSource = created;
         try
         {
-            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            var sealedPasswords = await DarlingPasswordKeyStore.CountSealedPasswordsAsync(connection, cancellationToken);
-            var replaced = await DarlingPasswordKeyStore.MarkCurrentResetAsync(connection, cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            var outcome = await ResetPasswordKeyInStoreAsync(dataSource, fromSetting, cancellationToken);
             output.WriteLine();
-            output.WriteLine(replaced is null
-                ? "The store publishes no password key, so there is nothing to reset."
-                : ResetPasswordKeyRestartSentence(sealedPasswords, fromSetting));
+            output.WriteLine(outcome.Text);
             output.WriteLine();
             return CollectorToggleExitCode.Success;
         }
@@ -559,6 +582,68 @@ public static partial class DarlingCliCommands
             error.WriteLine($"Could not reset the password key in the store: {ex.Message}");
             return CollectorToggleExitCode.StoreUnavailable;
         }
+    }
+
+    /// <summary>What <see cref="ResetPasswordKeyInStoreAsync"/> did: <see cref="Replaced"/> is false when the store published no
+    /// current key (or the call was refused by <see cref="FingerprintMismatch"/>), <see cref="SealedPasswords"/> is how many saved
+    /// passwords were sealed to it, and <see cref="Text"/> is the sentence the CLI prints and the MCP <c>reset_password_key</c> tool
+    /// returns. <see cref="FingerprintMismatch"/> is true when an expected fingerprint was given and the current key was another one:
+    /// nothing was changed.</summary>
+    internal sealed record PasswordKeyResetOutcome(bool Replaced, int SealedPasswords, string Text, bool FingerprintMismatch = false);
+
+    /// <summary>What <see cref="PreviewPasswordKeyResetAsync"/> found: the current key's display fingerprint (null when the
+    /// store publishes none) and how many saved passwords are sealed.</summary>
+    internal sealed record PasswordKeyResetPreview(string? Fingerprint, int SealedPasswords);
+
+    /// <summary>The words of a reset with no current key to replace.</summary>
+    internal const string NothingToResetText = "The store publishes no password key, so there is nothing to reset.";
+
+    /// <summary>Reads, and changes nothing: the fingerprint of the key a reset would replace and the count of saved passwords it
+    /// would leave to be entered again (#9644).</summary>
+    internal static async Task<PasswordKeyResetPreview> PreviewPasswordKeyResetAsync(NpgsqlDataSource dataSource, CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        var current = await DarlingPasswordKeyStore.ReadCurrentAsync(connection, ServiceCommandDeadlines.BootstrapSeconds, cancellationToken);
+        var sealedPasswords = await DarlingPasswordKeyStore.CountSealedPasswordsAsync(connection, cancellationToken);
+        return new PasswordKeyResetPreview(current is null ? null : PasswordSeal.DisplayKeyId(current.KeyId), sealedPasswords);
+    }
+
+    /// <summary>Whether two key fingerprints are the same key, however each is spelled (case, and the dashes of the display form).</summary>
+    internal static bool SameFingerprint(string a, string b) =>
+        string.Equals(a.Replace("-", "", StringComparison.Ordinal).Trim(), b.Replace("-", "", StringComparison.Ordinal).Trim(), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The one place a password key reset is made (#9644): on a connection with the store owner's rights, in one transaction,
+    /// marks the current key <c>replaced</c> with the reason <c>reset</c>, which takes that row's lock, and only then counts the saved
+    /// passwords sealed to it, so a password saved before the lock is counted. <c>--reset-password-key</c> and the MCP
+    /// <c>reset_password_key</c> tool both call it, so the count, the mark and the words are the same. With
+    /// <paramref name="expectedFingerprint"/> the key marked must be that one, or the transaction is rolled back and nothing is
+    /// changed. Once the mark is made the commit does not take <paramref name="cancellationToken"/>: a caller that goes away then
+    /// must not leave the work half done. Key files are never touched. Throws what the store throws.
+    /// </summary>
+    internal static async Task<PasswordKeyResetOutcome> ResetPasswordKeyInStoreAsync(
+        NpgsqlDataSource dataSource, bool fromSetting, CancellationToken cancellationToken, string? expectedFingerprint = null)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var replaced = await DarlingPasswordKeyStore.MarkCurrentResetAsync(connection, cancellationToken);
+        if (replaced is not null && expectedFingerprint is not null
+            && !SameFingerprint(expectedFingerprint, PasswordSeal.DisplayKeyId(replaced)))
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            return new PasswordKeyResetOutcome(
+                Replaced: false, SealedPasswords: 0,
+                "The fingerprint is not the current password key's. Nothing was changed.", FingerprintMismatch: true);
+        }
+
+        var sealedPasswords = await DarlingPasswordKeyStore.CountSealedPasswordsAsync(connection, CancellationToken.None);
+        await transaction.CommitAsync(CancellationToken.None);
+        return new PasswordKeyResetOutcome(
+            replaced is not null,
+            sealedPasswords,
+            replaced is null
+                ? NothingToResetText
+                : ResetPasswordKeyRestartSentence(sealedPasswords, fromSetting));
     }
 
     /// <summary>The verb <see cref="SetCollectorRunAtAsync"/> handles: set, stop or clear the time of day a collector that runs once

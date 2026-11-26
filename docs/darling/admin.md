@@ -13,6 +13,7 @@ To change the list, use one of these:
 - The Viewer: **Manage Servers**.
 - The `add_servers`, `edit_server`, `remove_server` and `set_server_action` MCP tools. They need `mcp.allowWrites` and `mcp.allowServerAdmin`.
 - The `add_alert_source`, `rotate_alert_source` and `remove_alert_source` MCP tools, which make, change and drop the login of an external alert source. They need the same two settings. `list_alert_sources` is a read.
+- The `new_password_key` and `reset_password_key` MCP tools, which change the key that seals the saved passwords. They need the same two settings.
 - The `mint_personal_token` and `revoke_personal_token` MCP tools, which make and revoke a personal MCP token for a person named in `get_people`. `mint_personal_token` makes reader tokens only: an operator token is made on the web dashboard's token page, where the person signs in. They need `mcp.allowWrites` and `mcp.allowServerAdmin`, and personal tokens on. `get_personal_tokens` lists the tokens, is served under the same two settings, and never shows a token value. A call made with a personal token is never offered any of the three.
 - The `--add-server` command line verb. It can add a server. It cannot remove one.
 

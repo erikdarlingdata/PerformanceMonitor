@@ -301,6 +301,9 @@ public static partial class DarlingWebEndpoints
         "update_service_flags",
         /* #6269: the server action switches have their own web routes (GET /api/server-actions and PUT /api/servers/{id}/actions/{action}, admin role); the MCP write is under mcp.allowServerAdmin. */
         "set_server_action",
+        /* #9644: the password key tools are MCP writes under mcp.allowServerAdmin. The web page has no route for them. */
+        "new_password_key",
+        "reset_password_key",
         "get_server_actions",
         /* #9643: the personal token page has its own routes (/api/mcp-tokens); the MCP mint and revoke are under mcp.allowServerAdmin and the list read is MCP-only. */
         "mint_personal_token",
