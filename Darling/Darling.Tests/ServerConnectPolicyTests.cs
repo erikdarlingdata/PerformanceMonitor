@@ -232,6 +232,70 @@ public sealed class SweepInFlightWordingTests
 }
 
 /// <summary>
+/// #9696: a server that has not connected yet says once what it waits for. The cold-start spread holds a first launch by a
+/// per-server offset, and a full set of collection slots holds a body whose connect attempt has run.
+/// </summary>
+public sealed class FirstConnectHoldTests
+{
+    private static readonly DateTime Start = new(2026, 11, 26, 12, 0, 0, DateTimeKind.Utc);
+
+    [Theory]
+    [InlineData(1442992967, 17)]
+    [InlineData(-912449187, 109)]
+    public void AServerHeldByTheColdStartSpread_NamesTheSecondsUntilItsFirstLaunch(int serverId, int expectedSeconds)
+    {
+        var due = DarlingWorker.ColdStartFirstSweepDue(Start, serverId);
+
+        var remaining = FirstConnectHold.ColdStartRemainingToAnnounce(alreadyAnnounced: false, due, Start);
+
+        Assert.Equal((double)expectedSeconds, remaining);
+    }
+
+    [Fact]
+    public void AServerHeldByTheColdStartSpread_NamesTheRemainingTimeAtTheMomentOfTheAsk()
+    {
+        var due = DarlingWorker.ColdStartFirstSweepDue(Start, -912449187);
+
+        var remaining = FirstConnectHold.ColdStartRemainingToAnnounce(alreadyAnnounced: false, due, Start.AddSeconds(45));
+
+        Assert.Equal(64.0, remaining);
+    }
+
+    [Fact]
+    public void AServerHeldByTheColdStartSpread_AnnouncesOnlyOnce()
+    {
+        var due = DarlingWorker.ColdStartFirstSweepDue(Start, -912449187);
+
+        Assert.Null(FirstConnectHold.ColdStartRemainingToAnnounce(alreadyAnnounced: true, due, Start));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(5)]
+    public void AServerWhoseFirstLaunchIsDueOrAdded_AnnouncesNothing(int secondsPastDue)
+    {
+        Assert.Null(FirstConnectHold.ColdStartRemainingToAnnounce(false, Start.AddSeconds(-secondsPastDue), Start));
+        Assert.Null(FirstConnectHold.ColdStartRemainingToAnnounce(false, DateTime.MinValue, Start));
+    }
+
+    [Fact]
+    public void ABodyAboutToWaitWithEveryCollectionSlotHeld_NamesTheSlotsInUse()
+    {
+        Assert.Equal(4, FirstConnectHold.SlotsInUseToAnnounce(alreadyAnnounced: false, notConnectedAfterAttempt: true, freeSlots: 0, width: 4));
+        Assert.Equal(2, FirstConnectHold.SlotsInUseToAnnounce(alreadyAnnounced: false, notConnectedAfterAttempt: true, freeSlots: 0, width: 2));
+    }
+
+    [Theory]
+    [InlineData(true, true, 0)]
+    [InlineData(false, false, 0)]
+    [InlineData(false, true, 1)]
+    public void ABodyThatHasAnnouncedConnectedOrFindsASlotFree_AnnouncesNothing(bool alreadyAnnounced, bool notConnectedAfterAttempt, int freeSlots)
+    {
+        Assert.Null(FirstConnectHold.SlotsInUseToAnnounce(alreadyAnnounced, notConnectedAfterAttempt, freeSlots, width: 4));
+    }
+}
+
+/// <summary>
 /// #4710: the connect attempt runs before the fleet permit, so the run stamp is still 0 for its whole length.
 /// The body stamps the connect stage on a field of its own, so the in-flight check can tell a body inside a
 /// connect attempt from one that is waiting for a fleet slot.
