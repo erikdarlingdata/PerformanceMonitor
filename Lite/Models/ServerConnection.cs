@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Data.SqlClient;
 using PerformanceMonitorLite.Services;
@@ -89,7 +90,14 @@ public class ServerConnection : INotifyPropertyChanged
     [JsonIgnore]
     public DateTime RegisteredAtUtc => CreatedDate.ToUniversalTime();
 
-    public DateTime LastConnected { get; set; } = DateTime.Now;
+    /// <summary>
+    /// When Lite last connected to this server, or null for "never" (#9761). A hand-edited servers.json can carry
+    /// <c>"LastConnected": null</c>, which reads as null instead of failing the whole file
+    /// (<see cref="LastConnectedJsonConverter"/>). Readers order by it (null sorts last when newest comes first) and the
+    /// Manage Servers grid shows null as blank.
+    /// </summary>
+    [JsonConverter(typeof(LastConnectedJsonConverter))]
+    public DateTime? LastConnected { get; set; } = DateTime.Now;
     public bool IsFavorite { get; set; }
     public bool IsEnabled { get; set; } = true;
 
@@ -793,4 +801,30 @@ public class ServerConnection : INotifyPropertyChanged
         // SqlServer (password) and ServicePrincipal (client secret) require a stored credential.
         return ServerCredentialIds.Allows(server.Id, server.DisplayName) && credentialService.CredentialExists(server.Id);
     }
+}
+
+/// <summary>
+/// #9761: reads <see cref="ServerConnection.LastConnected"/> so that a JSON null (or the earliest date) means "never" and costs
+/// only that field: a null the reader refused would reject the whole servers.json and send Lite to the backup's list.
+/// "Never" is written back as the earliest date, an ordinary value that every build reads, so a file saved here still loads
+/// in an older build and in a reader whose field is not nullable.
+/// </summary>
+internal sealed class LastConnectedJsonConverter : JsonConverter<DateTime?>
+{
+    /* Without this a null value is written as a JSON null and never reaches Write. */
+    public override bool HandleNull => true;
+
+    public override DateTime? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return null;
+        }
+
+        var value = reader.GetDateTime();
+        return value == DateTime.MinValue ? null : value;
+    }
+
+    public override void Write(Utf8JsonWriter writer, DateTime? value, JsonSerializerOptions options)
+        => writer.WriteStringValue(value ?? DateTime.MinValue);
 }
