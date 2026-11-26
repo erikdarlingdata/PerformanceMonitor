@@ -339,7 +339,7 @@ public static partial class DarlingCliCommands
     public static bool IsNewPasswordKeyVerb(string arg) =>
         string.Equals(arg, "--new-password-key", StringComparison.OrdinalIgnoreCase);
 
-    private const string NewPasswordKeyUsage = "Usage: PerformanceMonitor.Darling.Service.exe --new-password-key <path>";
+    private const string NewPasswordKeyUsage = "Usage: --new-password-key <path>";
 
     /// <summary>
     /// <c>--new-password-key &lt;path&gt;</c> (#8006): generates a password key and writes it to <paramref name="rest"/>'s one
