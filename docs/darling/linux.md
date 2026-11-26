@@ -439,11 +439,13 @@ After the first start the server list lives in the store, and an edit to `server
 Both are off in the example. `--enable-web` and `--enable-mcp` are Windows only, so on Linux the switch is set in one of two places:
 
 - **Before the first start**, set `web.enabled` or `mcp.enabled` to `true` in `darling.json`. The first start copies the value into the store.
-- **After the first start**, the store holds the switch, in `config.config_service.web_enabled` and `mcp_enabled`, and the file's value is ignored. Change it there as the store owner, for example `UPDATE config.config_service SET web_enabled = true WHERE id = 1`, and then restart the service.
+- **After the first start**, the store holds the switch, in `config.config_service.web_enabled` and `mcp_enabled`, and the file's value is ignored. Change it there as the store owner, for example `UPDATE config.config_service SET web_enabled = true WHERE id = 1`. No restart is needed. The service reads the switch on each collection sweep, and it starts or stops the surface when the value changes. On the Docker Compose shape, run the statement through psql in the store container, as the [quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804) shows for MCP.
 
 The `network` block of each surface (`listen`, `allowFrom`, `token`) is read from the file at every start. Give the token as a `file:` reference. The settings are in [Web dashboard configuration](configuration-web.md) and [MCP configuration](configuration-mcp.md), and the exposure rules are in [Opt-in Network Endpoints](network-endpoints.md). Run `provision-roles.sql` before you turn either surface on (see [The least-privilege roles](#the-least-privilege-roles-when-the-web-dashboard-or-mcp-is-on)).
 
 ## Upgrade by hand
+
+This section is for the systemd shape. For Docker Compose, see [Compose upgrade](admin.md#compose-upgrade).
 
 There is no upgrade script for Linux ([#9688](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9688)). The config, the secrets and the keys are in `/etc/darling`, outside the service folder, so an upgrade replaces only `/opt/darling`.
 
