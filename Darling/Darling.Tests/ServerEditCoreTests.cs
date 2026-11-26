@@ -669,7 +669,7 @@ public sealed class ServerEditCoreTests : IDisposable
     }
 
     [Fact]
-    public void AReferenceToDarlingsOwnSecrets_IsRefused_WithTheSentenceEveryReferenceGets()
+    public void AReferenceToDarlingsOwnSecrets_IsRefused_WithTheEditsSentenceForAReference()
     {
         DarlingOwnedSecrets.Set(new DarlingOwnedSet(Array.Empty<string>(), new[] { "DARLING_CONFIG" }));
 

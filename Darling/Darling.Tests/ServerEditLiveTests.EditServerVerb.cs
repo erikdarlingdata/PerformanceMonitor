@@ -37,7 +37,7 @@ public sealed partial class ServerEditLiveTests
         try
         {
             await SeedServerAsync(rig.Owner, 5301, "gone-01", "gone-01.example.test", "integrated", null, null, ct);
-            await SeedServerAsync(rig.Owner, 5302, "stays-01", "stays-01.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 5302, "beta-01", "beta-01.example.test", "integrated", null, null, ct);
 
             /* The row as the enabled step reads it (disabled), then the server is removed before the write. */
             var read = (await DarlingMcpCollectionStateTools.ReadServersAsync(rig.Owner, ct)).Single(s => s.ServerId == 5301);
@@ -94,14 +94,14 @@ public sealed partial class ServerEditLiveTests
         var ok = false;
         try
         {
-            /* "shared-01" is the first server's display name and the second server's host, which is its storage name. */
-            await SeedServerAsync(rig.Owner, 5311, "shared-01", "first-01.example.test", "integrated", null, null, ct);
-            await SeedServerAsync(rig.Owner, 5312, "second-01", "shared-01", "integrated", null, null, ct);
+            /* "alpha-01" is the first server's display name and the second server's host, which is its storage name. */
+            await SeedServerAsync(rig.Owner, 5311, "alpha-01", "gamma-01.example.test", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 5312, "delta-01", "alpha-01", "integrated", null, null, ct);
             var firstBefore = await RowSignatureAsync(rig.Owner, 5311, ct);
             var secondBefore = await RowSignatureAsync(rig.Owner, 5312, ct);
             var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
 
-            var refused = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "shared-01", "{\"monthly_cost_usd\":120}", Reachable, TestKeyRings.Healthy, null, ct));
+            var refused = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "alpha-01", "{\"monthly_cost_usd\":120}", Reachable, TestKeyRings.Healthy, null, ct));
 
             Assert.Equal("ambiguous", refused["status"]!.GetValue<string>());
             var candidates = refused["candidates"]!.AsArray().Select(c => c!["server_id"]!.GetValue<int>()).OrderBy(id => id).ToArray();
@@ -137,7 +137,7 @@ public sealed partial class ServerEditLiveTests
             /* darling.json as it is parsed, with one Windows-authentication server. */
             static DarlingConfig File(bool trust) => DarlingConfig.Parse(System.Text.Json.JsonSerializer.Serialize(new
             {
-                servers = new[] { new { name = "drift-01", host = "drift-01.example.test", auth = "integrated", trustServerCertificate = trust } },
+                servers = new[] { new { name = "omega-01", host = "omega-01.example.test", auth = "integrated", trustServerCertificate = trust } },
             }));
             await new StoreConfigProvider(rig.Owner).SeedIfEmptyAsync(File(trust: false), ct);
             Assert.Equal(1L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers", ct));
@@ -153,7 +153,7 @@ public sealed partial class ServerEditLiveTests
                 ? " --config " + word
                 : $"({StoreConfigProvider.DriftValue(path)}).";
             Assert.Contains(logger.Lines, l =>
-                l.Contains("\"drift-01\"", StringComparison.Ordinal)
+                l.Contains("\"omega-01\"", StringComparison.Ordinal)
                 && l.Contains("trustServerCertificate", StringComparison.Ordinal)
                 && l.EndsWith(expectedEnd, StringComparison.Ordinal));
             ok = true;
