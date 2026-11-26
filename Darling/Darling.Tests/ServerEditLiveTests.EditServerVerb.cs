@@ -95,7 +95,7 @@ public sealed partial class ServerEditLiveTests
         {
             /* "alpha-01" is the first server's display name and the second server's host, which is its storage name. */
             await SeedServerAsync(rig.Owner, 5311, "alpha-01", "gamma-01.example.test", "integrated", null, null, ct);
-            await SeedServerAsync(rig.Owner, 5312, "delta-01", "alpha-01", "integrated", null, null, ct);
+            await SeedServerAsync(rig.Owner, 5312, "zeta-01", "alpha-01", "integrated", null, null, ct);
             var firstBefore = await RowSignatureAsync(rig.Owner, 5311, ct);
             var secondBefore = await RowSignatureAsync(rig.Owner, 5312, ct);
             var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
@@ -136,7 +136,7 @@ public sealed partial class ServerEditLiveTests
             /* darling.json as it is parsed, with one Windows-authentication server. */
             static DarlingConfig File(bool trust) => DarlingConfig.Parse(System.Text.Json.JsonSerializer.Serialize(new
             {
-                servers = new[] { new { name = "omega-01", host = "omega-01.example.test", auth = "integrated", trustServerCertificate = trust } },
+                servers = new[] { new { name = "epsilon-01", host = "epsilon-01.example.test", auth = "integrated", trustServerCertificate = trust } },
             }));
             await new StoreConfigProvider(rig.Owner).SeedIfEmptyAsync(File(trust: false), ct);
             Assert.Equal(1L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers", ct));
@@ -152,7 +152,7 @@ public sealed partial class ServerEditLiveTests
                 ? " --config " + word
                 : $"({StoreConfigProvider.DriftValue(path)}).";
             Assert.Contains(logger.Lines, l =>
-                l.Contains("\"omega-01\"", StringComparison.Ordinal)
+                l.Contains("\"epsilon-01\"", StringComparison.Ordinal)
                 && l.Contains("trustServerCertificate", StringComparison.Ordinal)
                 && l.EndsWith(expectedEnd, StringComparison.Ordinal));
             ok = true;
