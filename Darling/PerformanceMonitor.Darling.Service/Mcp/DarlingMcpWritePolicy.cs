@@ -47,7 +47,7 @@ internal static class DarlingMcpWritePolicy
     /// <summary>The darling.json key that offers the write tools.</summary>
     internal const string WritesSetting = "mcp.allowWrites";
 
-    /// <summary>The darling.json key that additionally offers <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>.</summary>
+    /// <summary>The darling.json key that additionally offers <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>, and (#9643) <c>mint_personal_token</c> and <c>revoke_personal_token</c>.</summary>
     internal const string ServerAdminSetting = "mcp.allowServerAdmin";
 
     /// <summary>The tools that change which servers the service connects to, or where. They present the service's
@@ -58,6 +58,8 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "mint_personal_token",
+        "revoke_personal_token",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
@@ -78,6 +80,8 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "mint_personal_token",
+        "revoke_personal_token",
         "mute_analysis_finding",
         "unmute_analysis_finding",
         "create_mute_rule",
@@ -268,6 +272,8 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "mint_personal_token",
+        "revoke_personal_token",
         "undo_plan_change",
         "write_investigation_note",
         "approve_investigation_note",

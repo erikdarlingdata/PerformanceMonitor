@@ -116,27 +116,8 @@ public static partial class DarlingWebEndpoints
             : seat.CanEdit && served.AdminMayMintOperator ? new[] { McpTokenEntry.OperatorRole, McpTokenEntry.ReaderRole }
             : new[] { McpTokenEntry.ReaderRole };
 
-        JsonObject RowJson(PersonalTokenRow row, DateTimeOffset now, bool withSubject)
-        {
-            var json = new JsonObject
-            {
-                ["id"] = row.TokenId,
-                ["name"] = row.TokenName,
-                ["role"] = row.Role,
-                ["created_at"] = Iso(row.CreatedAt),
-                ["expires_at"] = Iso(row.ExpiresAt),
-                ["last_used_at"] = row.LastUsedAt is { } used ? Iso(used) : null,
-                ["state"] = row.RevokedAt is not null ? "revoked" : row.ExpiresAt <= now ? "expired" : "live",
-                ["revoked_by"] = row.RevokedBy,
-                ["revoke_reason"] = row.RevokeReason,
-            };
-            if (withSubject)
-            {
-                json["subject"] = row.Subject;
-            }
-
-            return json;
-        }
+        static JsonObject RowJson(PersonalTokenRow row, DateTimeOffset now, bool withSubject) =>
+            DarlingPersonalTokenAdmin.RowJson(row, now, withSubject);
 
         async Task<IResult> Guarded(HttpContext context, string route, Stopwatch stopwatch, Func<Task<IResult>> run)
         {
@@ -261,7 +242,7 @@ public static partial class DarlingWebEndpoints
             }
 
             var name = request["name"] is JsonValue nameValue && nameValue.TryGetValue(out string? nameText) ? nameText : null;
-            if (!DarlingMcpTokenSet.IsValidName(name) || DarlingWebSeat.IsBuiltInStamp(name))
+            if (!DarlingPersonalTokenAdmin.IsAcceptableName(name))
             {
                 return Refusal("bad_name", "A token name is 1 to 64 characters of letters, digits, '.', '_', ':' and '-', and cannot be web, mcp, cli or viewer.",
                     StatusCodes.Status400BadRequest);
@@ -288,11 +269,11 @@ public static partial class DarlingWebEndpoints
                     return Retry();
                 }
 
-                var minted = PersonalTokenFormat.Mint();
-                var now = clock.GetUtcNow();
-                var outcome = await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, ownerKey, seat.EditorPrincipal, name!, role,
-                    now, lifetime, settings.MaxTokensPerPerson, actor, context.RequestAborted);
-                switch (outcome)
+                /* R6: the MCP gate reads the snapshot, so it holds the new token before the caller sees its value. The row has committed by
+                   then: the shared core logs it, then refreshes on the host's token, so a caller that goes away now cannot skip either. */
+                var made = await DarlingPersonalTokenAdmin.MintAsync(owner, ownerSource!, snapshot, settings, ownerKey, seat.EditorPrincipal, name!, role,
+                    lifetime, actor, clock, logger, context.RequestAborted, hostStopping);
+                switch (made.Outcome)
                 {
                     case PersonalTokenCreateOutcome.NameTaken:
                         return Refusal("name_taken", "You already have a live token with that name.", StatusCodes.Status409Conflict);
@@ -305,16 +286,10 @@ public static partial class DarlingWebEndpoints
                             StatusCodes.Status429TooManyRequests);
                 }
 
-                /* R6: the MCP gate reads the snapshot, so it holds the new token before the caller sees its value. The row has committed: log
-                   it, then refresh on the host's token, so a caller that goes away now cannot skip either. */
-                logger.LogInformation("Personal MCP token {TokenName} ({TokenId}) was created for {Subject} with role {Role}", name, minted.TokenId, seat.EditorPrincipal, role);
-                await snapshot.RefreshAsync(ownerSource!, logger, hostStopping);
-
-                var record = new PersonalTokenRow(minted.TokenId, ownerKey, seat.EditorPrincipal, name!, role, now, now.AddDays(lifetime), null, null, null, null);
                 return JsonNodeResult(new JsonObject
                 {
-                    ["token"] = minted.Value,
-                    ["record"] = RowJson(record, now, withSubject: false),
+                    ["token"] = made.Token,
+                    ["record"] = RowJson(made.Record!, clock.GetUtcNow(), withSubject: false),
                 }, StatusCodes.Status201Created);
             });
         });
@@ -361,21 +336,15 @@ public static partial class DarlingWebEndpoints
                    Whose row it is decides what is recorded: the caller's own row is revoked by its owner (person:<subject>), any other by an
                    administrator (admin:<subject>, or admin:web for the shared token). */
                 var adminRevokedBy = "admin:" + actor[InvestigationPersonWrites.PersonActorPrefix.Length..];
-                var revoked = await PersonalTokenStore.RevokeAsync(owner, id, seat.CanEdit ? null : seat.OwnerKey, seat.OwnerKey, actor,
-                    adminRevokedBy, actor, clock.GetUtcNow(), context.RequestAborted);
+                var revoked = await DarlingPersonalTokenAdmin.RevokeAsync(owner, ownerSource!, snapshot, id, seat.CanEdit ? null : seat.OwnerKey,
+                    seat.OwnerKey, actor, adminRevokedBy, actor, seat.EditorPrincipal, clock, logger, context.RequestAborted, hostStopping);
                 if (!revoked)
                 {
                     return Refusal("not_found", "No live token has that id.", StatusCodes.Status404NotFound);
                 }
 
-                /* The revoke has committed: log it, then refresh on the host's token, never the request's, so the gate refuses the token now
-                   even when the caller has gone away. */
-                logger.LogInformation("Personal MCP token {TokenId} was revoked by {Subject}", id, seat.EditorPrincipal);
-                await snapshot.RefreshAsync(ownerSource!, logger, hostStopping);
                 return Results.NoContent();
             });
         });
     }
-
-    private static string Iso(DateTimeOffset value) => value.UtcDateTime.ToString("O", CultureInfo.InvariantCulture);
 }
