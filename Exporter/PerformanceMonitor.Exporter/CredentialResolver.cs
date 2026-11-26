@@ -13,7 +13,7 @@ public static class CredentialResolver
 {
     /// <summary>
     /// Darling's own DPAPI entropy string for this credential family. Must match what
-    /// Darling used to encrypt the blob, or Unprotect fails. The README's "The store login" section
+    /// Darling used to encrypt the blob, or Unprotect fails. The README's "The dpapi_file password file" section
     /// documents it, with a PowerShell snippet that writes a file this resolver accepts.
     /// </summary>
     private const string DpapiEntropy = "PerformanceMonitor.Darling.v1";
@@ -69,7 +69,7 @@ public static class CredentialResolver
                     throw new CredentialException(
                         $"store.password.path: DPAPI credential file '{spec.Path}' could not be decrypted ({ex.GetType().Name}). " +
                         $"Likely causes: the file is not the base64 text of a DPAPI blob, the blob was protected with other entropy than '{DpapiEntropy}', " +
-                        "or it was written on another machine (see \"The store login\" in the Exporter README).");
+                        "or it was written on another machine (see \"The dpapi_file password file\" in the Exporter README).");
                 }
 
             default:
