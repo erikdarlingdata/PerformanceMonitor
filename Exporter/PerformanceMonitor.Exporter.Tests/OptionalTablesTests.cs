@@ -65,11 +65,105 @@ public class OptionalTablesTests
     }
 
     [Fact]
-    public void ByGroup_7a_has_the_31_tables_from_the_registry_table()
+    public void ByGroup_7a_has_the_44_tables_from_the_registry_table()
     {
         // 27 original 7a entries plus incident_occurrences (docs/optional-grains.md §1.1, lane G1), then attention_events,
-        // column_stats and column_stats_runs.
-        Assert.Equal(31, OptionalTables.ByGroup("7a").Count);
+        // column_stats and column_stats_runs (31), then 13 more: query_store_hints, query_store_forced_plans,
+        // object_inventory, object_dependencies, identity_capacity, database_protection, object_usage_snapshots,
+        // object_usage_deltas, query_tag_sightings, and the four query tag config tables.
+        Assert.Equal(44, OptionalTables.ByGroup("7a").Count);
+        Assert.Single(OptionalTables.ByGroup("7b"));
+        Assert.Equal(71, OptionalTables.All.Count);
+    }
+
+    // ---- the owner-approved 2026-11-26 tables ---------------------------------------------------
+
+    // name, group, time column (null = daily snapshot), schema, min darling schema
+    public static IEnumerable<object?[]> ApprovedTables() =>
+    [
+        ["query_snapshots", "7b", "collection_time", "collect", null],
+        ["waiting_tasks", "7a", "collection_time", "collect", 243],
+        ["dmv_blocking_snapshots", "7a", "collection_time", "collect", 199],
+        ["default_trace_events", "7a", "collection_time", "collect", 21],
+        ["object_usage_snapshots", "7a", "collection_time", "collect", 299],
+        ["object_usage_deltas", "7a", "collection_time", "collect", 299],
+        ["query_store_hints", "7a", "collection_time", "collect", 217],
+        ["query_store_forced_plans", "7a", "collection_time", "collect", 201],
+        ["object_inventory", "7a", "collection_time", "collect", 268],
+        ["object_dependencies", "7a", "collection_time", "collect", 297],
+        ["identity_capacity", "7a", "collection_time", "collect", 224],
+        ["database_protection", "7a", "collection_time", "collect", 278],
+        ["query_tag_sightings", "7a", "last_seen", "collect", 192],
+        ["pg_session_states", "7c", "collection_time", "collect", 86],
+        ["pg_blocking_edges", "7c", "collection_time", "collect", 71],
+        ["pg_extension_availability", "7c", "collection_time", "collect", 95],
+        ["query_tags", "7a", null, "config", 192],
+        ["query_tag_assignments", "7a", null, "config", 192],
+        ["query_tag_rules", "7a", null, "config", 192],
+        ["query_tag_map", "7a", null, "config", 192],
+    ];
+
+    [Theory]
+    [MemberData(nameof(ApprovedTables))]
+    public void Each_approved_table_is_a_candidate_event_entry_with_its_time_column_and_rung(
+        string name, string group, string? timeColumn, string schema, int? minSchema)
+    {
+        var table = OptionalTables.TryGet(name);
+
+        Assert.NotNull(table);
+        Assert.Equal(OptionalTableStatus.Candidate, table!.Status);
+        Assert.Equal(ExportGrain.Event, table.Grain);
+        Assert.Equal(group, table.Group);
+        Assert.Equal(schema, table.Schema);
+        Assert.Equal(timeColumn, table.TimeColumn);
+        Assert.Equal(timeColumn is null ? OptionalTableKind.Snapshot : OptionalTableKind.Window, table.Kind);
+        Assert.Equal(minSchema, table.MinDarlingSchemaVersion);
+    }
+
+    [Fact]
+    public void Only_the_tables_without_a_server_name_of_their_own_resolve_it_from_collect_servers()
+    {
+        var resolving = OptionalTables.All.Where(t => t.ResolveServerName).Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal);
+
+        Assert.Equal(
+            ["object_usage_deltas", "object_usage_snapshots", "query_tag_assignments", "query_tag_map", "query_tag_rules", "query_tag_sightings"],
+            resolving);
+    }
+
+    [Fact]
+    public void The_query_tag_tables_that_other_tables_name_by_id_keep_their_identity_columns()
+    {
+        var keeping = OptionalTables.All.Where(t => t.KeepIdentityColumns).Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal);
+
+        Assert.Equal(["query_tag_assignments", "query_tag_rules", "query_tags"], keeping);
+    }
+
+    [Fact]
+    public void Query_tag_sightings_reads_its_timestamptz_last_seen_as_utc_and_no_other_entry_does()
+    {
+        Assert.Equal(["query_tag_sightings"], OptionalTables.All.Where(t => t.TimeColumnHasTimeZone).Select(t => t.Name));
+    }
+
+    [Fact]
+    public void The_two_object_usage_tables_name_the_missing_window_index_in_their_note()
+    {
+        foreach (var name in new[] { "object_usage_snapshots", "object_usage_deltas" })
+        {
+            var table = OptionalTables.TryGet(name)!;
+            Assert.Contains("NO USABLE INDEX", table.Note, StringComparison.Ordinal);
+            Assert.Contains("collection_time", table.Note, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void ValidateRegistry_rejects_a_time_zone_flag_on_a_snapshot_table()
+    {
+        var bad = new OptionalTable("probe", "collect", null, OptionalTableKind.Snapshot, [], "7a", OptionalTableStatus.Candidate, "x")
+        {
+            TimeColumnHasTimeZone = true,
+        };
+
+        Assert.Throws<InvalidOperationException>(() => OptionalTables.ValidateRegistry([bad]));
     }
 
     [Fact]
@@ -170,10 +264,10 @@ public class OptionalTablesTests
     public static IEnumerable<object[]> Group7cWindowNamesMemberData() => Group7cWindowNames.Select(n => new object[] { n });
 
     [Fact]
-    public void Pg_lock_stats_is_a_candidate_event_table_and_pg_session_states_stays_blocked()
+    public void Pg_lock_stats_and_pg_session_states_are_candidate_event_tables()
     {
-        // pg_lock_stats holds numbers and lock states only, so it may be exported. pg_session_states carries
-        // usernames and client addresses, so it stays out of every export.
+        // pg_lock_stats holds numbers and lock states only. pg_session_states carries usernames and client addresses;
+        // the owner approved exporting every column on 2026-11-26.
         var locks = OptionalTables.TryGet("pg_lock_stats");
         Assert.NotNull(locks);
         Assert.Equal(OptionalTableStatus.Candidate, locks!.Status);
@@ -181,7 +275,8 @@ public class OptionalTablesTests
 
         var sessions = OptionalTables.TryGet("pg_session_states");
         Assert.NotNull(sessions);
-        Assert.Equal(OptionalTableStatus.Blocked, sessions!.Status);
+        Assert.Equal(OptionalTableStatus.Candidate, sessions!.Status);
+        Assert.Equal(ExportGrain.Event, sessions.Grain);
     }
 
     [Fact]
