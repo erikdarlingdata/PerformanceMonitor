@@ -1584,6 +1584,8 @@ public sealed class DarlingMcpHostService : BackgroundService
            service parameter, so it is registered wherever the tools are: the process's one signal, so the worker and this
            host share it. */
         services.AddSingleton<InvestigationOpenSignal>(InvestigationOpenSignal.Shared);
+        /* #9636: send_test_notification sends with the worker's live alert settings, published on this seat. Empty until the worker publishes. */
+        services.AddSingleton<NotificationTestSeat>(NotificationTestSeat.Shared);
 
         /* #5916: set_alert_threshold_override is a Level 2 action tool offered under both arms and takes the served policy as a
            service parameter to tell them apart. */

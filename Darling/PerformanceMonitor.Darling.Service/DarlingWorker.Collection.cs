@@ -826,6 +826,8 @@ public sealed partial class DarlingWorker
            its IsAlertMuted delegate, so refreshing the same instance's cache mutes the next sweep). */
         var alertSettings = new DarlingAlertSettings(config, _logger);
         var historyStore = new PgAlertHistoryStore(postgres, DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds, _logger);
+        /* #9636: send_test_notification sends through these same live settings, so a test uses the values a real alert would. */
+        NotificationTestSeat.Shared.Publish(alertSettings);
         var webhookAlertService = new WebhookAlertService(
             alertSettings, DarlingAlertDeliverer.Branding,
             _loggerFactory.CreateLogger<WebhookAlertService>(), historyStore);

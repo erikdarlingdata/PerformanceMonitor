@@ -308,6 +308,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `run_collectors_now` | `config.config_command` |
 | `save_environment_profile` | `config.agent_environment_profiles` (upsert/delete)<br>`config.server_tags` (tag exists check)<br>`config.config_monitored_servers` (server exists check)<br>`config.investigation_journal` |
 | `send_daily_health_report_now` | `config.config_alert_log` (insert, the alert history row)<br>`config.config_alert_settings` (read)<br>`config.config_notification_routes` (read)<br>`config.config_mute_rules` (read)<br>The objects that `get_daily_health_report` reads. |
+| `send_test_notification` | No collected data. It sends one test message to a channel and writes nothing to the store. |
 | `set_agent_actions_enabled` | `config.config_service` |
 | `set_alert_threshold_override` | `config.config_threshold_overrides` |
 | `set_collector_databases` | `config.config_collector_schedules` |
