@@ -735,7 +735,8 @@ public sealed class StoreConfigProvider
             var fields = string.Join(", ", server.Fields.Select(f => $"{f.Field} (file={DriftText(f.FileValue)}, store={DriftText(f.StoreValue)})"));
             var other = server.Fields.Where(f => !DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field).ToList();
             var args = EditServerArgsFor(server);
-            var words = args.Select(a => CommandWord(a, powershell)).ToList();
+            /* args is the name, then "--set" and a field=value pair for each field: the flag is printed as it is, the rest is quoted. */
+            var words = args.Select((a, i) => i > 0 && i % 2 == 1 ? a : CommandWord(a, powershell)).ToList();
             var remedy = args.Count == 0
                 ? ""
                 : words.Contains(null)

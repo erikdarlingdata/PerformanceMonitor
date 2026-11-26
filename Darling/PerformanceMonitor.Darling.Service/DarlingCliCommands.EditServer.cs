@@ -16,6 +16,7 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 
@@ -79,7 +80,14 @@ public static partial class DarlingCliCommands
     internal sealed record EditServerRequest(string ServerName, string? ConfigPath, JsonObject? Changes, bool? Enabled);
 
     private const string EditServerPasswordRefusal =
-        "A password is never an argument, so --set does not take one. When a change needs the server's password, --edit-server asks for it.";
+        "A password is never an argument, so --set does not take one, and what you typed is now in your shell history and visible to other processes on this host: change that password. When a change needs the server's password, --edit-server asks for it.";
+
+    /// <summary>The field names <c>--set</c> refuses as a secret, whatever the case: the shapes a password is named by in a
+    /// darling.json entry, a connection string and a service-principal entry.</summary>
+    private static readonly HashSet<string> EditServerSecretFields = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "password", "encryptedPassword", "encrypted_password", "pwd", "passwd", "secret", "clientSecret", "client_secret",
+    };
 
     private static string EditServerFieldList() =>
         string.Join(", ", EditServerFields.Select(f => f.Name)) + ", " + EditServerEnabledField;
@@ -120,6 +128,12 @@ public static partial class DarlingCliCommands
             return false;
         }
 
+        if (StoreConfigProvider.HasControlCharacter(rest[0]))
+        {
+            errorMessage = "The server's name holds a control character, which a registered server's name never does.";
+            return false;
+        }
+
         string? configPath = null;
         bool? enabled = null;
         var changes = new JsonObject();
@@ -157,7 +171,7 @@ public static partial class DarlingCliCommands
 
             var split = value.IndexOf('=', StringComparison.Ordinal);
             var field = (split < 0 ? value : value[..split]).Trim();
-            if (field.Equals("password", StringComparison.OrdinalIgnoreCase) || field.Equals("encryptedPassword", StringComparison.OrdinalIgnoreCase))
+            if (EditServerSecretFields.Contains(field))
             {
                 errorMessage = EditServerPasswordRefusal;
                 return false;
@@ -173,7 +187,7 @@ public static partial class DarlingCliCommands
             var known = isEnabled ? null : FindEditServerField(field);
             if (!isEnabled && known is null)
             {
-                errorMessage = $"--edit-server cannot set '{field}'. Fields: " + EditServerFieldList() + ".";
+                errorMessage = $"--edit-server cannot set '{StoreConfigProvider.DriftText(field)}'. Fields: " + EditServerFieldList() + ".";
                 return false;
             }
 
@@ -185,6 +199,12 @@ public static partial class DarlingCliCommands
             }
 
             var text = value[(split + 1)..];
+            if (StoreConfigProvider.HasControlCharacter(text))
+            {
+                errorMessage = $"{canonical} holds a control character (a newline, a tab or another character below U+0020, DEL or a line separator), which the verb does not take.";
+                return false;
+            }
+
             if (isEnabled || known!.Kind == EditServerValueKind.Boolean)
             {
                 if (!bool.TryParse(text.Trim(), out var flag))
@@ -298,39 +318,102 @@ public static partial class DarlingCliCommands
         }
     }
 
+    /// <summary>The one registered server the verb edits, resolved once from the name the operator typed: what is printed before
+    /// the password is asked for, and the <c>modified_at</c> the edit carries as <c>expected_modified_at</c>, so a row that moved
+    /// while the prompt waited is refused and the password is never used against a server the operator did not see.</summary>
+    internal sealed record EditServerTarget(
+        int ServerId, string StorageName, string DisplayName, string Host, int Port, string Auth, string? Username, string ModifiedAt)
+    {
+        /// <summary>The server as the operator is shown it. Control characters in a value are escaped.</summary>
+        internal string Describe()
+        {
+            var where = StoreConfigProvider.DriftText(Host) + (Port > 0 ? ":" + Port.ToString(CultureInfo.InvariantCulture) : "");
+            var login = string.IsNullOrEmpty(Username) ? $"{Auth} authentication" : $"login {StoreConfigProvider.DriftText(Username)} ({Auth})";
+            return $"'{StoreConfigProvider.DriftText(DisplayName)}' (id {ServerId.ToString(CultureInfo.InvariantCulture)}) at {where}, {login}";
+        }
+    }
+
+    /// <summary>
+    /// Finds the one server <paramref name="name"/> names, by its exact display name or storage name and never by a part of one:
+    /// a write verb that can ask for a password must not guess. A name that matches nothing, a part of a name and a name several
+    /// servers share each answer with the sentence to print and no target.
+    /// </summary>
+    internal static (EditServerTarget? Target, string? Refusal) ResolveEditServerTarget(
+        IReadOnlyList<PerformanceMonitor.Darling.Storage.RegisteredServer> servers, string name)
+    {
+        var match = DarlingMcpServerAdminTools.ResolveForRemoval(servers, name, nameClash: NameClash.Refuse);
+        string List(IEnumerable<PerformanceMonitor.Darling.Storage.RegisteredServer> candidates) =>
+            string.Join(Environment.NewLine, candidates.Select(c => $"    {StoreConfigProvider.DriftText(c.DisplayName)} ({StoreConfigProvider.DriftText(c.ServerName)})"));
+        if (match.Candidates.Count == 0)
+        {
+            return (null, "  Not changed: no registered server is named that. Nothing was changed.");
+        }
+
+        if (match.MatchedBy != "exact")
+        {
+            return (null, "  Not changed: no registered server is named exactly that, and --edit-server never matches a part of a name. Servers whose names contain it:"
+                + Environment.NewLine + List(match.Candidates));
+        }
+
+        if (match.Candidates.Count > 1)
+        {
+            return (null, "  Not changed: more than one registered server has that name. Use the storage name in parentheses:"
+                + Environment.NewLine + List(match.Candidates));
+        }
+
+        var only = match.Candidates[0];
+        return (new EditServerTarget(only.ServerId, only.ServerName, only.DisplayName ?? only.ServerName, "", 0, "", null, ""), null);
+    }
+
     /// <summary>
     /// The verb's body over its two writes, so a test drives it without a store. <paramref name="edit"/> takes an edit_server
     /// request and returns its answer; <paramref name="setEnabled"/> takes a server name and the enabled state and returns the
     /// enable_server or disable_server answer. When the edit answers that it needs the server's password, the password is read
-    /// with <paramref name="readPassword"/> and the same request is sent once more with it. The enabled state is applied only
-    /// after the edit, if there is one, has succeeded.
+    /// with <paramref name="readPassword"/> and the same request is sent once more with it. With a <paramref name="target"/> both
+    /// sends carry its <c>modified_at</c> as <c>expected_modified_at</c>, so a server that changed while the password was typed is
+    /// refused before the password is used, and the prompt names the server, its host and its login. The enabled state is applied
+    /// only after the edit, if there is one, has succeeded. An enabled step that fails keeps the edit's lines and says the settings
+    /// were saved.
     /// </summary>
     internal static async Task<(IReadOnlyList<string> Lines, int ExitCode)> RunEditServerAsync(
         EditServerRequest request,
         Func<string, Task<string>> edit,
         Func<string, bool, Task<string>> setEnabled,
-        Func<string, string?> readPassword)
+        Func<string, string?> readPassword,
+        EditServerTarget? target = null)
     {
         var lines = new List<string>();
-        var target = request.ServerName;
+        var storageName = target?.StorageName ?? request.ServerName;
+        var saved = false;
         if (request.Changes is { } changes)
         {
-            var answer = await edit(changes.ToJsonString());
+            var first = (JsonObject)changes.DeepClone();
+            if (target is not null)
+            {
+                first["expected_modified_at"] = target.ModifiedAt;
+            }
+
+            var answer = await edit(first.ToJsonString());
             if (DarlingMcpServerAdminTools.IsPasswordNeededAnswer(answer))
             {
-                var typed = readPassword($"  Password for {request.ServerName} (the change is tested with it, then saved with it): ");
+                var who = target?.Describe() ?? $"'{StoreConfigProvider.DriftText(request.ServerName)}'";
+                var typed = readPassword($"  This change sets how {who} is reached, and a saved password is never sent with changed connection settings unless it is typed again. Password for it (tested with the change, then saved with it): ");
                 if (string.IsNullOrEmpty(typed))
                 {
                     lines.Add("  Not changed: this change needs the server's password, and none was entered.");
                     return (lines, 1);
                 }
 
-                var withPassword = (JsonObject)changes.DeepClone();
+                var withPassword = (JsonObject)first.DeepClone();
                 withPassword["password"] = typed;
                 answer = await edit(withPassword.ToJsonString());
+                if (StatusOf(answer) == DarlingMcpServerAdminTools.EditStatus.Conflict)
+                {
+                    lines.Add("  The server changed while the password prompt was open, so the password was not used.");
+                }
             }
 
-            var (editLines, exitCode, storageName) = FormatEditServerOutcome(answer);
+            var (editLines, exitCode, savedName) = FormatEditServerOutcome(answer);
             lines.AddRange(editLines);
             if (exitCode != 0)
             {
@@ -342,7 +425,8 @@ public static partial class DarlingCliCommands
                 return (lines, exitCode);
             }
 
-            target = storageName ?? target;
+            saved = StatusOf(answer) == DarlingMcpServerAdminTools.EditStatus.Updated;
+            storageName = savedName ?? storageName;
         }
 
         if (request.Enabled is { } enable)
@@ -350,11 +434,21 @@ public static partial class DarlingCliCommands
             JsonObject? answer;
             try
             {
-                answer = JsonNode.Parse(await setEnabled(target, enable)) as JsonObject;
+                answer = JsonNode.Parse(await setEnabled(storageName, enable)) as JsonObject;
             }
             catch (JsonException)
             {
                 answer = null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                lines.Add("  enabled was not changed: could not reach the store: " + StoreConfigProvider.DriftText(ex.Message));
+                if (saved)
+                {
+                    lines.Add("  The settings above were saved.");
+                }
+
+                return (lines, 1);
             }
 
             string? Text(string key) => answer?[key] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
@@ -366,6 +460,11 @@ public static partial class DarlingCliCommands
             else
             {
                 lines.Add("  enabled was not changed: " + (Text("message") ?? Text("error") ?? "the store's answer could not be read."));
+                if (saved)
+                {
+                    lines.Add("  The settings above were saved.");
+                }
+
                 return (lines, 1);
             }
         }
@@ -373,13 +472,83 @@ public static partial class DarlingCliCommands
         return (lines, 0);
     }
 
+    private static string? StatusOf(string answerJson)
+    {
+        try
+        {
+            return JsonNode.Parse(answerJson) is JsonObject o && o["status"] is JsonValue v && v.TryGetValue<string>(out var s) ? s : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The write the edit makes, with one more check in its transaction: the password key the typed password was sealed to
+    /// is still the store's current key (#9693). A key reset between the choice of the key and the write would leave a password
+    /// sealed to a retired key that opens for nobody, so the write is refused and nothing is saved.</summary>
+    internal sealed class KeyCheckedEditStore(DarlingMcpServerAdminTools.IServerEditStore inner, IPasswordKeyRing ring) : DarlingMcpServerAdminTools.IServerEditStore
+    {
+        public Task<DarlingMcpServerAdminTools.ServerEditRow?> ReadRowAsync(int serverId, CancellationToken cancellationToken) =>
+            inner.ReadRowAsync(serverId, cancellationToken);
+
+        public Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken) =>
+            inner.LoadOtherStorageKeysAsync(serverId, cancellationToken);
+
+        public Task<DarlingMcpServerAdminTools.ServerEditWrite> WriteAsync(
+            int serverId, DateTime expectedModifiedAt, IReadOnlyList<DarlingMcpServerAdminTools.EditColumnValue> sets,
+            string? newStorageKey, string? actualStorageKey, DarlingMcpServerAdminTools.HeldCheck? heldCheck, CancellationToken cancellationToken)
+        {
+            if (!sets.Any(s => s.Column == "encrypted_password"))
+            {
+                return inner.WriteAsync(serverId, expectedModifiedAt, sets, newStorageKey, actualStorageKey, heldCheck, cancellationToken);
+            }
+
+            DarlingMcpServerAdminTools.HeldCheck checkKey = async (connection, transaction, token) =>
+            {
+                string? currentKeyId;
+                await using (var command = new NpgsqlCommand("SELECT key_id FROM config.password_key WHERE state = 'current' FOR SHARE;", connection, transaction))
+                {
+                    command.CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds;
+                    currentKeyId = (string?)await command.ExecuteScalarAsync(token);
+                }
+
+                return PasswordKeyChangedReason(currentKeyId, ring) ?? (heldCheck is null ? null : await heldCheck(connection, transaction, token));
+            };
+            return inner.WriteAsync(serverId, expectedModifiedAt, sets, newStorageKey, actualStorageKey, checkKey, cancellationToken);
+        }
+    }
+
+    /// <summary>A logger that writes each line the edit path logs to the verb's own output, so the driver's reason for a failed
+    /// connection test and the one-line audit of an edit (the id and the field names, never a value) reach the operator.
+    /// Exceptions are not printed.</summary>
+    private sealed class EditServerOutputLogger(TextWriter output) : Microsoft.Extensions.Logging.ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => logLevel >= Microsoft.Extensions.Logging.LogLevel.Information;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (IsEnabled(logLevel))
+            {
+                output.WriteLine("    " + StoreConfigProvider.DriftText(formatter(state, null)));
+            }
+        }
+    }
+
     /// <summary>
     /// <c>--edit-server &lt;name&gt; --set &lt;field&gt;=&lt;value&gt; ... [--config &lt;path&gt;]</c> (#9693). Runs as the store owner, like
     /// <c>--add-server</c>, and seals a typed password with the key the service keeps. It does not stop or signal the service: the
     /// store bumps its config version on the write, and the running service reloads the registry on its next config poll.
+    /// The server is found once, by its exact name, and printed with the store and the configuration file before anything is
+    /// sent. The password is read as bytes (<see cref="ReadLoginPassword"/>), the password key is chosen again after it is typed and
+    /// checked again in the write's transaction, and the write goes by the server's id with the row's <c>modified_at</c> as the expected value.
     /// </summary>
     public static async Task<int> EditServerAsync(
-        string[] rest, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken,
+        string[] rest, Stream input, TextWriter output, TextWriter error, CancellationToken cancellationToken,
         Func<string, string?>? readPassword = null)
     {
         if (rest.Length == 0 || IsHelpVerb(rest[0]))
@@ -453,6 +622,8 @@ public static partial class DarlingCliCommands
             return probe;
         }
 
+        var configPath = DarlingConfig.ResolveConfigPath(request.ConfigPath);
+        var logger = new EditServerOutputLogger(output);
         IReadOnlyList<string> lines;
         int exitCode;
         try
@@ -460,32 +631,102 @@ public static partial class DarlingCliCommands
             await using var dataSource = NpgsqlDataSource.Create(
                 DarlingStoreConnection.PinSessionTimeZoneUtc(
                     DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
-            var sealKey = await DarlingCliSealKey.ResolveAsync(config, DarlingConfig.ResolveConfigPath(request.ConfigPath), dataSource, null, cancellationToken);
+            var editStore = new DarlingMcpServerAdminTools.PostgresServerEditStore(dataSource);
+
+            /* The server is found once, by its exact name, and from here on it is its id: the password is asked for, and later sent,
+               for this row and no other. */
+            var definitions = await DarlingMcpServerAdminTools.LoadDefinitionsForRemovalAsync(dataSource);
+            var (found, refusal) = ResolveEditServerTarget(definitions.Select(d => d.Server).ToList(), request.ServerName);
+            if (found is null)
+            {
+                output.WriteLine(refusal);
+                return 1;
+            }
+
+            var row = await editStore.ReadRowAsync(found.ServerId, cancellationToken);
+            if (row is null)
+            {
+                output.WriteLine("  Not changed: that server's definition no longer exists.");
+                return 1;
+            }
+
+            var target = found with
+            {
+                Host = row.Host,
+                Port = row.Port,
+                Auth = DarlingMcpServerAdminTools.AuthWord(row.Auth),
+                Username = row.Username,
+                DisplayName = row.Name,
+                ModifiedAt = DarlingMcpServerAdminTools.ModifiedAtToken(row.ModifiedAt),
+            };
+
+            /* Before the first send and before any prompt: the store and the configuration file this run reaches, the key a typed
+               password is sealed to, and the server it is for, so a configuration or a name that is not the one the operator meant
+               is seen before a password is spent on it. */
+            var firstKey = await DarlingCliSealKey.ResolveAsync(config, configPath, dataSource, null, cancellationToken);
+            output.WriteLine("  " + StoreAndKeyLine(dataSource.ConnectionString, firstKey.Ring));
+            output.WriteLine($"  Configuration: {configPath ?? "(none)"}");
+            output.WriteLine($"  Server: {target.Describe()}.");
+            output.WriteLine();
+
+            DarlingCliSealKey.Decision? sealedWith = null;
+            async Task<string> EditAsync(string changesJson)
+            {
+                /* The key is chosen again for every send, so the one after the password prompt is the store's key now. */
+                var key = await DarlingCliSealKey.ResolveAsync(config, configPath, dataSource, null, cancellationToken);
+                sealedWith = key;
+                try
+                {
+                    return await DarlingMcpServerAdminTools.EditServerCoreAsync(
+                        new KeyCheckedEditStore(editStore, key.Ring), target.ServerId, changesJson, ProbeAsync, key.Ring, logger, cancellationToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    var typed = JsonNode.Parse(changesJson) is JsonObject sent && sent["password"] is JsonValue pw && pw.TryGetValue<string>(out var text) ? text : null;
+                    var message = string.IsNullOrEmpty(typed) ? ex.Message : ex.Message.Replace(typed, "[redacted]", StringComparison.Ordinal);
+                    return McpHelpers.FormatError("edit_server", new InvalidOperationException(message));
+                }
+            }
+
             (lines, exitCode) = await RunEditServerAsync(
                 request,
-                changesJson => DarlingMcpServerAdminTools.EditServerByNameAsync(
-                    dataSource, request.ServerName, changesJson, ProbeAsync, sealKey.Ring, null, cancellationToken),
+                EditAsync,
                 (server, enable) => enable
                     ? DarlingMcpCollectionStateTools.EnableServer(dataSource, server, null, cancellationToken)
                     : DarlingMcpCollectionStateTools.DisableServer(dataSource, server, null, cancellationToken),
-                readPassword ?? (label => ReadPasswordFromConsole(label, input ?? TextReader.Null, output)));
+                readPassword ?? ((Func<string, string?>)(label =>
+                {
+                    var typed = ReadLoginPassword(label, input, output, Console.IsInputRedirected, out var inputRefusal);
+                    if (inputRefusal is not null)
+                    {
+                        output.WriteLine("  " + inputRefusal);
+                    }
+
+                    return typed;
+                })),
+                target);
+
+            foreach (var line in lines)
+            {
+                output.WriteLine(line);
+            }
+
+            foreach (var note in identityNotes)
+            {
+                output.WriteLine("    " + note);
+            }
+
+            if (sealedWith is { Ring: DarlingCliSealKey.PublishedKeyRing { SealedCount: > 0 }, Notice: { } notice })
+            {
+                output.WriteLine(notice);
+            }
+
+            return exitCode;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            error.WriteLine($"Could not reach the store: {ex.Message}");
+            error.WriteLine($"Could not reach the store: {StoreConfigProvider.DriftText(ex.Message)}");
             return 1;
         }
-
-        foreach (var line in lines)
-        {
-            output.WriteLine(line);
-        }
-
-        foreach (var note in identityNotes)
-        {
-            output.WriteLine("    " + note);
-        }
-
-        return exitCode;
     }
 }

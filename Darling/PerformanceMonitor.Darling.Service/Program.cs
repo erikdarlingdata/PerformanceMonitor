@@ -345,7 +345,7 @@ if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
    credential, which the verb checks). */
 if (args.Length > 0 && DarlingCliCommands.IsEditServerVerb(args[0]))
 {
-    return await DarlingCliCommands.EditServerAsync(args[1..], Console.In, Console.Out, Console.Error, CancellationToken.None);
+    return await DarlingCliCommands.EditServerAsync(args[1..], Console.OpenStandardInput(), Console.Out, Console.Error, CancellationToken.None);
 }
 
 /* CLI verbs: --add-alert-source / --rotate-alert-source / --remove-alert-source <name> and --list-alert-sources, each with an
