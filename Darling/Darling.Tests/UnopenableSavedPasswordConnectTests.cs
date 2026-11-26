@@ -1,0 +1,242 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Reflection;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
+using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Analysis;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #9749: a server whose saved password cannot be opened is a failed connect with a named cause. The connector refuses before any
+/// network work, the refusal is the failed attempt the worker handles, and the text the worker keeps for the registry is the
+/// resolver's own sentence. The sealed value and the password are never part of it.
+/// </summary>
+public sealed class UnopenableSavedPasswordConnectTests
+{
+    internal const string Plain = "p@ss-not-real";
+    private static readonly Lazy<PasswordPrivateKey> s_savedWith = new(PasswordPrivateKey.Generate);
+    private static readonly Lazy<PasswordPrivateKey> s_heldNow = new(PasswordPrivateKey.Generate);
+
+    internal static MonitoredServer SqlAuthServer() => new()
+    {
+        Name = "alpha",
+        Host = "alpha-host.example.test",
+        Auth = "sql",
+        Username = "monitor",
+    };
+
+    /// <summary>A password sealed for this server's connection with the key the service held when it was saved.</summary>
+    internal static string SealedFor(MonitoredServer server) =>
+        PasswordSeal.Seal(Plain, s_savedWith.Value.PublicKey, server.SecretBinding);
+
+    /// <summary>The ring of a service whose key file is gone while the store still publishes the key: it refuses with the start-up decision's reason.</summary>
+    internal static IPasswordKeyRing KeyFileMissing()
+    {
+        var published = s_savedWith.Value.PublicKey;
+        var decision = DarlingPasswordKeyState.Decide(new PasswordKeyFacts(
+            FilePresent: false, FileUntrusted: false, FileRefusal: null, FileSpki: null,
+            FoundAfterOpenDirectory: false, StoreCurrent: new PublishedKey(published.KeyId, published.Spki), FileKeyRetiredInStore: false));
+        Assert.Equal(PasswordKeyAction.Missing, decision.Action);
+        return DarlingPasswordKey.Refusing(decision.Reason!);
+    }
+
+    /// <summary>The ring of a service that holds a different key from the one the password was sealed to (a reset key, another credentials volume).</summary>
+    internal static IPasswordKeyRing AnotherKey() => DarlingPasswordKey.FromPrivateKey(s_heldNow.Value);
+
+    internal static DarlingWorker NewWorker(NpgsqlDataSource? store = null) =>
+        new(
+            NullLogger<DarlingWorker>.Instance,
+            NullLoggerFactory.Instance,
+            new McpRuntimeState(),
+            new WebRuntimeState(),
+            new MonitoredServerRegistryState(),
+            new CollectorRuntimeState(),
+            new WebTlsCertificateState(),
+            new BaselineCache(),
+            new ReadLatencyAccumulator())
+        {
+            StoreForTests = store,
+            SelfAlertsForTests = new DarlingSelfAlertEvaluator(
+                new DarlingSelfAlertTests.FakeSettings(), new DarlingSelfAlertTests.RecordingDeliverer(),
+                new DarlingSelfAlertTests.FakeHistoryStore(), _ => false),
+        };
+
+    internal static async Task TryConnectAsync(DarlingWorker worker, DarlingWorker.ServerLoopState state, ConnectAttempt attempt, CancellationToken ct)
+    {
+        var tryConnect = typeof(DarlingWorker).GetMethod("TryConnectAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        await (Task)tryConnect.Invoke(worker, [state, null, new DarlingConfig(), attempt, ct])!;
+    }
+
+    [Fact]
+    public async Task The_connector_refuses_before_the_network_and_the_refusal_is_the_failed_attempt()
+    {
+        var server = SqlAuthServer();
+        server.EncryptedPassword = SealedFor(server);
+        using var gate = new SemaphoreSlim(1, 1);
+
+        /* The connect the sweep makes: the real connector, in the connect gate. The password is opened with the process's own ring. */
+        var attempt = await ServerConnectProbe.AttemptAsync(
+            server, (target, token) => DarlingServerConnector.ConnectAsync(target, NullLogger.Instance, token), gate, TestContext.Current.CancellationToken);
+
+        Assert.Null(attempt.Runtime);
+        var failure = Assert.IsType<InvalidOperationException>(attempt.Failure);
+        var refusal = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _));
+        Assert.Equal(refusal.Message, failure.Message);
+        Assert.DoesNotContain(server.EncryptedPassword, failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(Plain, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_failed_attempt_reaches_the_workers_failure_path_with_the_resolvers_sentence(bool keyFileMissing)
+    {
+        var server = SqlAuthServer();
+        server.EncryptedPassword = SealedFor(server);
+        var refusal = Assert.Throws<InvalidOperationException>(
+            () => DarlingSecrets.ResolvePassword(server, out _, keyFileMissing ? KeyFileMissing() : AnotherKey()));
+
+        /* No store: the registry write is failure-isolated, so the failure path still runs to its end. */
+        var state = new DarlingWorker.ServerLoopState { Config = server };
+        var before = DateTime.UtcNow;
+        await TryConnectAsync(NewWorker(), state, new ConnectAttempt(server, null, refusal), TestContext.Current.CancellationToken);
+
+        Assert.Null(state.Runtime);
+        Assert.Equal(1, state.ConsecutiveConnectFailures);
+        Assert.True(state.NextConnectAttempt > before, "the server is in the connect backoff, not dropped");
+        Assert.Equal(refusal.Message, state.LastConnectFailureLogged);
+        Assert.DoesNotContain(server.EncryptedPassword, state.LastConnectFailureLogged, StringComparison.Ordinal);
+        Assert.DoesNotContain(Plain, state.LastConnectFailureLogged, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
+/// #9749 against a store: the configuration load keeps a server whose saved password cannot be opened, the failed connect writes the
+/// named cause on the registry and no collection log row, and the reads a user looks at (collection health, the server list, the fleet
+/// card) carry that cause. None of them carries the sealed value.
+/// </summary>
+[Collection("live-postgres")]
+public sealed class UnopenableSavedPasswordConnectLiveTests
+{
+    private const int ServerId = 97;
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_server_is_kept_at_load_and_every_read_names_the_cause(bool keyFileMissing)
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live unopenable-password test.");
+        var ct = TestContext.Current.CancellationToken;
+        /* #1776 own-store: this fact mints its own scratch database through ScratchPostgres. */
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        MonitoredServer loaded;
+        string sealedText;
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            await using (var seed = new NpgsqlCommand(
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, auth, username, is_enabled) VALUES ($1, 'alpha', 'alpha-host.example.test', 'sql', 'monitor', TRUE)", connection))
+            {
+                seed.Parameters.AddWithValue(ServerId);
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            /* Sealed for the connection the loader builds from the row, then saved on the row. */
+            var unsaved = Assert.Single(await StoreConfigProvider.ReadMonitoredServersAsync(connection, new DarlingConfig(), ct));
+            sealedText = UnopenableSavedPasswordConnectTests.SealedFor(unsaved);
+            await using (var save = new NpgsqlCommand("UPDATE config.config_monitored_servers SET encrypted_password = $2 WHERE server_id = $1", connection))
+            {
+                save.Parameters.AddWithValue(ServerId);
+                save.Parameters.AddWithValue(sealedText);
+                await save.ExecuteNonQueryAsync(ct);
+            }
+
+            /* The load keeps the server, with the value it cannot open. */
+            loaded = Assert.Single(await StoreConfigProvider.ReadMonitoredServersAsync(connection, new DarlingConfig(), ct));
+        }
+
+        Assert.Equal(ServerId, loaded.ServerId);
+        Assert.Equal(sealedText, loaded.EncryptedPassword);
+        Assert.True(loaded.RequiresResolvedSecret);
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(
+            loaded, out _, keyFileMissing ? UnopenableSavedPasswordConnectTests.KeyFileMissing() : UnopenableSavedPasswordConnectTests.AnotherKey()));
+
+        var state = new DarlingWorker.ServerLoopState { Config = loaded };
+        await UnopenableSavedPasswordConnectTests.TryConnectAsync(
+            UnopenableSavedPasswordConnectTests.NewWorker(postgres), state, new ConnectAttempt(loaded, null, refusal), ct);
+
+        /* The registry carries the cause. */
+        await using (var row = postgres.CreateCommand("SELECT connect_down_since IS NOT NULL, last_connect_error, next_connect_attempt IS NOT NULL FROM servers WHERE server_id = $1"))
+        {
+            row.Parameters.AddWithValue(ServerId);
+            await using var reader = await row.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct), "the failed connect wrote the registry row");
+            Assert.True(reader.GetBoolean(0));
+            Assert.Equal(refusal.Message, reader.GetString(1));
+            Assert.True(reader.GetBoolean(2));
+        }
+
+        /* The collection log holds nothing for the server: the registry, not a log row, is where a failed connect is kept (#7590). */
+        await using (var log = postgres.CreateCommand("SELECT count(*) FROM v_collection_log WHERE server_id = $1"))
+        {
+            log.Parameters.AddWithValue(ServerId);
+            Assert.Equal(0L, await log.ExecuteScalarAsync(ct));
+        }
+
+        /* get_collection_health: the connection block and the answer's own sentence carry the cause. */
+        var healthJson = await DarlingMcpDataTools.GetCollectionHealthUncut(postgres, "alpha", ct);
+        using (var health = JsonDocument.Parse(healthJson))
+        {
+            var root = health.RootElement;
+            Assert.Equal("waiting_on_connection", root.GetProperty("server_connection").GetProperty("status").GetString());
+            Assert.Equal(refusal.Message, root.GetProperty("server_connection").GetProperty("last_connect_error").GetString());
+            Assert.Contains(refusal.Message, root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }
+
+        /* list_servers: Offline, with the cause as the reason. */
+        var listJson = await DarlingMcpDataTools.ListServers(postgres, ct);
+        using (var list = JsonDocument.Parse(listJson))
+        {
+            var server = list.RootElement.GetProperty("servers")[0];
+            Assert.Equal("Offline", server.GetProperty("status").GetString());
+            Assert.Contains(refusal.Message, server.GetProperty("reason").GetString(), StringComparison.Ordinal);
+        }
+
+        /* The fleet card behind get_fleet_overview and the web dashboard: Offline, the cause in its reason and in last_connect_error. */
+        var now = DateTime.UtcNow;
+        var fleet = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-1), now, now, cancellationToken: ct);
+        var card = Assert.Single(fleet.Cards);
+        Assert.Equal("Offline", card.Status);
+        Assert.Equal(refusal.Message, card.LastConnectError);
+        var reason = DarlingFleetReader.BuildReason(card);
+        Assert.Contains(refusal.Message, reason, StringComparison.Ordinal);
+
+        foreach (var text in new[] { refusal.Message, healthJson, listJson, reason })
+        {
+            Assert.DoesNotContain(sealedText, text, StringComparison.Ordinal);
+            Assert.DoesNotContain(UnopenableSavedPasswordConnectTests.Plain, text, StringComparison.Ordinal);
+        }
+    }
+}
