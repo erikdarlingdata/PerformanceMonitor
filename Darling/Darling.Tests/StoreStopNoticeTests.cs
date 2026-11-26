@@ -9,6 +9,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -238,6 +239,71 @@ public sealed class StoreStopNoticeTests
         Assert.Equal(0, notice.Count);
     }
 
+    [Fact]
+    public async Task StartHistoryLastFlush_ConnectionRefused_GoesToTheNoticeNotAWarning()
+    {
+        await using var postgres = NpgsqlDataSource.Create(RefusingStore.ConnectionStringFor(RefusingStore.ClosedPort()));
+        var logger = new CapturingTestLogger();
+        var notice = new StoreStopNotice(logger);
+        using var recorder = Recorder();
+        using var stopped = new CancellationTokenSource();
+        await stopped.CancelAsync();
+
+        await recorder.RunAsync(postgres, logger, stopped.Token, stopNotice: notice);
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(1, notice.Count);
+    }
+
+    /// <summary>
+    /// The store goes down between the open and the first write: the connection opens, the collector-cost insert is answered with 57P01 and
+    /// the connection is lost, and opening it again for the read-latency flush is refused. Each sample set is named once and nothing warns.
+    /// </summary>
+    [Fact]
+    public async Task SampleFlushAtStop_StoreGoesDownAfterTheOpen_NamesEachSampleSetOnce()
+    {
+        await using var store = new RefusingStore("57P01", statementsBeforeRefusing: 0);
+        await using var postgres = NpgsqlDataSource.Create(store.ConnectionString);
+        var logger = new CapturingTestLogger();
+        var notice = new StoreStopNotice(logger);
+        var (cost, latency) = Samples();
+
+        await DarlingWorker.FlushSamplesOnStopAsync(postgres, cost, latency, TimeSpan.FromSeconds(30), logger, notice);
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(2, notice.Count);
+        /* The open succeeded and a statement was sent on it: the failure was the insert's, not the connect's. */
+        Assert.Equal(1, store.StatementsRefused);
+    }
+
+    /// <summary>
+    /// The store goes down between two statements of one sightings flush: the first statement's rows land, the second meets 57P01, and the
+    /// notice counts only the rows that were not written.
+    /// </summary>
+    [Fact]
+    public async Task SightingsFlushAtStop_StoreGoesDownAfterTheFirstStatement_CountsOnlyTheUnwrittenRows()
+    {
+        await using var store = new RefusingStore("57P01", statementsBeforeRefusing: 1);
+        await using var postgres = NpgsqlDataSource.Create(store.ConnectionString);
+        var logger = new CapturingTestLogger();
+        var notice = new StoreStopNotice(logger);
+        var rows = Enumerable.Range(0, QueryTagSightingWriter.RowsPerStatement + 1)
+            .Select(i => new QueryTagSightingWriter.CollapsedSighting { ServerId = 1, Kind = "hash", Key = "k" + i.ToString("D6", CultureInfo.InvariantCulture), Count = 1 })
+            .ToList();
+
+        var written = await QueryTagSightingWriter.WriteAsync(postgres, rows, logger, CancellationToken.None, stopNotice: notice);
+
+        Assert.Equal(QueryTagSightingWriter.RowsPerStatement, written);
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(1, notice.Count);
+        Assert.Equal(1, store.StatementsRefused);
+
+        notice.Report();
+
+        /* The only number in the line is the one row the second statement carried. */
+        Assert.Equal("1", new string(logger.Lines.Single().Where(char.IsDigit).ToArray()));
+    }
+
     /// <summary>
     /// The start's store-retry arms flush right after logging that the store cannot be reached. A store that is not up yet is no second
     /// Warning there, and it leaves the recorder's own first-failure Warning unspent: the minute flush that later meets the same store warns.
@@ -343,6 +409,9 @@ public sealed class StoreStopNoticeTests
     /// A listener that answers every PostgreSQL connection with one error and closes it: what a client sees from a store that is
     /// shutting down, starting up or refusing the login. It declines an encryption request, reads the startup packet and sends an
     /// ErrorResponse with the SQLSTATE given.
+    /// <para>With <c>statementsBeforeRefusing</c> it is a store that goes down mid-write instead: it lets the connection open, answers that
+    /// many statements as written, answers the next one with the SQLSTATE given and closes, and from then on refuses every new connection
+    /// with 57P03, as a postmaster that is shutting down does.</para>
     /// </summary>
     private sealed class RefusingStore : IAsyncDisposable
     {
@@ -352,16 +421,27 @@ public sealed class StoreStopNoticeTests
         private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
         private readonly CancellationTokenSource _stop = new();
         private readonly string _sqlState;
+        private readonly bool _opens;
         private readonly Task _accepting;
+        private int _statementsLeft;
+        private int _statementsRefused;
+        private int _down;
 
-        public RefusingStore(string sqlState)
+        public RefusingStore(string sqlState, int statementsBeforeRefusing = -1)
         {
             _sqlState = sqlState;
+            _opens = statementsBeforeRefusing >= 0;
+            _statementsLeft = Math.Max(statementsBeforeRefusing, 0);
             _listener.Start();
             _accepting = AcceptAsync();
         }
 
-        public string ConnectionString => ConnectionStringFor(((IPEndPoint)_listener.LocalEndpoint).Port);
+        /// <summary>How many statements were answered with the error, on a connection that had opened.</summary>
+        public int StatementsRefused => Volatile.Read(ref _statementsRefused);
+
+        /* No type loading: the open then sends no statement of its own, so the first statement the listener sees is the writer's. */
+        public string ConnectionString =>
+            ConnectionStringFor(((IPEndPoint)_listener.LocalEndpoint).Port) + (_opens ? ";Server Compatibility Mode=NoTypeLoading" : string.Empty);
 
         public static string ConnectionStringFor(int port) =>
             $"Host=127.0.0.1;Port={port};Username=darling;Database=darling;SSL Mode=Disable;Timeout=15;Pooling=false";
@@ -416,12 +496,52 @@ public sealed class StoreStopNoticeTests
                         break;
                     }
 
-                    await stream.WriteAsync(ErrorResponse(), _stop.Token);
-                    await stream.FlushAsync(_stop.Token);
-                    client.Client.Shutdown(SocketShutdown.Send);
-                    /* Wait for the client to close its side, so the error is read before the socket goes. */
-                    while (await stream.ReadAsync(header, _stop.Token) > 0)
+                    if (!_opens || Volatile.Read(ref _down) == 1)
                     {
+                        await RefuseAsync(client, stream, _opens ? "57P03" : _sqlState);
+                        return;
+                    }
+
+                    await stream.WriteAsync(Handshake(), _stop.Token);
+                    var replies = new List<byte>();
+                    var prefix = new byte[5];
+                    while (true)
+                    {
+                        /* One frontend message: a type byte, a length that counts itself, and the payload. */
+                        await stream.ReadExactlyAsync(prefix, _stop.Token);
+                        var payload = new byte[BinaryPrimitives.ReadInt32BigEndian(prefix.AsSpan(1)) - 4];
+                        await stream.ReadExactlyAsync(payload, _stop.Token);
+                        switch ((char)prefix[0])
+                        {
+                            case 'X':
+                                return;
+                            case 'P':
+                                replies.AddRange(Message('1'));
+                                break;
+                            case 'B':
+                                replies.AddRange(Message('2'));
+                                break;
+                            case 'D':
+                                replies.AddRange(Message('n'));
+                                break;
+                            case 'E':
+                                replies.AddRange(Message('C', Encoding.ASCII.GetBytes("INSERT 0 1\0")));
+                                break;
+                            case 'S':
+                                /* The whole statement has been read, so the client is reading when the answer goes out. */
+                                if (Interlocked.Decrement(ref _statementsLeft) < 0)
+                                {
+                                    Volatile.Write(ref _down, 1);
+                                    Interlocked.Increment(ref _statementsRefused);
+                                    await RefuseAsync(client, stream, _sqlState);
+                                    return;
+                                }
+
+                                replies.AddRange(Message('Z', "I"u8.ToArray()));
+                                await stream.WriteAsync(replies.ToArray(), _stop.Token);
+                                replies.Clear();
+                                break;
+                        }
                     }
                 }
             }
@@ -431,7 +551,48 @@ public sealed class StoreStopNoticeTests
             }
         }
 
-        private byte[] ErrorResponse()
+        private async Task RefuseAsync(TcpClient client, NetworkStream stream, string sqlState)
+        {
+            await stream.WriteAsync(ErrorResponse(sqlState), _stop.Token);
+            await stream.FlushAsync(_stop.Token);
+            client.Client.Shutdown(SocketShutdown.Send);
+            /* Wait for the client to close its side, so the error is read before the socket goes. */
+            var rest = new byte[256];
+            while (await stream.ReadAsync(rest, _stop.Token) > 0)
+            {
+            }
+        }
+
+        private static byte[] Message(char type, byte[]? payload = null)
+        {
+            payload ??= [];
+            var message = new byte[5 + payload.Length];
+            message[0] = (byte)type;
+            BinaryPrimitives.WriteInt32BigEndian(message.AsSpan(1), 4 + payload.Length);
+            payload.CopyTo(message, 5);
+            return message;
+        }
+
+        /* AuthenticationOk, the parameters a client reads at connect, a backend key and ReadyForQuery. */
+        private static byte[] Handshake()
+        {
+            var bytes = new List<byte>();
+            bytes.AddRange(Message('R', new byte[4]));
+            foreach (var (name, value) in new[]
+            {
+                ("server_version", "17.0"), ("server_encoding", "UTF8"), ("client_encoding", "UTF8"), ("integer_datetimes", "on"),
+                ("standard_conforming_strings", "on"), ("DateStyle", "ISO, MDY"), ("TimeZone", "UTC"),
+            })
+            {
+                bytes.AddRange(Message('S', Encoding.ASCII.GetBytes(name + "\0" + value + "\0")));
+            }
+
+            bytes.AddRange(Message('K', new byte[8]));
+            bytes.AddRange(Message('Z', "I"u8.ToArray()));
+            return bytes.ToArray();
+        }
+
+        private static byte[] ErrorResponse(string sqlState)
         {
             var fields = new List<byte>();
             void Field(char type, string value)
@@ -443,8 +604,8 @@ public sealed class StoreStopNoticeTests
 
             Field('S', "FATAL");
             Field('V', "FATAL");
-            Field('C', _sqlState);
-            Field('M', "the store answered " + _sqlState);
+            Field('C', sqlState);
+            Field('M', "the store answered " + sqlState);
             fields.Add(0);
 
             var message = new byte[1 + 4 + fields.Count];
