@@ -132,9 +132,13 @@ internal static class DarlingPendingPasswordKeys
             {
                 createModes.CreateOwnerOnly(directory);
             }
-            else
+            else if (OperatingSystem.IsWindows())
             {
                 DarlingFileSecurity.CreateHardenedDirectory(directory);
+            }
+            else
+            {
+                return "this platform has no way to make it owner-only";
             }
 
             info.Refresh();
@@ -156,6 +160,11 @@ internal static class DarlingPendingPasswordKeys
             return (mode & GroupOrOtherAccess) != 0
                 ? $"its mode is {Convert.ToString((int)mode, 8)}, so other users can reach it"
                 : null;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return "this platform has no way to check it";
         }
 
         if (!DarlingFileSecurity.IsTrustedOwner(directory))
