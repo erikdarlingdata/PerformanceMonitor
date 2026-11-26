@@ -1049,7 +1049,7 @@ public partial class MainWindow : Window
                     $"To serve without a token as before, set {McpSettings.AllowTokenlessLoopbackSetting} to true in settings.json.");
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, mcpToken, mcpSettings.AllowTokenlessLoopback, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys, mcpSettings.AllowServerAdmin, McpServerAdminHooksFor());
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, mcpToken, mcpSettings.AllowTokenlessLoopback, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys, mcpSettings.AllowServerAdmin, McpServerAdminHooksFor(mcpSettings.AllowWindowsAuthOverUnverifiedTls));
             _mcpDataDetail = mcpSettings.DataDetail;
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }
@@ -1064,8 +1064,9 @@ public partial class MainWindow : Window
     /// and the sidebar's Remove run, on the UI thread as they do, after closing the server's tab and followed by the same sweep Manage Servers makes
     /// of the collector health and a refresh of the sidebar. add_servers refreshes the sidebar.
     /// </summary>
-    private McpServerAdminHooks McpServerAdminHooksFor() => new()
+    private McpServerAdminHooks McpServerAdminHooksFor(bool allowWindowsAuthOverUnverifiedTls) => new()
     {
+        AllowWindowsAuthOverUnverifiedTls = allowWindowsAuthOverUnverifiedTls,
         OnUiThread = work => Dispatcher.Invoke(work),
         RemoveServer = async server => await await Dispatcher.InvokeAsync(async () =>
         {

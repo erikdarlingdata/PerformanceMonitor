@@ -51,6 +51,7 @@ public sealed class McpServerAdminTools
         "Not here: Darling's port, aws_role_arn, aws_external_id and expected_modified_at (Lite has no such fields), the server's id (it is derived from host, database and read-only intent), excluded databases (use set_server_excluded_databases), and credential profiles and Microsoft Entra MFA or device code sign-in (use the Edit Server window). Any other key is status \"invalid\". " +
         "PASSWORD: omit it, or leave it blank, to keep the stored one; a typed one replaces it. It is never returned or logged. Changing where or how a server is reached, for a SQL or service principal server, uses the stored password unless you send one, and Lite refuses the edit when this Windows user has not confirmed those settings for the server and no password is sent (the Edit Server window asks that question; confirm there). " +
         "When collection is on and a connection setting changed, the new settings are tried first and saved only if the server answers (status \"connection_failed\", nothing saved). " +
+        "An edit of host, auth, trust_server_certificate or encrypt_mode that leaves Windows authentication with trust_server_certificate true or encrypt_mode Optional is refused as invalid before any connection is tried, because Windows authentication would present Lite's own Windows account to a host the connection does not verify; an operator can allow it with mcp_allow_windows_auth_over_unverified_tls in settings.json. " +
         "Returns updated or unchanged, or invalid / not_found / ambiguous / collides / connection_failed / refused with nothing saved. updated returns {status, server, display_name, changed:[field names], tested, previous, undo, undo_note}: previous holds the changed fields as they were, undo is the edit_server call that sets them back (never the password). " +
         "Served only when both mcp_allow_writes and mcp_allow_server_admin are true. server_name is a display name, host or storage name, and a partial name is accepted only when it matches exactly one server.")]
     public static async Task<string> EditServer(
@@ -482,6 +483,16 @@ public sealed class McpServerAdminTools
                 ["server"] = stored.DisplayName,
                 ["message"] = "The request equals the stored values, so nothing was written.",
             }.ToJsonString();
+        }
+
+        /* #9640: Darling's rule. An edit that changes where or how the server is reached must not leave Windows authentication over a connection
+           nothing verifies, unless the operator allowed it. It runs before the question and the connection test, so Windows credentials never
+           reach an unverified host. An edit of other fields leaves a server that already has this posture as it is. */
+        if (changed.Any(k => k is "host" or "auth" or "trust_server_certificate" or "encrypt_mode")
+            && McpUnverifiedWindowsAuthScreen.Refusal(
+                hooks?.AllowWindowsAuthOverUnverifiedTls ?? false, next.AuthenticationType, next.EncryptMode, next.TrustServerCertificate, "Not saved") is { } unverifiedRefusal)
+        {
+            return Refuse(EditTool, "invalid", unverifiedRefusal + " Nothing was saved.");
         }
 
         /* The window asks before it connects or saves with settings this Windows user has not confirmed, unless the user typed the secret. A tool call

@@ -149,11 +149,13 @@ public sealed class McpCollectorScheduleToolTests : IDisposable
     }
 
     [Fact]
-    public void Get_RefusesAnUnknownCollector_NamingTheArgument()
+    public void Get_AnswersAnUnknownCollector_AsUnknownCollector_LikeDarling()
     {
         using var doc = Parse(Get("no_such_collector"));
-        Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
-        Assert.Equal("collector_name", doc.RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Equal("refused", doc.RootElement.GetProperty("status").GetString());
+        Assert.Equal("unknown_collector", doc.RootElement.GetProperty("reason").GetString());
+        Assert.Equal("get_collector_schedules", doc.RootElement.GetProperty("tool").GetString());
+        Assert.False(doc.RootElement.GetProperty("changed").GetBoolean());
     }
 
     [Fact]

@@ -65,6 +65,15 @@ internal sealed class McpSettings
     public bool AllowServerAdmin { get; set; } = false;
 
     /// <summary>
+    /// #9640: whether <c>add_servers</c> and <c>edit_server</c> may save Windows authentication over a connection whose server identity is not
+    /// verified (<c>trust_server_certificate</c> true, or <c>encrypt_mode</c> Optional). Default OFF: they refuse it before any connection test, so the
+    /// Windows account Lite runs as is never presented to a host nothing confirms. Read from <c>mcp_allow_windows_auth_over_unverified_tls</c>
+    /// (<see cref="McpUnverifiedWindowsAuthScreen.Setting"/>) at start, so a change needs a restart. The twin of Darling's
+    /// <c>mcp.allowWindowsAuthOverUnverifiedTls</c>. A file setting only, no Settings window control, like <c>mcp_allow_server_admin</c>.
+    /// </summary>
+    public bool AllowWindowsAuthOverUnverifiedTls { get; set; } = false;
+
+    /// <summary>
     /// Whether the state-changing investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820; the two
     /// investigation reads are ordinary reads, #8461) are
     /// offered. Default OFF. Read from <c>mcp_allow_investigations</c> (<see cref="McpInvestigationPolicy.InvestigationsSetting"/>)
@@ -200,6 +209,16 @@ internal sealed class McpSettings
                 }
 
                 settings.AllowServerAdmin = allowServerAdmin.GetBoolean();
+            }
+
+            if (root.TryGetProperty(McpUnverifiedWindowsAuthScreen.Setting, out var allowWindowsAuth))
+            {
+                if (allowWindowsAuth.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return Lost(WrongKind(McpUnverifiedWindowsAuthScreen.Setting, allowWindowsAuth, "true or false"));
+                }
+
+                settings.AllowWindowsAuthOverUnverifiedTls = allowWindowsAuth.GetBoolean();
             }
 
             if (root.TryGetProperty("mcp_allow_investigations", out var allowInvestigations))
