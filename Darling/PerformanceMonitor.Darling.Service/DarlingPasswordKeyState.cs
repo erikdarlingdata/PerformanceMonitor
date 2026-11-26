@@ -16,10 +16,13 @@ public sealed record PublishedKey(string KeyId, byte[] Spki);
 
 /// <summary>What the service found about its password key at start: the key file, and the key the store publishes.
 /// <see cref="FromSetting"/> is true when the key came from the <c>passwordKey</c> setting instead of the key file; the
-/// file fields then describe that key, and <see cref="FoundAfterOpenDirectory"/> is ignored.</summary>
+/// file fields then describe that key, and <see cref="FoundAfterOpenDirectory"/> is ignored. <see cref="KeyFolder"/> is the folder the
+/// service looked in, and <see cref="InContainer"/> says whether it runs in the container (#9750): only there is that folder a volume,
+/// so only there do the reasons say "volume".</summary>
 public sealed record PasswordKeyFacts(
     bool FilePresent, bool FileUntrusted, string? FileRefusal, byte[]? FileSpki,
-    bool FoundAfterOpenDirectory, PublishedKey? StoreCurrent, bool FileKeyRetiredInStore, bool FromSetting = false);
+    bool FoundAfterOpenDirectory, PublishedKey? StoreCurrent, bool FileKeyRetiredInStore, bool FromSetting = false,
+    string? KeyFolder = null, bool InContainer = false);
 
 /// <summary>What the service does with its password key at start.</summary>
 public enum PasswordKeyAction
@@ -65,6 +68,20 @@ public static class DarlingPasswordKeyState
     private const string DiscardedFileReason =
         "The password key file was found while its directory was open to other users and does not match the store, so it was set aside.";
 
+    /// <summary>Where the key is missing from or does not match, as the reasons say it (#9750): the folder the service looked in, with the
+    /// word "credentials directory" kept beside it in the container, where that folder is the credentials volume's mount.</summary>
+    internal static string KeyFolderText(string? keyFolder, bool inContainer) =>
+        keyFolder is null ? "the credentials directory"
+        : inContainer ? $"the credentials directory {keyFolder}"
+        : keyFolder;
+
+    /// <summary>The first words of the advice for a key that is not where the service looked (#9750). A volume is named only in the
+    /// container, where the folder is one. A host install has no volume, so the advice names the folder.</summary>
+    internal static string RestoreAdvice(string? keyFolder, bool inContainer) =>
+        inContainer ? "Restore the credentials volume that holds the key"
+        : keyFolder is null ? "Restore the credentials directory that holds the key"
+        : $"Restore the key to {keyFolder} from a backup";
+
     /// <summary>Decides what to do, checking the rows of the table in order.</summary>
     public static PasswordKeyDecision Decide(PasswordKeyFacts f)
     {
@@ -89,7 +106,7 @@ public static class DarlingPasswordKeyState
         if (current is not null && !string.Equals(current.KeyId, PasswordSeal.KeyIdFor(current.Spki), StringComparison.Ordinal))
         {
             return f.FilePresent
-                ? new PasswordKeyDecision(PasswordKeyAction.Mismatch, false, null, MismatchReason(f.FileSpki, current), null)
+                ? new PasswordKeyDecision(PasswordKeyAction.Mismatch, false, null, MismatchReason(f.FileSpki, current, f), null)
                 : new PasswordKeyDecision(
                     PasswordKeyAction.Refused, false, null,
                     "The store's published password key is inconsistent: its id does not match the key. " +
@@ -105,13 +122,13 @@ public static class DarlingPasswordKeyState
             }
 
             // The file does not match the store: set it aside, then decide as if it were absent.
-            var withoutFile = DecideWithoutFile(current);
+            var withoutFile = DecideWithoutFile(current, f);
             return withoutFile with { RetireFileFirst = true, RetireAs = "discarded", Reason = withoutFile.Reason ?? DiscardedFileReason };
         }
 
         if (!f.FilePresent)
         {
-            return DecideWithoutFile(current);
+            return DecideWithoutFile(current, f);
         }
 
         if (f.FileSpki is null)
@@ -132,16 +149,16 @@ public static class DarlingPasswordKeyState
             return new PasswordKeyDecision(PasswordKeyAction.Use, false, null, null, null);
         }
 
-        return new PasswordKeyDecision(PasswordKeyAction.Mismatch, false, null, MismatchReason(f.FileSpki, current), null);
+        return new PasswordKeyDecision(PasswordKeyAction.Mismatch, false, null, MismatchReason(f.FileSpki, current, f), null);
     }
 
     // Both ids are worked out from the key bytes, never printed as the store holds them.
-    private static string MismatchReason(byte[]? fileSpki, PublishedKey current)
+    private static string MismatchReason(byte[]? fileSpki, PublishedKey current, PasswordKeyFacts f)
     {
         var fileId = fileSpki is null ? "unreadable" : PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(fileSpki));
         var storeId = PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki));
-        return $"The password key in the credentials directory ({fileId}) is not the key the store publishes ({storeId}). " +
-            "Restore the credentials volume that holds the key, or run --reset-password-key and enter the saved passwords again.";
+        return $"The password key in {KeyFolderText(f.KeyFolder, f.InContainer)} ({fileId}) is not the key the store publishes ({storeId}). " +
+            $"{RestoreAdvice(f.KeyFolder, f.InContainer)}, or run --reset-password-key and enter the saved passwords again.";
     }
 
     /// <summary>The sweep's sentence when the published key was reset and the held key came from <c>passwordKey</c>.</summary>
@@ -207,13 +224,13 @@ public static class DarlingPasswordKeyState
         return new PasswordKeyDecision(PasswordKeyAction.Mismatch, false, null, SettingMismatchReason(f.FileSpki, current), null);
     }
 
-    private static PasswordKeyDecision DecideWithoutFile(PublishedKey? current) =>
+    private static PasswordKeyDecision DecideWithoutFile(PublishedKey? current, PasswordKeyFacts f) =>
         current is null
             ? new PasswordKeyDecision(PasswordKeyAction.Generate, false, null, null, null)
             : new PasswordKeyDecision(
                 PasswordKeyAction.Missing, false, null,
-                $"The password key {PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki))} is missing from the credentials directory. " +
-                "Restore the credentials volume, or run --reset-password-key and enter the saved passwords again.",
+                $"The password key {PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki))} is missing from {KeyFolderText(f.KeyFolder, f.InContainer)}. " +
+                $"{RestoreAdvice(f.KeyFolder, f.InContainer)}, or run --reset-password-key and enter the saved passwords again.",
                 null);
 
     private static bool SameKey(byte[] a, byte[] b) => a.AsSpan().SequenceEqual(b);

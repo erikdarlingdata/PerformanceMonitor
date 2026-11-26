@@ -27,8 +27,9 @@ public sealed class DarlingPasswordKeyStateTests
 
     private static PasswordKeyFacts Facts(
         bool filePresent = false, bool untrusted = false, string? refusal = null, byte[]? fileSpki = null,
-        bool afterOpen = false, PublishedKey? current = null, bool retired = false, bool fromSetting = false) =>
-        new(filePresent, untrusted, refusal, fileSpki, afterOpen, current, retired, fromSetting);
+        bool afterOpen = false, PublishedKey? current = null, bool retired = false, bool fromSetting = false,
+        string? keyFolder = null, bool inContainer = false) =>
+        new(filePresent, untrusted, refusal, fileSpki, afterOpen, current, retired, fromSetting, keyFolder, inContainer);
 
     private static string Display(byte[] spki) => PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(spki));
 
@@ -330,10 +331,10 @@ public sealed class DarlingPasswordKeyStateTests
     {
         static string Mismatch(byte[] file, byte[] store) =>
             $"The password key in the credentials directory ({Display(file)}) is not the key the store publishes ({Display(store)}). "
-            + "Restore the credentials volume that holds the key, or run --reset-password-key and enter the saved passwords again.";
+            + "Restore the credentials directory that holds the key, or run --reset-password-key and enter the saved passwords again.";
         static string Missing(byte[] store) =>
             $"The password key {Display(store)} is missing from the credentials directory. "
-            + "Restore the credentials volume, or run --reset-password-key and enter the saved passwords again.";
+            + "Restore the credentials directory that holds the key, or run --reset-password-key and enter the saved passwords again.";
 
         var rows = new (string Row, PasswordKeyFacts Facts, PasswordKeyDecision Expected)[]
         {
@@ -429,5 +430,44 @@ public sealed class DarlingPasswordKeyStateTests
         Assert.Equal(
             PasswordSealFailure.BindingOrTamper,
             Assert.Throws<PasswordSealException>(() => ring.Open(text, PasswordBinding.ForSmtp("omega-02", 587, true, "example_mail_user"))).Kind);
+    }
+
+    private const string HostFolder = "/etc/darling/darling-keys";
+    private const string ContainerFolder = "/var/lib/darling/credentials";
+
+    public static TheoryData<string, bool> FolderCases => new()
+    {
+        { HostFolder, false },
+        { ContainerFolder, true },
+    };
+
+    /// <summary>#9750: a key the store publishes but the folder lacks says where the service looked, and a host install, which has no volume,
+    /// is never told to restore one.</summary>
+    [Theory]
+    [MemberData(nameof(FolderCases))]
+    public void AMissingKey_NamesTheFolderTheServiceLookedIn_AndSaysVolumeOnlyInTheContainer(string folder, bool inContainer)
+    {
+        var d = DarlingPasswordKeyState.Decide(Facts(current: Published(SpkiA), keyFolder: folder, inContainer: inContainer));
+
+        Assert.Equal(PasswordKeyAction.Missing, d.Action);
+        Assert.Contains(folder, d.Reason, StringComparison.Ordinal);
+        Assert.Equal(inContainer, d.Reason!.Contains("volume", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(Display(SpkiA), d.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain(Convert.ToBase64String(SpkiA), d.Reason, StringComparison.Ordinal);
+    }
+
+    /// <summary>#9750: a key file that is not the published key names the same folder, with the same volume rule.</summary>
+    [Theory]
+    [MemberData(nameof(FolderCases))]
+    public void AMismatchedKey_NamesTheFolderTheServiceLookedIn_AndSaysVolumeOnlyInTheContainer(string folder, bool inContainer)
+    {
+        var d = DarlingPasswordKeyState.Decide(Facts(
+            filePresent: true, fileSpki: SpkiA, current: Published(SpkiB), keyFolder: folder, inContainer: inContainer));
+
+        Assert.Equal(PasswordKeyAction.Mismatch, d.Action);
+        Assert.Contains(folder, d.Reason, StringComparison.Ordinal);
+        Assert.Equal(inContainer, d.Reason!.Contains("volume", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(Convert.ToBase64String(SpkiA), d.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain(Convert.ToBase64String(SpkiB), d.Reason, StringComparison.Ordinal);
     }
 }

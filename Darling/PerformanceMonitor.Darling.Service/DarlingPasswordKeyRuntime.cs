@@ -44,6 +44,10 @@ internal sealed record PasswordKeyStartOptions
     /// file in the credentials directory.</summary>
     public string? KeySetting { get; init; }
 
+    /// <summary>Whether the service runs in the container (#9750), which decides whether the reasons name a credentials volume. Null means
+    /// <see cref="Hosting.DarlingHostBinding.IsRunningInContainer"/>, the variable the image sets.</summary>
+    public bool? InContainer { get; init; }
+
     /// <summary>The sentence <see cref="DarlingLogHashKeyFile.ContainerFolderNote"/> gives when the directory was chosen because
     /// <c>DOTNET_RUNNING_IN_CONTAINER</c> is true (#9734). A refused start carries it at the end of its reason. Null adds nothing.</summary>
     public string? FolderNote { get; init; }
@@ -67,6 +71,8 @@ internal sealed class DarlingPasswordKeyRuntime
     private readonly bool _windows;
     private readonly Func<string, bool> _canOpen;
     private readonly bool _fromSetting;
+    private readonly string? _keyFolder;
+    private readonly bool _inContainer;
     private string? _sweepState;
     private bool _sweepReadFailed;
     private volatile bool _pinsWaiting;
@@ -76,10 +82,12 @@ internal sealed class DarlingPasswordKeyRuntime
     private DarlingPasswordKeyRuntime(
         NpgsqlDataSource postgres, ILogger logger, Action<IPasswordKeyRing> setRing, string serviceHost,
         IPasswordKeyRing ring, IPasswordKeyRing? held, byte[]? heldSpki, string? heldKeyId, string state, string? note,
-        bool windows, Func<string, bool> canOpen, bool fromSetting = false)
+        bool windows, Func<string, bool> canOpen, bool fromSetting = false, string? keyFolder = null, bool inContainer = false)
     {
         _postgres = postgres;
         _fromSetting = fromSetting;
+        _keyFolder = keyFolder;
+        _inContainer = inContainer;
         _windows = windows;
         _canOpen = canOpen;
         _logger = logger;
@@ -164,11 +172,12 @@ internal sealed class DarlingPasswordKeyRuntime
         var selfTest = options.SelfTest ?? SelfTest;
         var windows = options.IsWindows ?? OperatingSystem.IsWindows();
         var canOpen = options.CanOpen ?? WindowsCanOpen;
+        var inContainer = options.InContainer ?? Hosting.DarlingHostBinding.IsRunningInContainer;
 
         PasswordPrivateKey? held = null;
         try
         {
-            var outcome = await DecideAndActAsync(directory, postgres, logger, selfTest, host, options.KeySetting, ct).ConfigureAwait(false);
+            var outcome = await DecideAndActAsync(directory, postgres, logger, selfTest, host, options.KeySetting, inContainer, ct).ConfigureAwait(false);
             if (options.FolderNote is not null && outcome.State == "refused" && outcome.FromKeyFolder)
             {
                 /* #9734: only a refusal that read or wrote the key folder names why that folder was chosen. */
@@ -194,7 +203,8 @@ internal sealed class DarlingPasswordKeyRuntime
 
             var runtime = new DarlingPasswordKeyRuntime(
                 postgres, logger, setRing, host, ring, held is null ? null : ring, held?.PublicKey.Spki, held?.PublicKey.KeyId,
-                outcome.State, outcome.Note, windows, canOpen, fromSetting: options.KeySetting is not null);
+                outcome.State, outcome.Note, windows, canOpen, fromSetting: options.KeySetting is not null,
+                keyFolder: directory, inContainer: inContainer);
             await runtime.RunPinStepAsync(ServiceCommandDeadlines.BootstrapSeconds, ct).ConfigureAwait(false);
             return runtime;
         }
@@ -285,7 +295,7 @@ internal sealed class DarlingPasswordKeyRuntime
                 problem = _fromSetting
                     ? DarlingPasswordKeyState.SettingSweepMismatchReason(PasswordSeal.KeyIdFor(current.Spki), _heldKeyId ?? "")
                     : $"The store now publishes the password key {PasswordSeal.DisplayKeyId(PasswordSeal.KeyIdFor(current.Spki))}, not the key this service holds " +
-                        $"({PasswordSeal.DisplayKeyId(_heldKeyId ?? "")}). Restart the service, or restore the credentials volume that holds the key.";
+                        $"({PasswordSeal.DisplayKeyId(_heldKeyId ?? "")}). Restart the service. {DarlingPasswordKeyState.RestoreAdvice(_keyFolder, _inContainer)}.";
                 state = "mismatch";
             }
 
@@ -326,7 +336,7 @@ internal sealed class DarlingPasswordKeyRuntime
 
     private static async Task<Outcome> DecideAndActAsync(
         string directory, NpgsqlDataSource postgres, ILogger logger, Func<PasswordPrivateKey, PublishedKey, bool> selfTest,
-        string host, string? keySetting, CancellationToken ct)
+        string host, string? keySetting, bool inContainer, CancellationToken ct)
     {
         await using var c = await postgres.OpenConnectionAsync(StoreSessionNames.PasswordKey, ct).ConfigureAwait(false);
 
@@ -394,7 +404,9 @@ internal sealed class DarlingPasswordKeyRuntime
                 FoundAfterOpenDirectory: load.FoundAfterOpenDirectory,
                 StoreCurrent: storeCurrent,
                 FileKeyRetiredInStore: retiredInStore,
-                FromSetting: keySetting is not null);
+                FromSetting: keySetting is not null,
+                KeyFolder: directory,
+                InContainer: inContainer);
             var decision = DarlingPasswordKeyState.Decide(facts);
 
             if (decision.RetireFileFirst)
@@ -435,7 +447,7 @@ internal sealed class DarlingPasswordKeyRuntime
                         if (!selfTest(fileKey!, storeCurrent!))
                         {
                             var reason = "The password key file kept from the credentials directory has the published key's id but cannot open a value sealed to it, so it was not used. " +
-                                "Restore the credentials volume that holds the key, or run --reset-password-key and enter the saved passwords again.";
+                                $"{DarlingPasswordKeyState.RestoreAdvice(directory, inContainer)}, or run --reset-password-key and enter the saved passwords again.";
                             return new Outcome(null, "mismatch", reason, fileKey!.PublicKey.KeyId, false, true, null);
                         }
 

@@ -417,6 +417,61 @@ public sealed class DarlingServiceConnectionTestTests
         Assert.NotNull(error);
     }
 
+    /* #9750: --port reaches the add core as the entry's "port", the same field and the same check the JSON form uses. */
+    [Theory]
+    [InlineData("--port", "5433", 5433)]
+    [InlineData("--PORT", "1", 1)]
+    [InlineData("--port=65535", null, 65535)]
+    public void APort_IsTakenInBothSpellings_AndRidesInTheEntryAsThePortTheJsonFormTakes(string flag, string? value, int expected)
+    {
+        var args = value is null ? new[] { "--host", "pg01", "--engine", "postgres", flag } : new[] { "--host", "pg01", "--engine", "postgres", flag, value };
+
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(args, out _, out var flags, out var error));
+        Assert.Null(error);
+        Assert.Equal(expected, flags.Port);
+
+        var (json, problem) = DarlingCliCommands.BuildAddServerJson(flags with { Auth = "windows" }, _ => "pw");
+        Assert.Null(problem);
+        var entry = Assert.IsType<System.Text.Json.Nodes.JsonObject>(System.Text.Json.Nodes.JsonNode.Parse(json!)!.AsArray()[0]);
+        var (port, portError) = DarlingMcpServerAdminTools.ResolvePort(entry);
+        Assert.Null(portError);
+        Assert.Equal(expected, port);
+    }
+
+    [Fact]
+    public void NoPort_LeavesThePortOutOfTheEntry_AndAPortAloneCountsAsFlags()
+    {
+        Assert.True(DarlingCliCommands.TryParseAddServerArgs(new[] { "--host", "pg01" }, out _, out var flags, out _));
+        Assert.Null(flags.Port);
+        var (json, _) = DarlingCliCommands.BuildAddServerJson(flags with { Auth = "windows" }, _ => "pw");
+        Assert.DoesNotContain("port", json, StringComparison.Ordinal);
+
+        Assert.True(new DarlingCliCommands.AddServerFlags(Port: 5432).Any);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("65536")]
+    [InlineData("99999999999")]
+    [InlineData("-5")]
+    [InlineData("abc")]
+    [InlineData("54.32")]
+    [InlineData("5,432")]
+    [InlineData("0x1538")]
+    [InlineData("")]
+    public void APortOutsideOneTo65535_OrNotAWholeNumber_IsRefusedWithAPlainMessage(string value)
+    {
+        Assert.False(DarlingCliCommands.TryParseAddServerArgs(new[] { "--host", "pg01", "--port=" + value }, out _, out _, out var error));
+        Assert.Contains("--port needs a whole number from 1 to 65535", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void APortFlagWithNoValue_IsRefusedLikeEveryOtherFlag()
+    {
+        Assert.False(DarlingCliCommands.TryParseAddServerArgs(new[] { "--host", "pg01", "--port" }, out _, out _, out var error));
+        Assert.Contains("--port needs a value", error, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task FlagsWithNoHost_FailOnTheErrorStream_WithoutReadingStdinOrTouchingTheStore()
     {
