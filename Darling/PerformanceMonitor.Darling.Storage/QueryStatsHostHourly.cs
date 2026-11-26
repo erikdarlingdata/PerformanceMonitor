@@ -51,7 +51,8 @@ namespace PerformanceMonitor.Darling.Storage;
 /// gated raw purge drops it at <see cref="TimescaleSupport.RawRetentionSpan"/>, whatever the collector's retention, and older windows are served by
 /// the tier rollups, so that span is the horizon: an hour older than that is one no raw read reaches. Where raw is a plain table it is the
 /// collector's retention. A tick removes the hours before the first whole hour inside the horizon from
-/// both tables, oldest first, <see cref="PruneSliceHours"/> hours per transaction (<see cref="PruneAsync"/>), and builds none of them. A window that
+/// both tables, oldest first, one hour (<see cref="PruneSliceHours"/>) per transaction (<see cref="PruneAsync"/>), and builds none of them. A slice that
+/// fails is logged and ends the prune for that tick, and the tick still plans and builds (#9711). A window that
 /// reaches an hour the rollup no longer holds reads that hour from raw, which is correct and slower (#9684).</para>
 /// </summary>
 public static class QueryStatsHostHourly
@@ -434,10 +435,10 @@ ORDER BY h.bucket;";
         return builds;
     }
 
-    /// <summary>The hours one prune transaction removes from both tables: a quarter of a day, so each transaction deletes a small slice of the table
-    /// inside the <see cref="BuildStatementTimeoutSeconds"/> bound, and a first prune over the weeks between the collector's retention and raw's takes
-    /// about a hundred of them, spread over as many ticks as <see cref="MaxPruneDuration"/> needs.</summary>
-    public const int PruneSliceHours = 6;
+    /// <summary>The hours one prune transaction removes from both tables: one, so each transaction deletes a small slice of the table well inside the
+    /// <see cref="BuildStatementTimeoutSeconds"/> bound on a large store draining its first backlog (#9711). A first prune over the weeks between the
+    /// collector's retention and raw's takes hundreds of them, spread over as many ticks as <see cref="MaxPruneDuration"/> needs.</summary>
+    public const int PruneSliceHours = 1;
 
     /// <summary>One slice of hours to prune: <c>[From, To)</c> for the servers the ledger holds.</summary>
     public readonly record struct PruneSlice(DateTime From, DateTime To, int[] ServerIds);
@@ -486,11 +487,14 @@ ORDER BY h.bucket;";
     /// hours per transaction, and returns the rollup rows removed. A slice's rollup rows and built rows go in one transaction, so the ledger never
     /// names an hour whose rows are gone. No slice starts once <paramref name="elapsed"/> reaches <see cref="MaxPruneDuration"/>; the hours left wait for the
     /// next tick. After each commit the WAL the slice wrote goes to the pacer <paramref name="pacerFactory"/> builds (null runs unpaced), which is the
-    /// retention purge's, so the prune holds the same share of the checkpoint budget the purge does.
+    /// retention purge's, so the prune holds the same share of the checkpoint budget the purge does. A slice that throws (not a cancellation) rolls
+    /// back with its transaction and goes to <paramref name="onSliceFailed"/>, and the prune stops there and returns what the earlier slices removed
+    /// (#9711). With no handler the exception propagates.
     /// </summary>
     public static async Task<long> PruneAsync(
         NpgsqlConnection connection, DateTime nowUtc, int retentionDays, int sliceHours, Func<TimeSpan> elapsed,
-        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory, CancellationToken cancellationToken)
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory, CancellationToken cancellationToken,
+        Action<PruneSlice, Exception>? onSliceFailed = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(elapsed);
@@ -508,7 +512,16 @@ ORDER BY h.bucket;";
             }
 
             var walBefore = pacer is null ? null : await pacer.ReadWalPositionAsync(connection, cancellationToken);
-            removed += await PruneSliceAsync(connection, slice, cancellationToken);
+            try
+            {
+                removed += await PruneSliceAsync(connection, slice, cancellationToken);
+            }
+            catch (Exception ex) when (onSliceFailed is not null && ex is not OperationCanceledException)
+            {
+                onSliceFailed(slice, ex);
+                break;
+            }
+
             if (pacer is not null)
             {
                 await pacer.AfterBatchAsync(connection, walBefore, cancellationToken);
@@ -588,7 +601,7 @@ ORDER BY h.bucket;";
     /// <summary>
     /// One tick: resolve the horizon raw is held to (<see cref="HorizonDaysAsync"/>), remove the hours before it in slices (<see cref="PruneAsync"/>),
     /// plan against the same horizon, then build each planned hour in its own transaction, newest first. An hour that fails is logged and the loop
-    /// goes on; the next tick plans it again. Once <see cref="MaxPruneDuration"/> has passed no further slice starts, and once
+    /// goes on; the next tick plans it again. A prune slice that fails is logged and ends the prune for the tick, and the plan and builds go on. Once <see cref="MaxPruneDuration"/> has passed no further slice starts, and once
     /// <see cref="MaxTickDuration"/> has passed no further hour starts and the planned hours left are reported as deferred.
     /// <paramref name="retentionDays"/> is the collector's retention for <c>query_stats</c>.
     /// </summary>
@@ -614,7 +627,9 @@ ORDER BY h.bucket;";
 
         await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.QueryStatsHostHourly, cancellationToken);
         var horizonDays = await HorizonDaysAsync(connection, retentionDays, cancellationToken);
-        var removed = await PruneAsync(connection, nowUtc, horizonDays, PruneSliceHours, elapsed, pacerFactory, cancellationToken);
+        var removed = await PruneAsync(connection, nowUtc, horizonDays, PruneSliceHours, elapsed, pacerFactory, cancellationToken,
+            (slice, ex) => logger.LogWarning(ex, "Query stats host hourly rollup: pruning hours {From:yyyy-MM-dd HH}:00 to {To:yyyy-MM-dd HH}:00 failed, the prune stops for this tick and the builds go on: {Message}",
+                slice.From, slice.To, ex.Message));
         var plan = await PlanBuildsAsync(connection, nowUtc, horizonDays, cancellationToken);
 
         foreach (var item in plan)
