@@ -578,8 +578,12 @@ public sealed class ExternalAlertDrain
     /// <summary>
     /// The detail's own sanitizer (#9576). Line feeds survive, and only they: <c>\r\n</c> and a lone <c>\r</c> become one, every
     /// other control character (a tab too), U+0085, U+2028 and U+2029 become a space, and invisible and reordering characters
-    /// are dropped, as <see cref="CleanText"/> does (#5654). Spaces inside a line are kept, so an indented report keeps its
-    /// shape, and trailing spaces are cut. A detail that is left with one line or none is cleaned by <see cref="CleanText"/>
+    /// are dropped, as <see cref="CleanText"/> does (#5654). Spaces inside a line are kept and trailing spaces are cut, and each
+    /// channel shows the kept spaces its own way (#9608). Plain-text email indents every line two spaces and keeps the line's own
+    /// spaces behind that. HTML email shows a line's leading spaces, and each run of two or more, as non-breaking spaces. Slack is
+    /// sent the spaces as they are. Teams reads the text as markdown, which drops leading spaces and shows a run of spaces as
+    /// one, so a table-shaped detail reads best there as one line per row with a separator such as <c> | </c>. A detail that is
+    /// left with one line or none is cleaned by <see cref="CleanText"/>
     /// instead, so it reads as it did before this sanitizer existed. A run of blank lines becomes one blank line, blank lines at either end go, and a
     /// detail past <see cref="MaxDetailLines"/> lines keeps the first ones and ends in a line of "...". The code point cap
     /// then applies as it does to every text here. The title and the server name never come through here: a card's header
