@@ -381,12 +381,24 @@ internal static class DarlingPasswordKeyFileReader
     /// The refusal for a key file that could not be opened or read, as <see cref="DarlingSecretSource.Resolve"/> words it.
     /// When the read was denied on Unix and another user owns the file (#8141: a compose secret keeps its host owner, and
     /// the service runs as 1654), it also names both users and the <c>chown</c> that gives the file to the service's
-    /// user, which for a compose secret runs on the host file the secret is made from.
+    /// user, which for a compose secret runs on the host file the secret is made from. When the file is not there on Unix
+    /// (#9793) it says so and gives the same compose advice as <see cref="DarlingSecretSource.CouldNotRead"/>, which words
+    /// every other <c>file:</c> secret.
     /// </summary>
     internal static string CouldNotRead(string path, Exception ex)
     {
         var refusal = $"{DarlingPasswordKeySource.SettingName}: secret file '{path}' could not be read: {ex.Message}";
-        if (ex is not UnauthorizedAccessException || ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes)
+        if (ComposeCredentialDirectoryGuard.Current.UnixModes is not { } modes)
+        {
+            return refusal;
+        }
+
+        if (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return refusal.TrimEnd('.') + ". " + DarlingSecretSource.MissingFileAdvice(DarlingPasswordKeySource.SettingName, path);
+        }
+
+        if (ex is not UnauthorizedAccessException)
         {
             return refusal;
         }
