@@ -157,7 +157,7 @@ public sealed class McpToolGuideHeadsSqlCoreTests
     [Fact]
     public void FactsPayloadCounts_AreDocumentedInTheTail()
     {
-        Assert.Contains("total_facts counts every scored fact before the source and min_severity filters; shown counts the facts that passed them", McpToolGuideTests.Served("get_analysis_facts").Tail!, StringComparison.Ordinal);
+        Assert.Contains("total_facts counts every scored fact the read collected before the source and min_severity filters (with source set, the read collects only the fact families that source and its scoring need, so the count covers those); shown counts the facts that passed them", McpToolGuideTests.Served("get_analysis_facts").Tail!, StringComparison.Ordinal);
     }
 
     /// <summary>D4: <c>get_analysis_findings</c>' two issue references ("(pre-#3538)" naming the confidence-basis

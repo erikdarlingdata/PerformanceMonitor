@@ -91,12 +91,37 @@ The password comes from one place that the config names:
 |---|---|
 | `env` | An environment variable. The sample uses `DARLING_EXPORT_PG_PASSWORD`. |
 | `file` | A plain text file. Keep its permissions tight. |
-| `dpapi_file` | A Windows DPAPI file written by Darling. It works on Windows only. |
+| `dpapi_file` | A file that holds the base64 text of a Windows DPAPI blob, as Darling writes its own. It works on Windows only. See below. |
 
 You can use `store.connection_string_env` instead. It names an environment variable that holds a full Npgsql connection string.
 The session guards below still apply when you do.
 
 There is no fallback. If the named source is empty or missing, the run stops with exit code 2.
+
+### The dpapi_file password file
+
+A `dpapi_file` holds one thing: the base64 text of a DPAPI blob. The blob is the password as UTF-8 text, protected with `DataProtectionScope.LocalMachine` and the entropy string `PerformanceMonitor.Darling.v1`.
+The Exporter reads the file as text, trims it, decodes the base64 and decrypts it. A raw binary blob, a blob made with other entropy, text that is not base64 and an empty file are all refused.
+Darling's own `pg-credential.dpapi` is this format.
+
+LocalMachine scope means any account on the machine that wrote the file can decrypt it, and no other machine can. The file keeps the password out of a copied disk or a backup. It does not keep it from another local user, and the entropy string is not a secret because it is in this repository.
+Limit the file's permissions to the account that runs the Exporter and to administrators.
+
+To make a file on a machine that has no Darling, or to change the password without Darling, run this in PowerShell on the machine that runs the Exporter. It works in Windows PowerShell 5.1 and in PowerShell 7. Set `$path` to the file that `store.password.path` names:
+
+```powershell
+$path = 'C:\ProgramData\PerformanceMonitorExporter\store-password.dpapi'
+Add-Type -AssemblyName System.Security
+New-Item -ItemType Directory -Force -Path (Split-Path $path) | Out-Null
+$secure = Read-Host -AsSecureString 'Store password'
+$password = [System.Net.NetworkCredential]::new('', $secure).Password
+$entropy = [System.Text.Encoding]::UTF8.GetBytes('PerformanceMonitor.Darling.v1')
+$blob = [System.Security.Cryptography.ProtectedData]::Protect([System.Text.Encoding]::UTF8.GetBytes($password), $entropy, 'LocalMachine')
+[System.IO.File]::WriteAllText($path, [Convert]::ToBase64String($blob))
+```
+
+`darling-export check-config --config <file>` resolves the password and tells you whether the file works.
+A file that cannot be decrypted stops it with exit code 2 and one line that names the likely causes: the file is not the base64 text of a DPAPI blob, the blob used other entropy than `PerformanceMonitor.Darling.v1`, or it was written on another machine.
 
 ### The store collation
 
