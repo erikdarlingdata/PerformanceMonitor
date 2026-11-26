@@ -446,12 +446,16 @@ public static class DarlingRetention
     /// gate, so the prune runs at most once in 24 hours even when budget-stopped passes follow each other within the hour.
     /// Null (the on-demand <c>purge_now</c> command, and every test that predates the rule) prunes on every pass.
     /// </param>
+    /// <param name="livenessAdopt">
+    /// Where the adopt step is in each liveness table (<see cref="LivenessAdoptState"/>). The worker hands in its own, so
+    /// a pass goes on from the key the pass before it stopped at. Null starts every table at its first key.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false,
         string? runLabel = null, ICollectionPressure? collectionPressure = null, TimeSpan? wallBudget = null,
-        QueryTextPruneGate? queryTextPruneGate = null)
+        QueryTextPruneGate? queryTextPruneGate = null, LivenessAdoptState? livenessAdopt = null)
     {
         /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
            table is touched. */
@@ -466,7 +470,7 @@ public static class DarlingRetention
 
         return await PurgeWithPacerAsync(
             postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
-            livenessTouchedTablePruneRowCap, walPacer, runLabel, queryTextPruneGate);
+            livenessTouchedTablePruneRowCap, walPacer, runLabel, queryTextPruneGate, livenessAdopt);
     }
 
     /// <summary>
@@ -478,8 +482,10 @@ public static class DarlingRetention
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null,
-        string? runLabel = null, QueryTextPruneGate? queryTextPruneGate = null)
+        string? runLabel = null, QueryTextPruneGate? queryTextPruneGate = null, LivenessAdoptState? livenessAdopt = null)
     {
+        livenessAdopt ??= new LivenessAdoptState();
+
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
            store-unreachable boot the worker passes darling.json's RAW value, and a file value of 1-6
@@ -874,10 +880,12 @@ public static class DarlingRetention
                     var queryTextCutoff = utcNow.AddDays(
                         -(WidestEffectiveRetentionDays(QueryStoreTextStore.ReferencingCollectors, retentionDaysFor) + QueryStoreTextStore.PruneMarginDays));
                     /* A text row with no seen row gets one first, stamped with its own last_seen, so the prune below
-                       judges it by that stamp instead of never finding it. Keys against keys, no pass over the text heap
-                       (QueryStoreTextSeen.AdoptMissingSql). It inserts rows and deletes none, so it is not one of the
-                       pass's purged tables and its rows are not rows deleted: only its failure is counted. */
-                    if (!await AdoptMissingSeenRowsAsync(postgres, queryTextCutoff, logger, walPacer, cancellationToken))
+                       judges it by that stamp instead of never finding it. Keys against keys, a slice of the key at a time,
+                       no pass over the text heap (QueryStoreTextSeen.AdoptSlice). It inserts rows and deletes none, so it
+                       is not one of the pass's purged tables and its rows are not rows deleted: only its failure is
+                       counted. */
+                    if (!await AdoptMissingSeenRowsAsync(
+                            postgres, QueryStoreTextSeen.AdoptSlice, livenessAdopt, queryTextCutoff, logger, walPacer, cancellationToken))
                     {
                         tablesFailed++;
                     }
@@ -935,9 +943,9 @@ public static class DarlingRetention
                     var dimCutoff = ComputeDimTableCutoff(dimTable, dimensionCutoff, planDimensionCutoff);
 
                     /* A dimension row with no stamp row gets one first, stamped with its own last_seen, so the delete below
-                       judges it by that stamp (PayloadDimensionSeen.AdoptMissingSql). */
+                       judges it by that stamp, a slice of the key at a time (PayloadDimensionSeen.AdoptSlice). */
                     if (!await AdoptMissingSeenRowsAsync(
-                            postgres, PayloadDimensionSeen.AdoptMissingSql(dimTable), PayloadDimensionSeen.TableName(dimTable),
+                            postgres, PayloadDimensionSeen.AdoptSlice(dimTable), livenessAdopt,
                             dimCutoff, logger, walPacer, cancellationToken))
                     {
                         tablesFailed++;
@@ -3059,33 +3067,39 @@ $do$";
     }
 
     /// <summary>
-    /// The text prune's first statement (<see cref="QueryStoreTextSeen.AdoptMissingSql"/>), run once on its own connection:
-    /// an <c>INSERT</c> that gives every Query Store text row with no seen row one. Returns false when it failed (warned,
-    /// and the pass goes on to the prune, which then cannot find a text with no seen row until a later pass adopts it).
+    /// What an adopt slice reports as its cap to <see cref="DrainBatchesAsync"/> while slices are left for this pass: no
+    /// row count is under it, so the drain runs the next slice. The last slice of a pass reports
+    /// <see cref="SingleShotStatement"/>, which no row count reaches, and the drain ends.
+    /// </summary>
+    private const int AdoptSliceGoesOn = 0;
+
+    /// <summary>
+    /// The adopt step of a liveness table (the Query Store text's seen table and the two payload dimensions' stamp tables):
+    /// gives every source row with no liveness row one, a keyset slice of the key at a time
+    /// (<see cref="LivenessAdoptSlice"/>), from the cursor <paramref name="state"/> holds for the table. Returns false when
+    /// it failed (warned, and the pass goes on to the prune, which cannot find a row with no liveness row until a later pass
+    /// adopts it).
+    ///
+    /// <para><b>How far one pass goes.</b> Slices run until the end of the keys or until their own run time reaches
+    /// <see cref="LivenessAdoptState.Budget"/>. A pass that stops on the budget leaves the cursor where it is and the next
+    /// pass goes on from it. A pass that reaches the end clears the cursor, so the next one starts at the first key. The
+    /// cursor is in the service's memory, so a restart starts at the first key too.</para>
+    ///
+    /// <para><b>A slice that times out.</b> Each statement of a slice has <see cref="LivenessAdoptState.SliceTimeoutSeconds"/>
+    /// as its command timeout. A slice that runs into it is not a failure: the cursor stays, the next slice is half the
+    /// size, and the pass goes on while the budget lasts. Any other error ends the step with a warning and counts as a
+    /// failed table.</para>
     ///
     /// <para>It deletes nothing, so it is kept out of the purge's table accounting: the caller does not count it as a
     /// purged table, its rows are logged as adopted, and the wall budget's gate never records it as a table not reached or
-    /// left. A pass whose budget is spent does not start it, and the prune that follows records the stop at its own entry.
-    /// It is paced like any purge batch, through the same drain loop, so it waits for collection and the WAL of a large
-    /// adoption is paid for before the prune starts.</para>
-    /// </summary>
-    private static Task<bool> AdoptMissingSeenRowsAsync(
-        NpgsqlDataSource postgres,
-        DateTime cutoff,
-        ILogger? logger,
-        RetentionWalPacer? pacer,
-        CancellationToken cancellationToken) =>
-        AdoptMissingSeenRowsAsync(postgres, QueryStoreTextSeen.AdoptMissingSql, QueryStoreTextSeen.TableName, cutoff, logger, pacer, cancellationToken);
-
-    /// <summary>
-    /// The adopt step of any liveness table (the Query Store text's, and #9304's two dimension stamp tables): runs
-    /// <paramref name="adoptSql"/> once on its own connection, bound with the pass's cutoff, and logs the rows it wrote
-    /// under <paramref name="tableName"/>.
+    /// left. A pass whose wall budget is spent does not start it, and the prune that follows records the stop at its own
+    /// entry. Every slice is a batch of the drain loop, so it waits for collection, pauses and pays for its WAL like any
+    /// purge batch, and stops at a slice boundary when the pass's wall budget runs out.</para>
     /// </summary>
     private static async Task<bool> AdoptMissingSeenRowsAsync(
         NpgsqlDataSource postgres,
-        string adoptSql,
-        string tableName,
+        LivenessAdoptSlice slice,
+        LivenessAdoptState state,
         DateTime cutoff,
         ILogger? logger,
         RetentionWalPacer? pacer,
@@ -3096,29 +3110,69 @@ $do$";
             return true;
         }
 
+        var tableName = slice.LivenessTable;
+        var keysRead = 0L;
+        var slices = 0;
+        var timedOut = 0;
+        var reachedEnd = false;
+        var sliceSeconds = 0.0;
+        NpgsqlConnection? connection = null;
         try
         {
-            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
-            using var command = new NpgsqlCommand(adoptSql, connection) { CommandTimeout = DeleteTimeoutSeconds };
-            command.Parameters.AddWithValue(cutoff);
-
-            /* SingleShotStatement as the cap: no row count reaches it, so the one execution is the whole step. */
             var adopted = await DrainBatchesAsync(
                 async ct =>
                 {
+                    connection ??= await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, ct);
                     var walBefore = pacer is null ? null : await pacer.ReadWalPositionAsync(connection, ct);
-                    var rows = await command.ExecuteNonQueryAsync(ct);
-                    return (rows, SingleShotStatement, pacer is null ? 0 : await pacer.WalWrittenSinceAsync(connection, walBefore, ct));
+                    var sliceKeys = state.SliceKeysOf(tableName);
+                    var cursor = state.CursorOf(tableName);
+                    var started = state.NowSeconds;
+                    var rows = 0;
+                    try
+                    {
+                        var (upperKey, keys) = await ReadAdoptSliceUpperKeyAsync(
+                            connection, slice, cursor, sliceKeys, state.SliceTimeoutSeconds, ct);
+                        if (upperKey is not null)
+                        {
+                            rows = await InsertAdoptSliceAsync(
+                                connection, slice, cursor, upperKey, cutoff, state.SliceTimeoutSeconds, ct);
+                        }
+
+                        var seconds = state.NowSeconds - started;
+                        sliceSeconds += seconds;
+                        slices++;
+                        keysRead += keys;
+                        reachedEnd = keys < sliceKeys;
+                        state.NoteSliceRan(tableName, reachedEnd ? null : upperKey, seconds);
+                    }
+                    catch (Exception ex) when (IsPlanDimBatchTimeout(ex, ct))
+                    {
+                        sliceSeconds += state.NowSeconds - started;
+                        timedOut++;
+                        state.NoteSliceTimedOut(tableName);
+                        logger?.LogDebug(
+                            "Retention's adopt slice of {Table} at {Keys} key(s) hit its {Timeout} s command timeout ({Failure}); the next slice is {NextKeys} key(s)",
+                            tableName, sliceKeys, state.SliceTimeoutSeconds, DescribePurgeFailure(ex), state.SliceKeysOf(tableName));
+
+                        /* The connection of a command that timed out is not used again: the next slice opens its own. */
+                        await connection.DisposeAsync();
+                        connection = null;
+                        return (0, sliceSeconds < state.Budget.TotalSeconds ? AdoptSliceGoesOn : SingleShotStatement, 0L);
+                    }
+
+                    var walBytes = pacer is null ? 0 : await pacer.WalWrittenSinceAsync(connection, walBefore, ct);
+                    var goesOn = !reachedEnd && sliceSeconds < state.Budget.TotalSeconds;
+                    return (rows, goesOn ? AdoptSliceGoesOn : SingleShotStatement, walBytes);
                 },
                 pacer,
                 cancellationToken);
 
-            if (adopted > 0)
-            {
-                logger?.LogInformation(
-                    "Retention adopted {Rows} row(s) that had no liveness row into {Table}",
-                    adopted, tableName);
-            }
+            logger?.LogInformation(
+                "Retention's adopt of {Table} read {Keys} key(s) in {Slices} slice(s) and adopted {Rows} row(s) that had no liveness row; {TimedOut} slice(s) timed out; {Place}",
+                tableName, keysRead, slices, adopted, timedOut,
+                reachedEnd
+                    ? "it reached the end of the keys, and the next pass starts at the first key"
+                    : "it stopped before the end of the keys, and the next pass goes on from there");
 
             return true;
         }
@@ -3128,6 +3182,74 @@ $do$";
                 "Retention could not write the missing liveness rows of {Table}; a row with none is kept until a later pass adopts it: {Failure}",
                 tableName, DescribePurgeFailure(ex));
             return false;
+        }
+        finally
+        {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="LivenessAdoptSlice.UpperKeySql"/>: the key the next slice ends at and how many keys it holds, or no
+    /// key and zero when no key is left after <paramref name="cursor"/>.
+    /// </summary>
+    private static async Task<(IReadOnlyList<object>? UpperKey, long Keys)> ReadAdoptSliceUpperKeyAsync(
+        NpgsqlConnection connection,
+        LivenessAdoptSlice slice,
+        IReadOnlyList<object>? cursor,
+        int sliceKeys,
+        int timeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(slice.UpperKeySql(cursor is not null), connection) { CommandTimeout = timeoutSeconds };
+        AddKeyParameters(command, cursor);
+        command.Parameters.AddWithValue(sliceKeys);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return (null, 0);
+        }
+
+        var upperKey = new object[slice.KeyColumnCount];
+        for (var i = 0; i < upperKey.Length; i++)
+        {
+            upperKey[i] = reader.GetValue(i);
+        }
+
+        return (upperKey, reader.GetInt64(slice.KeyColumnCount));
+    }
+
+    /// <summary>Runs <see cref="LivenessAdoptSlice.InsertSql"/> for the keys after <paramref name="cursor"/> up to <paramref name="upperKey"/>.</summary>
+    private static async Task<int> InsertAdoptSliceAsync(
+        NpgsqlConnection connection,
+        LivenessAdoptSlice slice,
+        IReadOnlyList<object>? cursor,
+        IReadOnlyList<object> upperKey,
+        DateTime cutoff,
+        int timeoutSeconds,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(slice.InsertSql(cursor is not null), connection) { CommandTimeout = timeoutSeconds };
+        command.Parameters.AddWithValue(cutoff);
+        AddKeyParameters(command, cursor);
+        AddKeyParameters(command, upperKey);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static void AddKeyParameters(NpgsqlCommand command, IReadOnlyList<object>? key)
+    {
+        if (key is null)
+        {
+            return;
+        }
+
+        foreach (var value in key)
+        {
+            command.Parameters.AddWithValue(value);
         }
     }
 

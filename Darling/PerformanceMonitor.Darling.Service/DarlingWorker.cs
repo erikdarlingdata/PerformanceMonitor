@@ -1099,6 +1099,9 @@ public sealed partial class DarlingWorker : BackgroundService
     /// <summary>The once-per-24-hours rule for the <c>collect.query_store_text</c> prune, shared by the scheduled passes (a pass the wall budget stopped brings the next one forward to within the hour).</summary>
     private readonly QueryTextPruneGate _queryTextPruneGate = new();
 
+    /// <summary>Where the retention pass's adopt step is in each liveness table, shared by the scheduled passes and <c>purge_now</c>, so each goes on from the key the last one stopped at.</summary>
+    private readonly LivenessAdoptState _livenessAdopt = new();
+
     /* MinValue = the first sweep after startup evaluates the store disk-pressure self-alert, then every
        s_diskCheckInterval. Fleet-level (one shared store), so it is a single field, not per-server. */
     private DateTime _nextDiskCheckUtc = DateTime.MinValue;

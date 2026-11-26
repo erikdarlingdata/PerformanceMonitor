@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// runs the insert: this build's <see cref="QueryStoreTextStore.UpsertSql"/>, an older build run against the
 /// same store after a rollback, or an older instance that shares the store. The liveness touch
 /// (<see cref="QueryStoreTextStore.TouchSeenSql"/>) is an upsert, so a referenced text with no seen row gets
-/// one, and the daily prune first gives every other text with no seen row one (<see cref="AdoptMissingSql"/>).
+/// one, and the daily prune first gives every other text with no seen row one (<see cref="AdoptSlice"/>).
 /// The foreign key cascades, so every delete of a text row removes its seen row.</para>
 ///
 /// <para><b>How it is read.</b> A text's effective stamp is the later of the two stamps (the prune tests both
@@ -145,34 +145,17 @@ WHERE NOT EXISTS (
     WHERE s.server_id = t.server_id AND s.database_name = t.database_name AND s.query_id = t.query_id);";
 
     /// <summary>
-    /// The prune's first statement: gives every text row with no seen row one, stamped with the text row's own
+    /// The prune's first step: gives every text row with no seen row one, stamped with the text row's own
     /// <c>last_seen</c>, so the prune that follows judges it by that stamp. A text row is without a seen row only when it
     /// was written with <see cref="InsertTriggerName"/> off (a restore that disables triggers, a session in replica mode),
     /// and a prune that reads the seen table alone would keep such a row for good.
     ///
-    /// <para>The keys are compared first, primary key against primary key, and only a missing key reads its text row.
-    /// Measured with every seen row present on 3.45 million texts: 73,000 buffers and 0.7 s, against the 765,000 buffers of
-    /// one pass over the text heap. <c>$1</c> is the retention pass's cutoff, which every purge statement is bound with.
-    /// The test does not need it, and it is named only so the bind matches the statement.</para>
+    /// <para>It runs in keyset slices of <c>(server_id, database_name, query_id)</c>, compared as a row in primary key
+    /// order (<see cref="LivenessAdoptSlice"/>), so no statement reads either primary key from end to end and none reads
+    /// the text heap except for a text that has no seen row.</para>
     /// </summary>
-    public const string AdoptMissingSql = @"
-INSERT INTO collect.query_store_text_seen (server_id, database_name, query_id, last_seen)
-SELECT t.server_id, t.database_name, t.query_id, t.last_seen
-FROM (
-    SELECT k.server_id, k.database_name, k.query_id
-    FROM collect.query_store_text AS k
-    WHERE $1::timestamp IS NOT NULL
-    AND   NOT EXISTS (
-        SELECT 1 FROM collect.query_store_text_seen AS s
-        WHERE s.server_id = k.server_id AND s.database_name = k.database_name AND s.query_id = k.query_id)
-    OFFSET 0
-) AS missing
-JOIN collect.query_store_text AS t
-  ON  t.server_id = missing.server_id
-  AND t.database_name = missing.database_name
-  AND t.query_id = missing.query_id
-ORDER BY t.server_id, t.database_name, t.query_id
-ON CONFLICT (server_id, database_name, query_id) DO NOTHING";
+    public static readonly LivenessAdoptSlice AdoptSlice = new(
+        QueryStoreTextStore.TableName, TableName, new[] { "server_id", "database_name", "query_id" }, LastSeenColumn);
 
     /// <summary>The foreign key's name.</summary>
     public const string ForeignKeyName = "query_store_text_seen_text_fkey";
