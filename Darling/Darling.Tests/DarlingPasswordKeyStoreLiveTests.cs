@@ -241,6 +241,42 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         }
     }
 
+    /// <summary>#9734: a refusal whose cause is not the key folder never carries the folder sentence, even when the start was given it:
+    /// the passwordKey refusal never reads the folder, and a published key whose id does not match is the store's fault.</summary>
+    [Fact]
+    public async Task ARefusalThatIsNotAboutTheKeyFolder_DoesNotCarryTheFolderNote()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        using var source = new SettingKeySource();
+        var bodySucceeded = false;
+        const string note = "DOTNET_RUNNING_IN_CONTAINER is true, so the service uses the compose folder.";
+        try
+        {
+            var missing = "file:" + Path.Combine(source.Directory, "no-such-key");
+            var setting = await store.StartAsync(keySetting: missing, folderNote: note);
+            Assert.Equal("refused", setting.State);
+            Assert.StartsWith("passwordKey", setting.Note, StringComparison.Ordinal);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", setting.Ring.Status.Reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", (await store.ReadStateAsync("example-host")).Note, StringComparison.Ordinal);
+
+            // A published key whose id does not match its own key, and no key file in the folder.
+            using var other = PasswordPrivateKey.Generate();
+            await store.ExecAsync(
+                "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES (@id, @key, 'RSA3072-OAEP-SHA256/A256GCM', 'current');",
+                ("id", "not-the-id-of-this-key"), ("key", other.PublicKey.Spki));
+            var inconsistent = await store.StartAsync(folderNote: note);
+            Assert.Equal("refused", inconsistent.State);
+            Assert.Contains("inconsistent", inconsistent.Note, StringComparison.Ordinal);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", inconsistent.Ring.Status.Reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", (await store.ReadStateAsync("example-host")).Note, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
     [Fact]
     public async Task ADisabledOrExtraTrigger_MakesTheStartRefuse_AndNoKeyIsPublished()
     {
