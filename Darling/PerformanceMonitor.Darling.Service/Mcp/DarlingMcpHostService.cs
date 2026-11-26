@@ -634,7 +634,8 @@ public sealed class DarlingMcpHostService : BackgroundService
                     _logger.LogCritical(ex,
                         "{Message}",
                         DarlingSecretSource.DescribeTokenReadFailure(
-                            "MCP network token", "mcp.network", "MCP server not started.", ex.Message, OperatingSystem.IsWindows()));
+                            "MCP network token", "mcp.network", "MCP server not started.", ex.Message,
+                            !string.IsNullOrWhiteSpace(config.Mcp.Network.EncryptedToken)));
                     await DisposeFailedStartAsync();
                     return false;
                 }
@@ -2033,7 +2034,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                 "{Message}",
                 DarlingSecretSource.DescribeTokenReadFailure(
                     "MCP network token", "mcp.network", "The loopback listener is not served without a token, so the MCP server is not started.",
-                    ex.Message, OperatingSystem.IsWindows()));
+                    ex.Message, !string.IsNullOrWhiteSpace(network.EncryptedToken)));
             return new LoopbackTokenResolution(true, "");
         }
     }

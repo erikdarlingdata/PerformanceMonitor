@@ -17,7 +17,7 @@ namespace Darling.Tests;
 /// #8141 review: a <c>file:</c> secret the service's user is denied stops the start before the credentials-directory
 /// refusal can run, so its message carries the upgrade steps itself. The service's user comes from
 /// <see cref="StandInUnixModes"/>. #9793: a missing file and a denied one each say what is true of that file, and the token
-/// failure line carries Windows DPAPI advice on Windows only.
+/// failure line carries DPAPI advice only when the setting read was encryptedToken.
 /// </summary>
 public sealed class SecretFileReadHintTests
 {
@@ -216,14 +216,14 @@ public sealed class SecretFileReadHintTests
     }
 
     [Fact]
-    public void Resolve_OfAMissingComposeSecret_ThenTheTokenLine_NamesTheMountAndNoDpapiOnLinux()
+    public void Resolve_OfAMissingComposeSecret_ThenTheTokenLine_NamesTheMountAndNoDpapi()
     {
         var modes = new StandInUnixModes { EffectiveUserId = 1654, EffectiveUserName = "app" };
         using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
         {
             var thrown = Assert.Throws<InvalidOperationException>(() => DarlingSecretSource.Resolve("file:" + McpSecret, "mcp.network.token"));
             var line = DarlingSecretSource.DescribeTokenReadFailure(
-                "MCP network token", "mcp.network", "MCP server not started.", thrown.Message, windows: false);
+                "MCP network token", "mcp.network", "MCP server not started.", thrown.Message, encrypted: false);
 
             Assert.Contains("'/run/secrets/mcp_token'", line, StringComparison.Ordinal);
             Assert.Contains("docker compose up -d", line, StringComparison.Ordinal);
@@ -238,9 +238,9 @@ public sealed class SecretFileReadHintTests
     [Theory]
     [InlineData("MCP network token", "mcp.network", "MCP server not started.")]
     [InlineData("Web dashboard token", "web.network", "The web dashboard is not started.")]
-    public void TokenReadFailure_OnWindows_KeepsTheDpapiAdvice(string tokenName, string section, string consequence)
+    public void TokenReadFailure_EncryptedTokenSet_KeepsTheDpapiAdvice(string tokenName, string section, string consequence)
     {
-        var line = DarlingSecretSource.DescribeTokenReadFailure(tokenName, section, consequence, "the cause", windows: true);
+        var line = DarlingSecretSource.DescribeTokenReadFailure(tokenName, section, consequence, "the cause", encrypted: true);
 
         Assert.Equal(
             $"{tokenName} ({section}.encryptedToken) could not be decrypted (the cause). {consequence} "
@@ -253,9 +253,9 @@ public sealed class SecretFileReadHintTests
     [Theory]
     [InlineData("MCP network token", "mcp.network", "MCP server not started.")]
     [InlineData("Web dashboard token", "web.network", "The web dashboard is not started.")]
-    public void TokenReadFailure_OffWindows_NamesTheCauseAndNoDpapiAdvice(string tokenName, string section, string consequence)
+    public void TokenReadFailure_TokenReference_NamesTheCauseAndNoDpapiAdvice(string tokenName, string section, string consequence)
     {
-        var line = DarlingSecretSource.DescribeTokenReadFailure(tokenName, section, consequence, "the cause", windows: false);
+        var line = DarlingSecretSource.DescribeTokenReadFailure(tokenName, section, consequence, "the cause", encrypted: false);
 
         Assert.StartsWith(tokenName, line, StringComparison.Ordinal);
         Assert.Contains("the cause", line, StringComparison.Ordinal);
@@ -264,6 +264,50 @@ public sealed class SecretFileReadHintTests
         Assert.DoesNotContain("--encrypt-password", line, StringComparison.Ordinal);
         Assert.DoesNotContain("encryptedToken", line, StringComparison.Ordinal);
         Assert.DoesNotContain("another machine", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>The setting <c>ResolveToken</c> read, as the host's catch sites decide it, and the line that follows.</summary>
+    private static string LineFor(McpNetworkConfig network)
+    {
+        var thrown = Record.Exception(() => network.ResolveToken(out _));
+        Assert.NotNull(thrown);
+        return DarlingSecretSource.DescribeTokenReadFailure(
+            "MCP network token", "mcp.network", "MCP server not started.", thrown.Message, !string.IsNullOrWhiteSpace(network.EncryptedToken));
+    }
+
+    [Fact]
+    public void TokenLine_ForATokenFileReference_NamesTheFileAndNoDpapiAdvice_OnAnyOs()
+    {
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var line = LineFor(new McpNetworkConfig { Token = "file:" + McpSecret });
+
+            Assert.Contains("'/run/secrets/mcp_token'", line, StringComparison.Ordinal);
+            Assert.Contains("MCP server not started.", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("decrypted", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("--encrypt-password", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("another machine", line, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void TokenLine_ForAnEncryptedToken_KeepsTheDpapiAdvice_OnAnyOs()
+    {
+        var line = LineFor(new McpNetworkConfig { EncryptedToken = "AAAA" });
+
+        Assert.Contains("(mcp.network.encryptedToken) could not be decrypted", line, StringComparison.Ordinal);
+        Assert.Contains("--encrypt-password", line, StringComparison.Ordinal);
+        Assert.Contains("remove it and set mcp.network.token to an env: or file: reference", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TokenLine_WhenBothAreSet_FollowsTheEncryptedTokenResolveTokenReads()
+    {
+        var line = LineFor(new McpNetworkConfig { EncryptedToken = "AAAA", Token = "file:" + McpSecret });
+
+        Assert.Contains("could not be decrypted", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(McpSecret, line, StringComparison.Ordinal);
     }
 
     [Fact]

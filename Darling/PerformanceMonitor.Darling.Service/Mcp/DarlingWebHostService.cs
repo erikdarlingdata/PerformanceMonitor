@@ -811,7 +811,7 @@ public sealed class DarlingWebHostService : BackgroundService
                 "{Message}",
                 DarlingSecretSource.DescribeTokenReadFailure(
                     "Web dashboard token", "web.network", "The loopback listener is not served without a token, so the web dashboard is not started.",
-                    ex.Message, OperatingSystem.IsWindows()));
+                    ex.Message, !string.IsNullOrWhiteSpace(network.EncryptedToken)));
             return new LoopbackTokenResolution(true, "");
         }
     }
@@ -913,7 +913,8 @@ public sealed class DarlingWebHostService : BackgroundService
                     _logger.LogCritical(ex,
                         "{Message}",
                         DarlingSecretSource.DescribeTokenReadFailure(
-                            "Web dashboard token", "web.network", "The web dashboard is not started.", ex.Message, OperatingSystem.IsWindows()));
+                            "Web dashboard token", "web.network", "The web dashboard is not started.", ex.Message,
+                            !string.IsNullOrWhiteSpace(network.EncryptedToken)));
                     await DisposeFailedStartAsync();
                     return false;
                 }

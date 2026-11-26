@@ -270,19 +270,20 @@ public static class DarlingSecretSource
     }
 
     /// <summary>
-    /// The log line for a network token that could not be resolved (#9793). On Windows it is the line the host has always
-    /// written: the setting is a DPAPI blob that may have been made on another machine, so it says to make a new one here. On any
-    /// other platform there is no DPAPI, so the line names what failed and why (the exception's text names the file, the
-    /// account and the owner and mode, or the missing variable) and stops, with the consequence the caller states. The
-    /// platform is a parameter so both lines are checked on one machine.
+    /// The log line for a network token that could not be resolved (#9793). <c>ResolveToken</c> reads <c>encryptedToken</c>
+    /// whenever it is set, on any OS, and the token reference only when it is not, so which setting was read picks the line.
+    /// An <c>encryptedToken</c> is a DPAPI blob that may have been made on another machine or account, so its line says to make
+    /// a new one here, or to use a token reference on another OS. A token reference (<c>file:</c>, <c>env:</c> or a literal) is
+    /// no blob, so its line names what failed and why (the exception's text names the file, the account and the owner and
+    /// mode, or the missing variable) and stops, with the consequence the caller states.
     /// </summary>
     /// <param name="tokenName">The token as the log names it, such as "MCP network token" or "Web dashboard token".</param>
     /// <param name="section">The config section, <c>mcp.network</c> or <c>web.network</c>.</param>
     /// <param name="consequence">What the failure stops, as a sentence.</param>
     /// <param name="detail">The exception's message.</param>
-    /// <param name="windows">Whether the service runs on Windows.</param>
-    internal static string DescribeTokenReadFailure(string tokenName, string section, string consequence, string detail, bool windows)
-        => windows
+    /// <param name="encrypted">Whether <c>encryptedToken</c> is set, so it is the setting that was read.</param>
+    internal static string DescribeTokenReadFailure(string tokenName, string section, string consequence, string detail, bool encrypted)
+        => encrypted
             ? $"{tokenName} ({section}.encryptedToken) could not be decrypted ({detail}). {consequence} "
                 + "A token made on another machine or account cannot be read here. "
                 + $"Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in {section}.encryptedToken. "
