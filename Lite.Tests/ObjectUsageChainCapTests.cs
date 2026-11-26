@@ -25,10 +25,12 @@ namespace PerformanceMonitorLite.Tests;
 /// <summary>
 /// #9596: the three chain tables stay under a share of the hot store's reset point. A small reset point is injected into the builder so the history of
 /// <see cref="ObjectUsageChainHistory"/> reaches the cap: the chain never passes it, a trim keeps the newest snapshots and the builder carries on from its
-/// watermark, a window inside the kept chain reads from it and a window outside folds, and every answer is the full fold's. A cap that the newest week does
-/// not fit under drops the chain and leaves the fold. With two databases a pass that starts over the cap drops only the one that does not fit, and the same
-/// builder rebuilds it once it fits. A database whose backfill a trim removes is rebuilt from the trim's cutoff and keeps a chain over its newest days, a
-/// chain dropped after a trim comes back from that cutoff, and with no trim each database's chain starts at its own oldest snapshot.
+/// watermark, a window inside the kept chain reads from it and a window outside folds, and every answer is the full fold's. A cap that the minimum span
+/// (<see cref="ObjectUsageChainBuilder.MinKeptDays"/>) does not fit under drops the chain and leaves the fold. With two databases a pass that starts over
+/// the cap drops only the one that does not fit, and the same builder rebuilds it once it fits. A database whose backfill a trim removes is rebuilt from
+/// the trim's cutoff and keeps a chain over its newest days, a chain dropped after a trim comes back from that cutoff, and with no trim each database's
+/// chain starts at its own oldest snapshot. A trim to the minimum span keeps the baseline of a 7 day window, so the 7 day read comes from the chain, also
+/// when the newest snapshot is earlier in its day than the snapshots a week back.
 /// </summary>
 public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -197,7 +199,7 @@ public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture
     }
 
     [Fact]
-    public async Task WhenTheNewestWeekDoesNotFit_TheChainIsDropped_NotExtended_AndTheFoldAnswers()
+    public async Task WhenTheMinimumSpanDoesNotFit_TheChainIsDropped_NotExtended_AndTheFoldAnswers()
     {
         var capRows = await SeedAndMeasureAsync() / 40;
         var expected7 = await ToolAsync(7);
@@ -397,7 +399,7 @@ public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture
     }
 
     [Fact]
-    public async Task AfterATrim_ACapTheNewestWeekDoesNotFitUnder_StillDropsTheChain_AndItComesBackFromTheTrimsCutoff()
+    public async Task AfterATrim_ACapTheMinimumSpanDoesNotFitUnder_StillDropsTheChain_AndItComesBackFromTheTrimsCutoff()
     {
         /* One builder with a cap the test moves. At half the uncapped size the passes trim the chain to its newest days. */
         var uncapped = await SeedAndMeasureAsync();
@@ -416,7 +418,7 @@ public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture
         var fromCutoff = await ScalarAsync(
             $"SELECT count(DISTINCT collection_time) FROM index_object_stats WHERE collection_time >= TIMESTAMP '{cutoff:yyyy-MM-dd HH:mm:ss}'");
 
-        /* The cap drops to where the newest week does not fit: no trim reaches it, so the pass drops the chain, and the chain is under the cap. */
+        /* The cap drops to where the minimum span does not fit: no trim reaches it, so the pass drops the chain, and the chain is under the cap. */
         capRows = uncapped / 40;
         Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
         Assert.Equal(0L, await ChainRowsAsync());
@@ -445,6 +447,97 @@ public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture
         Assert.NotNull(week.Result);
         Assert.Equal(Json(await _dataService.GetObjectUsageWindowFullAsync(_serverId, Database, Start(7))), Json(week.Result));
         Assert.Equal(expected7, await ToolAsync(7));
+    }
+
+    /// <summary>
+    /// A cap whose trim budget holds the delta rows of the built chain's newest <see cref="ObjectUsageChainBuilder.MinKeptDays"/> days and not a day more,
+    /// so the pass that starts over it trims to the minimum span.
+    /// </summary>
+    private async Task<long> MinimumSpanCapAsync()
+    {
+        var spanDeltas = await ScalarAsync(
+            "SELECT count(*) FROM object_usage_deltas WHERE collection_time >= "
+            + $"(SELECT CAST(CAST(max(collection_time) AS DATE) AS TIMESTAMP) - to_days({ObjectUsageChainBuilder.MinKeptDays - 1}) FROM object_usage_deltas)");
+        var other = await ScalarAsync("SELECT (SELECT count(*) FROM object_usage_snapshots) + (SELECT count(*) FROM object_usage_runs)");
+        return (long)Math.Ceiling((other + spanDeltas) / ObjectUsageChainBuilder.TrimTargetShare) + 2;
+    }
+
+    [Fact]
+    public async Task ATrimToTheMinimumSpan_KeepsTheBaselineOfA7DayWindow_SoThe7DayReadComesFromTheChain()
+    {
+        /* One builder with a cap the test moves. The chain is built whole, then the cap drops to where the trim budget holds the minimum span and no more. */
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, Database, ObjectUsageChainHistory.Generate());
+        var expected7 = await ToolAsync(7);
+        long capRows = long.MaxValue / 1024;
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now,
+            () => capRows * (double)ObjectUsageChainBuilder.EstimatedBytesPerRow / (1048576.0 * ObjectUsageChainBuilder.CapShareOfResetPoint));
+        Assert.Equal(ObjectUsageChainHistory.SnapshotDays().Count(), await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+
+        capRows = await MinimumSpanCapAsync();
+        Assert.True(await ChainRowsAsync() > builder.CapRows, "the whole chain fits under the cap, so no pass trims it");
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.True(await ChainRowsAsync() <= builder.CapRows);
+
+        /* The trim went to the minimum span: the kept chain starts on the span's oldest day and ends at the newest snapshot. */
+        Assert.Equal(Start(ObjectUsageChainBuilder.MinKeptDays - 1), await OldestAsync(Database));
+        Assert.Equal(Start(0), await NewestAsync(Database));
+
+        /* The 7 day read comes from the chain and is the fold's, and the tool answers what it answered with no chain. */
+        var (week, reason) = await _dataService.TryReadObjectUsageChainAsync(_serverId, Database, Start(7));
+        Assert.True(week is not null, $"the 7 day read did not come from the chain: {reason}");
+        Assert.Null(reason);
+        Assert.Equal(Json(await _dataService.GetObjectUsageWindowFullAsync(_serverId, Database, Start(7))), Json(week));
+        Assert.Equal(expected7, await ToolAsync(7));
+
+        /* A further pass builds nothing and removes nothing. */
+        var settled = await ChainRowsAsync();
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(settled, await ChainRowsAsync());
+    }
+
+    [Fact]
+    public async Task ATrimToTheMinimumSpan_KeepsTheBaseline_WhenTheNewestSnapshotIsEarlierInItsDayThanTheSnapshotsAWeekBack()
+    {
+        /* Hourly snapshots at ten past the hour for 20 days, then the newest one at five past midnight. A 7 day window read at the newest snapshot starts
+           before the first snapshot of the 8th day back, so its baseline is the last snapshot of the 9th. */
+        var newest = new DateTime(2026, 11, 14, 0, 5, 0);
+        var first = newest.Date.AddDays(-20).AddMinutes(10);
+        var times = Enumerable.Range(0, 20 * 24).Select(hour => first.AddHours(hour)).Append(newest).ToList();
+        var rows = new List<ObjectUsageChainHistory.Row>();
+        for (var i = 0; i < times.Count; i++)
+        {
+            foreach (var indexId in new[] { 1, 2 })
+            {
+                rows.Add(new ObjectUsageChainHistory.Row(
+                    times[i], new DateTime(2026, 1, 1, 3, 0, 0), ObjectUsageChainHistory.Node1, 1, "Orders", indexId, (i + 1) * (10L + indexId), 0, 0,
+                    indexId == 1 ? (i + 1) * 3L : 0, times[i].AddMinutes(-2), null, null, indexId == 1 ? times[i].AddMinutes(-1) : null));
+            }
+        }
+
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, Database, rows);
+        var start = newest.AddDays(-7);
+        Assert.Equal(
+            newest.Date.AddDays(-8).AddHours(23).AddMinutes(10),
+            await TimeAsync($"SELECT max(collection_time) FROM index_object_stats WHERE collection_time <= TIMESTAMP '{start:yyyy-MM-dd HH:mm:ss}'"));
+
+        long capRows = long.MaxValue / 1024;
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => DateTime.SpecifyKind(newest, DateTimeKind.Utc),
+            () => capRows * (double)ObjectUsageChainBuilder.EstimatedBytesPerRow / (1048576.0 * ObjectUsageChainBuilder.CapShareOfResetPoint));
+        Assert.Equal(times.Count, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+
+        capRows = await MinimumSpanCapAsync();
+        Assert.True(await ChainRowsAsync() > builder.CapRows, "the whole chain fits under the cap, so no pass trims it");
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.True(await ChainRowsAsync() <= builder.CapRows);
+
+        /* The trim went to the minimum span: the kept chain starts at the first snapshot of the span's oldest day and ends at the newest snapshot. */
+        Assert.Equal(newest.Date.AddDays(-(ObjectUsageChainBuilder.MinKeptDays - 1)).AddMinutes(10), await OldestAsync(Database));
+        Assert.Equal(newest, await NewestAsync(Database));
+
+        var (week, reason) = await _dataService.TryReadObjectUsageChainAsync(_serverId, Database, start);
+        Assert.True(week is not null, $"the 7 day read did not come from the chain: {reason}");
+        Assert.Null(reason);
+        Assert.Equal(Json(await _dataService.GetObjectUsageWindowFullAsync(_serverId, Database, start)), Json(week));
     }
 
     [Fact]

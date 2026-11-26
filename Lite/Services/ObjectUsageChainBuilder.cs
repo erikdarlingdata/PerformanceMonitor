@@ -75,8 +75,17 @@ internal sealed class ObjectUsageChainBuilder
     /// <summary>A trim goes down to this share of the cap, so the pass that follows has room to build before it is over again.</summary>
     internal const double TrimTargetShare = 0.8;
 
-    /// <summary>The shortest span of newest snapshots worth keeping: a chain that cannot hold this much under the cap is dropped and the fold answers.</summary>
-    internal const int MinKeptDays = 7;
+    /// <summary>The window the minimum span serves, in days: a <c>get_object_usage</c> read of the newest week.</summary>
+    internal const int ServedWindowDays = 7;
+
+    /// <summary>
+    /// The shortest span of newest snapshots worth keeping, in calendar days with the newest day counted as the first: a chain that cannot hold this
+    /// much under the cap is dropped and the fold answers. It is the span a window of <see cref="ServedWindowDays"/> days needs in the chain. A window
+    /// read at or after the newest snapshot starts on the 8th day at the earliest, and its baseline is the snapshot at or before its start: on the 8th
+    /// day, or on the 9th when the 8th day's first snapshot is later than the start. A trim cuts at a midnight, so the span holds both days whole. A
+    /// window whose baseline is older still, after more than a day with no snapshot, folds.
+    /// </summary>
+    internal const int MinKeptDays = ServedWindowDays + 2;
 
     /// <summary>The databases whose newest hot snapshot is ahead of their chain, or whose chain was built under older rules. $1 the current step version.</summary>
     internal const string PendingPairsSql = """
@@ -223,7 +232,7 @@ internal sealed class ObjectUsageChainBuilder
     private readonly Func<double> _resetPointMb;
 
     /// <summary>
-    /// Databases whose chain was dropped because the newest <see cref="MinKeptDays"/> did not fit under the cap, each with the rows its newest week
+    /// Databases whose chain was dropped because the newest <see cref="MinKeptDays"/> days did not fit under the cap, each with the rows those days
     /// held when it was dropped (the most of every drop). A pass skips one until the chain's rows plus that many fit under <see cref="TrimTargetShare"/>
     /// of the cap, which is the condition the drop broke, so it comes back once the cap is raised or a trim, a purge or the size reset frees room, and
     /// is not built and dropped again on every pass while that condition holds.
@@ -834,7 +843,7 @@ internal sealed class ObjectUsageChainBuilder
     /// Keeps the three chain tables under <see cref="CapRows"/>. Over it, the oldest days of snapshots go through <see cref="PurgeAsync"/> with a later
     /// cutoff until the rest is under <see cref="TrimTargetShare"/> of the cap, so the newest windows keep the chain and a longer window folds (the
     /// reader needs the chain's facts at the window's baseline). If the newest <see cref="MinKeptDays"/> days do not fit, one database's chain is
-    /// dropped and the check runs again: the database being extended when the cap was reached, else the one whose newest week holds the most rows.
+    /// dropped and the check runs again: the database being extended when the cap was reached, else the one whose newest days hold the most rows.
     /// So only the databases that do not fit lose their chain, and the rest keep theirs, trimmed when they still need it. A dropped database waits in
     /// <see cref="_stopped"/> until it fits. A trim's cutoff becomes <see cref="_trimFloor"/>, where a database with no chain starts its own.
     /// Returns the sentence for the pass's one warning, or null when the chain was under the cap.
@@ -876,13 +885,13 @@ internal sealed class ObjectUsageChainBuilder
                 break;
             }
 
-            var weeks = await ReadNewestWeekRowsAsync(cancellationToken);
-            if (weeks.Count == 0)
+            var spans = await ReadMinimumSpanRowsAsync(cancellationToken);
+            if (spans.Count == 0)
             {
                 break;
             }
 
-            var victim = weeks.FindIndex(w => preferred is { } hit && w.Pair == hit) is var at and >= 0 ? weeks[at] : weeks[0];
+            var victim = spans.FindIndex(s => preferred is { } hit && s.Pair == hit) is var at and >= 0 ? spans[at] : spans[0];
             preferred = null;
             await DeletePairAsync(victim.Pair.ServerId, victim.Pair.DatabaseName, cancellationToken);
             _stopped[victim.Pair] = Math.Max(victim.Rows, _stopped.GetValueOrDefault(victim.Pair));
@@ -939,9 +948,9 @@ internal sealed class ObjectUsageChainBuilder
     /// Each database with a chain and the rows a trim to its newest <see cref="MinKeptDays"/> days would leave it: the delta and snapshot rows of those
     /// days and all its runs. The most rows first. $1 is <see cref="MinKeptDays"/> less one, the days before the newest day that the span holds.
     /// </summary>
-    private async Task<List<((int ServerId, string DatabaseName) Pair, long Rows)>> ReadNewestWeekRowsAsync(CancellationToken cancellationToken)
+    private async Task<List<((int ServerId, string DatabaseName) Pair, long Rows)>> ReadMinimumSpanRowsAsync(CancellationToken cancellationToken)
     {
-        var weeks = new List<((int, string), long)>();
+        var spans = new List<((int, string), long)>();
         using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(cancellationToken);
@@ -980,10 +989,10 @@ internal sealed class ObjectUsageChainBuilder
                     FROM object_usage_runs AS r
                     WHERE r.server_id = n.server_id
                     AND   r.database_name = n.database_name
-                ) AS week_rows
+                ) AS span_rows
             FROM newest AS n
             ORDER BY
-                week_rows DESC,
+                span_rows DESC,
                 n.server_id,
                 n.database_name
             """;
@@ -991,11 +1000,11 @@ internal sealed class ObjectUsageChainBuilder
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            weeks.Add(((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), reader.GetString(1)),
+            spans.Add(((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), reader.GetString(1)),
                 Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture)));
         }
 
-        return weeks;
+        return spans;
     }
 
     /// <summary>
