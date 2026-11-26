@@ -243,7 +243,7 @@ The **About** button needs a window, so a headless Lite does not update itself. 
 
 To upgrade an install that `Setup.exe` made, run the new `Setup.exe` as the dedicated user in place of steps 2 and 3. The rollback below is for the portable ZIP.
 
-`-Force` replaces the files that the ZIP holds and leaves every other file where it is, so a file that only an older build had stays. Lite's own code loads nothing from a plugins or lib folder. This guide has not confirmed whether the .NET runtime can pick up a leftover `.dll`. To keep only the new build's files in the folder, run `Remove-Item -Path '<folder>\*' -Recurse -Force` after step 2 and before step 3, and keep the folder itself so that the dedicated user keeps its access to it. The copy from step 2 holds the old files, including a default file that you changed in `config`.
+`-Force` replaces the files that the ZIP holds and leaves every other file where it is, so a file that only an older build had stays. Lite's own code loads nothing from a plugins or lib folder. To keep only the new build's files in the folder, run `Remove-Item -Path '<folder>\*' -Recurse -Force` after step 2 and before step 3, and keep the folder itself so that the dedicated user keeps its access to it. The copy from step 2 holds the old files, including a default file that you changed in `config`.
 
 To roll back the program, run the stop task and check its last result, as in step 1. Then put the files from the copy back, and run the scheduled task that starts Lite:
 
