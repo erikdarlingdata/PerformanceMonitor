@@ -93,11 +93,11 @@ internal sealed class DarlingMcpTokenSet
     };
 
     /// <summary>The policy a personal token's role is served (#8737): <c>operator</c> as a named operator token is served (the server admin
-    /// tools only with both settings on), anything else as a reader. A personal token never holds the investigation tools.</summary>
+    /// tools only with both settings on, and never the personal token tools, #9643), anything else as a reader. A personal token never holds the investigation tools.</summary>
     internal DarlingMcpWritePolicy.Effective PolicyForRole(string role, string? name) => role switch
     {
-        McpTokenEntry.OperatorRole => new DarlingMcpWritePolicy.Effective(true, _serverAdmin, false, name),
-        _ => new DarlingMcpWritePolicy.Effective(false, false, false, name),
+        McpTokenEntry.OperatorRole => new DarlingMcpWritePolicy.Effective(true, _serverAdmin, false, name, PersonalToken: true),
+        _ => new DarlingMcpWritePolicy.Effective(false, false, false, name, PersonalToken: true),
     };
 
     /// <summary>The caller a live personal token is: named <c>personal:&lt;subject&gt;/&lt;token_name&gt;</c>, served the personal tokens' own

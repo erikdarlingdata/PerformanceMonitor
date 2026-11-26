@@ -101,7 +101,7 @@ public sealed class DarlingMcpNamedTokenTests
     private static List<string> ToolsPointedAtIn(string text, IEnumerable<string> catalog) =>
         catalog.Where(n => text.Contains("`" + n + "`", StringComparison.Ordinal)).OrderBy(n => n, StringComparer.Ordinal).ToList();
 
-    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action", "create_web_access_group", "update_web_access_group", "rotate_web_access_group_token", "delete_web_access_group", "set_advanced_web_access", "get_web_access_groups", "add_alert_source", "rotate_alert_source", "remove_alert_source" };
+    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action", "add_alert_source", "rotate_alert_source", "remove_alert_source", "mint_personal_token", "revoke_personal_token", "get_personal_tokens", "create_web_access_group", "update_web_access_group", "rotate_web_access_group_token", "delete_web_access_group", "set_advanced_web_access", "get_web_access_groups" };
 
     [Fact]
     public void ServerAdminToolsList_IsTheToolsTheDocsName()
