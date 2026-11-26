@@ -1066,6 +1066,7 @@ public partial class MainWindow : Window
     /// </summary>
     private McpServerAdminHooks McpServerAdminHooksFor() => new()
     {
+        OnUiThread = work => Dispatcher.Invoke(work),
         RemoveServer = async server => await await Dispatcher.InvokeAsync(async () =>
         {
             CloseServerTab(server.Id);

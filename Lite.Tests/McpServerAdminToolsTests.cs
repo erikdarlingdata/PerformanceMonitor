@@ -277,6 +277,49 @@ public sealed class McpServerAdminToolsTests : IDisposable
         Assert.Empty(Reread("Orders").ExcludedDatabases);
     }
 
+    /* #9640: a tool call runs off the UI thread, while the Edit Server and Manage Servers windows read and save the same live
+       ServerConnection objects. A host with a window hands the change over to its UI thread; these pin that the field change and its
+       save run inside that hook (nothing is written before it, and the saved file has the change when it returns), and that a
+       failure in the hook leaves the server as it was. */
+    [Fact]
+    public async Task Edit_AndSetExcluded_RunTheirChangeAndSaveOnTheHostsUiThread()
+    {
+        var manager = Seeded();
+        var runs = 0;
+        string? displayNameBefore = null;
+        var hooks = new McpServerAdminHooks
+        {
+            OnUiThread = work =>
+            {
+                runs++;
+                displayNameBefore = Reread("Orders").DisplayName;
+                work();
+            },
+        };
+
+        var edited = await McpServerAdminTools.EditAsync(manager, "Orders", "{\"description\":\"main\"}", new Probe().RunAsync, CancellationToken.None, hooks);
+        Assert.Equal("updated", Status(edited));
+        Assert.Equal(1, runs);
+        Assert.Equal("main", Reread("Orders").Description);
+
+        var excluded = McpServerAdminTools.SetExcluded(manager, "Orders", new[] { "Archive_*" }, hooks);
+        Assert.Equal("changed", Status(excluded));
+        Assert.Equal(2, runs);
+        Assert.Equal(new[] { "Archive_*" }, Reread("Orders").ExcludedDatabases);
+        Assert.Equal("Orders", displayNameBefore);
+    }
+
+    [Fact]
+    public void ASaveThatThrowsOnTheUiThread_LeavesTheStoreAsItWas()
+    {
+        var manager = Seeded();
+        var hooks = new McpServerAdminHooks { OnUiThread = _ => throw new InvalidOperationException("the window is closing") };
+
+        Assert.Throws<InvalidOperationException>(() => McpServerAdminTools.SetExcluded(manager, "Orders", new[] { "Archive_*" }, hooks));
+
+        Assert.True(Reread("Orders").ExcludedDatabases is null or { Count: 0 });
+    }
+
     [Theory]
     [InlineData("*")]
     [InlineData("***")]

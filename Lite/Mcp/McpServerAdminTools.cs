@@ -55,13 +55,14 @@ public sealed class McpServerAdminTools
         "Served only when both mcp_allow_writes and mcp_allow_server_admin are true. server_name is a display name, host or storage name, and a partial name is accepted only when it matches exactly one server.")]
     public static async Task<string> EditServer(
         ServerManager serverManager,
+        McpServerAdminHooks hooks,
         [Description("The monitored server to edit: its display name or storage name. A partial name is accepted only when it matches exactly one server.")] string server_name,
         [Description("A JSON object with ONLY the fields to change (e.g. {\"display_name\":\"Orders\",\"monthly_cost_usd\":120}). See the tool description for the keys.")] string changes_json,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            return await EditAsync(serverManager, server_name, changes_json, ServerEntryRules.TestConnectionAsync, cancellationToken);
+            return await EditAsync(serverManager, server_name, changes_json, ServerEntryRules.TestConnectionAsync, cancellationToken, hooks);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -75,12 +76,13 @@ public sealed class McpServerAdminTools
         "Data already collected stays. Collection picks the list up on its next pass. Served only when mcp_allow_writes is true. The answer gives the previous list and the exact call that restores it.")]
     public static string SetServerExcludedDatabases(
         ServerManager serverManager,
+        McpServerAdminHooks hooks,
         [Description("Server name (a display name or storage name), or a unique part of it.")] string server_name,
         [Description("The complete new list of database names or patterns to exclude. Empty clears the list.")] string[] databases)
     {
         try
         {
-            return SetExcluded(serverManager, server_name, databases);
+            return SetExcluded(serverManager, server_name, databases, hooks);
         }
         catch (Exception ex)
         {
@@ -217,7 +219,8 @@ public sealed class McpServerAdminTools
         string? serverName,
         string? changesJson,
         Func<ServerConnection, string?, string?, CancellationToken, Task<string?>> testConnection,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        McpServerAdminHooks? hooks = null)
     {
         var (stored, findError) = Find(serverManager, EditTool, serverName);
         if (stored is null)
@@ -504,17 +507,21 @@ public sealed class McpServerAdminTools
             }
         }
 
-        var snapshot = Copy(stored);
-        CopyOnto(stored, next);
-        try
+        /* #9640: the live server's fields change in place, so the change and its save run where the windows read and save them. */
+        McpServerAdminHooks.Save(hooks, () =>
         {
-            ServerEditSave.Persist(serverManager, stored, useProfile, username, password);
-        }
-        catch
-        {
-            CopyOnto(stored, snapshot);
-            throw;
-        }
+            var snapshot = Copy(stored);
+            CopyOnto(stored, next);
+            try
+            {
+                ServerEditSave.Persist(serverManager, stored, useProfile, username, password);
+            }
+            catch
+            {
+                CopyOnto(stored, snapshot);
+                throw;
+            }
+        });
 
         var previous = new JsonObject();
         var undoChanges = new JsonObject();
@@ -560,7 +567,7 @@ public sealed class McpServerAdminTools
     }
 
     /// <summary>set_server_excluded_databases over a server manager, so a test runs it with a throwaway one.</summary>
-    internal static string SetExcluded(ServerManager serverManager, string? serverName, string[]? databases)
+    internal static string SetExcluded(ServerManager serverManager, string? serverName, string[]? databases, McpServerAdminHooks? hooks = null)
     {
         if (databases is null)
         {
@@ -583,7 +590,7 @@ public sealed class McpServerAdminTools
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         var previous = (server.ExcludedDatabases ?? new List<string>()).ToList();
-        ExcludedDatabasesDialog.PersistSelection(serverManager, server, wanted, xeSessionsMode: false);
+        McpServerAdminHooks.Save(hooks, () => ExcludedDatabasesDialog.PersistSelection(serverManager, server, wanted, xeSessionsMode: false));
 
         var after = server.ExcludedDatabases ?? new List<string>();
         var storage = RemoteCollectorService.GetServerNameForStorage(server);

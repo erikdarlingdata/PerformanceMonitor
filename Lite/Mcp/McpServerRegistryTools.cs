@@ -33,6 +33,29 @@ public sealed class McpServerAdminHooks
 
     /// <summary>Called after the server list changed, so the window shows it. Null when there is no window.</summary>
     public Action? ServersChanged { get; init; }
+
+    /// <summary>Runs a change to a server's own fields on the window's UI thread, where the Edit Server and Manage Servers windows read and
+    /// save them. Null when there is no window (a test), where <see cref="Save"/> serialises on one lock instead.</summary>
+    public Action<Action>? OnUiThread { get; init; }
+
+    private static readonly object HeadlessSaveLock = new();
+
+    /// <summary>Runs <paramref name="work"/>, a change to the fields of a live <see cref="ServerConnection"/> and its save, on the UI thread when
+    /// <paramref name="hooks"/> has one, so no window reads or saves the server halfway through it. Without one, under one lock shared by every caller.
+    /// ServerManager's and ScheduleManager's own saves are each atomic under their own lock, so only the in-place field change needs this.</summary>
+    internal static void Save(McpServerAdminHooks? hooks, Action work)
+    {
+        if (hooks?.OnUiThread is { } onUi)
+        {
+            onUi(work);
+            return;
+        }
+
+        lock (HeadlessSaveLock)
+        {
+            work();
+        }
+    }
 }
 
 /// <summary>
