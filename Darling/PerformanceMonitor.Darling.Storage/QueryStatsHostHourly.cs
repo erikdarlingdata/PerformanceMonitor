@@ -95,6 +95,16 @@ public static class QueryStatsHostHourly
 
     private static readonly string StatementTimeoutSql = $"SET LOCAL statement_timeout = '{BuildStatementTimeoutSeconds}s'";
 
+    /// <summary>
+    /// The <c>work_mem</c> an hour's build transaction runs under (#9799). The build groups the hour's raw rows by key and text digest, and
+    /// the planner makes that a hash aggregate only when it expects the hash table to fit in <c>work_mem</c> times
+    /// <c>hash_mem_multiplier</c>. Below that it sorts the hour's rows first, and a sort of that size goes to disk. The setting is local to
+    /// the transaction, and a hash aggregate that outgrows the limit spills in batches instead of taking more memory.
+    /// </summary>
+    private const string BuildWorkMem = "256MB";
+
+    private static readonly string BuildWorkMemSql = $"SET LOCAL work_mem = '{BuildWorkMem}'";
+
     /// <summary>The rows the statement's two passes read for their measures.</summary>
     private const string Honest = "sample_interval_seconds IS DISTINCT FROM 0";
 
@@ -626,6 +636,11 @@ ORDER BY h.bucket;";
         await using (var timeout = new NpgsqlCommand(StatementTimeoutSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             await timeout.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var workMem = new NpgsqlCommand(BuildWorkMemSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            await workMem.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await RunHourStatementAsync(connection, transaction, DeleteHourSql, serverIds, bucket, null, cancellationToken);
