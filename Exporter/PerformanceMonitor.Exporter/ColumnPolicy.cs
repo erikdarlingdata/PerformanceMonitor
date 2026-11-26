@@ -86,6 +86,16 @@ public static class ColumnPolicies
         return !string.IsNullOrEmpty(column) && SecretLikeColumnRegex.IsMatch(column);
     }
 
+    /// <summary>The columns a table's policy drops, by name. Empty when the table has no policy or the policy drops nothing.</summary>
+    public static IReadOnlySet<string> DroppedColumns(string table)
+    {
+        return For(table)?.Rules
+            .Where(r => r.Action == ColumnAction.Drop)
+            .Select(r => r.Column)
+            .ToHashSet(StringComparer.Ordinal)
+            ?? new HashSet<string>(StringComparer.Ordinal);
+    }
+
     /// <summary>Returns the column policy for a table, by bare name, or null if none applies.</summary>
     public static TablePolicy? For(string table)
     {
@@ -100,6 +110,24 @@ public static class ColumnPolicies
                 {
                     new ColumnRule("message", ColumnAction.KeepWhen, PredicateSql: "\"run_status\" <> 1", TruncateChars: 2000),
                 },
+                Version: 1),
+
+            // The plan XML reaches the export through plan_shape and the plan_* feature tables, which QuerySnapshotsExporter
+            // builds from query_plan. It is never exported inline, so both plan columns are out of the fact row.
+            // QuerySnapshotsExporter reads this list for its fact columns; query_plan is read separately, last, to
+            // build those plan tables.
+            "query_snapshots" => new TablePolicy(
+                Rules: new[]
+                {
+                    new ColumnRule("query_plan", ColumnAction.Drop),
+                    new ColumnRule("live_query_plan", ColumnAction.Drop),
+                },
+                Version: 1),
+
+            // text_sample is up to 4,000 characters of query text kept per sighting; the sighting's key, caller fields
+            // and counts are what the export needs.
+            "query_tag_sightings" => new TablePolicy(
+                Rules: new[] { new ColumnRule("text_sample", ColumnAction.Drop) },
                 Version: 1),
 
             "analysis_findings" => new TablePolicy(
