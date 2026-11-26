@@ -35,7 +35,9 @@ chmod 755 "${compose_stage}/${compose_dir}/setup.sh"
 sh -n "${compose_stage}/${compose_dir}/setup.sh"
 tar -C "${compose_stage}" -czf "${archive}" "${compose_dir}"
 tar -tzf "${archive}"
-if ! tar -tvzf "${archive}" | grep -Eq '^-rwxr-xr-x .* '"${compose_dir}"'/setup\.sh$'; then
+# grep reads the whole listing (no -q): under pipefail, a grep that stops at its first match can make tar fail
+# its next write, and the check then fails on an archive that is fine (#9671).
+if ! tar -tvzf "${archive}" | grep -E '^-rwxr-xr-x .* '"${compose_dir}"'/setup\.sh$' >/dev/null; then
   echo "::error::setup.sh is missing from the compose archive or lacks its execute bit (#6140)."
   exit 1
 fi
