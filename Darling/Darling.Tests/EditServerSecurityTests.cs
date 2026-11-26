@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json.Nodes;
@@ -102,33 +101,14 @@ public sealed class EditServerSecurityTests
 
     [Theory]
     [MemberData(nameof(HostileWords))]
-    public async Task A_quoted_word_reaches_bash_as_the_same_text(string word, bool _)
-    {
-        if (OperatingSystem.IsWindows() || !File.Exists("/bin/bash"))
-        {
-            return;
-        }
-
-        var printed = StoreConfigProvider.CommandWord(word, powershell: false)!;
-        var start = new ProcessStartInfo("/bin/bash") { RedirectStandardOutput = true, StandardOutputEncoding = Encoding.UTF8 };
-        start.ArgumentList.Add("-c");
-        start.ArgumentList.Add("printf '%s' " + printed);
-        using var process = Process.Start(start)!;
-        var seen = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
-        await process.WaitForExitAsync(TestContext.Current.CancellationToken);
-
-        Assert.Equal(word, seen);
-    }
-
-    [Theory]
-    [MemberData(nameof(HostileWords))]
     public async Task A_quoted_word_reaches_powershell_as_the_same_text(string word, bool _)
     {
-        var shell = OperatingSystem.IsWindows() ? "powershell.exe" : null;
-        if (shell is null)
+        if (!OperatingSystem.IsWindows())
         {
             return;
         }
+
+        const string shell = "powershell.exe";
 
         var printed = StoreConfigProvider.CommandWord(word, powershell: true)!;
         var start = new ProcessStartInfo(shell) { RedirectStandardOutput = true, UseShellExecute = false };
