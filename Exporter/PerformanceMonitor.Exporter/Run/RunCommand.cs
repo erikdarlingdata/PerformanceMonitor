@@ -11,7 +11,8 @@ public static class RunCommand
 {
     public const string Usage = "Usage: darling-export run (--config <file> | --settings <file>) [--plan-only] [--now <ISO UTC>]";
 
-    public static async Task<int> MainAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct)
+    /// <param name="childRunner">Runs each window's child process. The default starts the exporter; a test passes its own.</param>
+    public static async Task<int> MainAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct, IChildRunner? childRunner = null)
     {
         string? settingsPath = null, configPath = null;
         var planOnly = false;
@@ -48,8 +49,23 @@ public static class RunCommand
         {
             // Plan-only never resolves the credential or opens the store, so a dpapi_file password is accepted on any OS
             // (a config can be planned on any OS). A real run refuses it off Windows, as `export` does.
-            try { settings = RunConfigMapping.Load(configPath, isWindows: OperatingSystem.IsWindows() || planOnly); }
+            ExporterConfig config;
+            try { (settings, config) = RunConfigMapping.LoadWithConfig(configPath, isWindows: OperatingSystem.IsWindows() || planOnly); }
             catch (ConfigException ex)
+            {
+                error.WriteLine($"Config error: {ex.Message}");
+                return RunScheduler.ExitRefused;
+            }
+
+            // What every window of this run needs is checked once, before the first window, so a configuration error is
+            // exit 2 with one line and no window is started: the store credential (a real run only) and the local
+            // destination folder, which the upload never creates.
+            try
+            {
+                if (!planOnly) CredentialResolver.Resolve(config.Store.Credential, TextWriter.Null);
+                DestinationCheck.Assert(config);
+            }
+            catch (Exception ex) when (ex is ConfigException or CredentialException)
             {
                 error.WriteLine($"Config error: {ex.Message}");
                 return RunScheduler.ExitRefused;
@@ -68,7 +84,7 @@ public static class RunCommand
         var memory = new SystemHostMemory(error);
         var scheduler = new RunScheduler(
             settings, new RunOptions(planOnly, now), () => DateTime.UtcNow,
-            new ProcessChildRunner(settings.MemoryGuard, memory, output),
+            childRunner ?? new ProcessChildRunner(settings.MemoryGuard, memory, output),
             settings.Validate() is null ? RestartDelay.Create(settings.Restart, error) : new NoRestartDetector(),
             memory, output);
         return await scheduler.RunAsync(ct).ConfigureAwait(false);

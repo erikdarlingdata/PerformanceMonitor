@@ -60,7 +60,7 @@ catch (Exception ex)
     return 1;
 }
 
-// check-config --config F: loads and validates the config, resolves the credential, prints the config with secrets redacted.
+// check-config --config F: loads and validates the config, resolves the credential, checks the local destination folder, prints the config with secrets redacted.
 static int RunCheckConfig(string[] args)
 {
     string? path = null;
@@ -87,6 +87,7 @@ static int RunCheckConfig(string[] args)
     {
         var config = ConfigLoader.Load(path);
         var secret = CredentialResolver.Resolve(config.Store.Credential);
+        DestinationCheck.Assert(config);
         if (config.Store.ConnectionStringEnv is not null)
         {
             // Parse it too, so a malformed connection string is caught here and not at the first export.
