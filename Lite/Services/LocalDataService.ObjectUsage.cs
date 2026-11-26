@@ -19,7 +19,8 @@ namespace PerformanceMonitorLite.Services;
 /// The reads behind Lite's <c>get_object_usage</c> (#8784): one database's index and object stats snapshots over the window (the shared
 /// <see cref="ObjectUsageWindowRead"/> statement and mapper), fed to the shared <see cref="ObjectUsageWindow"/>, and its module executions summed from the stored Query Store rows. Lite keeps every collector for its one
 /// retention horizon, so it needs no summary table: both reads go through the <c>v_</c> views, which union the hot tables with the parquet
-/// archive.
+/// archive. The window read answers from the persisted per-snapshot chain where it can (#9596, <see cref="GetObjectUsageWindowAsync"/>) and
+/// folds every snapshot where it cannot.
 /// </summary>
 public partial class LocalDataService
 {
@@ -203,25 +204,6 @@ GROUP BY
             statements,
             withoutText,
             unparsed);
-    }
-
-    /// <summary>Reads the window for one database and runs it through <see cref="ObjectUsageWindow"/>.</summary>
-    public async Task<ObjectUsageWindowResult> GetObjectUsageWindowAsync(int serverId, string databaseName, DateTime windowStartUtc)
-    {
-        var window = new ObjectUsageWindow();
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-        command.CommandText = ObjectUsageWindowRead.Sql;
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = databaseName });
-        command.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified) });
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            window.Add(ObjectUsageWindowRead.Map(reader));
-        }
-
-        return window.Complete();
     }
 
     /// <summary>Reads the module executions for one database over the window, from the stored Query Store rows.</summary>

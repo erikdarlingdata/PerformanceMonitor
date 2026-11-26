@@ -22,6 +22,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
@@ -31,8 +32,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <c>edit_server</c> (#5240): changes one monitored server's settings IN PLACE. The row keeps its
 /// <c>server_id</c> (the #2158 rule the desktop Edit already follows), so tags, collected history and every
 /// per-id setting stay attached; only a fixed list of columns is ever written, and never <c>server_id</c>,
-/// <c>engine</c>, <c>is_enabled</c>, <c>excluded_databases</c>, <c>capture_plans</c>,
-/// <c>alert_delivery_mode_override</c>, <c>plan_force_bot_enabled</c> or the <c>remediation_*</c> columns.
+/// <c>engine</c>, <c>is_enabled</c>, <c>excluded_databases</c>, <c>plan_force_bot_enabled</c> or the <c>remediation_*</c> columns.
+/// <c>capture_plans</c> and <c>alert_delivery_mode_override</c> (#9635) are plain per-server settings the Viewer's Add and Edit
+/// Server dialog also sets: this surface writes them with a column UPDATE in the edit's own transaction (the <c>mcp</c> role
+/// holds that grant), and the web edit route, whose role holds no such grant, still refuses them.
 ///
 /// <para><b>Credentials.</b> The stored secret cannot be read back (the <c>mcp</c> role has no SELECT on
 /// <c>encrypted_password</c>), so the edit cannot probe with "keep the stored password". A change to how a SQL or
@@ -71,11 +74,18 @@ public sealed partial class DarlingMcpServerAdminTools
         "expected_modified_at",
     ];
 
+    /// <summary>The two per-server settings only the MCP surface may set (#9635): the web route's role cannot write them.</summary>
+    internal static readonly string[] EditSettingKeys = ["capture_plans", "alert_delivery_mode_override"];
+
+    /// <summary>The values the Viewer's dialog stores for <c>alert_delivery_mode_override</c>: the <see cref="AlertNotificationMode"/> names.
+    /// Null means "inherit the global mode".</summary>
+    private static readonly string[] AlertDeliveryOverrideValues = [nameof(AlertNotificationMode.Summary), nameof(AlertNotificationMode.PerEvent)];
+
     /// <summary>Keys that name a column this surface never writes. Named in the refusal, so a caller learns that it
     /// is a rule and not a typo.</summary>
     private static readonly string[] EditRefusedKeys =
     [
-        "server_id", "engine", "is_enabled", "excluded_databases", "xe_session_databases", "capture_plans", "alert_delivery_mode_override",
+        "server_id", "engine", "is_enabled", "excluded_databases", "xe_session_databases",
         "plan_force_bot_enabled",
     ];
 
@@ -98,6 +108,8 @@ public sealed partial class DarlingMcpServerAdminTools
         ["monthly_cost_usd"] = "monthly_cost_usd",
         ["aws_role_arn"] = "aws_role_arn",
         ["aws_external_id"] = "aws_external_id",
+        ["capture_plans"] = "capture_plans",
+        ["alert_delivery_mode_override"] = "alert_delivery_mode_override",
     };
 
     private const string EditNoteSweep = "The service applies this within one sweep.";
@@ -156,18 +168,18 @@ public sealed partial class DarlingMcpServerAdminTools
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "edit_server"), Description(
         "Edits one monitored server's settings in place, no confirm step: name, address, database, authentication, " +
-        "TLS posture or monthly cost. The server keeps its id, tags and history. A change to how it is reached is " +
-        "probed first and saved only if the server answers; the service applies it within one sweep. Engine, " +
-        "enabled state and excluded databases cannot change here (use disable_server / enable_server, set_server_excluded_databases, set_server_xe_session_databases). Returns updated, unchanged, or " +
+        "TLS, cost, plan capture or alert delivery. The server keeps its id, tags and history. A change to how it is reached is " +
+        "probed first and saved only if the server answers. Engine, " +
+        "enabled state and excluded databases cannot change here (see disable_server, enable_server, set_server_excluded_databases, set_server_xe_session_databases). Returns updated, unchanged, or " +
         "invalid/not_found/ambiguous/conflict/collides/connection_failed with nothing written." +
         "<<GUIDE>>" +
-        "SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
+        "The service applies a saved change within one sweep. SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
         "A change to where the server connects (host, port, database or read_only_intent) is answered refused while a route with an agent setting (Off included) is scoped to the server, by its id, one of its tags or a tag above one (a route with no scope does not count): that is changed in the Viewer or on the web dashboard. The display name and the other settings stay open. " +
         "The machine is also recognised by the name its server reports for itself (a SQL Server's own name, a PostgreSQL cluster's identifier and port), so one machine reached under another host name is held the same way, and so is a change to another connection field that reaches it, and two machines that report the same name (cloned images, containers sharing a hostname, a PostgreSQL replica and its primary) are treated as one machine: register those in the Viewer or on the web dashboard. " +
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
         "database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\"), username, " +
         "password, encrypt_mode, trust_server_certificate, multi_subnet_failover, query_store_replica, monthly_cost_usd, " +
-        "aws_role_arn, aws_external_id, expected_modified_at. The values mean what they mean in add_servers (query_store_replica: empty or null removes it; monthly_cost_usd: null clears it, stored as 0, the unset value). Naming engine, is_enabled, " +
+        "aws_role_arn, aws_external_id, capture_plans, alert_delivery_mode_override, expected_modified_at. The values mean what they mean in add_servers (query_store_replica: empty or null removes it; monthly_cost_usd: null clears it, stored as 0, the unset value). capture_plans is true (capture plans on this server), false (never), or null (follow the service-wide capture_plans flag, the Viewer's \"Use the service setting\"); alert_delivery_mode_override is \"Summary\", \"PerEvent\", or null (inherit the global delivery mode), the same values the Viewer's Edit Server dialog stores. Both are plain settings: no probe and no reconnect, and the service applies them on its next config poll without a restart. Naming engine, is_enabled, " +
         "excluded_databases or any other key is status \"invalid\". The server keeps its id: tags, history and " +
         "settings stay attached, even when the address changes; the old address then cannot be added as a new " +
         "server under the same spelling. PASSWORD: omit it, or leave it blank, to keep the stored one; a typed one replaces it and is the password itself (a value starting with env: or file: is refused, references are set in the configuration file). The stored secret cannot be " +
@@ -212,7 +224,7 @@ public sealed partial class DarlingMcpServerAdminTools
             }
 
             /* Validate the body BEFORE any store access: a malformed request never reads the table. */
-            var (changes, parseError) = ParseEditChanges(changes_json);
+            var (changes, parseError) = ParseEditChanges(changes_json, allowSettings: true);
             if (parseError != null)
             {
                 return Outcome(EditStatus.Invalid, parseError);
@@ -600,6 +612,8 @@ LIMIT 1";
                 case "multi_subnet_failover": previous[field] = row.MultiSubnetFailover; break;
                 case "query_store_replica": previous[field] = row.QueryStoreReplica; break;
                 case "monthly_cost_usd": previous[field] = row.MonthlyCostUsd; break;
+                case "capture_plans": previous[field] = row.CapturePlans; break;
+                case "alert_delivery_mode_override": previous[field] = row.AlertDeliveryModeOverride; break;
                 case "aws_role_arn": previous[field] = row.AwsRoleArn; break;
             }
         }
@@ -702,6 +716,8 @@ LIMIT 1";
         multi_subnet_failover = row.MultiSubnetFailover,
         query_store_replica = row.QueryStoreReplica,
         monthly_cost_usd = row.MonthlyCostUsd,
+        capture_plans = row.CapturePlans,
+        alert_delivery_mode_override = row.AlertDeliveryModeOverride,
         aws_role_arn = row.AwsRoleArn,
         aws_external_id_set = row.AwsExternalIdSet,
         modified_at = ModifiedAtToken(row.ModifiedAt),
@@ -753,6 +769,14 @@ LIMIT 1";
         public bool? MultiSubnetFailover { get; set; }
         public decimal? MonthlyCostUsd { get; set; }
 
+        /// <summary>True when the request names <c>capture_plans</c> (#9635): null in <see cref="CapturePlans"/> then means "follow the service setting".</summary>
+        public bool HasCapturePlans { get; set; }
+        public bool? CapturePlans { get; set; }
+
+        /// <summary>True when the request names <c>alert_delivery_mode_override</c> (#9635): null in <see cref="AlertDeliveryModeOverride"/> then means "inherit the global mode".</summary>
+        public bool HasAlertDeliveryModeOverride { get; set; }
+        public string? AlertDeliveryModeOverride { get; set; }
+
         /// <summary>True when the request names the Query Store replica (#6254): <see cref="QueryStoreReplica"/> null then means
         /// "remove it". A replica left out keeps the stored one.</summary>
         public bool HasQueryStoreReplica { get; set; }
@@ -775,7 +799,7 @@ LIMIT 1";
     /// by name; any other unknown key is refused with the editable keys listed. Every message is a fixed sentence
     /// that never repeats a value, so a password sent under a wrong key is not echoed.
     /// </summary>
-    internal static (ServerEditChanges? Changes, string? Error) ParseEditChanges(string? changesJson)
+    internal static (ServerEditChanges? Changes, string? Error) ParseEditChanges(string? changesJson, bool allowSettings = false)
     {
         if (string.IsNullOrWhiteSpace(changesJson))
         {
@@ -808,6 +832,7 @@ LIMIT 1";
 
         var keys = body.Select(p => p.Key).ToList();
         if (keys.FirstOrDefault(k => EditRefusedKeys.Contains(k, StringComparer.Ordinal)
+                                  || (!allowSettings && EditSettingKeys.Contains(k, StringComparer.Ordinal))
                                   || k.StartsWith("remediation_", StringComparison.Ordinal)) is { } refused)
         {
             var refusedName = refused.StartsWith("remediation_", StringComparison.Ordinal) ? "remediation_*" : TruncateKey(refused);
@@ -816,12 +841,13 @@ LIMIT 1";
                 "is_enabled" => " To take a server out of collection or bring it back, call disable_server or enable_server.",
                 "excluded_databases" => " To change a server's excluded databases, call set_server_excluded_databases.",
                 "xe_session_databases" => " To change the list of databases that get Extended Events sessions, call set_server_xe_session_databases.",
+                "capture_plans" or "alert_delivery_mode_override" => " The web edit cannot set it: use the Viewer's Edit Server dialog or the edit_server MCP tool.",
                 _ => string.Empty,
             };
             return (null, $"'{refusedName}' cannot be changed here: it is the server's identity or a setting kept in the desktop app.{elsewhere} Nothing was changed.");
         }
 
-        if (keys.FirstOrDefault(k => !EditableKeys.Contains(k, StringComparer.Ordinal)) is { } unknown)
+        if (keys.FirstOrDefault(k => !EditableKeys.Contains(k, StringComparer.Ordinal) && !EditSettingKeys.Contains(k, StringComparer.Ordinal)) is { } unknown)
         {
             return (null, $"'{TruncateKey(unknown)}' is not an editable field. The editable fields are: {string.Join(", ", EditableKeys)}.");
         }
@@ -956,6 +982,26 @@ LIMIT 1";
 
                     changes.MonthlyCostUsd = cost;
                     break;
+                case "capture_plans":
+                    var (captureValue, captureError) = ParseCapturePlansSetting(node);
+                    if (captureError is not null)
+                    {
+                        return (null, captureError);
+                    }
+
+                    changes.HasCapturePlans = true;
+                    changes.CapturePlans = captureValue;
+                    break;
+                case "alert_delivery_mode_override":
+                    var (deliveryValue, deliveryError) = ParseAlertDeliveryOverrideSetting(node);
+                    if (deliveryError is not null)
+                    {
+                        return (null, deliveryError);
+                    }
+
+                    changes.HasAlertDeliveryModeOverride = true;
+                    changes.AlertDeliveryModeOverride = deliveryValue;
+                    break;
                 case "query_store_replica":
                     if (node is not null && !TryEditString(node, out _))
                     {
@@ -1019,6 +1065,42 @@ LIMIT 1";
     }
 
     private static string TruncateKey(string key) => key.Length <= 40 ? key : key[..40] + "...";
+
+    /// <summary>
+    /// #9635: the one parse of <c>capture_plans</c>, shared by <c>edit_server</c> and <c>add_servers</c>: the values the Viewer's dialog stores,
+    /// on (true), off (false), or the service setting (null, which an absent key also is). A string or a number is refused.
+    /// </summary>
+    internal static (bool? Value, string? Error) ParseCapturePlansSetting(JsonNode? node)
+    {
+        if (node is null)
+        {
+            return (null, null);
+        }
+
+        return node is JsonValue capture && capture.TryGetValue<bool>(out var on)
+            ? (on, null)
+            : (null, "capture_plans must be true, false, or null (follow the service setting).");
+    }
+
+    /// <summary>
+    /// #9635: the one parse of <c>alert_delivery_mode_override</c>, shared by <c>edit_server</c> and <c>add_servers</c>: the
+    /// <see cref="AlertNotificationMode"/> name in its stored spelling, or null (which an absent key also is) to inherit the global mode.
+    /// Matched against the names, never <c>Enum.TryParse</c>, which would also take a number.
+    /// </summary>
+    internal static (string? Value, string? Error) ParseAlertDeliveryOverrideSetting(JsonNode? node)
+    {
+        if (node is null)
+        {
+            return (null, null);
+        }
+
+        var matched = TryEditString(node, out var text)
+            ? AlertDeliveryOverrideValues.FirstOrDefault(v => string.Equals(v, text?.Trim(), StringComparison.OrdinalIgnoreCase))
+            : null;
+        return matched is null
+            ? (null, "alert_delivery_mode_override must be \"Summary\", \"PerEvent\", or null (inherit the global setting).")
+            : (matched, null);
+    }
 
     private static bool TryEditString(JsonNode? node, out string? value)
     {
@@ -1251,6 +1333,13 @@ LIMIT 1";
         Set("query_store_replica", NpgsqlDbType.Text, replica, QueryStoreReplicaSetting.Differ(replica, row.QueryStoreReplica));
         Set("monthly_cost_usd", NpgsqlDbType.Numeric, cost, cost != row.MonthlyCostUsd);
 
+        /* #9635: the two per-server settings. They never need a probe and never reconnect the server: neither is part of the definition
+           the worker compares. The store writes them by column UPDATE, in the same transaction as the function call. */
+        var capturePlans = c.HasCapturePlans ? c.CapturePlans : row.CapturePlans;
+        Set("capture_plans", NpgsqlDbType.Boolean, capturePlans, capturePlans != row.CapturePlans);
+        var deliveryOverride = c.HasAlertDeliveryModeOverride ? c.AlertDeliveryModeOverride : row.AlertDeliveryModeOverride;
+        Set("alert_delivery_mode_override", NpgsqlDbType.Text, deliveryOverride, !string.Equals(deliveryOverride, row.AlertDeliveryModeOverride, StringComparison.OrdinalIgnoreCase));
+
         Set("aws_role_arn", NpgsqlDbType.Text, newRole, !string.Equals(newRole, row.AwsRoleArn, StringComparison.Ordinal));
 
         /* The external ID rides with a role that stays: a typed one replaces the stored one (it cannot be compared, so it
@@ -1331,6 +1420,8 @@ LIMIT 1";
         ReadOnlyIntent = c.ReadOnlyIntent, StoreAuth = c.StoreAuth, HasUsername = c.HasUsername, Username = c.Username,
         Password = null, EncryptMode = c.EncryptMode, TrustServerCertificate = c.TrustServerCertificate,
         MultiSubnetFailover = c.MultiSubnetFailover, MonthlyCostUsd = c.MonthlyCostUsd, ExpectedModifiedAt = c.ExpectedModifiedAt,
+        HasCapturePlans = c.HasCapturePlans, CapturePlans = c.CapturePlans,
+        HasAlertDeliveryModeOverride = c.HasAlertDeliveryModeOverride, AlertDeliveryModeOverride = c.AlertDeliveryModeOverride,
         HasAwsRole = c.HasAwsRole, AwsRoleArn = c.AwsRoleArn, HasAwsExternalId = c.HasAwsExternalId, AwsExternalId = c.AwsExternalId,
         HasQueryStoreReplica = c.HasQueryStoreReplica, QueryStoreReplica = c.QueryStoreReplica,
     };
@@ -1341,7 +1432,8 @@ LIMIT 1";
     internal sealed record ServerEditRow(
         int ServerId, string Name, string Host, int Port, string? Database, bool ReadOnlyIntent, string Engine, string Auth,
         string? Username, string EncryptMode, bool TrustServerCertificate, bool MultiSubnetFailover, decimal MonthlyCostUsd,
-        DateTime ModifiedAt, string? AwsRoleArn = null, bool AwsExternalIdSet = false, string? QueryStoreReplica = null);
+        DateTime ModifiedAt, string? AwsRoleArn = null, bool AwsExternalIdSet = false, string? QueryStoreReplica = null,
+        bool? CapturePlans = null, string? AlertDeliveryModeOverride = null);
 
     /// <summary><c>Occupied</c>: another definition holds the address the edit moves to. <c>ActualOccupied</c>: another
     /// definition holds the storage key the probe's connected database gives (#5240), the refusal
@@ -1379,7 +1471,7 @@ LIMIT 1";
     internal const string ReadEditRowSql = @"
 SELECT server_id, name, host, port, database, read_only_intent, engine, auth, username, encrypt_mode,
        trust_server_certificate, multi_subnet_failover, monthly_cost_usd, modified_at, aws_role_arn, aws_external_id_set,
-       query_store_replica
+       query_store_replica, capture_plans, alert_delivery_mode_override
 FROM config_monitored_servers WHERE server_id = $1";
 
     internal const string OtherServersSql =
@@ -1427,7 +1519,7 @@ FROM config_monitored_servers WHERE server_id = $1";
         {
             new NpgsqlParameter<int> { TypedValue = serverId }, // $1
             new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = expectedModifiedAt }, // $2
-            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = sets.Select(s => s.Column).ToArray() }, // $3
+            new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = sets.Select(s => s.Column).Where(c => !IsSettingColumn(c)).ToArray() }, // $3
         };
         foreach (var (column, dbType) in EditFunctionColumns)
         {
@@ -1437,6 +1529,16 @@ FROM config_monitored_servers WHERE server_id = $1";
 
         return parameters;
     }
+
+    /// <summary>The two columns the edit writes by UPDATE instead of through the function (#9635): the function knows neither.</summary>
+    private static bool IsSettingColumn(string column) =>
+        EditSettingKeys.Contains(column, StringComparer.Ordinal);
+
+    /// <summary>#9635: the per-server settings, written under the edit's transaction after the function has locked the row, checked
+    /// <c>modified_at</c> and stamped it. The <c>mcp</c> role holds UPDATE on both columns. <c>$2</c>/<c>$3</c> say which column to write.</summary>
+    internal const string EditSettingsSql =
+        "UPDATE config_monitored_servers SET capture_plans = CASE WHEN $2 THEN $3 ELSE capture_plans END, "
+        + "alert_delivery_mode_override = CASE WHEN $4 THEN $5 ELSE alert_delivery_mode_override END WHERE server_id = $1";
 
     internal sealed class PostgresServerEditStore : IServerEditStore
     {
@@ -1464,7 +1566,8 @@ FROM config_monitored_servers WHERE server_id = $1";
                 !reader.IsDBNull(10) && reader.GetBoolean(10), !reader.IsDBNull(11) && reader.GetBoolean(11),
                 reader.IsDBNull(12) ? 0m : reader.GetDecimal(12), reader.GetDateTime(13),
                 reader.IsDBNull(14) ? null : reader.GetString(14), !reader.IsDBNull(15) && reader.GetBoolean(15),
-                reader.IsDBNull(16) ? null : reader.GetString(16));
+                reader.IsDBNull(16) ? null : reader.GetString(16),
+                reader.IsDBNull(17) ? null : reader.GetBoolean(17), reader.IsDBNull(18) ? null : reader.GetString(18));
         }
 
         public async Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken)
@@ -1556,6 +1659,20 @@ FROM config_monitored_servers WHERE server_id = $1";
                     break;
                 default:
                     throw new InvalidOperationException("The edit function answered an outcome this build does not know.");
+            }
+
+            if (sets.Any(set => IsSettingColumn(set.Column)))
+            {
+                var capture = sets.FirstOrDefault(set => set.Column == "capture_plans");
+                var delivery = sets.FirstOrDefault(set => set.Column == "alert_delivery_mode_override");
+                await using var settings = new NpgsqlCommand(EditSettingsSql, connection) { Transaction = transaction };
+                settings.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                settings.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId }); // $1
+                settings.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = capture is not null }); // $2
+                settings.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = capture?.Value ?? DBNull.Value }); // $3
+                settings.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = delivery is not null }); // $4
+                settings.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = delivery?.Value ?? DBNull.Value }); // $5
+                await settings.ExecuteNonQueryAsync(cancellationToken);
             }
 
             if (newStorageKey is not null || actualStorageKey is not null)
