@@ -5,7 +5,11 @@
 INSTALL_ROOT=/opt/darling
 PREVIOUS_ROOT=/opt/darling.previous
 FAILED_ROOT=/opt/darling.failed
+# The staging folder is root's alone (700) while a run works in it: the copy of a tarball source, the build that is being
+# laid out, and the copies of the unit and the config sample that the run installs.
 STAGING_ROOT=/opt/darling.staging
+STAGED_BUILD=/opt/darling.staging/build
+STAGED_TARBALL=/opt/darling.staging/source.tar.gz
 CONFIG_DIR=/etc/darling
 CONFIG_FILE=/etc/darling/darling.json
 KEY_DIR=/etc/darling/darling-keys
@@ -22,12 +26,51 @@ note() { printf '%s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Text that the service user or a tarball controls (a command line, a file name, a build's output, the stopped marker)
+# goes through this before root's terminal shows it: every byte that is not printable ASCII becomes "?", so no escape
+# sequence reaches the terminal.
+printable() { LC_ALL=C tr -c '\040-\176\n' '?'; }
+# The same for the lines a build prints for the operator to read, which may hold UTF-8 text: the control characters
+# go (C0 apart from tab and line end, DEL, and C1 in its UTF-8 form) and the rest stays, a line at a time.
+printable_lines() { LC_ALL=C sed -u -e 's/[\x01-\x08\x0b-\x1f\x7f]//g' -e 's/\xc2[\x80-\x9f]//g'; }
+
+# Runs a command as the service user in a session of its own, with no terminal: a new session has no controlling
+# terminal, stdin is /dev/null, and every caller pipes or drops the output. A process of the service user can then
+# reach nothing of the root session that started it, even on a host that lets one process of a user attach to another.
+as_service_user() {
+    setsid -w runuser -u "${SERVICE_USER}" -- "$@" </dev/null
+}
+
+# True when root owns the path and neither its group nor other users can write it.
+root_only_writable() {
+    case "$(stat -L -c '%u %A' -- "$1" 2>/dev/null)" in "0 "?????-??-?) return 0 ;; esac
+    return 1
+}
+
+# Stops when the path is a symbolic link, or exists and is not a folder. The install script creates its folders with
+# "install -d", which follows a link and changes the owner of whatever the link names.
+require_real_folder() {
+    if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
+        die "$1 is a symbolic link or is not a folder, so its owner and mode were left alone. Look at what put it there, remove it, then run this script again."
+    fi
+}
+
+# Makes the staging folder once in a run, and removes it when the run ends, however it ends.
+staging_made=0
+ensure_staging() {
+    [ "${staging_made}" = 0 ] || return 0
+    rm -rf "${STAGING_ROOT}"
+    mkdir -m 700 "${STAGING_ROOT}"
+    staging_made=1
+    trap 'rm -rf "${STAGING_ROOT}"' EXIT
+}
+
 # What every run needs before it changes anything: root, a host that systemd runs, the tools the steps call and the runtime host.
 require_host() {
     [ "$(id -u)" -eq 0 ] || die "Run this script as root (sudo)."
     [ -d /run/systemd/system ] || die "This host does not run systemd. These scripts install Darling as a systemd service."
     local tool
-    for tool in systemctl tar sha256sum runuser useradd install readlink; do
+    for tool in systemctl tar sha256sum runuser setsid timeout stat useradd install readlink; do
         command -v "${tool}" >/dev/null 2>&1 || die "The '${tool}' command is not on this host, and this script needs it."
     done
     [ -x "${DOTNET}" ] || die "${DOTNET} is missing. Install the .NET 10 runtime and the ASP.NET Core 10 runtime (docs/darling/linux.md, step 2). The unit starts the service with ${DOTNET}, so a dotnet in another folder needs a link there."
@@ -43,16 +86,26 @@ resolve_source() {
         SOURCE_KIND=folder
         [ -f "${SOURCE_PATH}/${SERVICE_DLL}" ] || die "The folder '${SOURCE_PATH}' holds no ${SERVICE_DLL}, so it is not an extracted Darling tarball."
         [ "${SOURCE_PATH}" != "${INSTALL_ROOT}" ] || die "The source is the install folder ${INSTALL_ROOT} itself. Extract the tarball to another folder and run the script from there, or pass --source with the tarball."
+        root_only_writable "${SOURCE_PATH}" || die "The source folder '${SOURCE_PATH}' is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner), or pass --source with the tarball."
     else
         SOURCE_KIND=tarball
     fi
 }
 
-# A tarball source is checked against --sha256, or against the SHA256SUMS-linux.txt beside it. A folder source has no checksum to check.
+# A tarball source is copied into the staging folder first, and that copy is the one that is hashed and later extracted,
+# so nobody can swap the file between the check and the extract. The hash is checked against --sha256, or against the
+# SHA256SUMS-linux.txt beside the tarball. That file proves the download is whole, not where it came from: anyone who
+# can replace the tarball can replace the file beside it. A folder source has no checksum to check, so the two hash
+# arguments are refused with one, not ignored.
 verify_source() {
     local expected="$1" skip="$2" actual sums name line
-    [ "${SOURCE_KIND}" = tarball ] || return 0
-    actual="$(sha256sum "${SOURCE_PATH}" | cut -d' ' -f1)"
+    if [ "${SOURCE_KIND}" != tarball ]; then
+        [ -z "${expected}" ] && [ "${skip}" = 0 ] || die "--sha256 and --skip-hash-check are for a tarball source. The source '${SOURCE_PATH}' is a folder, which has no checksum to check. Pass --source with the tarball, or leave the argument out."
+        return 0
+    fi
+    ensure_staging
+    cp -- "${SOURCE_PATH}" "${STAGED_TARBALL}" || die "Could not copy ${SOURCE_PATH} into ${STAGING_ROOT}."
+    actual="$(sha256sum "${STAGED_TARBALL}" | cut -d' ' -f1)"
     if [ -n "${expected}" ]; then
         [ "${actual}" = "$(printf '%s' "${expected}" | tr 'A-F' 'a-f')" ] || die "The SHA256 of ${SOURCE_PATH} is ${actual}, not the --sha256 value. Download the tarball again."
         note "SHA256 matches --sha256."
@@ -64,7 +117,7 @@ verify_source() {
         line="$(awk -v n="${name}" '{ f = $2; sub(/^\*/, "", f); if (f == n) print $1 }' "${sums}" | head -n 1)"
         [ -n "${line}" ] || die "${sums} has no line for ${name}. Download the checksum file of the same release."
         [ "${actual}" = "${line}" ] || die "The SHA256 of ${SOURCE_PATH} is ${actual}, and ${sums} says ${line}. Download the tarball again."
-        note "SHA256 matches ${sums}."
+        note "SHA256 matches ${sums}. That shows the file is whole. --sha256 with a hash from the release page shows where it came from."
         return 0
     fi
     [ "${skip}" = 1 ] || die "Found no ${SUMS_NAME} beside ${SOURCE_PATH}, so the tarball is not verified. Download it from the same release, pass --sha256 <hash>, or pass --skip-hash-check to go on without the check."
@@ -72,22 +125,40 @@ verify_source() {
 }
 
 # Lays the source out in the staging folder, owned by root whatever the archive or the source folder records, and
-# writable by root only. Then runs the staged build's --version as the service user: that proves the runtimes the
-# build needs are on the host and that the service user can read the files. Sets STAGED_VERSION.
+# writable by root only. The staging folder stays closed to every other account until the build has passed its checks:
+# root's tar and cp create a device node, a FIFO or a socket that a source holds, and a Darling build has none, so a
+# source with one is refused before any mode is opened. Then runs the staged build's --version as the service user:
+# that proves the runtimes the build needs are on the host and that the service user can read the files. Sets
+# STAGED_VERSION, and SHIPPED_UNIT and SHIPPED_SAMPLE (see below). $1 is the folder the running script is in.
 stage_source() {
-    rm -rf "${STAGING_ROOT}"
-    mkdir -m 755 "${STAGING_ROOT}"
+    local script_dir="$1" odd output name from
+    ensure_staging
+    mkdir -m 755 "${STAGED_BUILD}"
     if [ "${SOURCE_KIND}" = tarball ]; then
-        tar -xzf "${SOURCE_PATH}" -C "${STAGING_ROOT}" --no-same-owner --no-same-permissions || { rm -rf "${STAGING_ROOT}"; die "Could not extract ${SOURCE_PATH}."; }
+        tar -xzf "${STAGED_TARBALL}" -C "${STAGED_BUILD}" --no-same-owner --no-same-permissions || die "Could not extract ${SOURCE_PATH}."
     else
-        cp -R "${SOURCE_PATH}/." "${STAGING_ROOT}/" || { rm -rf "${STAGING_ROOT}"; die "Could not copy ${SOURCE_PATH}."; }
+        cp -R "${SOURCE_PATH}/." "${STAGED_BUILD}/" || die "Could not copy ${SOURCE_PATH}."
     fi
-    chown -R root:root "${STAGING_ROOT}"
-    chmod -R u+rwX,go+rX,go-w "${STAGING_ROOT}"
-    [ -f "${STAGING_ROOT}/${SERVICE_DLL}" ] || { rm -rf "${STAGING_ROOT}"; die "The source holds no ${SERVICE_DLL}, so it is not a Darling linux-x64 tarball."; }
-    local output
-    if ! output="$(runuser -u "${SERVICE_USER}" -- "${DOTNET}" "${STAGING_ROOT}/${SERVICE_DLL}" --version 2>&1)"; then
-        rm -rf "${STAGING_ROOT}"
+    odd="$(find "${STAGED_BUILD}" ! -type f ! -type d ! -type l -print -quit)"
+    [ -z "${odd}" ] || die "The source holds '$(printf '%s' "${odd#"${STAGED_BUILD}"/}" | printable)', which is not a file, a folder or a link (a device node, a FIFO or a socket). A Darling tarball holds none, so the source was refused and nothing was installed."
+    chown -R root:root "${STAGED_BUILD}"
+    chmod -R u+rwX,go+rX,go-w "${STAGED_BUILD}"
+    [ -f "${STAGED_BUILD}/${SERVICE_DLL}" ] || die "The source holds no ${SERVICE_DLL}, so it is not a Darling linux-x64 tarball."
+    # The unit and the config sample that this run installs: the file a folder source holds, or the one beside the
+    # script when the source is a tarball or an older build without them. Each is read once, into the staging folder,
+    # so the file the script compares is the file it installs.
+    SHIPPED_UNIT=""
+    SHIPPED_SAMPLE=""
+    for name in darling.service darling.linux.sample.json; do
+        from="${script_dir}/${name}"
+        [ "${SOURCE_KIND}" = folder ] && [ -f "${STAGED_BUILD}/${name}" ] && [ ! -L "${STAGED_BUILD}/${name}" ] && from="${STAGED_BUILD}/${name}"
+        [ -f "${from}" ] && [ ! -L "${from}" ] || continue
+        install -m 644 "${from}" "${STAGING_ROOT}/${name}"
+        case "${name}" in darling.service) SHIPPED_UNIT="${STAGING_ROOT}/${name}" ;; *) SHIPPED_SAMPLE="${STAGING_ROOT}/${name}" ;; esac
+    done
+    # Only now can the service user reach the build, which its --version needs.
+    chmod 711 "${STAGING_ROOT}"
+    if ! output="$(as_service_user "${DOTNET}" "${STAGED_BUILD}/${SERVICE_DLL}" --version 2>&1 | printable)"; then
         die "The new build does not run on this host as the '${SERVICE_USER}' user. Its --version said: ${output}"
     fi
     STAGED_VERSION="$(printf '%s\n' "${output}" | tail -n 1)"
@@ -95,7 +166,7 @@ stage_source() {
 
 # The version of the build in a folder, or "unknown" when it does not run.
 build_version() {
-    runuser -u "${SERVICE_USER}" -- "${DOTNET}" "$1/${SERVICE_DLL}" --version 2>/dev/null | tail -n 1 || printf 'unknown\n'
+    as_service_user "${DOTNET}" "$1/${SERVICE_DLL}" --version 2>/dev/null | tail -n 1 | printable || printf 'unknown\n'
 }
 
 # The PIDs of the unit's own processes, one a line: the service the script is about to stop.
@@ -126,7 +197,7 @@ processes_from() {
         if [ "${hit}" = 0 ] && grep -q -F " ${folder}/" "${entry}/maps" 2>/dev/null; then
             hit=1
         fi
-        [ "${hit}" = 1 ] && printf '%s %s\n' "${pid}" "$(tr '\0' ' ' <"${entry}/cmdline" 2>/dev/null | cut -c1-160)"
+        [ "${hit}" = 1 ] && printf '%s %s\n' "${pid}" "$(tr '\0\n' '  ' <"${entry}/cmdline" 2>/dev/null | cut -c1-160 | printable)"
     done
     return 0
 }
@@ -157,9 +228,15 @@ health_check() {
             HEALTH_REASON="the service process exited and systemd started another (PID ${first_pid}, then ${pid})"
             return 1
         fi
-        if [ -n "${marker}" ] && [ -e "${marker}" ]; then
+        if [ -n "${marker}" ] && { [ -e "${marker}" ] || [ -L "${marker}" ]; }; then
+            # The service user owns the marker's folder, so the marker can be a link to a file that only root reads, or
+            # a FIFO that never answers. Only a regular file is read, as the service user and for 5 seconds at most.
             # The marker text ends with a full stop and a line end. Both come off, because the messages that quote the reason add their own (#9688).
-            HEALTH_REASON="the service says collection has stopped: $(head -c 600 "${marker}" 2>/dev/null | tr '\n' ' ' | sed -e 's/[[:space:]]*$//' -e 's/\.$//')"
+            if [ -f "${marker}" ] && [ ! -L "${marker}" ]; then
+                HEALTH_REASON="the service says collection has stopped: $(as_service_user timeout 5 head -c 600 "${marker}" 2>/dev/null | tr '\n' ' ' | printable | sed -e 's/[[:space:]]*$//' -e 's/\.$//' || true)"
+            else
+                HEALTH_REASON="the stopped marker ${marker} is there and is not a regular file, so it was not read"
+            fi
             return 1
         fi
         [ "${elapsed}" -lt "${seconds}" ] && sleep 1

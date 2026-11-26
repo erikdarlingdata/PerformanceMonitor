@@ -1,11 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Upgrades an installed PerformanceMonitor Darling under systemd from a newer linux-x64 tarball (#9688).
 #
 #   sudo ./upgrade-darling.sh [--source <tarball or folder>] [--sha256 <hash>] [--skip-hash-check]
 #                             [--replace-unit] [--health-seconds <n>] [--check]
 #   sudo ./upgrade-darling.sh --rollback [--health-seconds <n>]
 #
-# Run the copy of this script that came out of the NEW tarball, from a folder that is not /opt/darling.
+# Run the copy of this script that came out of the NEW tarball, as root, from a folder that is not /opt/darling.
+# That folder, this script and darling-script-lib.sh must be root's own and closed to group and other writes,
+# because root runs what they hold.
 # What it does, in order:
 #   1. Pre-flight, with the service still running: root, systemd, the .NET runtime host, an installed unit and build,
 #      the source and its SHA256, the new build's --version as the service user, and a refusal when any process
@@ -27,10 +29,23 @@
 # a failure, or an upgrade that was rolled back.
 set -euo pipefail
 umask 022
+# The tools come from the system folders, whatever PATH the caller has.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# Root sources darling-script-lib.sh from this folder. An account that could write the folder or either file would run
+# its own commands as root, so a root run stops before it reads the file (#9688).
+[ -f "${SCRIPT_DIR}/darling-script-lib.sh" ] || { echo "ERROR: darling-script-lib.sh is not beside this script. Run the script from the folder the new tarball extracted into." >&2; exit 1; }
+if [ "$(id -u)" -eq 0 ]; then
+    for trusted in "${SCRIPT_DIR}" "${BASH_SOURCE[0]}" "${SCRIPT_DIR}/darling-script-lib.sh"; do
+        case "$(stat -L -c '%u %A' -- "${trusted}" 2>/dev/null || true)" in
+            "0 "?????-??-?) ;;
+            *) echo "ERROR: ${trusted} is not owned by root, or its group or other users can write it. Extract the new tarball as root into a new folder (sudo mkdir <folder>, then sudo tar -xzf <tarball> -C <folder> --no-same-owner) and run the script from there." >&2; exit 1 ;;
+        esac
+    done
+fi
 # shellcheck source=darling-script-lib.sh
-. "${SCRIPT_DIR}/darling-script-lib.sh" || { echo "ERROR: darling-script-lib.sh is not beside this script. Run the script from the folder the new tarball extracted into." >&2; exit 1; }
+. "${SCRIPT_DIR}/darling-script-lib.sh"
 
 source_arg=""
 sha256_arg=""
@@ -48,7 +63,7 @@ while [ $# -gt 0 ]; do
         --health-seconds) [ $# -ge 2 ] || die "--health-seconds needs a value."; health_seconds="$2"; shift 2 ;;
         --check) check_only=1; shift ;;
         --rollback) rollback_only=1; shift ;;
-        -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "Unknown argument '$1'. --help lists the arguments." ;;
     esac
 done
@@ -56,9 +71,11 @@ case "${health_seconds}" in ''|*[!0-9]*) die "--health-seconds takes a whole num
 [ "${rollback_only}" = 0 ] || [ "${check_only}" = 0 ] || die "--rollback and --check cannot be combined."
 
 # One "hash path" line for the config, each secret file beside it and each key file. The upgrade writes none of them. The
-# service may add a key file at a start, so the check afterwards is that every line from before is still there.
+# service may add a key file at a start, so the check afterwards is that every line from before is still there. The
+# service user can swap a key file for a link or a FIFO, so the hashes are taken as the service user, which reads every
+# file the service reads, and for 60 seconds at most.
 config_listing() {
-    { find "${CONFIG_DIR}" -maxdepth 1 -type f -exec sha256sum {} + ; find "${KEY_DIR}" -maxdepth 1 -type f -exec sha256sum {} + ; } 2>/dev/null | sort
+    as_service_user timeout 60 find "${CONFIG_DIR}" "${KEY_DIR}" -maxdepth 1 -type f -exec sha256sum {} + 2>/dev/null | sort || true
 }
 
 # Stops the unit and waits until no process runs from the install folder. Returns 1 with the list in LEFT_RUNNING when one stays.
@@ -121,11 +138,6 @@ fi
 [ -e "${CONFIG_FILE}" ] || die "${CONFIG_FILE} does not exist. This script upgrades the install that docs/darling/linux.md and install-darling.sh make."
 
 resolve_source "${source_arg}" "${SCRIPT_DIR}"
-verify_source "${sha256_arg}" "${skip_hash}"
-
-shipped_unit=""
-[ "${SOURCE_KIND}" = folder ] && [ -f "${SOURCE_PATH}/darling.service" ] && shipped_unit="${SOURCE_PATH}/darling.service"
-[ -n "${shipped_unit}" ] || { [ -f "${SCRIPT_DIR}/darling.service" ] && shipped_unit="${SCRIPT_DIR}/darling.service"; }
 
 others="$(processes_from "${INSTALL_ROOT}" "$(unit_pids)")"
 if [ -n "${others}" ]; then
@@ -133,12 +145,14 @@ if [ -n "${others}" ]; then
 ${others}"
 fi
 
+# After the refusal above, because a tarball source is copied before it is hashed.
+verify_source "${sha256_arg}" "${skip_hash}"
 old_version="$(build_version "${INSTALL_ROOT}")"
-stage_source
+stage_source "${SCRIPT_DIR}"
 note "Upgrading ${old_version} to ${STAGED_VERSION}."
+[ "${old_version}" != "${STAGED_VERSION}" ] || note "The source is ${STAGED_VERSION}, the version that is already installed. The upgrade goes on and replaces the build with this copy."
 
 if [ "${check_only}" = 1 ]; then
-    rm -rf "${STAGING_ROOT}"
     note "The pre-flight passed. Nothing was changed, and the service was not stopped."
     exit 0
 fi
@@ -147,7 +161,6 @@ fi
 config_before="$(config_listing)"
 note "Stopping ${UNIT_NAME}..."
 if ! stop_and_confirm; then
-    rm -rf "${STAGING_ROOT}"
     die "A process still runs from ${INSTALL_ROOT} after the stop, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'.
 ${LEFT_RUNNING:-}"
 fi
@@ -155,13 +168,13 @@ fi
 # ---- 3. the rollback copy and the new build ----
 rm -rf "${PREVIOUS_ROOT}"
 mv "${INSTALL_ROOT}" "${PREVIOUS_ROOT}"
-mv "${STAGING_ROOT}" "${INSTALL_ROOT}"
+mv "${STAGED_BUILD}" "${INSTALL_ROOT}"
 note "The rollback copy of ${old_version} is ${PREVIOUS_ROOT}."
 
-if [ -n "${shipped_unit}" ] && ! cmp -s "${shipped_unit}" "${UNIT_PATH}"; then
+if [ -n "${SHIPPED_UNIT}" ] && ! cmp -s "${SHIPPED_UNIT}" "${UNIT_PATH}"; then
     if [ "${replace_unit}" = 1 ]; then
         cp -p "${UNIT_PATH}" "${UNIT_PATH}.previous"
-        install -o root -g root -m 644 "${shipped_unit}" "${UNIT_PATH}"
+        install -o root -g root -m 644 "${SHIPPED_UNIT}" "${UNIT_PATH}"
         systemctl daemon-reload
         unit_replaced=1
         note "Replaced ${UNIT_PATH}. The one it replaced is ${UNIT_PATH}.previous."
@@ -173,7 +186,7 @@ fi
 # ---- 4. start and check ----
 note "Starting ${UNIT_NAME} and watching it for ${health_seconds} seconds..."
 if start_and_check "${health_seconds}"; then
-    changed="$(comm -23 <(printf '%s\n' "${config_before}") <(config_listing) | cut -d' ' -f3-)"
+    changed="$(comm -23 <(printf '%s\n' "${config_before}") <(config_listing) | cut -d' ' -f3- | printable)"
     if [ -n "${changed}" ]; then
         warn "These files in ${CONFIG_DIR} changed or went away during the upgrade. The script writes nothing there, so compare them with your backup: ${changed}"
     else
@@ -181,6 +194,7 @@ if start_and_check "${health_seconds}"; then
     fi
     note "Darling ${STAGED_VERSION} is in ${INSTALL_ROOT}, and ${UNIT_NAME} is active."
     note "To go back: run this script with --rollback. Remove ${PREVIOUS_ROOT} when you no longer need it."
+    [ ! -e "${FAILED_ROOT}" ] || note "${FAILED_ROOT} holds a build that an earlier upgrade or rollback set aside. Nothing uses it: remove it when you have looked at it."
     print_next_checks
     exit 0
 fi

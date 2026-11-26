@@ -32,6 +32,9 @@ sudo /opt/darling-new/install-darling.sh
 - Edit the three files as [step 6](#step-6-write-darlingjson-and-the-secret-files) says, then run the script again. The second run runs the pre-flight of step 7 as the `darling` user, enables and starts the unit, and runs the health check.
 - A config that is already in `/etc/darling` is kept, and so is a unit that is already installed. `--replace-unit` installs the tarball's unit over yours and keeps yours as `darling.service.previous`.
 - `--check` runs the checks and changes nothing. `--source <tarball>` installs from a tarball that you did not extract, and checks it against the `SHA256SUMS-linux.txt` beside it.
+- A `SHA256SUMS-linux.txt` beside the tarball shows that the tarball is whole. It does not show where the tarball came from, because whoever can replace the tarball can replace the file beside it. `--sha256 <hash>`, with a hash that you took from the release page yourself, is the check that does. Both arguments are for a tarball: with a folder as the source the scripts refuse `--sha256` and `--skip-hash-check`.
+- The scripts run as root, so they refuse to run from a folder that root does not own or that its group or other users can write, and they refuse a `--source` folder like that. The commands above make a folder that passes.
+- The service user gets only the folders it writes. `/usr/share/PerformanceMonitorDarling` stays root's, and the script takes it back when an older install gave it to `darling`. It refuses, and changes no owner, when `logs` or `darling-keys` is a symbolic link.
 
 **Upgrade.** Read the release notes and back up the store first, as [Upgrade by hand](#upgrade-by-hand) says. Then extract the new tarball into a new folder and run the upgrade script that came out of it:
 
@@ -45,13 +48,14 @@ sudo /opt/darling-new/upgrade-darling.sh
 - It refuses, and changes nothing, while a process other than the service runs from `/opt/darling`, such as a `--backfill-rollups` that has not finished.
 - It stops the service and checks that no process is left that runs from `/opt/darling`.
 - It moves `/opt/darling` to `/opt/darling.previous`, the rollback copy, and moves the new build into `/opt/darling`. `/etc/darling` is not touched, and the script checks that the config, the secret files and the keys are as they were.
-- It starts the service and runs the health check. When the start or the check fails, it puts the old build back, starts it, and exits with code `1`. The build that failed stays in `/opt/darling.failed`.
+- It starts the service and runs the health check. When the start or the check fails, it puts the old build back, starts it, and exits with code `1`. The build that failed stays in `/opt/darling.failed`. Nothing uses that folder, and a later upgrade that succeeds reminds you to remove it.
+- An upgrade to the version that is already installed says so and goes on.
 - `--rollback` goes back to `/opt/darling.previous` by hand. The store is not rolled back: read [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) first.
 - A unit that you wrote by hand is kept. `--replace-unit` installs the tarball's unit and keeps yours as `darling.service.previous`. When that upgrade fails, the rollback puts yours back. `--rollback` leaves the unit as it is.
 
 **The health check.** With the web dashboard off there is no port to ask, so the scripts watch what systemd and the service give. For 30 seconds after the start (`--health-seconds` changes it), the unit must stay `active`, its main process must stay the same one, and the file `/run/darling/stopped` must not exist. The service keeps that file present while a startup failure has stopped collection for good, such as a `darling.json` that it rejects. Its process stays up in that state, so `active (running)` alone does not show it. The tarball's unit names the file in `DARLING_STOPPED_MARKER`. With a unit that does not, the scripts see only the first two signs and say so. A healthy start is not proof of collection: [step 9](#step-9-proof-that-it-collects) is.
 
-**The unit's sandbox.** The tarball's `darling.service` is the unit of step 8 with `RestartSec=10`, `ProtectSystem=strict`, `NoNewPrivileges=yes` and `PrivateTmp=yes`. The service can write only `/etc/darling/darling-keys`, `/usr/share/PerformanceMonitorDarling/logs`, `/run/darling` and its own private `/tmp`. If `darling.json` names another path for the service to write, add it with `sudo systemctl edit darling`:
+**The unit's sandbox.** The tarball's `darling.service` is the unit of step 8 with `RestartSec=10`, `ProtectSystem=strict`, `NoNewPrivileges=yes`, `PrivateTmp=yes`, `PrivateDevices=yes`, `ProtectHome=yes`, `ProtectKernelTunables=yes`, `RestrictSUIDSGID=yes` and `LockPersonality=yes`. The folders the service can write that hold anything are `/etc/darling/darling-keys`, `/usr/share/PerformanceMonitorDarling/logs` and `/run/darling`. It can also write its own private `/tmp` and `/var/tmp`, and the folders that every account on the host can write and that these settings do not close: `/dev/shm`, `/dev/mqueue`, and a folder under `/run` that is open to all, such as `/run/lock` on Ubuntu. It sees no device, and `/home`, `/root` and `/run/user` are empty for it. If `darling.json` names another path for the service to write, pick one outside those three and add it with `sudo systemctl edit darling`:
 
 ```ini
 [Service]
@@ -229,9 +233,11 @@ sudo chown root:darling /etc/darling
 sudo chmod 750 /etc/darling
 sudo chown darling:darling /etc/darling/darling-keys
 sudo chmod 700 /etc/darling/darling-keys
-sudo chown -R darling:darling /usr/share/PerformanceMonitorDarling
+sudo chown darling:darling /usr/share/PerformanceMonitorDarling/logs
 sudo chmod 700 /usr/share/PerformanceMonitorDarling/logs
 ```
+
+Only `logs` goes to `darling`. Its parent, `/usr/share/PerformanceMonitorDarling`, stays root's, like `/etc/darling`: an account that owns a parent folder can swap the folder inside it for a link, and a later `chown` by root then lands on whatever the link names.
 
 | Path | Owner and mode | What it holds |
 |---|---|---|

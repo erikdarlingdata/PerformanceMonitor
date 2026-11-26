@@ -21,13 +21,21 @@ User=darling
 Restart=on-failure
 RestartSec=10
 
-# The service writes its keys and its log, and nothing else on the host. A leading "-" lets the unit start
-# when a folder is missing, so the service's own message names the folder. A path that darling.json adds
-# for the service to write (an export folder, for example) goes on a ReadWritePaths= line in a drop-in.
+# The service writes its keys, its log and /run/darling. Of the rest of the host it can write only its own
+# private /tmp and /var/tmp, and what every account can write and no setting here closes: /dev/shm, /dev/mqueue
+# and a folder under /run that is open to all (/run/lock on Ubuntu). A leading "-" lets the unit start when a
+# folder is missing, so the service's own message names the folder. A path that darling.json adds for the
+# service to write (an export folder, for example) goes on a ReadWritePaths= line in a drop-in.
 ProtectSystem=strict
 ReadWritePaths=-/etc/darling/darling-keys -/usr/share/PerformanceMonitorDarling/logs
 NoNewPrivileges=yes
 PrivateTmp=yes
+# The service opens no device, and reads nothing under /home, /root or /run/user: its user has no home folder.
+PrivateDevices=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target

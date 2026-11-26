@@ -97,7 +97,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin darling
 sudo mkdir -p /etc/darling/darling-keys
 sudo mkdir -p /usr/share/PerformanceMonitorDarling/logs
 sudo chown darling:darling /etc/darling/darling-keys
-sudo chown -R darling:darling /usr/share/PerformanceMonitorDarling
+sudo chown darling:darling /usr/share/PerformanceMonitorDarling/logs
 sudo chmod 700 /etc/darling/darling-keys
 sudo chmod 700 /usr/share/PerformanceMonitorDarling/logs
 ```
