@@ -52,6 +52,10 @@ internal static class McpWritePolicy
         "set_notification_route_enabled",
         "delete_notification_route",
 
+        /* #9639: authoring a route, the twins of Darling's create_notification_route and update_notification_route. */
+        "create_notification_route",
+        "update_notification_route",
+
         /* #9639: the mute-rule writes, Darling's twins. get_mute_rules is a read. */
         "create_mute_rule",
         "update_mute_rule",
