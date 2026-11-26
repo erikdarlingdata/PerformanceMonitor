@@ -32,6 +32,7 @@ public sealed class KillSessionTests
     [InlineData("database_changed", "database_changed")]
     [InlineData("not_user_session", "not_user_session")]
     [InlineData("kill_permission_denied", "kill_permission_denied")]
+    [InlineData("kill_view_permission_denied", "kill_view_permission_denied")]
     public void EveryRefusalOfTheBatch_IsARefusalWithItsOwnReason_AndNeverSaysItWrote(string outcome, string reason)
     {
         foreach (var dryRun in new[] { true, false })
@@ -106,6 +107,33 @@ public sealed class KillSessionTests
             Assert.Equal(reason, result.Reason);
             Assert.False(result.Wrote);
         }
+    }
+
+    /// <summary>
+    /// #9786: a login without the server view grant gets a named refusal that names the grant its server's version needs, and not the kill grant: the
+    /// two are separate grants and a person fixes the one the message names.
+    /// </summary>
+    [Theory]
+    [InlineData("VIEW SERVER PERFORMANCE STATE")]
+    [InlineData("VIEW SERVER STATE")]
+    public void ALoginWithoutTheServerViewGrant_IsToldWhichGrantItsVersionNeeds(string grant)
+    {
+        var result = SqlServerRemediationExecutor.KillAnswer(Name, true, 57, "kill_view_permission_denied", null, null, null, viewGrant: grant);
+        Assert.Equal(RemediationOutcome.Refused, result.Outcome);
+        Assert.Equal(RemediationResult.Reasons.KillViewPermissionDenied, result.Reason);
+        Assert.Contains("GRANT " + grant + " TO", result.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("ALTER ANY CONNECTION", result.Message, StringComparison.Ordinal);
+        Assert.Null(result.Session);
+    }
+
+    /// <summary>#9786: a refusal that carries no grant name (the batch did not return one) still says what to grant, for either version.</summary>
+    [Fact]
+    public void AViewRefusalWithNoGrantNamed_SaysBothGrants()
+    {
+        var result = SqlServerRemediationExecutor.KillAnswer(Name, true, 57, "kill_view_permission_denied", null, null, null);
+        Assert.Equal(RemediationResult.Reasons.KillViewPermissionDenied, result.Reason);
+        Assert.Contains("VIEW SERVER STATE", result.Message, StringComparison.Ordinal);
+        Assert.Contains("VIEW SERVER PERFORMANCE STATE", result.Message, StringComparison.Ordinal);
     }
 
     /// <summary>#5632: a missing grant on an Azure SQL Database names the database-scoped grant, not the SQL Server one.</summary>

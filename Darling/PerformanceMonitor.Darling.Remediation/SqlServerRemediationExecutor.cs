@@ -97,7 +97,7 @@ SELECT edition = @edition, granted = @granted, cached = @cached;";
 
     /// <summary>
     /// The one kill batch (#5632, step 12), for a dry run and a write alike (<c>@dry</c>). It reads the session's facts, then decides in this order
-    /// and stops at the first that applies: the engine is an Azure SQL Database (<c>azure_sql_database</c>: its kill is <see cref="AzureKillSql"/>, in the session's own database), the session is this connection's
+    /// and stops at the first that applies: the engine is an Azure SQL Database (<c>azure_sql_database</c>: its kill is <see cref="AzureKillSql"/>, in the session's own database), the login lacks the server view permission the session and transaction views need (<c>kill_view_permission_denied</c>, #9786: <c>VIEW SERVER PERFORMANCE STATE</c> on SQL Server 2022 and later, <c>VIEW SERVER STATE</c> before, checked before any view is read, because without it the transaction view raises an engine error and the session view shows the login only its own session), the session is this connection's
     /// own (<c>own_session</c>), no such session (<c>session_gone</c>), a different <c>login_time</c> (<c>session_reused</c>: the id was reused),
     /// not a user session (<c>not_user_session</c>), a session of Darling itself (a program name that starts with <c>PerformanceMonitorDarling</c> AND the monitoring
     /// or the remediation login, or the remediation login with any program name: <c>tool_login_session</c>; with no monitoring login known, the program name alone), the login lacks <c>ALTER ANY CONNECTION</c> (<c>kill_permission_denied</c>). A write whose <c>@expected_last_end</c> is not the session's <c>last_request_end_time</c>, when <c>@check_activity</c> is 1, stops at <c>session_changed</c> (#7109), and one whose <c>@expected_database_id</c> is not the session's <c>database_id</c> stops at <c>database_changed</c>: a running request can move its session to another database without ending, so the database is compared here too. Then it runs the
@@ -126,8 +126,12 @@ DECLARE @database_name nvarchar(128) = NULL;
 DECLARE @command nvarchar(32) = NULL;
 DECLARE @percent real = NULL;
 DECLARE @rollback_read bit = 1;
+DECLARE @major int = CONVERT(int, ISNULL(SERVERPROPERTY('ProductMajorVersion'), 0));
+DECLARE @view_grant varchar(40) = CASE WHEN @major >= 16 THEN 'VIEW SERVER PERFORMANCE STATE' ELSE 'VIEW SERVER STATE' END;
 IF @edition = 5
     SET @outcome = 'azure_sql_database';
+ELSE IF ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, @view_grant), 0) <> 1
+    SET @outcome = 'kill_view_permission_denied';
 ELSE
 BEGIN
     SELECT
@@ -200,7 +204,7 @@ END;
 SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actual, login_name = @login_name, host_name = @host_name,
        program_name = @program_name, status = @status, open_transaction_count = @open_tran, last_request_end_time = @last_end,
        log_bytes_used = @log_bytes, rollback_command = @command, percent_complete = @percent, rollback_read = @rollback_read,
-       database_id = @database_id, database_name = @database_name;";
+       database_id = @database_id, database_name = @database_name, view_grant = @view_grant;";
 
     /// <summary>
     /// Query Store plan rows: the plan asked about, and any plan of the query that is forced now, each with the query's <c>query_hash</c> as <c>0x</c> text
@@ -519,7 +523,9 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             var rollbackCommand = reader.IsDBNull(10) ? null : reader.GetString(10);
             double? percent = reader.IsDBNull(11) ? null : Convert.ToDouble(reader.GetValue(11), CultureInfo.InvariantCulture);
             var rollbackRead = reader.IsDBNull(12) || Convert.ToInt64(reader.GetValue(12), CultureInfo.InvariantCulture) == 1;
-            return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent, rollbackRead, database);
+            /* The Azure batch answers 15 columns, the SQL Server batch a 16th: the view grant it checked. */
+            var viewGrant = reader.FieldCount > 15 && !reader.IsDBNull(15) ? reader.GetString(15) : null;
+            return KillAnswer(name, dryRun, sessionId, outcome, facts, rollbackCommand, percent, rollbackRead, database, viewGrant);
         }
     }
 
@@ -530,7 +536,7 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
     /// <paramref name="database"/> is set for the Azure SQL Database kill (<see cref="AzureKillSql"/>): its outcomes and grants are worded for it.
     /// </summary>
     internal static RemediationResult KillAnswer(string name, bool dryRun, int sessionId, string? outcome, KillSessionFacts? facts, string? rollbackCommand, double? percent,
-        bool rollbackRead = true, string? database = null)
+        bool rollbackRead = true, string? database = null, string? viewGrant = null)
     {
         var azure = database is not null;
         var result = outcome switch
@@ -553,6 +559,8 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
                 $"Session {sessionId} was not found on the primary of database {database}. It is gone, or it is on a named replica or a read-only secondary, which this tool does not reach. Nothing was run."),
             KillOutcomes.PermissionDenied when azure => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillPermissionDenied,
                 $"The remediation login's user in database {database} does not hold KILL DATABASE CONNECTION, which killing a session there needs. A person can run GRANT KILL DATABASE CONNECTION TO <user> in {database}. Nothing was run."),
+            KillOutcomes.ViewPermissionDenied => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillViewPermissionDenied,
+                $"The remediation login does not hold {viewGrant ?? "VIEW SERVER STATE (VIEW SERVER PERFORMANCE STATE on SQL Server 2022 and later)"} on this server, which reading another session and its open transaction needs. A person can run GRANT {viewGrant ?? "VIEW SERVER STATE"} TO <login> on the server. Nothing was run."),
             KillOutcomes.OwnSession => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.OwnSession,
                 $"Session {sessionId} is the remediation connection's own session. Nothing was run."),
             KillOutcomes.SessionGone => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.SessionGone,
@@ -712,6 +720,7 @@ internal static class KillOutcomes
     internal const string SessionChanged = "session_changed";
     internal const string DatabaseChanged = "database_changed";
     internal const string NotUserSession = "not_user_session";
+    internal const string ViewPermissionDenied = "kill_view_permission_denied";
     internal const string PermissionDenied = "kill_permission_denied";
     internal const string DryOk = "dry_ok";
     internal const string Killed = "killed";
