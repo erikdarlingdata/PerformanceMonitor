@@ -248,4 +248,13 @@ public interface ICollectorSchemaInfo
     /// <see cref="ReadsAuroraFunctions"/> made.
     /// </summary>
     bool ReadsPgExtension(PgExtensionDependency extension, CollectorContext context) => true;
+
+    /// <summary>
+    /// True when this definition writes query-tag sightings (#9705): it overrides <c>DescribeQueryTagSightings</c>, so its rows
+    /// put keys into <c>collect.query_tag_sightings</c>. Reachable by name without the row type, so the retention sweep can ask
+    /// the catalog which collectors feed the sightings table and keep a sighting as long as the longest of their raw retentions.
+    /// <see cref="CollectorDefinitionBase{TRow}"/> derives it from the override itself, so there is no second list to keep in
+    /// step with the writers. A default interface implementation, so a test double needs no change.
+    /// </summary>
+    bool WritesQueryTagSightings => false;
 }
