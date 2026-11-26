@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
@@ -370,7 +371,7 @@ VALUES (990384001, @at, @server_id, 'late', 'dbA', 7778, 77780, '0xQ', '0xP', 'S
     /// #9384: a tick whose hourly step failed folds no clutter day, and the next tick that the hourly step survives folds it. The hourly step also
     /// removes the empty hour stamps that raw never held, so a fold after a failed step could stamp a day made of stamps the step had left. The
     /// day's stamp is removed first, with all 24 hours built and unmarked, so only a fold stamps it. The hourly step is made to fail by a trigger
-    /// on its prune, which the fold never deletes from.
+    /// on the delete of the hour stamps, which its unstamp runs on every tick and the fold never runs. (A failing prune no longer fails the step, #9708.)
     /// </summary>
     [Fact]
     public async Task ATickWhoseHourlyStepFailed_FoldsNoClutterDay_AndTheNextTickFoldsIt()
@@ -391,22 +392,58 @@ VALUES (990384001, @at, @server_id, 'late', 'dbA', 7778, 77780, '0xQ', '0xP', 'S
         await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_collections_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
         await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
 
-        /* #9690: the prune deletes only when an hour is older than raw's edge, so one stamped hour past it gives the failing tick a prune to fail. */
-        await ExecuteAsync(store,
-            "INSERT INTO collect.query_store_clutter_hour_built (server_id, hour_utc, built_at) VALUES (@server_id, date_trunc('hour', @old::timestamp), @old)", ct,
-            ("server_id", A), ("old", FoldNow.AddDays(-RawRetention - 3)));
         await ExecuteAsync(store, @"
-CREATE FUNCTION collect.fail_hourly_prune() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the hourly prune is made to fail'; END $$;
-CREATE TRIGGER fail_hourly_prune BEFORE DELETE ON collect.query_store_clutter_plan_hourly FOR EACH STATEMENT EXECUTE FUNCTION collect.fail_hourly_prune();", ct);
+CREATE FUNCTION collect.fail_hourly_unstamp() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the hourly unstamp is made to fail'; END $$;
+CREATE TRIGGER fail_hourly_unstamp BEFORE DELETE ON collect.query_store_clutter_hour_built FOR EACH STATEMENT EXECUTE FUNCTION collect.fail_hourly_unstamp();", ct);
         var failed = await TickAsync(store, FoldNow.AddHours(1), ct);
         Assert.Equal(0, failed.ClutterDaysFolded);
         Assert.Equal(0L, await CountAsync(store, FoldStamps, ct, dayArgs));
 
-        await ExecuteAsync(store, "DROP TRIGGER fail_hourly_prune ON collect.query_store_clutter_plan_hourly; DROP FUNCTION collect.fail_hourly_prune();", ct);
+        await ExecuteAsync(store, "DROP TRIGGER fail_hourly_unstamp ON collect.query_store_clutter_hour_built; DROP FUNCTION collect.fail_hourly_unstamp();", ct);
         var next = await TickAsync(store, FoldNow.AddHours(1), ct);
         Assert.Equal(1, next.ClutterDaysFolded);
         Assert.Equal(1L, await CountAsync(store, FoldStamps, ct, dayArgs));
         Assert.Equal(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+    }
+
+    /// <summary>
+    /// #9708: a prune slice that fails does not stop the tick. The first slice is the same oldest slice every tick, so a slice that cannot finish (the
+    /// statement timeout on a cold cache) would otherwise fail the hourly step every tick and no hour would be built. Two old hours are stamped with a
+    /// plan row each and a trigger fails the delete of the second: the first slice commits and counts, the second rolls back and is logged once, and
+    /// the planned hours are still built on the same connection.
+    /// </summary>
+    [Fact]
+    public async Task APruneSliceThatFails_IsLoggedOnce_KeepsTheEarlierSlices_AndTheTickStillBuildsTheHours()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+
+        var now = FoldNow.AddHours(1);
+        var first = DateTime.SpecifyKind(now.AddDays(-RawRetention - 5).Date.AddHours(3), DateTimeKind.Unspecified);
+        var second = first.AddHours(1);
+        foreach (var hour in new[] { first, second })
+        {
+            await ExecuteAsync(store, "INSERT INTO collect.query_store_clutter_hour_built (server_id, hour_utc, built_at) VALUES (@server_id, @hour, @hour)", ct, ("server_id", A), ("hour", hour));
+            await ExecuteAsync(store,
+                "INSERT INTO collect.query_store_clutter_plan_hourly (server_id, hour_utc, database_name, query_id, plan_id, first_seen, last_seen) VALUES (@server_id, @hour, 'dbA', 1, 2, @hour, @hour)",
+                ct, ("server_id", A), ("hour", hour));
+        }
+
+        await ExecuteAsync(store, $@"
+CREATE FUNCTION collect.fail_second_slice() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.hour_utc = '{second:yyyy-MM-dd HH:mm:ss}'::timestamp THEN RAISE EXCEPTION 'the second slice is made to fail'; END IF; RETURN OLD; END $$;
+CREATE TRIGGER fail_second_slice BEFORE DELETE ON collect.query_store_clutter_plan_hourly FOR EACH ROW EXECUTE FUNCTION collect.fail_second_slice();", ct);
+
+        var logger = new CapturingTestLogger();
+        var result = await QueryStoreClutterHourly.RunAsync(store.Connection, now, RawRetention, logger, () => TimeSpan.Zero, ct);
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.True(result.Built > 0, logger.Joined);
+        Assert.Equal(0, result.Failed);
+        Assert.Equal(1L, result.Removed);
+        Assert.Equal(1L, await CountAsync(store, "SELECT count(*) FROM collect.query_store_clutter_plan_hourly WHERE hour_utc IN (@first, @second)", ct, ("first", first), ("second", second)));
+        Assert.Equal(1L, await CountAsync(store, "SELECT count(*) FROM collect.query_store_clutter_hour_built WHERE hour_utc = @second", ct, ("second", second)));
     }
 
     private static async Task ExecuteAsync(QueryStoreClosedDayRollupLiveTests.Store store, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
@@ -991,13 +1028,13 @@ SELECT s, h, 'DbA', 4 FROM unnest(ARRAY[@a, @b]) AS s CROSS JOIN generate_series
             });
 
             var removed = await QueryStoreClutterHourly.PruneAsync(
-                connection, HorizonNow, 4, HorizonSliceHours, () => TimeSpan.Zero, _ => Task.FromResult<IBatchWalPacer?>(watcher), ct);
+                connection, HorizonNow, 4, HorizonSliceHours, () => TimeSpan.Zero, _ => Task.FromResult<IBatchWalPacer?>(watcher), NullLogger.Instance, ct);
 
             Assert.Equal(2L * HorizonOldHours * (HorizonPlansPerHour + 1), removed);
             Assert.Equal(
                 Enumerable.Range(1, HorizonOldHours / HorizonSliceHours).Select(i => firstOld.AddHours(i * HorizonSliceHours)).Append(FourDayEdge).ToList(),
                 oldestAfterEachSlice);
-            Assert.Equal(0L, await QueryStoreClutterHourly.PruneAsync(connection, HorizonNow, 4, HorizonSliceHours, () => TimeSpan.Zero, null, ct));
+            Assert.Equal(0L, await QueryStoreClutterHourly.PruneAsync(connection, HorizonNow, 4, HorizonSliceHours, () => TimeSpan.Zero, null, NullLogger.Instance, ct));
         });
 
     /// <summary>
@@ -1013,14 +1050,14 @@ SELECT s, h, 'DbA', 4 FROM unnest(ARRAY[@a, @b]) AS s CROSS JOIN generate_series
 
             var looks = 0;
             Func<TimeSpan> twoSlicesOfBudget = () => ++looks <= 2 ? TimeSpan.Zero : QueryStoreClutterHourly.MaxPruneDuration;
-            var first = await QueryStoreClutterHourly.PruneAsync(connection, HorizonNow, 4, HorizonSliceHours, twoSlicesOfBudget, null, ct);
+            var first = await QueryStoreClutterHourly.PruneAsync(connection, HorizonNow, 4, HorizonSliceHours, twoSlicesOfBudget, null, NullLogger.Instance, ct);
 
             Assert.Equal(2L * 2 * HorizonSliceHours * (HorizonPlansPerHour + 1), first);
             Assert.Equal(firstOld.AddHours(2 * HorizonSliceHours), await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(connection, OldestHour, ct));
             Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, StampsWithoutRows, ct));
             Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, RowsWithoutStamp, ct));
 
-            var second = await QueryStoreClutterHourly.PruneAsync(connection, HorizonNow, 4, HorizonSliceHours, () => TimeSpan.Zero, null, ct);
+            var second = await QueryStoreClutterHourly.PruneAsync(connection, HorizonNow, 4, HorizonSliceHours, () => TimeSpan.Zero, null, NullLogger.Instance, ct);
 
             Assert.Equal(2L * HorizonOldHours * (HorizonPlansPerHour + 1), first + second);
             Assert.Equal(FourDayEdge, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(connection, OldestHour, ct));

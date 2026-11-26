@@ -236,10 +236,11 @@ WHERE b.server_id = f.server_id
     /// <summary>The first whole hour raw's retention still holds whole, in the three tables' own terms. $1 now, $2 raw retention in days.</summary>
     private const string EdgeSql = "date_trunc('hour', $1::timestamp - make_interval(days => $2)) + interval '1 hour'";
 
-    /// <summary>The hours one prune transaction removes from the three tables: a quarter of a day, so each transaction deletes a small slice
-    /// inside <see cref="QueryStoreClosedDayRollup.BuildStatementTimeoutSeconds"/>, and a first prune over the weeks between the collector's retention
-    /// and a hypertable raw's four days takes about a hundred of them, spread over as many ticks as <see cref="MaxPruneDuration"/> needs (#9690).</summary>
-    public const int PruneSliceHours = 6;
+    /// <summary>The hours one prune transaction removes from the three tables: one hour, so each transaction deletes a small slice (on the largest
+    /// store about 430k rows and a few seconds, where six hours was about 2.8M rows and 400 MB of WAL in one statement) inside
+    /// <see cref="QueryStoreClosedDayRollup.BuildStatementTimeoutSeconds"/>. A first prune over the weeks between the collector's retention and a
+    /// hypertable raw's four days takes a hundred or more of them, spread over as many ticks as <see cref="MaxPruneDuration"/> needs (#9690).</summary>
+    public const int PruneSliceHours = 1;
 
     /// <summary>No prune slice starts once this much of the tick has passed: half of <see cref="MaxTickDuration"/>, so a long prune leaves the
     /// hourly builds their time. The hours left wait for the next tick.</summary>
@@ -582,14 +583,17 @@ ORDER BY b.hour_utc;";
     /// three tables, oldest first, <paramref name="sliceHours"/> hours per transaction, and returns the rollup rows removed. A slice's rows and stamps go in
     /// one transaction, so a stamp never names an hour whose rows are gone. No slice starts once <paramref name="elapsed"/> reaches
     /// <see cref="MaxPruneDuration"/>: the hours left wait for the next tick. After each commit the WAL the slice wrote goes to the pacer
-    /// <paramref name="pacerFactory"/> builds (null runs unpaced), which is the retention purge's.
+    /// <paramref name="pacerFactory"/> builds (null runs unpaced), which is the retention purge's. A slice that fails (it rolled back, so its hours
+    /// are untouched) is logged with its hours and ends this prune, and the rows the earlier slices removed are still returned: the next tick starts at
+    /// the same slice, and a failure there must not stop the hourly builds that follow the prune.
     /// </summary>
     public static async Task<long> PruneAsync(
         NpgsqlConnection connection, DateTime nowUtc, int horizonDays, int sliceHours, Func<TimeSpan> elapsed,
-        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory, CancellationToken cancellationToken)
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory, ILogger logger, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(elapsed);
+        ArgumentNullException.ThrowIfNull(logger);
         ArgumentOutOfRangeException.ThrowIfLessThan(sliceHours, 1);
 
         long removed = 0;
@@ -604,7 +608,17 @@ ORDER BY b.hour_utc;";
             }
 
             var walBefore = pacer is null ? null : await pacer.ReadWalPositionAsync(connection, cancellationToken);
-            removed += await PruneSliceAsync(connection, slice, cancellationToken);
+            try
+            {
+                removed += await PruneSliceAsync(connection, slice, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Query Store hourly clutter rollups: pruning hours {From:yyyy-MM-dd HH} to {To:yyyy-MM-dd HH} failed, the prune stops for this tick and the builds go on: {Message}",
+                    slice.From, slice.To, ex.Message);
+                break;
+            }
+
             if (pacer is not null)
             {
                 await pacer.AfterBatchAsync(connection, walBefore, cancellationToken);
@@ -711,7 +725,7 @@ ORDER BY b.hour_utc;";
 
         await HeartbeatAsync(connection, nowUtc, logger, cancellationToken);
         var horizonDays = await RawHeldDaysAsync(connection, rawRetentionDays, cancellationToken) ?? rawRetentionDays;
-        var removed = await PruneAsync(connection, nowUtc, horizonDays, PruneSliceHours, elapsed, pacerFactory, cancellationToken);
+        var removed = await PruneAsync(connection, nowUtc, horizonDays, PruneSliceHours, elapsed, pacerFactory, logger, cancellationToken);
         removed += await UnstampBeforeFloorAsync(connection, horizonDays, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, horizonDays, cancellationToken);
 
