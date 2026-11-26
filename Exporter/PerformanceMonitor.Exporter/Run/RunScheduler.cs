@@ -186,7 +186,7 @@ public sealed class RunScheduler(
 
                 var call = Planner.CallFor(mode, plan, w);
                 output.WriteLine($"exporting {settings.Store} {family} {call.FromArg} .. {call.ToArg}");
-                var (result, runError) = await InvokeChildAsync(call, ct).ConfigureAwait(false);
+                var (result, runError) = await InvokeChildAsync(call, dailyLogPath, ct).ConfigureAwait(false);
                 if (result is { NotStarted: null })
                 {
                     calls.Add(new CallRecord(family, result.LogPath));
@@ -218,7 +218,7 @@ public sealed class RunScheduler(
         return failed;
     }
 
-    private async Task<(ChildResult? Result, string? Error)> InvokeChildAsync(PlannedCall call, CancellationToken ct)
+    private async Task<(ChildResult? Result, string? Error)> InvokeChildAsync(PlannedCall call, string dailyLogPath, CancellationToken ct)
     {
         try
         {
@@ -233,7 +233,7 @@ public sealed class RunScheduler(
             var result = await childRunner.RunAsync(childCall, ct).ConfigureAwait(false);
             if (result.NotStarted is { } why) return (result, why);
             // The child's own output goes to the run's stdout, then the summary line.
-            var summary = $"exit code: {result.ExitCode}; elapsed: {result.ElapsedSeconds.ToString("N0", CultureInfo.InvariantCulture)} s; exporter peak private memory: {result.PeakPrivateMb.ToString("N0", CultureInfo.InvariantCulture)} MB; host free memory lowest {result.MinFreeMb?.ToString("N0", CultureInfo.InvariantCulture) ?? "unknown"} MB; log: {log}";
+            var summary = $"exit code: {result.ExitCode}; elapsed: {result.ElapsedSeconds.ToString("N0", CultureInfo.InvariantCulture)} s; exporter peak private memory: {result.PeakPrivateMb.ToString("N0", CultureInfo.InvariantCulture)} MB; host free memory lowest {result.MinFreeMb?.ToString("N0", CultureInfo.InvariantCulture) ?? "unknown"} MB; log: {dailyLogPath}";
             output.WriteLine(summary);
             return (result, null);
         }
@@ -477,6 +477,23 @@ public sealed class RunScheduler(
         var path = Path.Combine(settings.LogDir, $"plan-only-{settings.Store}-{nowUtc.ToString("yyyyMMdd", CultureInfo.InvariantCulture)}.jsonl");
         RunFiles.AppendDaily(path, record.ToJsonString(new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }) + "\n");
         output.WriteLine($"plan-only: {decision}; wrote {path}");
+        foreach (var family in families.OfType<JsonObject>())
+        {
+            var entries = family["entries"]!.AsArray();
+            var status = (string?)family["status"];
+            if (entries.Count == 0)
+            {
+                output.WriteLine($"  {(string?)family["name"]}: {(status == "skipped" ? "skipped" : "nothing due")}");
+                continue;
+            }
+
+            foreach (var entry in entries.OfType<JsonObject>())
+            {
+                var note = (bool)entry["gap"]! ? " (gap, recorded and not exported)" : "";
+                output.WriteLine($"  {(string?)family["name"]}: {(string?)entry["from"]} .. {(string?)entry["to"]}{note}");
+            }
+        }
+
         return decision == "refuse_state" ? ExitRefused : ExitOk;
     }
 }

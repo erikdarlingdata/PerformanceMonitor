@@ -110,6 +110,12 @@ services:
       POSTGRES_USER: darling
       POSTGRES_DB: darling
       POSTGRES_PASSWORD_FILE: /run/secrets/store_password
+      # The store is created with UTF8 encoding and the C collation, the arguments the managed Windows store gives initdb
+      # (-E UTF8 --locale=C). The Darling Exporter needs the C collation: PostgreSQL text order must equal byte order for its
+      # Query Store keys. A bare --locale=C would pick the SQL_ASCII encoding, so the encoding is named too. initdb runs once, on an
+      # empty volume: a volume made without these arguments keeps the image's default collation (en_US.utf8), and the
+      # service works on it as before, but the Exporter refuses it with a one-line message.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     secrets:
       - store_password
     volumes:

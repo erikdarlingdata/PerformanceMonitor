@@ -13,7 +13,11 @@ darling-export run --config <file> [--plan-only] [--now <ISO UTC>]
 darling-export export [--config <file>] --store <name> --from <ISO UTC> --to <ISO UTC> --out <dir> [options]
 darling-export check-config --config <file>
 darling-export describe-tables [--json]
+darling-export explain-gate --tables <a,b,c> --from <ISO UTC> --to <ISO UTC> [--store <name>]
 ```
+
+Run `darling-export` with no verb, or `darling-export --help`, to print the usage with every `export` option.
+`--verbose` on `export` and `run` also prints the session-guard lines and, on an interactive console, the full stack trace of a failure. Without it a run prints each warning once and a failure on a console as its exception chain. A failure with stdout redirected, as in a scheduled run, always prints the full exception to stdout.
 
 ### `run`
 
@@ -25,7 +29,9 @@ Each run does these steps:
 3. It uploads the Parquet files first and the manifest last.
 4. It writes a daily log and removes old logs, output and temporary files.
 
-`--plan-only` prints and logs what a run would do. It does not open the store and does not upload anything.
+`--plan-only` prints and logs what a run would do. It lists every due window per family on the console and writes the same plan to `plan-only-<store>-<date>.jsonl` in the log folder. It does not upload anything and does not start an export.
+It opens the store once to check the collation (see "The store collation"). A store it cannot reach or a password it cannot resolve is a warning, and the plan goes on.
+After each window `run` prints the exit code and `log:`, the daily log `export-<store>-<date>.log` in the log folder that holds the window's output.
 `--now` sets the clock for a plan.
 
 The three families are `fresh_fast` (the fast window), `fresh` (hourly) and `query_store` (Query Store, a few hours behind).
@@ -44,13 +50,18 @@ Any flag you give overrides the config. Run `darling-export` with no verb to pri
 
 ### `check-config`
 
-Loads the config, resolves the credential and prints the result with the secret hidden.
-It exits 2 when the config is not valid.
+Loads the config, resolves the credential, checks the store's collation and prints the result with the secret hidden.
+It exits 2 when the config is not valid or the store does not use the C collation.
+A store it cannot reach is a warning on stderr, and the exit code stays 0.
 
 ### `describe-tables`
 
 Prints one line per table: the origin, the kind, the time column, the grain and the key columns.
-`--json` prints the same facts as JSON.
+`--json` prints the same facts as JSON, with a `blocked` field for the optional tables the registry lists but does not export.
+
+### `explain-gate`
+
+Prints the SQL of the schema gate for the optional tables you name. It does not connect to the store.
 
 ## The config file
 
@@ -86,6 +97,23 @@ You can use `store.connection_string_env` instead. It names an environment varia
 The session guards below still apply when you do.
 
 There is no fallback. If the named source is empty or missing, the run stops with exit code 2.
+
+### The store collation
+
+The store database must use the C collation. The Query Store keys depend on byte order, and only the C collation gives PostgreSQL the same order as the exporter.
+`export` stops on a store with another collation, such as `en_US.utf8`, with exit code 2 and one line that names the collation.
+`check-config` and `run --plan-only` run the same check when the store can be reached, so the problem shows up before the first window.
+
+The managed Windows store and a new Darling compose store are created with the C collation. A bring-your-own store and a compose store made before that change keep the collation they were created with.
+A database collation cannot be changed in place. To create a C database in a PostgreSQL server you already run:
+
+```sql
+CREATE DATABASE darling TEMPLATE template0 ENCODING 'UTF8' LOCALE 'C';
+```
+
+For a new cluster, give `initdb` the arguments `--encoding=UTF8 --locale=C`. The compose file does this through `POSTGRES_INITDB_ARGS`, and it applies to a new volume only.
+To move an existing store, create the C database, then load a dump of the old one into it. For a TimescaleDB store, use TimescaleDB's dump and restore steps (`timescaledb_pre_restore()` and `timescaledb_post_restore()`), and point the Darling service and `store.database` at the new database.
+Or start a new Darling store on a new volume and let it collect from the start.
 
 ### Session guards
 
