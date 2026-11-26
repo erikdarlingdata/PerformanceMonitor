@@ -126,3 +126,5 @@ WantedBy=multi-user.target
 Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs naturally with `file:`), and note `Microsoft.Data.SqlClient` needs `libgssapi-krb5-2` installed (`apt-get install libgssapi-krb5-2`) — the container image carries it already.
 
 systemd reports `active (running)` when the host process starts, before the store is ready. The readiness signal is the `Postgres store ready` line in the log, followed by `PerformanceMonitor Darling collection loop started`. With the web dashboard off there is no port to probe, so check `collect.collection_log` as [Watching the service from outside](darling/operations.md#watching-the-service-from-outside) says.
+
+On a bring-your-own store the custom alert evaluator stays off until `tools/provision-roles.sql` has run and `postgres.webConnectionString` is set. The service says so at start with `Custom alert evaluator not started`. The steps are in [The least-privilege roles](darling/linux.md#the-least-privilege-roles-when-the-web-dashboard-or-mcp-is-on) on the Linux page.
