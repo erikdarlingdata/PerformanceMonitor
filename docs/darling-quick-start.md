@@ -109,9 +109,11 @@ The unit:
 ```ini
 [Unit]
 Description=PerformanceMonitor Darling
-After=network-online.target
+After=network-online.target postgresql.service
+Wants=network-online.target
 
 [Service]
+Type=notify
 ExecStart=/usr/bin/dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll
 Environment=DARLING_CONFIG=/etc/darling/darling.json
 User=darling

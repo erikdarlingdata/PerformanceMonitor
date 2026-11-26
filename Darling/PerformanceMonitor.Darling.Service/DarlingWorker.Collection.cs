@@ -723,7 +723,8 @@ public sealed partial class DarlingWorker
         {
             _logger.LogInformation(
                 "No monitored servers are configured yet. Add one in the Viewer (Add Server) or with " +
-                "PerformanceMonitor.Darling.Service.exe --add-server; the service starts collecting from it without a restart.");
+                "{Command}; the service starts collecting from it without a restart.",
+                OperatorVerbForm.InstalledCommandHere("--add-server"));
         }
         /* #5812 (L1): the PLAN_REGRESSION candidate cache evicts the entries of servers outside this set on its next store. */
         PerformanceMonitor.Darling.Analysis.PgFactCollector.PlanRegressionCandidateCache.Shared.RetainServers(initialServers.Select(s => s.ServerId));

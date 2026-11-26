@@ -23,6 +23,20 @@ namespace PerformanceMonitor.Collectors;
 /// </summary>
 public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 {
+    /* WritesQueryTagSightings is read from the definition's own override: a delegate over the virtual method binds to the most
+       derived override, so its Method names the class that declares the body. The base's own body returns null, so any other
+       declaring class means the definition describes sightings. Computed once per definition, here, rather
+       than declared per definition, so a new writer joins the set by overriding the method and a definition cannot claim the flag
+       without describing anything (#9705). */
+    protected CollectorDefinitionBase()
+    {
+        Func<TRow, IReadOnlyList<QueryTagSighting>?> describe = DescribeQueryTagSightings;
+        WritesQueryTagSightings = describe.Method.DeclaringType != typeof(CollectorDefinitionBase<TRow>);
+    }
+
+    /// <summary><see cref="ICollectorSchemaInfo.WritesQueryTagSightings"/>: true when the definition overrides <see cref="DescribeQueryTagSightings"/>.</summary>
+    public bool WritesQueryTagSightings { get; }
+
     public abstract string Name { get; }
 
     public abstract string TargetTable { get; }
