@@ -521,8 +521,8 @@ public sealed class DarlingSweepSchedulingTests
     }
 
     /// <summary>
-    /// #9696: the spread applies only to a fleet larger than the sweep gate's width. A fleet that fits has no first body to queue, so
-    /// every server launches at once and none waits up to the spread for its first connect.
+    /// #9696: the spread applies only to a fleet larger than the narrower of the sweep gate and the connect gate. A fleet that fits
+    /// both has no first body to queue, so every server launches at once and none waits up to the spread for its first connect.
     /// </summary>
     [Theory]
     [InlineData(1, 4, false)]
@@ -531,9 +531,12 @@ public sealed class DarlingSweepSchedulingTests
     [InlineData(5, 4, true)]
     [InlineData(2, 1, true)]
     [InlineData(24, 4, true)]
+    [InlineData(8, 16, false)]
+    [InlineData(9, 16, true)]
+    [InlineData(16, 16, true)]
     public void SpreadsColdStart_OnlyWhenTheFleetIsWiderThanTheGate(int initialServers, int sweepWidth, bool spreads)
     {
-        Assert.Equal(spreads, DarlingWorker.SpreadsColdStart(initialServers, sweepWidth));
+        Assert.Equal(spreads, DarlingWorker.SpreadsColdStart(initialServers, sweepWidth, ServerConnectProbe.GateWidth));
     }
 
     /// <summary>
