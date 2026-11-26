@@ -147,8 +147,9 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         NpgsqlConnection connection, int lateRows, TimeSpan? intervalRefreshOffset, CancellationToken ct, int hours = 30)
     {
         var totalHours = hours;
-        /* #5608: the timeline ends at LiveClock.AnchoredEnd(), so its chunk layout is the same at any hour the test runs. */
-        var end = TimescaleSupport.AlignDown(LiveClock.AnchoredEnd(), TimeSpan.FromHours(1)) - TimeSpan.FromHours(1);
+        /* #5608: the timeline ends at 22:00 UTC the day before, so its chunk layout is the same at any hour the test runs. The retention
+           sweep ages the oldest row against the store's own clock, so the anchor is the one that clock has passed (#9695). */
+        var end = TimescaleSupport.AlignDown(LiveClock.AnchoredEndNotAfterNow(), TimeSpan.FromHours(1)) - TimeSpan.FromHours(1);
         var b0 = end - TimeSpan.FromHours(totalHours);
         var b1 = b0 + TimeSpan.FromHours(1);
 
@@ -166,8 +167,10 @@ CROSS JOIN generate_series(1, $4) AS n", connection) { CommandTimeout = SetupTim
         => TimescaleSupport.EnsureRetentionPoliciesAsync(
             connection, logger, TimescaleSupport.RetentionSweepPass.Periodic, otherRepairRunning, ct);
 
-    /// <summary>#9695: raw that starts more than its 4-day horizon back (the seed's oldest row is 98 to 122 hours old whatever the hour the
-    /// test runs), so a hold can still drop history and its line names the remedies. A younger seed gets the line a new install gets.</summary>
+    /// <summary>#9695: raw that starts more than its 4-day horizon back (the seed's oldest row is 98 to 123 hours old by the store's clock,
+    /// whatever the hour the test runs or the test clock it runs under), past the two hours in which a hold that just crossed its horizon
+    /// warns on the hourly pass. A hold can still drop history there and its line names the remedies. A younger seed gets the line a new
+    /// install gets.</summary>
     private const int OldStoreHours = 96;
 
     private static string HeldLine(CapturingTestLogger logger)
