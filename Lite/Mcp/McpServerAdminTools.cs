@@ -281,6 +281,8 @@ public sealed class McpServerAdminTools
             {
                 case "display_name":
                     if (!isNull && value.ValueKind != JsonValueKind.String) return BadType(key, "text");
+                    if (Text(value) is { } displayText && displayText.Any(char.IsControl))
+                        return Refuse(EditTool, "invalid", "display_name must not contain control characters (line breaks, tabs and the like).", key);
                     next.DisplayName = NullIfBlank(Text(value)) ?? string.Empty;
                     break;
                 case "host":
@@ -340,6 +342,9 @@ public sealed class McpServerAdminTools
                     break;
                 case "description":
                     if (!isNull && value.ValueKind != JsonValueKind.String) return BadType(key, "text");
+                    /* The window's description box is one line, so a line break or tab is as unwelcome here as any other control character. */
+                    if (Text(value) is { } descriptionText && descriptionText.Any(char.IsControl))
+                        return Refuse(EditTool, "invalid", "description must not contain control characters (line breaks, tabs and the like).", key);
                     next.Description = (Text(value) ?? string.Empty).Trim();
                     break;
                 case "utility_database":
@@ -371,6 +376,12 @@ public sealed class McpServerAdminTools
                     if (!isNull && value.ValueKind != JsonValueKind.String) return BadType(key, "text");
                     break;
             }
+        }
+
+        /* A blank display name falls back to the host, as the Edit Server window does on save. */
+        if (given.ContainsKey("display_name") && string.IsNullOrEmpty(next.DisplayName))
+        {
+            next.DisplayName = next.ServerName;
         }
 
         var typedUsername = given.TryGetValue("username", out var u) ? NullIfBlank(Text(u)) : null;
@@ -452,6 +463,7 @@ public sealed class McpServerAdminTools
             return Refuse(EditTool, "collides", ServerManager.DescribeIdHolder(candidate, holder, isEdit: true), "host");
         }
 
+        var baseline = Fields(stored);
         var before = Fields(stored);
         var after = Fields(next);
         /* The user name of a SQL or Entra MFA login lives in the credential store, and a service principal's client id is the user name too. */
@@ -460,7 +472,8 @@ public sealed class McpServerAdminTools
         var changed = EditKeys
             .Where(k => before.ContainsKey(k) && !JsonNode.DeepEquals(before[k], after[k]))
             .ToList();
-        var passwordChanged = typedPassword is not null && !string.Equals(typedPassword, storedCredential?.Password, StringComparison.Ordinal);
+        /* A typed password is always a change: the call never compares it with the stored one, so the answer does not depend on what is stored. */
+        var passwordChanged = typedPassword is not null;
         if (changed.Count == 0 && !passwordChanged)
         {
             return new JsonObject
@@ -474,7 +487,7 @@ public sealed class McpServerAdminTools
 
         /* The window asks before it connects or saves with settings this Windows user has not confirmed, unless the user typed the secret. A tool call
            cannot answer that question, so it is refused with the window's own question, and the user confirms it in the window. */
-        var typedSecret = typedPassword is not null && !string.Equals(typedPassword, storedCredential?.Password, StringComparison.Ordinal)
+        var typedSecret = typedPassword is not null
             && next.AuthenticationType is AuthenticationTypes.SqlServer or AuthenticationTypes.ServicePrincipal;
         var question = HostConfirmationGate.Question(
             serverManager.HostChangeIfSaved(Copy(next)), isEdit: true,
@@ -508,8 +521,18 @@ public sealed class McpServerAdminTools
         }
 
         /* #9640: the live server's fields change in place, so the change and its save run where the windows read and save them. */
+        var changedWhileRunning = false;
         McpServerAdminHooks.Save(hooks, () =>
         {
+            /* The connection test above can take a while, and a window Save or a second edit may land meanwhile. Writing the copy made before it
+               would undo that change, so a server that no longer reads as it did is left alone. */
+            var now = Fields(stored);
+            if (baseline.Any(kv => !JsonNode.DeepEquals(kv.Value, now[kv.Key])))
+            {
+                changedWhileRunning = true;
+                return;
+            }
+
             var snapshot = Copy(stored);
             CopyOnto(stored, next);
             try
@@ -522,6 +545,11 @@ public sealed class McpServerAdminTools
                 throw;
             }
         });
+
+        if (changedWhileRunning)
+        {
+            return Refuse(EditTool, "refused", "Nothing was saved. The server changed while the call ran, so the edit was not applied over that change. Read the server again and call again.");
+        }
 
         var previous = new JsonObject();
         var undoChanges = new JsonObject();
@@ -541,6 +569,7 @@ public sealed class McpServerAdminTools
         }
 
         var storage = RemoteCollectorService.GetServerNameForStorage(stored);
+        AppLogger.Info("MCP", $"{EditTool} saved server '{storage}': changed {string.Join(", ", passwordChanged ? changed.Append("password") : changed)}");
         return new JsonObject
         {
             ["status"] = "updated",
@@ -594,6 +623,7 @@ public sealed class McpServerAdminTools
 
         var after = server.ExcludedDatabases ?? new List<string>();
         var storage = RemoteCollectorService.GetServerNameForStorage(server);
+        AppLogger.Info("MCP", $"{ExcludedTool} saved server '{storage}': changed excluded_databases");
         var name = string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName;
         JsonArray Strings(IEnumerable<string> names) => new(names.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray());
         return new JsonObject
