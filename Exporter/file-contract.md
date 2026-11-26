@@ -33,6 +33,8 @@ The exporter writes these files under the destination prefix:
 3. A manifest means every file it lists is complete. Read the files that the manifest lists and no others.
 4. A file with no manifest is an unfinished or failed run. Ignore it.
 5. A re-export of the same store, window and table set overwrites the same file names and the same manifest name.
+   A table that writes one part gets the same bytes and the same SHA-256 when the store holds the same rows, so a consumer can skip a file whose hash did not change.
+   A table split across parts keeps the same rows and every part is sorted, but a row can land in a different part, so the part files of that table can differ.
 6. Each manifest entry has `row_count`, `byte_size` and `sha256`. A consumer can check a file against them.
 
 ## 3. Manifest fields
