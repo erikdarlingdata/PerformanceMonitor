@@ -121,8 +121,11 @@ public sealed class QueryTagSightingBuffer
     /// entries not yet written go back into the buffer first (counts summed into any entry sighted since, the first sample
     /// kept), so a flush cut short by a stop leaves them for the next flush.</para>
     /// </summary>
+    /// <param name="cancellationToken">Cancels the flush.</param>
+    /// <param name="stopNotice">The stop's notice, passed only by the shutdown flush (#9794): entries the store was going down
+    /// for are added to it instead of being logged as a failed write.</param>
     /// <returns>How many distinct sightings were written.</returns>
-    public async Task<int> FlushAsync(CancellationToken cancellationToken)
+    public async Task<int> FlushAsync(CancellationToken cancellationToken, StoreStopNotice? stopNotice = null)
     {
         List<QueryTagSightingWriter.CollapsedSighting> rows;
         lock (_gate)
@@ -146,7 +149,7 @@ public sealed class QueryTagSightingBuffer
         var progress = new QueryTagSightingWriter.WriteProgress();
         try
         {
-            return await QueryTagSightingWriter.WriteAsync(_postgres, rows, _logger, cancellationToken, progress).ConfigureAwait(false);
+            return await QueryTagSightingWriter.WriteAsync(_postgres, rows, _logger, cancellationToken, progress, stopNotice).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -165,15 +168,16 @@ public sealed class QueryTagSightingBuffer
     /// <summary>
     /// The last flush before the service stops (#5985): writes what is buffered, with its own time limit because the service's
     /// token is already cancelled. A flush that runs out of time keeps its rows in the buffer, which a stopping process then
-    /// loses; this never throws.
+    /// loses; this never throws. With <paramref name="stopNotice"/> (#9794), sightings a store that is going down did not take
+    /// are added to the notice instead of being logged as a failed write. The flush is tried once.
     /// </summary>
     /// <returns>How many distinct sightings were written.</returns>
-    public async Task<int> FlushOnShutdownAsync(TimeSpan limit)
+    public async Task<int> FlushOnShutdownAsync(TimeSpan limit, StoreStopNotice? stopNotice = null)
     {
         using var timeout = new CancellationTokenSource(limit);
         try
         {
-            return await FlushAsync(timeout.Token).ConfigureAwait(false);
+            return await FlushAsync(timeout.Token, stopNotice).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
