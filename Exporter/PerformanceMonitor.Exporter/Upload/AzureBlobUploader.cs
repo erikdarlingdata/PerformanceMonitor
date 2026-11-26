@@ -26,7 +26,7 @@ public sealed class AzureBlobUploader : IUploader
         {
             var value = getEnvironmentVariable(name);
             return string.IsNullOrWhiteSpace(value)
-                ? throw new InvalidOperationException($"Environment variable {name} (named in the Azure auth setting) is not set.")
+                ? throw new InvalidOperationException("destination.auth.name: the environment variable it names is not set.")
                 : value;
         }
 
