@@ -977,7 +977,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #7041: send_daily_health_report_now sends through the worker's alert evaluator, published on this hub. A host without the
                process services (a test-constructed one) gets an empty hub, so the tool answers not_ready. */
             RegisterToolServices(builder.Services, postgres, _registryState, config.Postgres, config.Analyzer, planFetcher, _logger, _baselineCache, _ownerSource, _pseudonymKeys,
-                _processServices?.GetService<DailyHealthReportHub>(), _processServices?.GetService<PasswordKeyStartupFacts>());
+                _processServices?.GetService<DailyHealthReportHub>(), PersonalTokensFor(config), _personalSnapshot, _processServices?.GetService<PasswordKeyStartupFacts>());
 
             /* #2339: publish the declared peer stores before the instructions are rendered, so the same
                snapshot feeds the instructions section, list_servers' peer_fleets block, and the
@@ -1437,6 +1437,8 @@ public sealed class DarlingMcpHostService : BackgroundService
         StoreOwnerSource? ownerSource = null,
         IPseudonymKeySource? pseudonymKeys = null,
         DailyHealthReportHub? dailyReportHub = null,
+        PersonalTokenSettings? personalTokens = null,
+        DarlingPersonalTokenSnapshot? personalSnapshot = null,
         PasswordKeyStartupFacts? passwordKeyFacts = null)
     {
         /* #9644: new_password_key and reset_password_key take the startup config's password key facts as a service parameter.
@@ -1448,7 +1450,11 @@ public sealed class DarlingMcpHostService : BackgroundService
         /* #6066: the store's pseudonym key, for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
         /* #5632 step 7: force_query_store_plan and unforce_query_store_plan take this as a service parameter. Empty until the worker publishes. */
-        services.AddSingleton<StoreOwnerSource>(ownerSource ?? new StoreOwnerSource());
+        var toolOwnerSource = ownerSource ?? new StoreOwnerSource();
+        services.AddSingleton<StoreOwnerSource>(toolOwnerSource);
+        /* #9643: mint_personal_token, revoke_personal_token and get_personal_tokens take this. Always registered, so a host with personal tokens
+           off still resolves it and the tools answer not_served: they need the settings and the snapshot, and both are null then. */
+        services.AddSingleton(new DarlingPersonalTokenSeat(personalTokens, personalSnapshot, toolOwnerSource));
         /* Register services that MCP tools need via dependency injection. */
         services.AddSingleton<NpgsqlDataSource>(postgres);
         /* get_fleet_overview scopes an Azure master's counts by the live registry, the way the analysis service is. */

@@ -44,6 +44,10 @@ public sealed class DarlingMcpWritePolicyTests
        tool but those two, and the whole catalog is a policy no start resolves; only the census reference reads it. */
     private static readonly int InvestigationCount = DarlingMcpWritePolicy.InvestigationTools.Count;
 
+    /* #9643: the server admin tools that are reads (the personal token list and the web access group list). They are served only with the server admin writes, so the default
+       policy leaves them out beside the writes. */
+    private static readonly int ServerAdminReadCount = DarlingMcpWritePolicy.ServerAdminTools.Count(n => !DarlingMcpWritePolicy.IsWrite(n));
+
     private static readonly McpConfig NoWrites = new();
     private static readonly McpConfig WritesConfig = new() { AllowWrites = true };
     internal static readonly McpConfig EverythingConfig = new() { AllowWrites = true, AllowServerAdmin = true };
@@ -84,7 +88,8 @@ public sealed class DarlingMcpWritePolicyTests
             + $"mark it with [DarlingToolAccess] and, for a write or an investigation tool, add it to its set: [{string.Join(", ", unclassified)}]");
         Assert.True(both.Length == 0, $"a tool is marked ToolAccess.Read AND is in the write or investigation set: [{string.Join(", ", both)}]");
         Assert.True(stale.Length == 0, $"a classified name is not a registered tool: [{string.Join(", ", stale)}]");
-        Assert.True(DarlingMcpWritePolicy.ServerAdminTools.IsSubsetOf(writes));
+        /* A server admin tool is a write, except a read that is served only with them (#9643, the personal token list). */
+        Assert.All(DarlingMcpWritePolicy.ServerAdminTools.Except(writes), n => Assert.Contains(n, readOnly));
         Assert.Contains("edit_server", writes);
         Assert.Contains("edit_server", DarlingMcpWritePolicy.ServerAdminTools);
     }
@@ -107,6 +112,27 @@ public sealed class DarlingMcpWritePolicyTests
     }
 
     [Fact]
+    public void TheWebAccessGroupList_IsServedOnlyWhereTheGroupWritesAre_AndNoAgentIsOfferedAnyOfTheSix()
+    {
+        string[] writes = ["set_advanced_web_access", "create_web_access_group", "update_web_access_group", "rotate_web_access_group_token", "delete_web_access_group"];
+        string[] six = [.. writes, "get_web_access_groups"];
+        var agent = new DarlingMcpWritePolicy.Effective(false, false, Investigations: true);
+
+        foreach (var policy in new[] { DarlingMcpWritePolicy.Effective.Off, WritesOnly, agent })
+        {
+            var names = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), policy));
+            Assert.All(six, t => Assert.DoesNotContain(t, names));
+        }
+
+        var admin = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), Everything));
+        Assert.All(six, t => Assert.Contains(t, admin));
+
+        /* Every server admin tool is one an agent is never offered, so a tool added to the set cannot reach an agent token unlisted. */
+        Assert.All(DarlingMcpWritePolicy.ServerAdminTools, t => Assert.Contains(t, DarlingMcpWritePolicy.NeverAgentTools));
+        Assert.All(six, t => Assert.False(DarlingMcpWritePolicy.IsAgentAction(t, new System.Collections.Generic.HashSet<string>(six))));
+    }
+
+    [Fact]
     public void Default_ServesNoWriteTool_AndEveryRead()
     {
         var all = ServedTools();
@@ -114,7 +140,7 @@ public sealed class DarlingMcpWritePolicyTests
 
         var names = Names(served);
         Assert.DoesNotContain(names, DarlingMcpWritePolicy.IsWrite);
-        Assert.Equal(all.Count - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount, served.Count);
+        Assert.Equal(all.Count - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount - ServerAdminReadCount, served.Count);
         Assert.DoesNotContain(names, DarlingMcpWritePolicy.IsInvestigation);
         Assert.Contains("list_servers", names);
         Assert.Contains("get_tool_guide", names);
@@ -211,7 +237,7 @@ public sealed class DarlingMcpWritePolicyTests
         var before = narrowed.Count;
         DarlingMcpWritePolicy.Apply(narrowed, DarlingMcpWritePolicy.Effective.Off);
 
-        Assert.Equal(before - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount, narrowed.Count);
+        Assert.Equal(before - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount - ServerAdminReadCount, narrowed.Count);
         Assert.All(narrowed, tool =>
         {
             Assert.NotNull(tool.ProtocolTool.Annotations);

@@ -34,7 +34,10 @@ public sealed class DarlingMcpInstructionsBudgetTests
        headroom, not a number set a few bytes above today's length: the tests below fail only when the text really
        crosses it. A change that needs more room either shortens something else or raises this number on purpose, in
        the same PR, with the reason. Never trim to land a few bytes under, and never raise it just to merge. */
-    internal const int InstructionsBudget = 8_000;
+    /* Raised from 8,000 to 8,500 on purpose (#9642): the settings paragraph names every server admin tool, so a test can check the text
+       against the set (DarlingMcpWriteGateTextTests), and the set grew by the alert source login tools, the personal token tools and the
+       web access group tools, which put the writes-on text 55 characters over 8,000. */
+    internal const int InstructionsBudget = 8_500;
 
     [Fact]
     public void Instructions_AreWithinTheD2Budget()
@@ -122,7 +125,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains(
             $"This server exposes {served.Count} of its {catalog.Count} tools: the write tools are off, so the {writes + admin} that change " +
-            $"monitoring configuration are not served (`mcp.allowWrites` with a token adds {writes}, `mcp.allowServerAdmin` {admin} more); " +
+            $"monitoring configuration or list personal tokens are not served (`mcp.allowWrites` with a token adds {writes}, `mcp.allowServerAdmin` {admin} more); " +
             $"`mcp.allowInvestigations` with a token adds the {investigations} investigation tools. " +
             $"{shared} are the same names Lite exposes. The remaining {served.Count - shared} are unique to Darling: {postgres} are the " +
             "PostgreSQL reads (`get_pg_*`), plus the Custom Views, custom-alert-rule and query-tag reads and the investigation-wait tool, and central-store-only reads",
@@ -143,7 +146,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains(
             $"This server exposes {served.Count} of its {catalog.Count} tools: `mcp.allowServerAdmin` is off, so the " +
-            $"{catalog.Count(DarlingMcpWritePolicy.IsServerAdmin)} tools that add, edit and remove monitored servers, or switch agent actions, are not served; " +
+            $"{catalog.Count(DarlingMcpWritePolicy.IsServerAdmin)} tools that add, edit and remove monitored servers, switch agent actions, or make, revoke and list personal tokens, are not served; " +
             $"the {catalog.Count(DarlingMcpWritePolicy.IsInvestigation)} investigation tools stay off while `mcp.allowWrites` is on (one token " +
             $"cannot tell an agent from a person). {shared} are the same names Lite exposes. The remaining " +
             $"{served.Count - shared} are unique to Darling: {postgres} are the PostgreSQL reads (`get_pg_*`), plus Custom Views, " +

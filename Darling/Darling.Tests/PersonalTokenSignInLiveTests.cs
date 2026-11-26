@@ -211,7 +211,7 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         public async Task<(string Value, string Id)> MakeTokenAsync(string ownerKey, string name, string role)
         {
             var minted = PersonalTokenFormat.Mint();
-            var outcome = await PersonalTokenStore.InsertAsync(Owner, minted.TokenId, minted.SecretSha256, ownerKey, "subject", name, role,
+            var outcome = await PersonalTokenStore.InsertAsync(Owner, minted.TokenId, minted.SecretSha256, ownerKey, "subject-" + ownerKey, name, role,
                 DateTimeOffset.UtcNow, 30, 5, "test", TestContext.Current.CancellationToken);
             Assert.Equal(PersonalTokenCreateOutcome.Created, outcome);
             await Snapshot.RefreshAsync(OwnerSource, Logger, TestContext.Current.CancellationToken);
@@ -676,7 +676,7 @@ public sealed class PersonalTokenSignInLiveTests : IClassFixture<PersonalTokenWe
         async Task<string> MakeOperatorAsync(string name)
         {
             var minted = PersonalTokenFormat.Mint();
-            await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, OwnerKeyFor("sweep-once"), "subject", name, "operator",
+            await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, OwnerKeyFor("sweep-once"), "subject-sweep-once", name, "operator",
                 DateTimeOffset.UtcNow, 30, 5, "test", ct);
             await snapshot.RefreshAsync(ownerSource, logger, ct);
             return minted.Value;

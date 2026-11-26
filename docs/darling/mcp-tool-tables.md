@@ -179,6 +179,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_wait_trend` | `collect.wait_stats`<br>`collect.collection_log`<br>`collect.collector_state`<br>`collect.v_wait_stats` |
 | `get_wait_types` | `collect.wait_stats`<br>`collect.v_wait_stats` |
 | `get_waiting_tasks` | `collect.waiting_tasks` |
+| `get_web_access_groups` | `config.web_access_groups`<br>`config.web_access_group_tags`<br>`config.web_access_advanced` |
 | `run_custom_view_panel` | The table that the panel's measure names. Also its hourly or daily aggregate, when the window uses one.<br>`collect.module_map` (module join)<br>`collect.servers` (query_store_interval_wide join)<br>`config.query_tag_map` |
 | `test_custom_alert_rule` | The table that the rule's measure names. Also its hourly or daily aggregate, when the window uses one.<br>`config.custom_alert_rules` (when rule_id given)<br>`config.server_tags`<br>`config.server_tag_map` (tag scope) |
 | `test_query_tag_rule` | `collect.query_tag_sightings`<br>`config.query_tag_rules`<br>`config.query_tags`<br>`config.query_tag_assignments`<br>`collect.servers` |
@@ -212,6 +213,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_notification_routes` | `config.config_notification_routes`<br>`config.investigation_requests`<br>`config.config_monitored_servers`<br>`config.server_tags`<br>`config.server_tag_map` |
 | `get_oversized_plan_backlog` | `collect.oversized_plan_backlog`<br>`collect.servers` |
 | `get_people` | `config.person`<br>`config.person_identity`<br>`config.person_grant`<br>`config.config_monitored_servers`<br>`config.server_tags` |
+| `get_personal_tokens` | `config.mcp_personal_token` |
 | `get_read_latency` | `collect.read_latency` |
 | `get_server_actions` | `config.config_monitored_servers`<br>`config.config_server_actions`<br>`collect.servers` |
 | `get_server_settings` | `config.config_monitored_servers` |
@@ -268,6 +270,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `create_query_tag` | `config.query_tags` (insert) |
 | `create_query_tag_rule` | `config.query_tag_rules` (insert)<br>`config.query_tags`<br>`config.query_tag_state`<br>`collect.servers` |
 | `create_server_tag` | `config.server_tags` (insert) |
+| `create_web_access_group` | `config.web_access_groups` (insert)<br>`config.web_access_group_tags` (insert)<br>`config.web_access_group_events` (insert)<br>`config.web_access_advanced`<br>`config.server_tags` |
 | `declare_change_window` | `config.investigation_change_windows` (insert)<br>`config.investigation_journal` (insert)<br>`collect.servers` (name lookup) |
 | `delete_custom_alert_rule` | `config.custom_alert_rules`<br>`config.custom_alert_state`<br>`config.config_alert_log` |
 | `delete_custom_view` | `config.custom_views` |
@@ -277,6 +280,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `delete_query_tag` | `config.query_tags` (delete)<br>`config.query_tag_assignments`<br>`config.query_tag_rules` |
 | `delete_query_tag_rule` | `config.query_tag_rules` (delete)<br>`config.query_tags`<br>`config.query_tag_state` |
 | `delete_server_tag` | `config.server_tags` (delete)<br>`config.server_tag_map`<br>`config.custom_alert_rules` |
+| `delete_web_access_group` | `config.web_access_groups` (delete)<br>`config.web_access_group_tags` (delete)<br>`config.web_access_group_events` (insert) |
 | `disable_collector` | `config.config_collector_schedules` |
 | `disable_server` | `config.config_monitored_servers` |
 | `dismiss_alert_history` | `config.config_alert_log` |
@@ -289,6 +293,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `generate_webhook_signing_key` | `config.config_notification`<br>`config.config_notification_routes` |
 | `kill_session` | `collect.server_properties`<br>`collect.dmv_blocking_snapshots` (through the view `collect.v_dmv_blocking_snapshots`)<br>`collect.blocked_process_reports` |
 | `merge_deadlock_signatures` | `config.investigation_signature_merges`<br>`config.investigation_signature_days` |
+| `mint_personal_token` | `config.mcp_personal_token` (insert)<br>`config.investigation_journal` |
 | `mute_analysis_finding` | `config.analysis_muted`<br>`collect.analysis_findings` |
 | `new_password_key` | None. It writes a key file into the service's own pending-password-keys folder on its machine and answers with the file's path and the key's fingerprint. |
 | `pause_collection` | `config.config_command`<br>`config.config_service` |
@@ -307,10 +312,13 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `reset_password_key` | `config.password_key` (update)<br>`config.config_monitored_servers` (read, to count the sealed passwords)<br>`config.config_notification` (read) |
 | `restore_alert_history` | `config.config_alert_log` |
 | `resume_collection` | `config.config_command`<br>`config.config_service` |
+| `rotate_web_access_group_token` | `config.web_access_groups` (update)<br>`config.web_access_group_events` (insert) |
+| `revoke_personal_token` | `config.mcp_personal_token` (update)<br>`config.investigation_journal` |
 | `run_collectors_now` | `config.config_command` |
 | `save_environment_profile` | `config.agent_environment_profiles` (upsert/delete)<br>`config.server_tags` (tag exists check)<br>`config.config_monitored_servers` (server exists check)<br>`config.investigation_journal` |
 | `send_daily_health_report_now` | `config.config_alert_log` (insert, the alert history row)<br>`config.config_alert_settings` (read)<br>`config.config_notification_routes` (read)<br>`config.config_mute_rules` (read)<br>The objects that `get_daily_health_report` reads. |
 | `send_test_notification` | No collected data. It sends one test message to a channel and writes nothing to the store. |
+| `set_advanced_web_access` | `config.web_access_advanced` (update)<br>`config.web_access_group_events` (insert) |
 | `set_agent_actions_enabled` | `config.config_service` |
 | `set_alert_threshold_override` | `config.config_threshold_overrides` |
 | `set_collector_databases` | `config.config_collector_schedules` |
@@ -345,4 +353,5 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `update_query_tag_rule` | `config.query_tag_rules` (update)<br>`config.query_tags`<br>`config.query_tag_state`<br>`collect.servers` |
 | `update_server_tag` | `config.server_tags` (update) |
 | `update_service_flags` | `config.config_service` |
+| `update_web_access_group` | `config.web_access_groups` (update)<br>`config.web_access_group_tags` (insert/delete)<br>`config.web_access_group_events` (insert)<br>`config.server_tags` |
 | `write_investigation_note` | `config.investigation_notes` (insert)<br>`collect.servers` (exists check) |

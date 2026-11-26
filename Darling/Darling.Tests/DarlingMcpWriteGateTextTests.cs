@@ -28,8 +28,8 @@ public sealed class DarlingMcpWriteGateTextTests
     }
 
     [Theory]
-    [InlineData(true, "set_server_action on via mcp.allowServerAdmin")]
-    [InlineData(false, "set_server_action off")]
+    [InlineData(true, "update_web_access_group on via mcp.allowServerAdmin")]
+    [InlineData(false, "update_web_access_group off")]
     public void Start_WritesServed_WarnsOnce_NamingEveryServerAdminTool(bool serverAdmin, string state)
     {
         var mcp = new McpConfig { AllowWrites = true, AllowServerAdmin = serverAdmin };

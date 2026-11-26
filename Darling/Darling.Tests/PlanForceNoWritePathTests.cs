@@ -197,6 +197,13 @@ public sealed class PlanForceNoWritePathTests
         nameof(DarlingMcpServerActionTools) + "." + nameof(DarlingMcpServerActionTools.SetServerAction),
         /* #6569: set_alert_threshold_override is a Level 2 agent action, so it takes the owner source and the service, not the mcp login, writes its action rows. */
         nameof(DarlingMcpThresholdOverrideTools) + "." + nameof(DarlingMcpThresholdOverrideTools.SetAlertThresholdOverride),
+        /* #9642: the web access tools write config.web_access_groups and config.web_access_advanced, which only the store owner can execute (the mcp login holds no grant). */
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.CreateWebAccessGroup),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.DeleteWebAccessGroup),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.GetWebAccessGroups),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.RotateWebAccessGroupToken),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.SetAdvancedWebAccess),
+        nameof(DarlingMcpWebAccessTools) + "." + nameof(DarlingMcpWebAccessTools.UpdateWebAccessGroup),
         }, takers);
     }
 

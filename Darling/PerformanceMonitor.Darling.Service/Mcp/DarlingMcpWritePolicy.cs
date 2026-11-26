@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <item><see cref="McpConfig.AllowWrites"/> (<c>mcp.allowWrites</c>) offers the tools that change alerting,
 /// mutes, custom alert rules and Custom Views, and the analysis mute.</item>
 /// <item><see cref="McpConfig.AllowServerAdmin"/> (<c>mcp.allowServerAdmin</c>) additionally offers
-/// <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>. It does nothing unless <c>mcp.allowWrites</c> is also on.</item>
+/// <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c>, <c>set_server_action</c> and the web access tools (<c>create_web_access_group</c>, <c>update_web_access_group</c>, <c>rotate_web_access_group_token</c>, <c>delete_web_access_group</c>, <c>set_advanced_web_access</c>, #9642). It does nothing unless <c>mcp.allowWrites</c> is also on.</item>
 /// </list>
 /// A write that is not allowed is ABSENT from the served tool collection, not merely hidden from
 /// <c>tools/list</c>: the SDK's <c>tools/call</c> dispatch consults the same collection, so the call fails as an
@@ -47,23 +47,43 @@ internal static class DarlingMcpWritePolicy
     /// <summary>The darling.json key that offers the write tools.</summary>
     internal const string WritesSetting = "mcp.allowWrites";
 
-    /// <summary>The darling.json key that additionally offers <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>.</summary>
+    /// <summary>The darling.json key that additionally offers <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>, (#9641) <c>add_alert_source</c>, <c>rotate_alert_source</c> and <c>remove_alert_source</c>, and (#9643) <c>mint_personal_token</c>, <c>revoke_personal_token</c> and <c>get_personal_tokens</c>.</summary>
     internal const string ServerAdminSetting = "mcp.allowServerAdmin";
 
     /// <summary>The tools that change which servers the service connects to, or where. They present the service's
-    /// own account to whatever host the caller names, so they sit behind their own setting.</summary>
+    /// own account to whatever host the caller names, so they sit behind their own setting. <c>get_web_access_groups</c> is a read that
+    /// sits here too (#9642): it reads on the store owner connection, and the store grants those columns to the Viewer's admin and web
+    /// roles only, so it is served only where the group writes are.</summary>
     internal static readonly IReadOnlySet<string> ServerAdminTools = new HashSet<string>(StringComparer.Ordinal)
     {
         "add_servers",
         "remove_server",
         "edit_server",
         "set_server_action",
-        "new_password_key",
+        "new_password_key",
         "reset_password_key",
+        "create_web_access_group",
+        "delete_web_access_group",
+        "rotate_web_access_group_token",
+        "set_advanced_web_access",
+        "update_web_access_group",
+        "get_web_access_groups",
+        "mint_personal_token",
+        "revoke_personal_token",
+        "get_personal_tokens",
         /* #9641: they create, change and drop a database login, so they sit behind the same switch. */
         "add_alert_source",
         "rotate_alert_source",
         "remove_alert_source",
+    };
+
+    /// <summary>The personal token tools (#9643): make, revoke and list a person's MCP token. They are server admin tools, and a call made with a
+    /// personal token is never offered them, so a token can never make, revoke or list tokens (<see cref="Effective.PersonalToken"/>).</summary>
+    internal static readonly IReadOnlySet<string> PersonalTokenTools = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "mint_personal_token",
+        "revoke_personal_token",
+        "get_personal_tokens",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
@@ -84,6 +104,13 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "create_web_access_group",
+        "delete_web_access_group",
+        "rotate_web_access_group_token",
+        "set_advanced_web_access",
+        "update_web_access_group",
+        "mint_personal_token",
+        "revoke_personal_token",
         "add_alert_source",
         "rotate_alert_source",
         "remove_alert_source",
@@ -220,6 +247,7 @@ internal static class DarlingMcpWritePolicy
     /// </summary>
     internal static readonly IReadOnlySet<string> NeverAgentTools = new HashSet<string>(StringComparer.Ordinal)
     {
+        "get_personal_tokens",
         "update_alert_settings",
         "mute_analysis_finding",
         "unmute_analysis_finding",
@@ -283,6 +311,14 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "create_web_access_group",
+        "delete_web_access_group",
+        "rotate_web_access_group_token",
+        "set_advanced_web_access",
+        "update_web_access_group",
+        "get_web_access_groups",
+        "mint_personal_token",
+        "revoke_personal_token",
         /* #9641: a database login is never an agent's to create, change or drop. */
         "add_alert_source",
         "rotate_alert_source",
@@ -312,7 +348,7 @@ internal static class DarlingMcpWritePolicy
     /// <summary>What the host actually offers, after the settings and the token are reconciled. <see cref="TokenName"/> is the
     /// name of the named token (#6542) a request presented, or null for the legacy single token and for the start-wide policy: an
     /// agent token's name is its identity, and an operator token's name is what its route journal rows record.</summary>
-    internal readonly record struct Effective(bool Writes, bool ServerAdmin, bool Investigations = false, string? TokenName = null)
+    internal readonly record struct Effective(bool Writes, bool ServerAdmin, bool Investigations = false, string? TokenName = null, bool PersonalToken = false)
     {
         internal static readonly Effective Off = new(false, false);
 
@@ -347,6 +383,9 @@ internal static class DarlingMcpWritePolicy
                 return true;
             if (Investigations && ChangeWindowTools.Contains(toolName))
                 return true;
+            /* #9643: a call made with a personal token is never offered the personal token tools, so a token cannot make, revoke or list tokens. */
+            if (PersonalToken && PersonalTokenTools.Contains(toolName))
+                return false;
             if (IsServerAdmin(toolName))
                 return ServerAdmin;
             if (IsWrite(toolName))

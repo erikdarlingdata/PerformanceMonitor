@@ -134,6 +134,14 @@ public static partial class DarlingWebEndpoints
     public static readonly IReadOnlySet<string> ExcludedToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_server",
+        // #9642: the web access groups are managed from the Viewer and these MCP tools. The web dashboard serves no page for them, so a group list is not a page read.
+        "get_web_access_groups",
+        // #9642: the five writes are group administration. A web seat reads no endpoint for them, so a web session never holds group admin.
+        "set_advanced_web_access",
+        "create_web_access_group",
+        "update_web_access_group",
+        "rotate_web_access_group_token",
+        "delete_web_access_group",
         "mute_analysis_finding",
         "unmute_analysis_finding",
         "analyze_query_plan",
@@ -297,6 +305,10 @@ public static partial class DarlingWebEndpoints
         "new_password_key",
         "reset_password_key",
         "get_server_actions",
+        /* #9643: the personal token page has its own routes (/api/mcp-tokens); the MCP mint and revoke are under mcp.allowServerAdmin and the list read is MCP-only. */
+        "mint_personal_token",
+        "revoke_personal_token",
+        "get_personal_tokens",
         /* #7107: the people directory read. The Admin People tab has its own web routes (GET /api/people and PUT /api/people/{command}). */
         "get_people",
         /* #6402: the read of the fields edit_server changes; the web edit form has its own read (GET /api/admin/servers/{id}), so no /api/read page mirrors it. */
