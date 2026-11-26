@@ -57,6 +57,26 @@ internal sealed class ObjectUsageChainBuilder
     /// <summary>How long a step waits for the store's write lock before the pass stops.</summary>
     private static readonly TimeSpan WriteLockBudget = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// The share of the hot store's reset point (<see cref="HotStoreResetLimit.Current"/>, the <c>hot_store_reset_mb</c> setting) the three chain
+    /// tables may use together. They live in the hot store and count toward the reset, and a collector that runs hourly writes about 24 times the
+    /// delta rows a daily one does.
+    /// </summary>
+    internal const double CapShareOfResetPoint = 0.10;
+
+    /// <summary>
+    /// The stored size of one chain row, for the size estimate: the row count of the three tables times this. A store of 4,950,000 delta rows and
+    /// 50,000 runs measured 11.3 bytes a row in <c>pragma_database_size()</c> on counters that grow evenly, which compress well, so the estimate
+    /// uses twice that. A row count is one metadata read per table, so the check is cheap enough to run after every step.
+    /// </summary>
+    internal const int EstimatedBytesPerRow = 24;
+
+    /// <summary>A trim goes down to this share of the cap, so the pass that follows has room to build before it is over again.</summary>
+    internal const double TrimTargetShare = 0.8;
+
+    /// <summary>The shortest span of newest snapshots worth keeping: a chain that cannot hold this much under the cap is dropped and the fold answers.</summary>
+    internal const int MinKeptDays = 7;
+
     /// <summary>The databases whose newest hot snapshot is ahead of their chain, or whose chain was built under older rules. $1 the current step version.</summary>
     internal const string PendingPairsSql = """
         SELECT
@@ -179,11 +199,24 @@ internal sealed class ObjectUsageChainBuilder
     /// <summary>The clock the purge horizon is measured from. The wall clock, except in a test that builds a history around a fixed day.</summary>
     private readonly Func<DateTime> _utcNow;
 
-    internal ObjectUsageChainBuilder(DuckDbInitializer duckDb, Func<DateTime>? utcNow = null)
+    /// <summary>The hot store's reset point in MB, read at each check. The setting the reset itself uses, except in a test that needs a small one.</summary>
+    private readonly Func<double> _resetPointMb;
+
+    /// <summary>Databases whose newest <see cref="MinKeptDays"/> did not fit under the cap. They are not extended again until the next start.</summary>
+    private readonly HashSet<(int ServerId, string DatabaseName)> _stopped = [];
+
+    /// <summary>The database being extended when the chain reached the cap, for the pass to deal with at its end.</summary>
+    private (int ServerId, string DatabaseName)? _capHit;
+
+    internal ObjectUsageChainBuilder(DuckDbInitializer duckDb, Func<DateTime>? utcNow = null, Func<double>? resetPointMb = null)
     {
         _duckDb = duckDb ?? throw new ArgumentNullException(nameof(duckDb));
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _resetPointMb = resetPointMb ?? (() => HotStoreResetLimit.Current.Mb);
     }
+
+    /// <summary>The most chain rows (all three tables) the cap allows.</summary>
+    internal long CapRows => (long)(_resetPointMb() * 1048576.0 * CapShareOfResetPoint / EstimatedBytesPerRow);
 
     /// <summary>What an index's presence run is keyed on: the columns whose change starts a new run.</summary>
     private readonly record struct RunIdentity(string SchemaName, string ObjectName, bool IsIndexedView, bool? IsMemoryOptimized);
@@ -206,11 +239,19 @@ internal sealed class ObjectUsageChainBuilder
         {
             var started = DateTime.UtcNow;
             var built = 0;
+            _capHit = null;
+            var notes = new List<string>();
+            AddNote(notes, await EnforceCapAsync(cancellationToken));
             foreach (var (serverId, databaseName) in await ReadPendingPairsAsync(cancellationToken))
             {
-                if (built >= maxSteps || DateTime.UtcNow - started >= MaxPassDuration)
+                if (built >= maxSteps || DateTime.UtcNow - started >= MaxPassDuration || _capHit is not null)
                 {
                     break;
+                }
+
+                if (_stopped.Contains((serverId, databaseName)))
+                {
+                    continue;
                 }
 
                 try
@@ -228,7 +269,13 @@ internal sealed class ObjectUsageChainBuilder
                 }
             }
 
+            AddNote(notes, await EnforceCapAsync(cancellationToken));
             await PurgeAsync(_utcNow().AddDays(-RetentionDays), cancellationToken);
+            if (notes.Count > 0)
+            {
+                AppLogger.Warn("ObjectUsage", string.Join(" ", notes));
+            }
+
             return built;
         }
         finally
@@ -326,6 +373,11 @@ internal sealed class ObjectUsageChainBuilder
 
             await StepAsync(serverId, databaseName, stepper, open, time, rows, cancellationToken);
             steps++;
+            if (await CountChainRowsAsync(cancellationToken) is var chainRows && chainRows.Deltas + chainRows.Other >= CapRows)
+            {
+                _capHit = (serverId, databaseName);
+                break;
+            }
         }
 
         return steps;
@@ -617,6 +669,116 @@ internal sealed class ObjectUsageChainBuilder
             transaction.Rollback();
             throw;
         }
+    }
+
+    private static void AddNote(List<string> notes, string? note)
+    {
+        if (note is not null)
+        {
+            notes.Add(note);
+        }
+    }
+
+    /// <summary>The delta rows, and the snapshot and run rows, of the chain. One metadata count per table.</summary>
+    private async Task<(long Deltas, long Other)> CountChainRowsAsync(CancellationToken cancellationToken)
+    {
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                (SELECT count(*) FROM object_usage_deltas),
+                (SELECT count(*) FROM object_usage_snapshots) + (SELECT count(*) FROM object_usage_runs)
+            """;
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        await reader.ReadAsync(cancellationToken);
+        return (Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture), Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// Keeps the three chain tables under <see cref="CapRows"/>. Over it, the oldest days of snapshots go through <see cref="PurgeAsync"/> with a later
+    /// cutoff until the rest is under <see cref="TrimTargetShare"/> of the cap, so the newest windows keep the chain and a longer window folds (the
+    /// reader needs the chain's facts at the window's baseline). If the newest <see cref="MinKeptDays"/> days do not fit, the chain of the database being
+    /// extended (every database when none was) is dropped and not extended again until the next start. Returns the sentence for the pass's one warning,
+    /// or null when the chain was under the cap.
+    /// </summary>
+    private async Task<string?> EnforceCapAsync(CancellationToken cancellationToken)
+    {
+        var capRows = CapRows;
+        var (deltas, other) = await CountChainRowsAsync(cancellationToken);
+        if (deltas + other <= capRows)
+        {
+            return null;
+        }
+
+        var days = new List<(DateTime Day, long Rows)>();
+        using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
+        using (var connection = _duckDb.CreateConnection())
+        {
+            await connection.OpenAsync(cancellationToken);
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT
+                    CAST(CAST(collection_time AS DATE) AS TIMESTAMP),
+                    count(*)
+                FROM object_usage_deltas
+                GROUP BY CAST(collection_time AS DATE)
+                ORDER BY 1 DESC
+                """;
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                days.Add((reader.GetDateTime(0), Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture)));
+            }
+        }
+
+        var budget = (long)(capRows * TrimTargetShare) - other;
+        long kept = 0;
+        DateTime? cutoff = null;
+        foreach (var (day, rows) in days)
+        {
+            if (kept + rows > budget)
+            {
+                break;
+            }
+
+            kept += rows;
+            cutoff = day;
+        }
+
+        var capText = $"The object usage chain is over its cap of {capRows * EstimatedBytesPerRow / 1048576.0:F1} MB ({CapShareOfResetPoint:P0} of the hot store reset point, hot_store_reset_mb).";
+        if (cutoff is { } from && days.Count > 0 && (days[0].Day - from).TotalDays >= MinKeptDays - 1)
+        {
+            await PurgeAsync(from, cancellationToken);
+            return $"{capText} Snapshots before {from:yyyy-MM-dd} were trimmed, so longer windows fold.";
+        }
+
+        var victims = _capHit is { } hit ? [hit] : await ReadChainPairsAsync(cancellationToken);
+        foreach (var victim in victims)
+        {
+            await DeletePairAsync(victim.ServerId, victim.DatabaseName, cancellationToken);
+            _stopped.Add(victim);
+        }
+
+        return $"{capText} The newest {MinKeptDays} days do not fit, so the chain of {victims.Count} database(s) was dropped and is not extended until the next start. Reads fold.";
+    }
+
+    private async Task<List<(int ServerId, string DatabaseName)>> ReadChainPairsAsync(CancellationToken cancellationToken)
+    {
+        var pairs = new List<(int, string)>();
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT DISTINCT server_id, database_name FROM object_usage_snapshots";
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            pairs.Add((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), reader.GetString(1)));
+        }
+
+        return pairs;
     }
 
     /// <summary>
