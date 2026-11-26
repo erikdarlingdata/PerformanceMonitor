@@ -210,7 +210,7 @@ public sealed class QueryStoreReplicaSettingTests
         server.StoredIdentity = null;
         server.QueryStoreReplica = "replica-01";
 
-        Assert.Throws<InvalidOperationException>(() => MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(server, false, Ring));
+        Assert.Throws<SavedSecretUnavailableException>(() => MonitoredServerConnection.BuildQueryStoreReplicaConnectionString(server, false, Ring));
     }
 
     /* #6254 security round 1, L1: a stored env:/file: reference is not sealed, so no binding covers it. It goes to a replica only when
