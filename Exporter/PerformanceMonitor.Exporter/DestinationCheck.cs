@@ -37,7 +37,8 @@ public static class DestinationCheck
     /// <summary>
     /// Checks that every environment variable the destination names for its keys is set: the S3 access key and secret key, the
     /// Azure connection string or the Azure SAS. An unset one fails every window at its upload, so it is a
-    /// <see cref="ConfigException"/> (exit 2) that names the config key and the variable. The value is never read into a message.
+    /// <see cref="ConfigException"/> (exit 2) that names the config key only. Neither the value nor the variable name reaches a message,
+    /// because a pasted key can look like a name.
     /// </summary>
     public static void AssertCredentials(ExporterConfig config, Func<string, string?>? getEnvironmentVariable = null)
     {
@@ -55,7 +56,7 @@ public static class DestinationCheck
         {
             if (string.IsNullOrWhiteSpace(read(name)))
             {
-                throw new ConfigException($"{key}: the environment variable '{name}' is not set");
+                throw new ConfigException($"{key}: the environment variable it names is not set");
             }
         }
 

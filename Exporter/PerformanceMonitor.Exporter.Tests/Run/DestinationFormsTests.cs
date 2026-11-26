@@ -50,9 +50,9 @@ public class DestinationFormsTests
     private const string S3EnvKeys = """{ "type": "s3", "bucket": "b", "region": "us-east-2", "credentials": { "access_key_id_env": "LAB_AK", "secret_access_key_env": "LAB_SK", "session_token_env": "LAB_ST" } }""";
     private const string S3Profile = """{ "type": "s3", "bucket": "b", "credentials": { "profile": "exporter" } }""";
     private const string S3NoChecksum = """{ "type": "s3", "bucket": "b", "checksum": "none" }""";
-    private const string AzureDefault = """{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net", "container": "c", "prefix": "p", "auth": { "method": "default_credential" } }""";
-    private const string AzureConnectionString = """{ "type": "azure_blob", "container": "c", "auth": { "method": "connection_string_env", "name": "LAB_AZ_CS" } }""";
-    private const string AzureSas = """{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net", "container": "c", "auth": { "method": "sas_url_env", "name": "LAB_AZ_SAS" } }""";
+    private const string AzureDefault = """{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net", "container": "exports", "prefix": "p", "auth": { "method": "default_credential" } }""";
+    private const string AzureConnectionString = """{ "type": "azure_blob", "container": "exports", "auth": { "method": "connection_string_env", "name": "LAB_AZ_CS" } }""";
+    private const string AzureSas = """{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net", "container": "exports", "auth": { "method": "sas_url_env", "name": "LAB_AZ_SAS" } }""";
 
     public static TheoryData<string> ConfigOnlyForms => [S3Endpoint, S3EnvKeys, S3Profile, S3NoChecksum, AzureDefault, AzureConnectionString, AzureSas];
 
@@ -103,7 +103,7 @@ public class DestinationFormsTests
     [Theory]
     [InlineData("""{ "type": "s3", "bucket": "b", "hive_store_folder": true }""")]
     [InlineData("""{ "type": "local", "path": "/srv/landing", "hive_store_folder": true }""")]
-    [InlineData("""{ "type": "azure_blob", "container": "c", "hive_store_folder": true, "auth": { "method": "connection_string_env", "name": "X" } }""")]
+    [InlineData("""{ "type": "azure_blob", "container": "exports", "hive_store_folder": true, "auth": { "method": "connection_string_env", "name": "X" } }""")]
     public void The_hive_store_folder_layout_is_refused_for_every_type(string destination)
     {
         using var r = new RunRoot();
@@ -285,11 +285,23 @@ public class DestinationFormsTests
     [Theory]
     [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "https://lab-user:lab-secret-value@minio.example:9000" }""", "destination.endpoint_url must not carry", "lab-secret-value")]
     [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "https://minio.example/?X-Amz-Signature=lab-secret-value" }""", "destination.endpoint_url must not carry", "lab-secret-value")]
-    [InlineData("""{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net/?sv=2025&sig=lab-secret-value", "container": "c", "auth": { "method": "default_credential" } }""", "destination.account_url must not carry", "lab-secret-value")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net/?sv=2025&sig=lab-secret-value", "container": "exports", "auth": { "method": "default_credential" } }""", "destination.account_url must not carry", "lab-secret-value")]
     [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "minio.example:9000" }""", "destination.endpoint_url is not a valid http or https URL", "minio.example")]
-    [InlineData("""{ "type": "azure_blob", "container": "c", "auth": { "method": "connection_string_env", "name": "DefaultEndpointsProtocol=https;AccountName=a;AccountKey=lab-secret-value" } }""", "destination.auth.name must be the name of an environment variable", "lab-secret-value")]
-    [InlineData("""{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "c", "auth": { "method": "sas_url_env", "name": "sv=2025&sig=lab-secret-value" } }""", "destination.auth.name must be the name of an environment variable", "lab-secret-value")]
+    [InlineData("""{ "type": "azure_blob", "container": "exports", "auth": { "method": "connection_string_env", "name": "DefaultEndpointsProtocol=https;AccountName=a;AccountKey=lab-secret-value" } }""", "destination.auth.name must be the name of an environment variable", "lab-secret-value")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "exports", "auth": { "method": "sas_url_env", "name": "sv=2025&sig=lab-secret-value" } }""", "destination.auth.name must be the name of an environment variable", "lab-secret-value")]
     [InlineData("""{ "type": "s3", "bucket": "b", "credentials": { "access_key_id_env": "LAB_AK", "secret_access_key_env": "lab/secret+value" } }""", "destination.credentials.secret_access_key_env must be the name of an environment variable", "lab/secret+value")]
+    [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "https://minio.example/#lab-secret-value" }""", "destination.endpoint_url must not carry", "lab-secret-value")]
+    [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "https://minio.example/bucket%3Flab-secret-value" }""", "destination.endpoint_url must not carry", "lab-secret-value")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net/#lab-secret-value", "container": "exports", "auth": { "method": "default_credential" } }""", "destination.account_url must not carry", "lab-secret-value")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net/sig=lab-secret-value", "container": "exports", "auth": { "method": "default_credential" } }""", "destination.account_url must not carry", "lab-secret-value")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "http://acct.blob.core.windows.net", "container": "exports", "auth": { "method": "sas_url_env", "name": "LAB_AZ_SAS" } }""", "destination.account_url must be an https URL", "acct.blob")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "file:///lab-secret-value", "container": "exports", "auth": { "method": "default_credential" } }""", "destination.account_url must be an https URL", "lab-secret-value")]
+    [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "http://169.254.169.254/lab-secret-value" }""", "destination.endpoint_url must not point at a link-local address", "169.254.169.254")]
+    [InlineData("""{ "type": "local", "path": "/srv/landing", "prefix": "../lab-secret-value" }""", "destination.prefix must not contain a '.' or '..' segment", "lab-secret-value")]
+    [InlineData("""{ "type": "s3", "bucket": "b", "prefix": "a/../lab-secret-value" }""", "destination.prefix must not contain a '.' or '..' segment", "lab-secret-value")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net", "container": "exports", "prefix": "../lab-secret-value", "auth": { "method": "default_credential" } }""", "destination.prefix must not contain a '.' or '..' segment", "lab-secret-value")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "https://acct.blob.core.windows.net", "container": "Lab_Secret_Value", "auth": { "method": "default_credential" } }""", "destination.container must be 3 to 63 characters", "Lab_Secret_Value")]
+    [InlineData("""{ "type": "s3", "bucket": "lab/secret-value" }""", "destination.bucket must be a bucket name", "lab/secret-value")]
     public async Task A_url_or_a_variable_name_that_carries_a_key_is_refused_and_the_message_does_not_repeat_it(string destination, string message, string mustNotAppear)
     {
         using var r = new RunRoot();
@@ -306,17 +318,18 @@ public class DestinationFormsTests
     // ---- the key variables are checked before the first window ----
 
     [Theory]
-    [InlineData(S3EnvKeys, "LAB_AK", "destination.credentials.access_key_id_env: the environment variable 'LAB_AK' is not set")]
-    [InlineData(S3EnvKeys, "LAB_SK", "destination.credentials.secret_access_key_env: the environment variable 'LAB_SK' is not set")]
-    [InlineData(AzureConnectionString, "LAB_AZ_CS", "destination.auth.name: the environment variable 'LAB_AZ_CS' is not set")]
-    [InlineData(AzureSas, "LAB_AZ_SAS", "destination.auth.name: the environment variable 'LAB_AZ_SAS' is not set")]
-    public void An_unset_key_variable_is_a_config_error_that_names_the_key_and_the_variable(string destination, string unset, string message)
+    [InlineData(S3EnvKeys, "LAB_AK", "destination.credentials.access_key_id_env: the environment variable it names is not set")]
+    [InlineData(S3EnvKeys, "LAB_SK", "destination.credentials.secret_access_key_env: the environment variable it names is not set")]
+    [InlineData(AzureConnectionString, "LAB_AZ_CS", "destination.auth.name: the environment variable it names is not set")]
+    [InlineData(AzureSas, "LAB_AZ_SAS", "destination.auth.name: the environment variable it names is not set")]
+    public void An_unset_key_variable_is_a_config_error_that_names_the_config_key_and_not_the_variable(string destination, string unset, string message)
     {
         using var r = new RunRoot();
         var config = ConfigLoader.Parse(Config(r, destination), isWindows: false);
         var ex = Assert.Throws<ConfigException>(() => DestinationCheck.AssertCredentials(config, name => name == unset ? null : "set-value"));
         Assert.Equal(message, ex.Message);
         Assert.DoesNotContain("set-value", ex.Message);
+        Assert.DoesNotContain(unset, ex.Message);
         DestinationCheck.AssertCredentials(config, _ => "set-value");
     }
 
@@ -332,7 +345,7 @@ public class DestinationFormsTests
     }
 
     [Fact]
-    public async Task Run_with_an_unset_key_variable_exits_2_with_one_line_and_starts_no_window_and_plan_only_still_plans()
+    public async Task Run_with_an_unset_key_variable_exits_2_with_one_line_that_does_not_name_the_variable_and_starts_no_window_and_plan_only_still_plans()
     {
         using var r = new RunRoot(); r.SeedState("destforms");
         var credential = Path.Combine(r.Root, "pw.txt");
@@ -347,14 +360,58 @@ public class DestinationFormsTests
         var exit = await RunCommand.MainAsync(["--config", cfg, "--now", "2026-09-28T16:30:00Z"], o, e, CancellationToken.None, child);
         Assert.Equal(2, exit);
         Assert.Empty(child.Calls);
-        Assert.Equal($"Config error: destination.auth.name: the environment variable '{name}' is not set", e.ToString().Trim());
+        Assert.Equal("Config error: destination.auth.name: the environment variable it names is not set", e.ToString().Trim());
 
         var check = new StringWriter();
         Assert.Equal(2, await CliVerbs.CheckConfigAsync(["check-config", "--config", cfg], new StringWriter(), check, CancellationToken.None));
-        Assert.Contains(name, check.ToString());
+        Assert.Equal("Config error: destination.auth.name: the environment variable it names is not set", check.ToString().Trim());
+        Assert.DoesNotContain(name, check.ToString());
 
         var plan = await RunCommand.MainAsync(["--config", cfg, "--plan-only", "--now", "2026-09-28T16:30:00Z"], new StringWriter(), new StringWriter(), CancellationToken.None,
             planStoreCheck: (_, _) => Task.FromResult<string?>(null));
         Assert.Equal(0, plan);
+    }
+
+    // ---- a duplicate key is a config error for every verb that reads the config ----
+
+    private static string DuplicateBucketConfig(RunRoot r, string credentialFile) =>
+        Config(r, """{ "type": "s3", "bucket": "lab-first-value", "bucket": "lab-second-value" }""", credentialFile);
+
+    [Fact]
+    public async Task A_duplicate_key_is_exit_2_with_one_line_naming_the_key_from_check_config_run_plan_only_and_export()
+    {
+        using var r = new RunRoot(); r.SeedState("destforms");
+        var credential = Path.Combine(r.Root, "pw.txt");
+        File.WriteAllText(credential, "lab-value");
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(credential, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        var cfg = Path.Combine(r.Root, "c.json");
+        File.WriteAllText(cfg, DuplicateBucketConfig(r, credential));
+        const string line = "Config error: destination.bucket: duplicate key";
+
+        var checkOut = new StringWriter(); var checkErr = new StringWriter { NewLine = "\n" };
+        Assert.Equal(2, await CliVerbs.CheckConfigAsync(["check-config", "--config", cfg], checkOut, checkErr, CancellationToken.None));
+        Assert.Equal(line, checkErr.ToString().Trim());
+        Assert.Empty(checkOut.ToString());
+
+        var child = new FakeChild();
+        var runOut = new StringWriter(); var runErr = new StringWriter { NewLine = "\n" };
+        Assert.Equal(2, await RunCommand.MainAsync(["--config", cfg, "--now", "2026-09-28T16:30:00Z"], runOut, runErr, CancellationToken.None, child));
+        Assert.Equal(line, runErr.ToString().Trim());
+        Assert.Empty(child.Calls);
+
+        var planErr = new StringWriter { NewLine = "\n" };
+        Assert.Equal(2, await RunCommand.MainAsync(["--config", cfg, "--plan-only", "--now", "2026-09-28T16:30:00Z"], new StringWriter(), planErr, CancellationToken.None,
+            planStoreCheck: (_, _) => Task.FromResult<string?>(null)));
+        Assert.Equal(line, planErr.ToString().Trim());
+
+        var exportErr = new StringWriter { NewLine = "\n" };
+        Assert.Equal(2, await CliVerbs.ExportAsync(["--config", cfg, "--upload-destination", .. Window], new StringWriter(), exportErr, CancellationToken.None));
+        Assert.Equal(line, exportErr.ToString().Trim());
+
+        foreach (var text in new[] { checkErr.ToString(), runErr.ToString(), planErr.ToString(), exportErr.ToString() })
+        {
+            Assert.DoesNotContain("lab-first-value", text);
+            Assert.DoesNotContain("lab-second-value", text);
+        }
     }
 }

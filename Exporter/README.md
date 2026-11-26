@@ -189,8 +189,18 @@ An Azure Blob destination with a connection string in an environment variable:
 
 The config holds the names of environment variables and never a key. The exporter does not print a key, and `check-config` prints only the names.
 A variable name has only letters, digits and underscores. Anything else is refused, which catches a connection string or a SAS pasted in place of a name.
-A URL in the config must not carry a user name, a password or a query string. A SAS belongs in an environment variable.
+A key made only of letters, digits and underscores looks like a name, so keep keys in the variable and put only the variable's name in the config.
+A URL in the config must not carry a user name, a password, a query string, a fragment or a SAS in the path. A SAS belongs in an environment variable.
+`account_url` must be an `https` URL. `http` is accepted only for a loopback address (`localhost`, `127.0.0.0/8` or `::1`), such as Azurite at `http://127.0.0.1:10000/devstoreaccount1`.
+`endpoint_url` may be `http` or `https`. Neither URL may point at a link-local address (`169.254.0.0/16` or `fe80::/10`), which is where cloud metadata services live.
 `check-config` and `run` stop with exit code 2 when a variable the destination names is not set. `run --plan-only` does not read the variables.
+The message names the config key (for example `destination.credentials.secret_access_key_env`) and never the variable or the profile.
+
+`prefix` is a folder path with `/` between folders. A `.` or `..` segment, a backslash and, for a `local` destination, a drive letter are refused, so a prefix cannot leave the destination.
+An `azure_blob` `container` follows the Azure naming rules: 3 to 63 characters of lowercase letters, digits and hyphens, starting and ending with a letter or digit, with no two hyphens in a row.
+An `s3` `bucket` cannot contain `/` or `\`, and cannot be `.` or `..`.
+
+A key that appears twice in the same object is an error in `check-config`, `run`, `run --plan-only` and `export --config`. The message names the key (for example `destination.bucket: duplicate key`) and exits with code 2.
 
 `run` uploads every window to the destination. `export` uploads only when you ask it to:
 
