@@ -42,7 +42,7 @@ public static class CredentialResolver
                 var key = spec.Source == CredentialSources.Env ? "store.password" : "store.connection_string_env";
                 var value = Environment.GetEnvironmentVariable(spec.Name ?? "");
                 return string.IsNullOrEmpty(value)
-                    ? throw new CredentialException($"{key}: env var '{spec.Name}' is not set or is empty")
+                    ? throw new CredentialException($"{key}: the environment variable it names is not set or is empty")
                     : value;
             }
 

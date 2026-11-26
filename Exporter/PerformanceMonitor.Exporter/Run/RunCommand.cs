@@ -64,11 +64,15 @@ public static class RunCommand
             }
 
             // What every window of this run needs is checked once, before the first window, so a configuration error is
-            // exit 2 with one line and no window is started: the store credential (a real run only) and the local
-            // destination folder, which the upload never creates.
+            // exit 2 with one line and no window is started: the store credential and the destination's key variables (a real
+            // run only) and the local destination folder, which the upload never creates.
             try
             {
-                if (!planOnly) CredentialResolver.Resolve(config.Store.Credential, TextWriter.Null);
+                if (!planOnly)
+                {
+                    CredentialResolver.Resolve(config.Store.Credential, TextWriter.Null);
+                    DestinationCheck.AssertCredentials(config);
+                }
                 DestinationCheck.Assert(config);
             }
             catch (Exception ex) when (ex is ConfigException or CredentialException)
