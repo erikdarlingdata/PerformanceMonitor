@@ -1280,10 +1280,9 @@ internal static partial class DarlingDataReader
                    when the row carries one (pre-dimension rows only; v_query_stats' COALESCE prefers it), else 0x01 and
                    the 32-byte digest. Only rows that carry a text or a digest take part, which is the row the view gives
                    a text for. A MAX keeps one value per group and has a combine step, so the aggregate stays partial and
-                   parallel where the planner wants it; an ordered array aggregate loses both. */
-                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
-                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
-                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
+                   parallel where the planner wants it; an ordered array aggregate loses both. ByteaMaxSql writes the MAX in the
+                   form PostgreSQL 16 and 17 run too, which have no max(bytea) (#9802). */
+                {ByteaMaxSql.LatestTextKey("q.")} AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
             FROM (
@@ -1588,9 +1587,7 @@ internal static partial class DarlingDataReader
                    text of ANY of its fragments and an ad-hoc group's the newest of its own hash. The pick sits inside
                    this pass's tag filter (#5984), so under a tag it is the newest text of the group's TAGGED fragments,
                    the rows the row's measures come from; fallback_text below carries the same token. */
-                MAX(timestamp_send(q.collection_time) || int8send(q.collection_id)
-                    || CASE WHEN q.query_text IS NOT NULL THEN '\x00'::bytea || convert_to(q.query_text, 'UTF8') ELSE '\x01'::bytea || q.query_text_digest END)
-                    FILTER (WHERE q.query_text IS NOT NULL OR q.query_text_digest IS NOT NULL) AS latest_text_key,
+                {ByteaMaxSql.LatestTextKey("q.")} AS latest_text_key,
                 MAX(w.rank_metric) AS rank_metric,
                 MAX(w.rank_cpu) AS rank_cpu
             FROM query_stats AS q

@@ -9,7 +9,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -119,7 +118,7 @@ public static class PgTableTuning
     /// The same bound as <see cref="CreateLockTimeoutSeconds"/>, as the <c>CommandTimeout</c> (seconds) of the start-path
     /// emptiness check. That check is a bare SELECT, so it takes ACCESS SHARE on the table and queues behind an ACCESS EXCLUSIVE
     /// holder (drop_chunks, decompress_chunk, VACUUM FULL) the way a CREATE does; with <see cref="SetupTimeoutSeconds"/> it
-    /// would hold the start for 300 s. It gives up here instead and fails closed onto the one-build budget (#6460).
+    /// would hold the start for 300 s. It gives up here instead and fails closed onto the shared build budget (#6460).
     /// </summary>
     private const int EmptinessCheckTimeoutSeconds = 5;
 
@@ -315,11 +314,20 @@ public static class PgTableTuning
     }
 
     /// <summary>
-    /// The indexes whose first build reads the heap of a large hypertable. A start builds at most one of them:
-    /// once one build has been issued, the rest that are still missing wait for the next start, so each start
-    /// pauses collection for one bounded build, not for the sum of several. Statement order decides which goes first.
+    /// #9795: the time, in seconds, the builds of the <see cref="s_startBuildBudget"/> indexes may take in one start, all of them
+    /// together. It is the limit of one build, so a start pauses collection for these builds no longer than one bounded build can.
     /// </summary>
-    private static readonly HashSet<string> s_oneBuildPerStart = new(StringComparer.Ordinal)
+    private const int StartBuildBudgetSeconds = SetupTimeoutSeconds;
+
+    /// <summary>
+    /// The indexes whose first build reads the heap of a large hypertable. They share one time budget per start
+    /// (<see cref="StartBuildBudgetSeconds"/>, #9795): a start builds every missing one, in statement order, while the builds so far
+    /// have taken less than the budget, and each build runs under the smaller of its own limit and the time left. A store whose
+    /// builds are quick, such as one upgraded across several releases with little history, has every index after one start. On a
+    /// store whose builds use the budget up, the rest wait for the next start, so each start pauses collection for no longer than
+    /// one bounded build, not for the sum of several.
+    /// </summary>
+    private static readonly HashSet<string> s_startBuildBudget = new(StringComparer.Ordinal)
     {
         LegacyRowIndexName,
         QueryStatsRestartRowIndexName,
@@ -330,8 +338,8 @@ public static class PgTableTuning
         QueryStoreServerHashIndexName,
     };
 
-    /// <summary>True for an index that shares the one-build-per-start budget.</summary>
-    internal static bool IsOneBuildPerStart(string indexName) => s_oneBuildPerStart.Contains(indexName);
+    /// <summary>True for an index whose build shares the start's build time budget.</summary>
+    internal static bool SharesStartBuildBudget(string indexName) => s_startBuildBudget.Contains(indexName);
 
     /// <summary>The index name in a <c>CREATE INDEX IF NOT EXISTS &lt;name&gt; ON ...</c> statement.</summary>
     private static string CreatedIndexName(string statement)
@@ -352,7 +360,7 @@ public static class PgTableTuning
     /// <summary>
     /// True when <paramref name="table"/> (a <c>schema.table</c> taken from <see cref="Statements"/>, never from input) has no
     /// row at all. A failed check, including one that gives up on a busy table after <see cref="EmptinessCheckTimeoutSeconds"/>,
-    /// answers false, so the index keeps the one-build budget; the command is cancelled on the server and the connection stays usable.
+    /// answers false, so the index stays on the shared build budget; the command is cancelled on the server and the connection stays usable.
     /// </summary>
     private static async Task<bool> TableIsEmptyAsync(NpgsqlConnection connection, string table, ILogger? logger, CancellationToken cancellationToken)
     {
@@ -364,7 +372,7 @@ public static class PgTableTuning
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(
-                "Could not tell whether {Table} is empty, so its index counts against the one-build budget this start: {Message}",
+                "Could not tell whether {Table} is empty, so its index build counts against this start's shared build time: {Message}",
                 table, ex.Message);
             return false;
         }
@@ -757,11 +765,11 @@ public static class PgTableTuning
            behind and applied every other statement, and the start after it tried again. A store whose build cannot fit
            the budget pauses for it at every start and keeps the FILTER statement.
 
-           ONE BUILD PER START: the index shares the one-build budget (s_oneBuildPerStart) and is the last of those a
-           hypertable store builds. On a store where an earlier one is also missing from a table that has rows, this start
-           builds that one and this index waits for the next start; until then the read keeps the FILTER statement. On a
-           plain-table store the wait_stats daily cover (WaitStatsDailyCoverIndexName) is later in this list and can wait
-           a start behind this index.
+           SHARED BUILD TIME: the index shares the start's build time budget (s_startBuildBudget, #9795) with the other
+           large indexes. On a store where earlier ones are also missing from tables that have rows, this start builds
+           those first and this index gets the time they leave; if that runs out it waits for the next start, and until
+           then the read keeps the FILTER statement. On a plain-table store the wait_stats daily cover
+           (WaitStatsDailyCoverIndexName) is later in this list and takes what this index leaves.
 
            THE READ, on a rig of one server with 8.0 M rows in 7 daily chunks, 5 of them compressed, warm, one procedure in
            one database:
@@ -939,10 +947,11 @@ public static class PgTableTuning
            INSERT queues. That is safe before collectors start and not while they write, which is also why QueryStoreBackgroundIndexes
            builds nothing on a hypertable (CONCURRENTLY is refused, and the Query Store backfill writes backdated rows into older chunks,
            so a per-chunk build would block it). The hourly pass never builds it: it warns once that the next start does. It shares the
-           one-build-per-start budget, last of the budget indexes, because it is the one that sorts every row of the uncompressed chunks
+           start's build time budget (#9795), last of the budget indexes, because it is the one that sorts every row of the uncompressed chunks
            rather than testing a filter. Compressed chunks get an empty 8 KB index. A build that outruns SetupTimeoutSeconds rolls back
            whole and is recorded (#9289, PgIndexBuildAttempts): the next start skips it for 24 hours unless the table has fewer uncompressed
-           pages than recorded, and a successful build deletes the record. The reader keeps its one-filter shape until the index is valid. */
+           pages than recorded, and a successful build deletes the record. A build that ran under less than that, because earlier builds
+           used part of the start's budget, is not recorded when it runs out: the next start tries it again. The reader keeps its one-filter shape until the index is valid. */
         "CREATE INDEX IF NOT EXISTS " + QueryStoreServerHashIndexName + " ON collect.query_store_stats (server_id, query_hash, collection_time DESC)",
         /* #9171: the dropped-database read behind the top-queries reads (QueryStoreBackfillState.LastSeenPerDatabaseSql: server_id and
            collection_time to filter, database_name to group) fetched the heap row of every snapshot row in the window, because the only
@@ -987,8 +996,9 @@ public static class PgTableTuning
         ApplyAsync(connection, logger, hourly, clock: null, SetupTimeoutSeconds, cancellationToken);
 
     /// <summary>
-    /// The pass with its two test seams (#9289): the clock the build-attempt record is stamped and aged with, and the CommandTimeout
-    /// (seconds) a start-path index build runs under. Production passes <see cref="SetupTimeoutSeconds"/> and the system clock.
+    /// The pass with its two test seams (#9289): the clock the build-attempt record is stamped and aged with and the builds are timed
+    /// with (#9795), and the CommandTimeout (seconds) the bounded start-path index build runs under. Production passes
+    /// <see cref="SetupTimeoutSeconds"/> and the system clock.
     /// </summary>
     internal static async Task<int> ApplyAsync(NpgsqlConnection connection, ILogger? logger, bool hourly, TimeProvider? clock, int buildTimeoutSeconds, CancellationToken cancellationToken = default)
     {
@@ -999,7 +1009,7 @@ public static class PgTableTuning
         }
 
         var applied = 0;
-        var buildIssued = false;
+        var budgetSpent = TimeSpan.Zero;
         var buildStartedAt = 0L;
         Dictionary<string, bool?>? hypertableByTable = null;
         foreach (var statement in Statements)
@@ -1007,6 +1017,9 @@ public static class PgTableTuning
             var sql = statement;
             var dropIssued = false;
             var bounded = false;
+            var budgeted = false;
+            var shortened = false;
+            TimeSpan? buildElapsed = null;
             PgIndexBuildAttempts.Attempt? priorAttempt = null;
             long? buildPages = null;
             var commandTimeout = SetupTimeoutSeconds;
@@ -1074,15 +1087,18 @@ public static class PgTableTuning
                     }
 
                     /* #6460: a table with no rows builds its index in no time and pauses nothing, so it does not use the
-                       one-build budget. Without this a brand-new store built one of the three large indexes at its first
-                       start and deferred the other two, and the first hourly pass then warned that they were missing. */
-                    var oneBuildPerStart = IsOneBuildPerStart(indexName)
+                       shared build budget. A brand-new store builds every large index at its first start. */
+                    var onBudget = SharesStartBuildBudget(indexName)
                         && !await TableIsEmptyAsync(connection, CreatedIndexTable(statement), logger, cancellationToken);
-                    if (oneBuildPerStart && buildIssued)
+
+                    /* #9795: the budget builds of one start share StartBuildBudgetSeconds. Whole seconds, because CommandTimeout is
+                       whole seconds and 0 there means no limit: with under a second left the build waits for the next start. */
+                    var secondsLeft = (int)Math.Floor((TimeSpan.FromSeconds(StartBuildBudgetSeconds) - budgetSpent).TotalSeconds);
+                    if (onBudget && secondsLeft < 1)
                     {
                         logger?.LogInformation(
-                            "Index collect.{Index} on {Table} is missing and is built at the next start: this start already issued one index build, and a start builds at most one",
-                            indexName, CreatedIndexTable(statement));
+                            "Index collect.{Index} on {Table} is missing and is built at the next start: the index builds of this start have used the {BudgetSeconds} s a start gives them in total",
+                            indexName, CreatedIndexTable(statement), StartBuildBudgetSeconds);
                         continue;
                     }
 
@@ -1101,8 +1117,15 @@ public static class PgTableTuning
                         commandTimeout = buildTimeoutSeconds;
                     }
 
-                    buildIssued |= oneBuildPerStart;
-                    buildStartedAt = Stopwatch.GetTimestamp();
+                    if (onBudget && secondsLeft < commandTimeout)
+                    {
+                        /* #9795: earlier builds used part of the budget, so this one runs under what is left of it. */
+                        commandTimeout = secondsLeft;
+                        shortened = true;
+                    }
+
+                    budgeted = onBudget;
+                    buildStartedAt = clock.GetTimestamp();
                     sql = GuardedCreate(statement);
                 }
                 else if (ReplacedIndexOf(statement) is { } replacement)
@@ -1130,6 +1153,11 @@ public static class PgTableTuning
 
                 using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = commandTimeout };
                 await command.ExecuteNonQueryAsync(cancellationToken);
+                if (budgeted)
+                {
+                    buildElapsed = clock.GetElapsedTime(buildStartedAt);
+                }
+
                 applied++;
                 if (bounded && priorAttempt is not null)
                 {
@@ -1166,9 +1194,13 @@ public static class PgTableTuning
             {
                 if (statement.StartsWith(CreateIndexPrefix, StringComparison.Ordinal) && IsBuildTimeout(ex))
                 {
-                    var elapsed = Stopwatch.GetElapsedTime(buildStartedAt);
+                    var elapsed = clock.GetElapsedTime(buildStartedAt);
+                    buildElapsed = elapsed;
                     var recorded = false;
-                    if (bounded && buildPages is { } pages)
+
+                    /* #9795: a shortened build had less than its own limit, so running out says nothing about whether it fits the
+                       limit. No record is written for it (#9289), and the next start tries it again. */
+                    if (!shortened && bounded && buildPages is { } pages)
                     {
                         /* The record is written outside the aborted transaction, so the ROLLBACK comes first. */
                         await RollbackBestEffortAsync(connection, logger, cancellationToken);
@@ -1179,9 +1211,11 @@ public static class PgTableTuning
 
                     logger?.LogWarning(
                         "{Message}",
-                        recorded
-                            ? BoundedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, buildPages!.Value, buildTimeoutSeconds)
-                            : BuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds));
+                        shortened
+                            ? ShortenedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, commandTimeout)
+                            : recorded
+                                ? BoundedBuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds, buildPages!.Value, buildTimeoutSeconds)
+                                : BuildTimeoutMessage(CreatedIndexName(statement), CreatedIndexTable(statement), elapsed.TotalSeconds));
                 }
                 else
                 {
@@ -1200,6 +1234,14 @@ public static class PgTableTuning
                    always safe; if it too fails the connection is unusable and every later statement's own
                    failure will say so. */
                 await RollbackBestEffortAsync(connection, logger, cancellationToken);
+            }
+            finally
+            {
+                if (budgeted)
+                {
+                    /* #9795: a budget build is charged for the time it held the start, whether it built, timed out or found the table busy. */
+                    budgetSpent += buildElapsed ?? clock.GetElapsedTime(buildStartedAt);
+                }
             }
         }
 
@@ -1238,6 +1280,14 @@ public static class PgTableTuning
     internal static string BuildTimeoutMessage(string indexName, string table, double elapsedSeconds) =>
         string.Create(CultureInfo.InvariantCulture,
             $"Index collect.{indexName} on {table} was not built: the build ran out of time after {elapsedSeconds:F0} s (limit {SetupTimeoutSeconds} s) and was rolled back; it is retried at the next start, and each try pauses collection at start for up to {SetupTimeoutSeconds} s");
+
+    /// <summary>
+    /// The warning for a start-path index build that ran under what earlier builds left of the start's shared build time (#9795)
+    /// and ran out of it.
+    /// </summary>
+    internal static string ShortenedBuildTimeoutMessage(string indexName, string table, double elapsedSeconds, int limitSeconds) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"Index collect.{indexName} on {table} was not built at this start: the index builds of one start share {StartBuildBudgetSeconds} s, the builds before this one left it {limitSeconds} s, and it ran out of that after {elapsedSeconds:F0} s and was rolled back; the next service start tries it again");
 
     /// <summary>The warning for a bounded start-path index build (#9289) that timed out and was recorded.</summary>
     internal static string BoundedBuildTimeoutMessage(string indexName, string table, double elapsedSeconds, long heapPages, int limitSeconds) =>

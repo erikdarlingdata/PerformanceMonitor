@@ -576,7 +576,8 @@ SELECT
     LEFT(t.query_text, 200) AS query_preview,
     t.query_text AS full_query_text,
     MAX(GREATEST(r.inline_plan, CASE WHEN r.has_row_without_inline_plan THEN p.query_plan_xml END)) AS query_plan_xml,
-    MAX(p.query_plan_gz) AS query_plan_gz,
+    /* #9802: the largest stored plan, in the form PostgreSQL 16 and 17 run too, which have no max(bytea). */
+    {ByteaMaxSql.Before}p.query_plan_gz{ByteaMaxSql.After} AS query_plan_gz,
     t.query_hash
 FROM top AS t
 JOIN resolved AS r

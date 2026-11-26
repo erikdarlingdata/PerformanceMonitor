@@ -89,7 +89,7 @@ SELECT
     LEFT(query_text, 200) AS query_preview,
     query_text AS full_query_text,
     MAX(query_plan_xml) AS query_plan_xml,
-    MAX(query_plan_gz) AS query_plan_gz,
+    (MAX(ARRAY[query_plan_gz]) FILTER (WHERE query_plan_gz IS NOT NULL))[1] AS query_plan_gz,
     MAX(query_hash) AS query_hash
 FROM v_query_stats
 WHERE server_id = $1

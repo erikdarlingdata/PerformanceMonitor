@@ -173,6 +173,83 @@ public sealed class ViewerImportServerIdCollisionLiveTests
         }
     }
 
+    /// <summary>#9787: Import Settings skips and counts a row whose display name holds a control character, and its neighbour lands.</summary>
+    [Fact]
+    public async Task ImportFromStore_SkipsAndCountsANameHoldingALineFeed_AndImportsItsNeighbour()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The import reads the viewer's Windows-only stores.");
+        var baseConnectionString = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live import pins.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var directory = Directory.CreateTempSubdirectory("darling-import-fieldrule-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await MigrateStoreAsync(scratch, ct);
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+            var (source, profiles) = NewRegistry(directory, "source");
+            source.AddServer(Entry("fake01", "prod\nFAKE"), null, null);
+            source.AddServer(Entry("other01", "Other"), null, null);
+
+            var result = await ViewerServerMigration.ImportFromStoreAsync(source, profiles, viewer, ct);
+
+            Assert.Equal(1, result.Imported);
+            Assert.Equal(1, result.Refused);
+            Assert.Equal("other01", Assert.Single(await viewer.GetMonitoredServersAsync(ct)).Host);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>#9787: the migrate-in counts a registry entry holding U+202E as refused, the next entry still imports, and the marker is written.</summary>
+    [Fact]
+    public async Task Migrate_SkipsAndCountsAnEntryHoldingAnOverride_ImportsTheNext_AndWritesTheMarker()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The migration reads the viewer's Windows-only stores.");
+        var baseConnectionString = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live import pins.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var directory = Directory.CreateTempSubdirectory("darling-migrate-fieldrule-").FullName;
+        var bodySucceeded = false;
+        try
+        {
+            await MigrateStoreAsync(scratch, ct);
+            await using var viewer = new ViewerDataService(scratch.ConnectionString);
+
+            /* The registry lists its servers by display name, so "1 ..." is migrated first. */
+            var (registry, profiles) = NewRegistry(directory, "local");
+            registry.AddServer(Entry("fake01", "1 prod\u202Efake"), null, null);
+            registry.AddServer(Entry("other01", "2 Other"), null, null);
+            var migration = new ViewerServerMigration(registry, profiles, Path.Combine(directory, "migrated.marker"));
+
+            var result = await migration.MigrateCoreAsync(viewer, ct);
+
+            Assert.Equal(1, result.Imported);
+            Assert.Equal(1, result.Refused);
+            Assert.True(migration.AlreadyMigrated);
+            Assert.Equal("other01", Assert.Single(await viewer.GetMonitoredServersAsync(ct)).Host);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     [Fact]
     public async Task Migrate_RefusesADifferentServerAtTheId_ImportsTheRest_AndStillWritesTheMarker()
     {

@@ -70,8 +70,8 @@ public sealed class DailySummaryHeapStoreLiveTests
 
         await Exec(connection, "CREATE INDEX IF NOT EXISTS idx_query_stats_server_hash_time ON collect.query_stats (server_id, query_hash, collection_time DESC)", ct);
 
-        /* A start builds at most one large index (the one-build budget), and the seeded tables are no longer empty, so the
-           restart-row and legacy-row indexes take their starts first. Repeat the start pass until the cover exists. */
+        /* The large indexes share one build time budget per start, and the seeded tables are no longer empty, so the
+           restart-row and legacy-row indexes are built first. Repeat the start pass until the cover exists. */
         for (var pass = 0; pass < 8 && !await IndexExistsAsync(connection, PgTableTuning.WaitStatsDailyCoverIndexName, ct); pass++)
         {
             await PgTableTuning.ApplyAsync(connection, NullLogger.Instance, ct);

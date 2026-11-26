@@ -760,6 +760,13 @@ public partial class AddServerDialog : Window
         var database = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim();
         var readOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true;
 
+        /* #9787: the four text fields hold no control character, the same rule as the web and MCP writers and the upsert. */
+        if (ServerFieldText.FirstRefusal(displayName, host, database, username) is { } fieldRefusal)
+        {
+            error = fieldRefusal;
+            return null;
+        }
+
         var (monthlyCost, costError) = ParseMonthlyCostText(MonthlyCostBox.Text);
         if (costError is not null)
         {
@@ -980,6 +987,12 @@ public partial class AddServerDialog : Window
         {
             /* #5240: a change to how the server is reached saved without a newly entered password. The message says so, in the same
                words as the web and MCP edit; nothing was written. */
+            StatusText.Text = ex.Message;
+            SaveButton.IsEnabled = true;
+        }
+        catch (MonitoredServerFieldRefusedException ex)
+        {
+            /* #9787: the upsert refused a control character in a text field; the message names the field and nothing was written. */
             StatusText.Text = ex.Message;
             SaveButton.IsEnabled = true;
         }
