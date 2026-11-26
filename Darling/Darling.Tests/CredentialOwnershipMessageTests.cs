@@ -244,17 +244,66 @@ public sealed class CredentialOwnershipMessageTests
         }
     }
 
-    [Fact]
-    public void PasswordKeyFile_NotFound_GivesNoChown()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PasswordKeyFile_Missing_SaysTheFileIsNotThere_AndHowComposeMountsIt_WithNoChown(bool directoryMissing)
     {
+        Exception missing = directoryMissing ? new DirectoryNotFoundException("no dir") : new FileNotFoundException("no file");
         var modes = new StandInUnixModes { EffectiveUserId = 1654 };
         modes.ReportOwner(ComposeSecretKey, 1000);
 
         using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
         {
-            var refusal = DarlingPasswordKeyFileReader.CouldNotRead(ComposeSecretKey, new FileNotFoundException("gone"));
+            var refusal = DarlingPasswordKeyFileReader.CouldNotRead(ComposeSecretKey, missing);
 
-            Assert.Equal("passwordKey: secret file '/run/secrets/password_key' could not be read: gone", refusal);
+            Assert.StartsWith("passwordKey: secret file '/run/secrets/password_key' could not be read: ", refusal);
+            Assert.Contains("not there", refusal);
+            Assert.Contains("'password_key'", refusal);
+            Assert.Contains("docker compose up -d", refusal);
+            Assert.Contains("docker compose restart", refusal);
+            Assert.DoesNotContain("chown", refusal);
+            Assert.DoesNotContain("owned by", refusal);
+        }
+    }
+
+    [Fact]
+    public void PasswordKeyFile_MissingOutsideTheSecretsMount_NamesThePathAndNoComposeSecret()
+    {
+        const string path = "/opt/keys/password_key";
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var refusal = DarlingPasswordKeyFileReader.CouldNotRead(path, new FileNotFoundException("no file"));
+
+            Assert.Contains("not there: '/opt/keys/password_key'", refusal);
+            Assert.DoesNotContain("is where compose mounts", refusal);
+        }
+    }
+
+    [Fact]
+    public void PasswordKeyFile_MissingWithNoUnixSeam_IsTheWindowsWording()
+    {
+        Assert.Equal(
+            "passwordKey: secret file '/run/secrets/password_key' could not be read: gone",
+            DarlingPasswordKeyFileReader.CouldNotRead(ComposeSecretKey, new FileNotFoundException("gone")));
+    }
+
+    [Fact]
+    public void PasswordKeyFile_ARealMissingFile_ReadsAsRefusedWithTheSameAdvice()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "darling-9793-key-" + Guid.NewGuid().ToString("N"), "password_key");
+        var modes = new StandInUnixModes { EffectiveUserId = 1654 };
+
+        using (ComposeCredentialDirectoryGuard.BeginForTest(modes))
+        {
+            var read = DarlingPasswordKeyFileReader.Read(path);
+
+            Assert.Null(read.Text);
+            Assert.NotNull(read.Refusal);
+            Assert.Contains("not there", read.Refusal);
+            Assert.Contains(path, read.Refusal);
         }
     }
 

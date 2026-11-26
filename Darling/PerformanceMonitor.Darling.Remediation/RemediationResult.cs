@@ -100,6 +100,7 @@ public sealed record RemediationResult(
         public const string OwnSession = "own_session";
         public const string NotUserSession = "not_user_session";
         public const string KillPermissionDenied = "kill_permission_denied";
+        public const string KillViewPermissionDenied = "kill_view_permission_denied";
         public const string NotPermitted = "not_permitted";
         public const string DatabaseRequired = "database_required";
         public const string NotAzureSqlDatabase = "not_azure_sql_database";
