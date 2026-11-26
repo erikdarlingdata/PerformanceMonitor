@@ -61,7 +61,19 @@ internal static class AddServerCommand
     /// <remarks>#9582: a null encryption mode or switch is one the run did not give. A new server then takes the default, and a listed one keeps its value.</remarks>
     internal sealed record Entry(
         string Host, string? DisplayName, string AuthenticationType, string? Username, string? Password, string? Database,
-        string? EncryptMode = null, bool? TrustServerCertificate = null, bool? ReadOnlyIntent = null, bool? MultiSubnetFailover = null);
+        string? EncryptMode = null, bool? TrustServerCertificate = null, bool? ReadOnlyIntent = null, bool? MultiSubnetFailover = null,
+        IReadOnlyList<UnreadServerKey>? UnreadKeys = null);
+
+    /// <summary>Every key <see cref="ReadEntries"/> reads from a JSON entry, matched in any letter case. A key the parse starts to read is added here,
+    /// or the answer names it as unread (#9780). Darling's port, aws_role_arn, aws_external_id, query_store_replica, capture_plans and
+    /// alert_delivery_mode_override are not read here, so an entry that carries one is told so.</summary>
+    internal static readonly string[] ReadKeys =
+    [
+        "host", "display_name", "database", "engine", "auth", "username", "password",
+        "encrypt_mode", "trust_server_certificate", "read_only_intent", "multi_subnet_failover",
+    ];
+
+    private static readonly AddServerEntryKeys s_entryKeys = new(ReadKeys, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>What the verb needs from the machine, so a test runs it with none of it.</summary>
     internal sealed record Machine(
@@ -73,7 +85,8 @@ internal static class AddServerCommand
         bool InsideRunningLite = false);
 
     /// <summary>One server a run added or updated (#9640), as the run reports it: the MCP <c>add_servers</c> tool answers with these rows.</summary>
-    internal sealed record Saved(string DisplayName, string Host, string? Database, bool Updated);
+    /// <remarks>#9780: <paramref name="UnreadKeys"/> are the keys of the entry the parse did not read, so the answer names them beside the row.</remarks>
+    internal sealed record Saved(string DisplayName, string Host, string? Database, bool Updated, IReadOnlyList<UnreadServerKey>? UnreadKeys = null);
 
     /// <summary>The rows a run saved, with the path of the server list it wrote them to.</summary>
     internal sealed class SaveLog : List<Saved>
@@ -212,8 +225,15 @@ internal static class AddServerCommand
         return errorMessage is null;
     }
 
-    /// <summary>Normalises the entries: the JSON array, or the one entry the flags name with its password read from <paramref name="input"/>.</summary>
-    internal static (List<Entry>? Entries, string? Problem) ReadEntries(AddServerFlags flags, TextReader input, bool inputRedirected)
+    /// <summary>
+    /// The most bytes of a piped password the strict reader holds (#9753): the characters Credential Manager stores
+    /// (<see cref="CredentialStore.MaxSecretLength"/>, UTF-16 units) at their longest in UTF-8, three bytes each. A longer password is
+    /// refused before it is read in full, and one between the store's own limit and this one is refused by the save with its length.
+    /// </summary>
+    internal const int MaxPipedPasswordBytes = CredentialStore.MaxSecretLength * 3;
+
+    /// <summary>Normalises the entries: the JSON array, or the one entry the flags name with its password read from <paramref name="passwordInput"/> as bytes (#9753).</summary>
+    internal static (List<Entry>? Entries, string? Problem) ReadEntries(AddServerFlags flags, TextReader input, bool inputRedirected, Stream? passwordInput = null)
     {
         if (flags.Any)
         {
@@ -236,7 +256,17 @@ internal static class AddServerCommand
                         + "There is no password prompt (this program has no console of its own, so a shell and the program would both read the keys). "
                         + "Pipe the password as one line, or pipe a JSON array with a password field.");
 
-                password = input.ReadLine();
+                /* #9753: the password is read as bytes with the strict reader Darling's --add-server and --set-login-password use, not through
+                   a text reader: a byte order mark, UTF-16 from a Windows pipe, a second line and a non-UTF-8 byte are refused, and the characters
+                   saved are the UTF-8 characters sent. */
+                password = StrictStdinPassword.Read(
+                    passwordInput ?? Stream.Null, MaxPipedPasswordBytes,
+                    "The password is longer than can be stored. Nothing was changed.",
+                    "The password contains characters that cannot be stored. Nothing was changed.",
+                    out var refusal);
+                if (refusal is not null)
+                    return (null, refusal);
+
                 if (string.IsNullOrEmpty(password))
                     return (null, "No password was read from stdin, so no server was added.");
             }
@@ -286,6 +316,11 @@ internal static class AddServerCommand
             if (item.ValueKind != JsonValueKind.Object)
                 return (null, $"Entry {number} is not an object.");
 
+            /* #9780: a key this parse does not read is dropped, so a refusal of the entry names it too (a hostname for host is found here). */
+            var unread = s_entryKeys.Unread(item.EnumerateObject().Select(property => property.Name));
+            (List<Entry>?, string?) Refused(string reason) =>
+                (null, unread.Count == 0 ? reason : $"{reason} Not read, so not applied: {AddServerEntryKeys.Describe(unread)}");
+
             string? Field(string name)
             {
                 foreach (var property in item.EnumerateObject())
@@ -299,27 +334,27 @@ internal static class AddServerCommand
 
             var host = NullIfBlank(Field("host"));
             if (host is null)
-                return (null, $"Entry {number}: host is required.");
+                return Refused($"Entry {number}: host is required.");
 
             var engine = NullIfBlank(Field("engine"));
             if (engine is not null && !engine.Equals("sqlserver", StringComparison.OrdinalIgnoreCase))
-                return (null, $"Entry {number}: Lite monitors SQL Server only, so engine '{engine}' is refused.");
+                return Refused($"Entry {number}: Lite monitors SQL Server only, so engine '{engine}' is refused.");
 
             var authText = NullIfBlank(Field("auth"));
             var auth = authText is null ? AuthenticationTypes.Windows : AuthWord(authText);
             if (auth.Length == 0)
-                return (null, $"Entry {number}: {AuthRefusal(authText!)}");
+                return Refused($"Entry {number}: {AuthRefusal(authText!)}");
 
             /* #9582: read as Darling's add_servers reads them. A JSON null is not given. An unknown word, or a value that is not a JSON true or false, is refused. */
             string? encrypt = null;
             var encryptKind = ValueKind(item, "encrypt_mode");
             if (encryptKind is not (JsonValueKind.Undefined or JsonValueKind.Null or JsonValueKind.String))
-                return (null, $"Entry {number}: encrypt_mode must be \"Optional\", \"Mandatory\" or \"Strict\".");
+                return Refused($"Entry {number}: encrypt_mode must be \"Optional\", \"Mandatory\" or \"Strict\".");
             if (NullIfBlank(Field("encrypt_mode")) is { } encryptText)
             {
                 encrypt = EncryptWord(encryptText);
                 if (encrypt.Length == 0)
-                    return (null, $"Entry {number}: {EncryptRefusal(encryptText)}");
+                    return Refused($"Entry {number}: {EncryptRefusal(encryptText)}");
             }
 
             var switches = new bool?[3];
@@ -330,12 +365,12 @@ internal static class AddServerCommand
                 if (kind is JsonValueKind.Undefined or JsonValueKind.Null)
                     continue;
                 if (kind is not (JsonValueKind.True or JsonValueKind.False))
-                    return (null, $"Entry {number}: {switchNames[f]} must be true or false.");
+                    return Refused($"Entry {number}: {switchNames[f]} must be true or false.");
                 switches[f] = kind == JsonValueKind.True;
             }
 
             entries.Add(new Entry(host, NullIfBlank(Field("display_name")), auth, NullIfBlank(Field("username")), Field("password"), NullIfBlank(Field("database")),
-                encrypt, switches[0], switches[1], switches[2]));
+                encrypt, switches[0], switches[1], switches[2], unread.Count == 0 ? null : unread));
         }
 
         return entries.Count == 0 ? (null, "The array is empty, so no server was added.") : (entries, null);
@@ -361,6 +396,21 @@ internal static class AddServerCommand
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    /// <summary>#9780: one line per entry that carries a key the parse did not read, for a run that was refused (an added entry's keys ride on its <see cref="Saved"/> row).</summary>
+    internal static List<string> UnreadNotes(IEnumerable<Entry> entries)
+    {
+        var notes = new List<string>();
+        var number = 0;
+        foreach (var entry in entries)
+        {
+            number++;
+            if (entry.UnreadKeys is { Count: > 0 } unread)
+                notes.Add($"Entry {number} ({entry.Host}): not read, so not applied: {AddServerEntryKeys.Describe(unread)}");
+        }
+
+        return notes;
+    }
+
     internal static string UsageText() =>
         "Nothing arrived on stdin, so no server was added." + System.Environment.NewLine
         + "--add-server reads a JSON ARRAY of servers from stdin: [{\"host\":\"sql01\",\"auth\":\"sql\",\"username\":\"login\",\"password\":\"...\"}]" + System.Environment.NewLine
@@ -372,7 +422,7 @@ internal static class AddServerCommand
     /// on <paramref name="error"/>, nothing changed).
     /// </summary>
     internal static async Task<int> RunAsync(
-        IEnumerable<string> args, TextReader input, bool inputRedirected, TextWriter output, TextWriter error, Machine env)
+        IEnumerable<string> args, TextReader input, bool inputRedirected, TextWriter output, TextWriter error, Machine env, Stream? passwordInput = null)
     {
         if (!TryParseArgs(args, out var flags, out var argError))
         {
@@ -388,7 +438,7 @@ internal static class AddServerCommand
             return ExitRefused;
         }
 
-        var (entries, problem) = ReadEntries(flags, input, inputRedirected);
+        var (entries, problem) = ReadEntries(flags, input, inputRedirected, passwordInput);
         if (entries is null)
         {
             if (problem == UsageText())
@@ -401,10 +451,19 @@ internal static class AddServerCommand
         var saved = new SaveLog();
         var exit = await SaveEntriesAsync(entries, error, env, saved);
         if (exit != ExitAdded)
+        {
+            foreach (var note in UnreadNotes(entries))
+                error.WriteLine(note);
             return exit;
+        }
 
         foreach (var row in saved)
+        {
             output.WriteLine($"{(row.Updated ? "Updated" : "Added")} {row.DisplayName} ({row.Host}).");
+            /* #9780: names only, never a value, so a password sent under a wrong key stays out of the output. */
+            if (row.UnreadKeys is { Count: > 0 } unread)
+                output.WriteLine($"  Not read, so not applied: {AddServerEntryKeys.Describe(unread)}");
+        }
 
         output.WriteLine($"Credentials were stored for the Windows account {env.AccountName}.");
         output.WriteLine($"Server list: {saved.ServerListPath}");
@@ -628,7 +687,7 @@ internal static class AddServerCommand
                 return ExitRefused;
             }
 
-            saved.Add(new Saved(server.DisplayName, server.ServerName, server.DatabaseName, exists));
+            saved.Add(new Saved(server.DisplayName, server.ServerName, server.DatabaseName, exists, entry.UnreadKeys));
         }
 
         /* The manager reports a failed write of the host record instead of throwing, and the run would then say Added. */
@@ -845,6 +904,7 @@ internal static class AddServerCommand
         }
 
         var input = ParentConsole.OpenInput(out var redirected);
+        var passwordInput = ParentConsole.OpenInputBytes();
         var hostFolder = Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), DataRootMigration.DataRootName, "config");
         var env = new Machine(
@@ -856,7 +916,7 @@ internal static class AddServerCommand
             (server, username, password) => ServerEntryRules.TestConnectionAsync(server, username, password, CancellationToken.None),
             WindowsIdentity.GetCurrent().Name,
             hostFolder);
-        return RunAsync(args, input, redirected, output, error, env).GetAwaiter().GetResult();
+        return RunAsync(args, input, redirected, output, error, env, passwordInput).GetAwaiter().GetResult();
     }
 
     /// <summary>True when another Lite process exists in any session and for any user: the shared servers.json is theirs to rewrite too.</summary>
