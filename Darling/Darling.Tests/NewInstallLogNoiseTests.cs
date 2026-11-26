@@ -56,6 +56,32 @@ public class NewInstallLogNoiseTests
         Assert.False(TimescaleSupport.NothingToDropYet(null, "4 days", Now));
     }
 
+    [Theory]
+    [InlineData(24 * 4 * 60 + 1, true)]
+    [InlineData(24 * 4 * 60 + 30, true)]
+    [InlineData(24 * 4 * 60 + 120, true)]
+    [InlineData(24 * 4 * 60 + 121, false)]
+    [InlineData(24 * 4 * 60, false)]
+    [InlineData(24 * 3 * 60, false)]
+    [InlineData(24 * 30 * 60, false)]
+    public void AHeldRelationWarnsOnThePassesRightAfterItsOldestRowAgesPastTheHorizon(int oldestRowAgeMinutes, bool crossed)
+    {
+        Assert.Equal(crossed, TimescaleSupport.CrossedHorizonRecently(Now.AddMinutes(-oldestRowAgeMinutes), "4 days", Now));
+    }
+
+    [Fact]
+    public void AnUnknownOldestRowOrAnUnreadableHorizonIsNeverACrossing()
+    {
+        Assert.False(TimescaleSupport.CrossedHorizonRecently(null, "4 days", Now));
+        Assert.False(TimescaleSupport.CrossedHorizonRecently(Now.AddDays(-4).AddMinutes(-30), "1 mon", Now));
+    }
+
+    [Fact]
+    public void TheCrossingWindowSpansTwoHourlyPasses()
+    {
+        Assert.Equal(TimeSpan.FromHours(2), TimescaleSupport.HorizonCrossingWindow);
+    }
+
     [Fact]
     public void EveryRetentionPolicyHorizonReadsAsWholeDays()
     {

@@ -9624,6 +9624,30 @@ AND   j.hypertable_name = '{relation}'";
         return oldest >= utcNow - span;
     }
 
+    /// <summary>
+    /// #9695: how far past its horizon a held relation's oldest row may be and still count as having just crossed it.
+    /// Two hourly passes wide, so a late or skipped pass still sees the crossing. A held policy purges nothing, so the
+    /// oldest row stays where it is while the cutoff moves past it.
+    /// </summary>
+    internal static readonly TimeSpan HorizonCrossingWindow = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// #9695: did the relation's oldest row pass its retention cutoff within <see cref="HorizonCrossingWindow"/>? On the
+    /// hourly pass a held policy logs at Debug, and a young store's hold logs below Warning, so without this a store that
+    /// ages past the horizon while the service runs would never write the Warning that names the remedy until a restart.
+    /// False when the oldest row is unknown or <paramref name="dropAfter"/> is not a whole number of days.
+    /// </summary>
+    internal static bool CrossedHorizonRecently(DateTime? sourceOldest, string dropAfter, DateTime utcNow)
+    {
+        if (sourceOldest is not { } oldest || !TryReadWholeDays(dropAfter, out var span))
+        {
+            return false;
+        }
+
+        var cutoff = utcNow - span;
+        return oldest < cutoff && oldest >= cutoff - HorizonCrossingWindow;
+    }
+
     private static bool TryReadWholeDays(string interval, out TimeSpan span)
     {
         span = default;
@@ -10277,9 +10301,14 @@ AND   j.hypertable_name = '{relation}'";
                            Retention Held alert send an operator to, once per start; on the hourly pass the same
                            line 24 times a day per held policy is noise that buries the transitions above and
                            below, so it drops to Debug there — the tally line at the end still counts it every
-                           hour, and the Retention Held self-alert judges its cost on the same tick. */
+                           hour, and the Retention Held self-alert judges its cost on the same tick. The exception
+                           is the pass that finds the oldest row has just aged past the horizon (#9695): until
+                           then the hold was logged as having nothing to drop, so this is the first time it costs
+                           history, and it warns there too. */
                         logger?.Log(
-                            pass == RetentionSweepPass.Startup ? LogLevel.Warning : LogLevel.Debug,
+                            pass == RetentionSweepPass.Startup || CrossedHorizonRecently(measure.SourceOldest, dropAfter, sweepNow)
+                                ? LogLevel.Warning
+                                : LogLevel.Debug,
                             "Retention policy for {Relation} HELD PAUSED - {ShortConsumers} do not yet cover everything it holds, so arming the {DropAfter} purge could drop history those rollups have never materialized. The remedy for each: {Remedies}. The policy arms itself on the next evaluation once every consumer covers everything it holds - the running service re-judges every held policy hourly (#3812), and at every start.",
                             relation, shortNames, dropAfter, remedies);
                     }
