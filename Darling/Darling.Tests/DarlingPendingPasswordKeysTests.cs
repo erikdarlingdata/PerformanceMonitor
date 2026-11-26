@@ -85,9 +85,9 @@ public sealed class DarlingPendingPasswordKeysTests
     [Fact]
     public void Create_NamesAFolderItCannotOpenInItsRefusal_InsteadOfThrowing_OnWindows()
     {
-        Assert.SkipUnless(OperatingSystem.IsWindows(), "the folder ACL is Windows's");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "the folder open is Windows's");
         var (root, credentials, pending) = Service();
-        FileSystemAccessRule? deny = null;
+        Microsoft.Win32.SafeHandles.SafeFileHandle? held = null;
         try
         {
             Assert.True(DarlingPendingPasswordKeys.Create(credentials, keyFromSetting: false, logger: null).Written);
@@ -96,15 +96,10 @@ public sealed class DarlingPendingPasswordKeysTests
                 File.Delete(file);
             }
 
-            // Deny this account the rights an open for traverse or listing needs, and nothing that changes the ACL, so the entry can be taken off again.
-            var me = WindowsIdentity.GetCurrent().User!;
-            deny = new FileSystemAccessRule(
-                me, FileSystemRights.ListDirectory | FileSystemRights.Traverse | FileSystemRights.ReadAttributes,
-                InheritanceFlags.None, PropagationFlags.None, AccessControlType.Deny);
-            var info = new DirectoryInfo(pending);
-            var security = info.GetAccessControl();
-            security.AddAccessRule(deny);
-            info.SetAccessControl(security);
+            // Another process holds the folder with no sharing, so the open that pins it fails with a sharing violation. An access entry
+            // that denies the account cannot stand in for this, because an administrator's folder open passes through it.
+            held = CreateFileW(pending, 0x00000001 | 0x00000080, FileShare.None, IntPtr.Zero, FileMode.Open, 0x02000000, IntPtr.Zero);
+            Assert.False(held.IsInvalid);
 
             var outcome = DarlingPendingPasswordKeys.Create(credentials, keyFromSetting: false, logger: null);
 
@@ -115,17 +110,15 @@ public sealed class DarlingPendingPasswordKeysTests
         }
         finally
         {
-            if (deny is not null)
-            {
-                var info = new DirectoryInfo(pending);
-                var security = info.GetAccessControl();
-                security.RemoveAccessRuleSpecific(deny);
-                info.SetAccessControl(security);
-            }
-
+            held?.Dispose();
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(
+        string lpFileName, uint dwDesiredAccess, FileShare dwShareMode, IntPtr lpSecurityAttributes,
+        FileMode dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
 
     [Fact]
     public void Create_RefusesAnExistingFolderThatUsersMayOnlyRead_AndWritesNothing_OnWindows()
