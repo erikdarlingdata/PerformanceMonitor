@@ -85,7 +85,7 @@ public sealed class McpServerRegistryTools
         "only \"sqlserver\" (Lite monitors SQL Server only, so Darling's port, aws_role_arn, aws_external_id and query_store_replica are not read). " +
         "The password travels to this endpoint in the request. Returns {status:\"ok\", requested, added, updated, results:[{server, host, database, " +
         "status:\"added\"|\"updated\"}]}, or {status:\"refused\", message} with nothing saved. An entry with Windows authentication (the default) and " +
-        "trust_server_certificate true or encrypt_mode Optional is refused before any connection is tried, as {status:\"invalid\", message, results:[{server, host, database, status:\"invalid\", detail}]} with nothing saved: " +
+        "trust_server_certificate true or encrypt_mode Optional is refused before any connection is tried, as {status:\"invalid\", message (naming each such entry), hints:{parameter:\"servers_json\"}} with nothing saved: " +
         "Windows authentication would present Lite's own Windows account to a host the connection does not verify. Use auth \"SQL\", or leave trust_server_certificate false and use encrypt_mode Mandatory or Strict; " +
         "an operator can allow it with mcp_allow_windows_auth_over_unverified_tls in settings.json. The new server is collected from the next collection pass.")]
     public static async Task<string> AddServers(
@@ -122,32 +122,26 @@ public sealed class McpServerRegistryTools
 
         /* #9640: Windows authentication over a connection nothing verifies is refused before any connection test or write, so the Windows account
            Lite runs as never reaches a host the TLS settings do not confirm. A listed server's own TLS settings count for a field the entry leaves out. */
-        var unverified = new List<(string Server, string Host, string? Database, string Detail)>();
+        var unverified = new List<string>();
         var listed = serverManager.GetAllServers();
+        var number = 0;
         foreach (var entry in entries)
         {
+            number++;
             var candidate = new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database, ReadOnlyIntent = entry.ReadOnlyIntent ?? false };
             var existing = listed.FirstOrDefault(s => ServerManager.IsSameServer(s, candidate));
-            var refusal = McpUnverifiedWindowsAuthScreen.Refusal(
+            if (McpUnverifiedWindowsAuthScreen.Refusal(
                 hooks?.AllowWindowsAuthOverUnverifiedTls ?? false, entry.AuthenticationType,
-                entry.EncryptMode ?? existing?.EncryptMode, entry.TrustServerCertificate ?? existing?.TrustServerCertificate ?? false, "Not added");
-            if (refusal is not null)
+                entry.EncryptMode ?? existing?.EncryptMode, entry.TrustServerCertificate ?? existing?.TrustServerCertificate ?? false,
+                $"Entry {number} ({entry.Host}) not added") is { } refusal)
             {
-                unverified.Add((entry.DisplayName ?? entry.Host, entry.Host, entry.Database, refusal));
+                unverified.Add(refusal);
             }
         }
 
         if (unverified.Count > 0)
         {
-            return JsonSerializer.Serialize(new
-            {
-                status = "invalid",
-                message = unverified[0].Detail,
-                requested = entries.Count,
-                added = 0,
-                updated = 0,
-                results = unverified.Select(row => new { server = row.Server, host = row.Host, database = row.Database, status = "invalid", detail = row.Detail }),
-            }, McpHelpers.JsonOptions);
+            return McpHelpers.Refusal("servers_json", string.Join(" ", unverified) + " Nothing was saved.");
         }
 
         var hostFolder = Path.Combine(

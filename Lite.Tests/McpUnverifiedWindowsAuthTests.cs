@@ -110,8 +110,8 @@ public sealed class McpUnverifiedWindowsAuthTests : IDisposable
         var answer = await McpServerRegistryTools.AddServersCore(manager, Hooks(false), json, probe.RunAsync);
 
         Assert.Equal("invalid", Status(answer));
-        var row = Assert.Single(Parse(answer).GetProperty("results").EnumerateArray());
-        Assert.Equal("sql03", row.GetProperty("host").GetString());
+        Assert.Equal("servers_json", Parse(answer).GetProperty("hints").GetProperty("parameter").GetString());
+        Assert.Contains("sql03", Parse(answer).GetProperty("message").GetString(), StringComparison.Ordinal);
         Assert.Equal(0, probe.Calls);
         Assert.Empty(NewManager().GetAllServers());
     }
