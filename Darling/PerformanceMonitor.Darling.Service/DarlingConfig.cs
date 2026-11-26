@@ -1680,6 +1680,11 @@ public sealed class SmtpConfig
     [JsonIgnore]
     internal LegacyPin? SecretPin { get; set; }
 
+    /// <summary>True while the one-time pin step is waiting to run when the configuration is read (#5456, #9749). An old-format
+    /// password with no pin then opens once the step has run, so its refusal says to wait and is not a failure that needs an operator.</summary>
+    [JsonIgnore]
+    internal bool SecretPinWaiting { get; set; }
+
     /// <summary>The binding a sealed SMTP password must have been sealed for.</summary>
     [JsonIgnore]
     internal PasswordBinding SecretBinding => PasswordBinding.ForSmtp(Host, Port, UseSsl, Username);
@@ -3690,6 +3695,12 @@ public sealed class MonitoredServer
     /// <summary>The pin taken at upgrade for the remediation slot, when the store holds one (#5366).</summary>
     [JsonIgnore]
     internal LegacyPin? RemediationPin { get; set; }
+
+    /// <summary>True while the one-time pin step is waiting to run when the configuration is read (#5456, #9749). It is a fact about the
+    /// service, not about one slot: it covers the <c>encryptedPassword</c> and remediation slots alike. An old-format password with no pin
+    /// then opens once the step has run, so its refusal says to wait and is not a failure that needs an operator.</summary>
+    [JsonIgnore]
+    internal bool SecretPinWaiting { get; set; }
 
     /// <summary>
     /// The connection settings this server's saved password is bound to (#5366). Throws <see cref="ArgumentException"/> when a
