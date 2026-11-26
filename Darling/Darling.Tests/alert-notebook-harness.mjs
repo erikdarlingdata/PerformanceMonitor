@@ -5,24 +5,8 @@
    tree of plain objects for the DOM, recording stand-ins for the panel renderers) and its `export` keywords are
    dropped. Everything else is views.js as shipped: the catalog check, the cell routing, the in-flight limiter. */
 import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import vm from "node:vm";
-import { fileURLToPath, pathToFileURL } from "node:url";
-
-/* util.js is loaded from a local copy of the js tree. Node cannot resolve a module imported from a network share (a \\server\share
-   path: "Cannot read package config"), so a suite run from a share (#9789) would fail on the import itself. The copy is the
-   same files as shipped. */
-const jsDir = fileURLToPath(new URL("../PerformanceMonitor.Darling.Service/wwwroot/js/", import.meta.url));
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "alert-notebook-"));
-let isStateZero;
-try {
-  fs.cpSync(jsDir, scratch, { recursive: true });
-  fs.writeFileSync(path.join(scratch, "package.json"), '{ "type": "module" }');
-  ({ isStateZero } = await import(pathToFileURL(path.join(scratch, "util.js")).href));
-} finally {
-  fs.rmSync(scratch, { recursive: true, force: true });
-}
+import { isStateZero } from "../PerformanceMonitor.Darling.Service/wwwroot/js/util.js";
 
 const [viewsPath, scenario] = process.argv.slice(-2);
 
