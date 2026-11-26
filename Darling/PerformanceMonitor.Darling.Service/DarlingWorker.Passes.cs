@@ -1133,6 +1133,17 @@ public sealed partial class DarlingWorker
     private static string? DeferredText(int deferred) => deferred > 0 ? $"{deferred} left for the next tick" : null;
 
     /// <summary>
+    /// #9711: the host hourly rollup tick as step counts. A prune slice that failed is caught inside the tick so the builds still run. It counts as
+    /// one failure here and its text leads the detail, ahead of the deferred note, so the step records as failed while the rollup grows past its horizon.
+    /// </summary>
+    internal static StorePassSteps.StepCounts HostHourlyStepCounts(QueryStatsHostHourly.TickResult tick)
+    {
+        var deferred = DeferredText(tick.Deferred);
+        var detail = tick.PruneFailure is null ? deferred : deferred is null ? tick.PruneFailure : $"{tick.PruneFailure}; {deferred}";
+        return new StorePassSteps.StepCounts(Built: tick.HoursBuilt, Removed: tick.RowsRemoved, Failed: tick.Failed + (tick.PruneFailure is null ? 0 : 1), Detail: detail);
+    }
+
+    /// <summary>
     /// The hourly store-maintenance tick's sixth tenant (#4605): the incremental module-map refresh, which keeps
     /// the <c>collect.module_map</c> watermark within about an hour of procedure_stats so a reader can trust the
     /// map up to it. Reads only the rows since the last watermark (<see cref="DarlingModuleMap.RefreshRecentAsync"/>),
@@ -1369,7 +1380,7 @@ public sealed partial class DarlingWorker
                     _logger,
                     stoppingToken,
                     async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(_postgres!, _logger, token)));
-                return new StorePassSteps.StepCounts(Built: tick.HoursBuilt, Removed: tick.RowsRemoved, Failed: tick.Failed, Detail: DeferredText(tick.Deferred));
+                return HostHourlyStepCounts(tick);
             });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
