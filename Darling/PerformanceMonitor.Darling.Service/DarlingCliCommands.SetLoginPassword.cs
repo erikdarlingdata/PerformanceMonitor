@@ -192,7 +192,7 @@ public static partial class DarlingCliCommands
         refusal = null;
         if (!inputRedirected)
         {
-            return ReadPasswordFromConsole(prompt, TextReader.Null, output);
+            return ReadPasswordFromConsole(prompt, output);
         }
 
         var limit = PasswordSeal.MaxPlaintextBytes + 2;

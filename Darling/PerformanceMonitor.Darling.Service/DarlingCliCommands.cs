@@ -7447,17 +7447,12 @@ public static partial class DarlingCliCommands
     }
 
     /// <summary>
-    /// Reads a password without echoing it (#6476). At a keyboard it reads keys with the echo off and ends on Enter; when stdin is a pipe or
-    /// a file there is no screen to hide it from, so it reads one line from <paramref name="input"/>. The prompt goes to
-    /// <paramref name="output"/>, never the typed text.
+    /// Reads a password at a keyboard without echoing it (#6476): it reads keys with the echo off and ends on Enter. The prompt goes to
+    /// <paramref name="output"/>, never the typed text. A pipe or a file is never read here: <see cref="ReadLoginPassword"/> reads one
+    /// with its strict byte reader and calls this only when stdin is a terminal (#9753).
     /// </summary>
-    internal static string? ReadPasswordFromConsole(string prompt, TextReader input, TextWriter output)
+    internal static string? ReadPasswordFromConsole(string prompt, TextWriter output)
     {
-        if (Console.IsInputRedirected)
-        {
-            return input.ReadLine();
-        }
-
         output.Write(prompt);
         output.Flush();
         var typed = new System.Text.StringBuilder();
@@ -7610,6 +7605,23 @@ public static partial class DarlingCliCommands
     }
 
     /// <summary>
+    /// <see cref="BuildAddServerJson"/> with the password read the way <c>--set-login-password</c> reads it (#9753): at a terminal
+    /// (<paramref name="inputRedirected"/> false) the hidden prompt, from a pipe or a file the strict byte reader
+    /// <see cref="ReadLoginPassword"/>, so a byte order mark, a NUL byte, a lone carriage return, a second non-empty line, a
+    /// password over the cap and bytes that are not UTF-8 are each refused with that reader's sentence, and the characters
+    /// saved are the UTF-8 characters sent. A refusal is the problem, with no JSON. <paramref name="readPassword"/>, when given,
+    /// stands in for the reader.
+    /// </summary>
+    internal static (string? Json, string? Problem) BuildAddServerJsonFromStdin(
+        AddServerFlags flags, Stream stdin, TextWriter output, bool inputRedirected, Func<string, string?>? readPassword = null)
+    {
+        string? refusal = null;
+        var (json, problem) = BuildAddServerJson(
+            flags, readPassword ?? (label => ReadLoginPassword(label, stdin, output, inputRedirected, out refusal)));
+        return refusal is null ? (json, problem) : (null, refusal);
+    }
+
+    /// <summary>
     /// <c>--add-server</c> (#2256): registers monitored server(s) in the store from a JSON array on stdin, through
     /// the SAME core the MCP <c>add_servers</c> tool uses (<see cref="DarlingMcpServerAdminTools.AddServersFromHostCommandLineAsync"/>) — so validation, dedupe,
     /// the in-process connection probe, password encryption and the identity computation are shared rather than
@@ -7623,7 +7635,7 @@ public static partial class DarlingCliCommands
     public static async Task<int> AddServerAsync(
         string? configPath, TextReader input, TextWriter output, TextWriter error, CancellationToken cancellationToken,
         AddServerFlags? flags = null, Func<string, string?>? readPassword = null,
-        DarlingServiceConnectionTest.IServiceConnectionTester? serviceTester = null)
+        DarlingServiceConnectionTest.IServiceConnectionTester? serviceTester = null, Stream? passwordInput = null)
     {
         /* #6476: flags name ONE server instead of a JSON array; stdin is then not read as JSON (a password it carries is read as a line). */
         var fromFlags = flags is { Any: true };
@@ -7693,8 +7705,9 @@ public static partial class DarlingCliCommands
         if (fromFlags)
         {
             /* The password is asked for here, after the store is known usable, and only for a login that has one. It is read hidden and goes
-               into the request text and nowhere else: never to the output, the error stream or a log. */
-            var (built, problem) = BuildAddServerJson(flags!, readPassword ?? (label => ReadPasswordFromConsole(label, input ?? TextReader.Null, output)));
+               into the request text and nowhere else: never to the output, the error stream or a log. A pipe or a file is read as bytes
+               from passwordInput (the process's stdin) with the strict reader --set-login-password uses (#9753). */
+            var (built, problem) = BuildAddServerJsonFromStdin(flags!, passwordInput ?? Stream.Null, output, Console.IsInputRedirected, readPassword);
             if (problem is not null)
             {
                 error.WriteLine(problem);
