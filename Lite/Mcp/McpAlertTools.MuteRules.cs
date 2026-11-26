@@ -237,10 +237,13 @@ public sealed partial class McpAlertTools
                 return McpHelpers.Status("not_found", $"No mute rule with id '{rule_id}'.");
             }
 
-            var undo = UndoCall("set_mute_rule_enabled", new { rule_id, enabled = existing.Enabled });
-            if (existing.Enabled == enabled)
+            /* MuteRuleService flips Enabled on the cached rule object itself, which is the object FindMute returned.
+               Read the old value now: after the save, existing.Enabled already holds the new one. */
+            var wasEnabled = existing.Enabled;
+            var undo = UndoCall("set_mute_rule_enabled", new { rule_id, enabled = wasEnabled });
+            if (wasEnabled == enabled)
             {
-                return JsonSerializer.Serialize(new { status = "unchanged", mute_rule = MutePayload(existing), previous = new { enabled = existing.Enabled }, undo }, McpHelpers.JsonOptions);
+                return JsonSerializer.Serialize(new { status = "unchanged", mute_rule = MutePayload(existing), previous = new { enabled = wasEnabled }, undo }, McpHelpers.JsonOptions);
             }
 
             if (PreservedTableRestore.IsRestorePendingFor(archivePath, MuteRulesTable) || !await service.SetRuleEnabledAsync(rule_id, enabled))
@@ -251,7 +254,7 @@ public sealed partial class McpAlertTools
             var stored = FindMute(service, rule_id);
             return stored is null
                 ? McpHelpers.Status("not_found", $"Mute rule '{rule_id}' was set enabled={(enabled ? "true" : "false")} but is no longer in the store: it was deleted concurrently.")
-                : JsonSerializer.Serialize(new { status = "updated", mute_rule = MutePayload(stored), previous = new { enabled = existing.Enabled }, undo }, McpHelpers.JsonOptions);
+                : JsonSerializer.Serialize(new { status = "updated", mute_rule = MutePayload(stored), previous = new { enabled = wasEnabled }, undo }, McpHelpers.JsonOptions);
         }
         catch (Exception ex)
         {
