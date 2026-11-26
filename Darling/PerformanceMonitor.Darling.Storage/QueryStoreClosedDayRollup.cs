@@ -1431,10 +1431,11 @@ WHERE b.server_id = f.server_id
     /// is purged on, which the hourly rollups follow. Null skips the hourly step.
     /// </summary>
     public static Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, CancellationToken cancellationToken,
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory = null)
     {
         var clock = Stopwatch.StartNew();
-        return RunTickAsync(dataSource, nowUtc, retentionDays, rawRetentionDays, logger, () => clock.Elapsed, cancellationToken);
+        return RunTickAsync(dataSource, nowUtc, retentionDays, rawRetentionDays, logger, () => clock.Elapsed, cancellationToken, pacerFactory);
     }
 
     /// <summary><see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/> with the elapsed time since the
@@ -1443,9 +1444,11 @@ WHERE b.server_id = f.server_id
         NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken) =>
         RunTickAsync(dataSource, nowUtc, retentionDays, null, logger, elapsed, cancellationToken);
 
-    /// <summary>The tick, with the hourly step (<paramref name="rawRetentionDays"/>) and the elapsed clock.</summary>
+    /// <summary>The tick, with the hourly step (<paramref name="rawRetentionDays"/>) and the elapsed clock. <paramref name="pacerFactory"/> builds the
+    /// WAL pacer the hourly step's sliced prune runs under (#9690); null runs it unpaced.</summary>
     public static async Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, int? rawRetentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken,
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory = null)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
         ArgumentNullException.ThrowIfNull(logger);
@@ -1465,7 +1468,7 @@ WHERE b.server_id = f.server_id
             var hoursRan = false;
             try
             {
-                hours = await QueryStoreClutterHourly.RunAsync(connection, nowUtc, rawDays, logger, elapsed, cancellationToken);
+                hours = await QueryStoreClutterHourly.RunAsync(connection, nowUtc, rawDays, logger, elapsed, cancellationToken, pacerFactory);
                 hoursRan = true;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -846,4 +847,178 @@ VALUES (990382001, @at, @server_id, 'rollup-9111', 'QDS_ASYNC_QUEUE', 10, 100, 0
             Assert.DoesNotContain("query_store_stats", note, StringComparison.Ordinal);
         }
     }
+
+    /// <summary>The tick clock of the #9690 horizon tests: the first whole hour inside four days of it is <see cref="FourDayEdge"/>.</summary>
+    private static readonly DateTime HorizonNow = new(2026, 9, 15, 12, 30, 0, DateTimeKind.Unspecified);
+
+    private static readonly DateTime FourDayEdge = new(2026, 9, 11, 13, 0, 0, DateTimeKind.Unspecified);
+
+    private const int HorizonOldHours = 40;
+    private const int HorizonKeptHours = 10;
+    private const int HorizonSliceHours = 6;
+    private const int HorizonPlansPerHour = 2;
+
+    /// <summary>Stamps whose rows are gone: a reader would serve the hour as built, with no plans.</summary>
+    private const string StampsWithoutRows = @"
+SELECT count(*) FROM collect.query_store_clutter_hour_built AS b
+WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_collections_hourly AS c WHERE c.server_id = b.server_id AND c.hour_utc = b.hour_utc)";
+
+    /// <summary>Rows with no stamp: an hour the reader treats as not built, holding rows the next build would have to find.</summary>
+    private const string RowsWithoutStamp = @"
+SELECT count(*) FROM collect.query_store_clutter_collections_hourly AS c
+WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_clutter_hour_built AS b WHERE b.server_id = c.server_id AND b.hour_utc = c.hour_utc)";
+
+    private const string OldestHour = @"
+SELECT LEAST((SELECT min(hour_utc) FROM collect.query_store_clutter_plan_hourly),
+             (SELECT min(hour_utc) FROM collect.query_store_clutter_collections_hourly),
+             (SELECT min(hour_utc) FROM collect.query_store_clutter_hour_built))";
+
+    /// <summary>Runs <paramref name="onSlice"/> after each committed prune slice, through the pacer seam the prune takes.</summary>
+    private sealed class SliceWatcher(Func<Task> onSlice) : IBatchWalPacer
+    {
+        public Task<long?> ReadWalPositionAsync(NpgsqlConnection connection, CancellationToken cancellationToken) => Task.FromResult<long?>(null);
+
+        public Task AfterBatchAsync(NpgsqlConnection connection, long? before, CancellationToken cancellationToken) => onSlice();
+    }
+
+    /// <summary>Plants <paramref name="hours"/> consecutive stamped hours from <paramref name="from"/> for two servers: a stamp, two plan rows (one with
+    /// NULL database, query and plan) and a collections row each.</summary>
+    private static async Task SeedHourlyRowsAsync(NpgsqlConnection connection, DateTime from, int hours, CancellationToken ct)
+    {
+        var last = from.AddHours(hours - 1);
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(connection, @"
+INSERT INTO collect.query_store_clutter_hour_built (server_id, hour_utc, built_at)
+SELECT s, h, @built FROM unnest(ARRAY[@a, @b]) AS s CROSS JOIN generate_series(@from::timestamp, @last::timestamp, interval '1 hour') AS h", ct,
+            ("a", A), ("b", B), ("from", from), ("last", last), ("built", HorizonNow));
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(connection, @"
+INSERT INTO collect.query_store_clutter_plan_hourly (server_id, hour_utc, database_name, query_id, plan_id, first_seen, last_seen)
+SELECT s, h, CASE WHEN k = 1 THEN 'DbA' END, CASE WHEN k = 1 THEN 10 END, CASE WHEN k = 1 THEN 20 END, h, h + interval '30 minutes'
+FROM unnest(ARRAY[@a, @b]) AS s CROSS JOIN generate_series(@from::timestamp, @last::timestamp, interval '1 hour') AS h CROSS JOIN generate_series(1, 2) AS k", ct,
+            ("a", A), ("b", B), ("from", from), ("last", last));
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(connection, @"
+INSERT INTO collect.query_store_clutter_collections_hourly (server_id, hour_utc, database_name, collections)
+SELECT s, h, 'DbA', 4 FROM unnest(ARRAY[@a, @b]) AS s CROSS JOIN generate_series(@from::timestamp, @last::timestamp, interval '1 hour') AS h", ct,
+            ("a", A), ("b", B), ("from", from), ("last", last));
+    }
+
+    /// <summary>A migrated scratch store with raw <c>query_store_stats</c> as a raw hypertable when <paramref name="tiered"/>, the shape the gated raw
+    /// purge owns, and a plain table otherwise.</summary>
+    private static async Task WithHorizonStoreAsync(bool tiered, Func<NpgsqlConnection, CancellationToken, Task> body)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(QueryStoreClosedDayRollupLiveTests.BaseConnectionString!, ct);
+        Assert.SkipUnless(!tiered || scratch.TimescaleEnabled, "A tiered raw table needs the TimescaleDB extension.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        if (tiered)
+        {
+            await QueryStoreClosedDayRollupLiveTests.ExecuteAsync(connection, TimescaleSupport.CreateHypertableSql("collect.query_store_stats", "collection_time"), ct);
+        }
+
+        var bodySucceeded = false;
+        try
+        {
+            await body(connection, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                Assert.Equal(0L, Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt)));
+            });
+        }
+    }
+
+    /// <summary>
+    /// #9690: the tick prunes the hourly tables at the days raw <c>query_store_stats</c> holds. Where raw is a raw hypertable, the gated raw purge's
+    /// four days, a custom thirty-day retention does not apply to it, and the hours older than four days go from all three tables while the rest
+    /// stay. Where raw is a plain table the collector's thirty days stand and nothing is removed.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public Task ATick_PrunesTheHourlyTablesToTheHorizonRawHolds_ByTheTableRawIs(bool tiered) =>
+        WithHorizonStoreAsync(tiered, async (connection, ct) =>
+        {
+            var firstOld = FourDayEdge.AddHours(-HorizonOldHours);
+            await SeedHourlyRowsAsync(connection, firstOld, HorizonOldHours + HorizonKeptHours, ct);
+
+            var result = await QueryStoreClutterHourly.RunAsync(connection, HorizonNow, 30, NullLogger.Instance, () => TimeSpan.Zero, ct);
+
+            if (!tiered)
+            {
+                Assert.Equal(0L, result.Removed);
+                Assert.Equal(firstOld, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(connection, OldestHour, ct));
+                Assert.Equal(2L * (HorizonOldHours + HorizonKeptHours), await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_store_clutter_hour_built", ct));
+                return;
+            }
+
+            Assert.Equal(2L * HorizonOldHours * (HorizonPlansPerHour + 1), result.Removed);
+            Assert.Equal(FourDayEdge, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(connection, OldestHour, ct));
+            Assert.Equal(2L * HorizonKeptHours, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_store_clutter_hour_built", ct));
+            Assert.Equal(2L * HorizonKeptHours * HorizonPlansPerHour, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_store_clutter_plan_hourly", ct));
+            Assert.Equal(2L * HorizonKeptHours, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_store_clutter_collections_hourly", ct));
+        });
+
+    /// <summary>
+    /// A prune over more old hours than one slice takes removes them oldest first, a slice per transaction. After every commit no stamp names an
+    /// hour whose rows are gone and no row lacks its stamp, and it ends at the edge in all three tables.
+    /// </summary>
+    [Fact]
+    public Task ThePrune_RemovesOldHoursInSlices_AndNeverLeavesAStampWithoutItsRowsOrRowsWithoutItsStamp() =>
+        WithHorizonStoreAsync(false, async (connection, ct) =>
+        {
+            var firstOld = FourDayEdge.AddHours(-HorizonOldHours);
+            await SeedHourlyRowsAsync(connection, firstOld, HorizonOldHours + HorizonKeptHours, ct);
+
+            var oldestAfterEachSlice = new List<DateTime>();
+            var watcher = new SliceWatcher(async () =>
+            {
+                Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, StampsWithoutRows, ct));
+                Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, RowsWithoutStamp, ct));
+                oldestAfterEachSlice.Add(await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(connection, OldestHour, ct));
+            });
+
+            var removed = await QueryStoreClutterHourly.PruneAsync(
+                connection, HorizonNow, 4, HorizonSliceHours, () => TimeSpan.Zero, _ => Task.FromResult<IBatchWalPacer?>(watcher), ct);
+
+            Assert.Equal(2L * HorizonOldHours * (HorizonPlansPerHour + 1), removed);
+            Assert.Equal(
+                Enumerable.Range(1, HorizonOldHours / HorizonSliceHours).Select(i => firstOld.AddHours(i * HorizonSliceHours)).Append(FourDayEdge).ToList(),
+                oldestAfterEachSlice);
+            Assert.Equal(0L, await QueryStoreClutterHourly.PruneAsync(connection, HorizonNow, 4, HorizonSliceHours, () => TimeSpan.Zero, null, ct));
+        });
+
+    /// <summary>
+    /// A prune that reaches its share of the tick (<see cref="QueryStoreClutterHourly.MaxPruneDuration"/>) after two slices stops with a consistent state,
+    /// and the next call removes the rest. The budget is a counter that reads spent from its third look, so no clock is involved.
+    /// </summary>
+    [Fact]
+    public Task AnOutOfBudgetPrune_LeavesAConsistentState_AndTheNextCallFinishesIt() =>
+        WithHorizonStoreAsync(false, async (connection, ct) =>
+        {
+            var firstOld = FourDayEdge.AddHours(-HorizonOldHours);
+            await SeedHourlyRowsAsync(connection, firstOld, HorizonOldHours + HorizonKeptHours, ct);
+
+            var looks = 0;
+            Func<TimeSpan> twoSlicesOfBudget = () => ++looks <= 2 ? TimeSpan.Zero : QueryStoreClutterHourly.MaxPruneDuration;
+            var first = await QueryStoreClutterHourly.PruneAsync(connection, HorizonNow, 4, HorizonSliceHours, twoSlicesOfBudget, null, ct);
+
+            Assert.Equal(2L * 2 * HorizonSliceHours * (HorizonPlansPerHour + 1), first);
+            Assert.Equal(firstOld.AddHours(2 * HorizonSliceHours), await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(connection, OldestHour, ct));
+            Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, StampsWithoutRows, ct));
+            Assert.Equal(0L, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(connection, RowsWithoutStamp, ct));
+
+            var second = await QueryStoreClutterHourly.PruneAsync(connection, HorizonNow, 4, HorizonSliceHours, () => TimeSpan.Zero, null, ct);
+
+            Assert.Equal(2L * HorizonOldHours * (HorizonPlansPerHour + 1), first + second);
+            Assert.Equal(FourDayEdge, await QueryStoreClosedDayRollupLiveTests.ScalarAsync<DateTime>(connection, OldestHour, ct));
+        });
 }

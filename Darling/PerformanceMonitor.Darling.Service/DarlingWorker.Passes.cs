@@ -1392,7 +1392,8 @@ public sealed partial class DarlingWorker
                 var tick = await QueryStoreClosedDayRollup.RunTickAsync(
                     _postgres!, DateTime.UtcNow, DarlingRetention.QueryStoreIntervalWideRetentionDays,
                     DarlingRetention.QueryStoreStatsPurgeRetentionDays(_scheduleOverrides),
-                    _logger, stoppingToken);
+                    _logger, stoppingToken,
+                    async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(_postgres!, _logger, token)));
                 return new StorePassSteps.StepCounts(
                     Built: tick.Built + tick.HoursBuilt + tick.ClutterDaysFolded, Removed: tick.DaysRemoved + tick.HoursRemoved,
                     Failed: tick.Failed + tick.HoursFailed, Detail: DeferredText(tick.Deferred + tick.HoursDeferred));
