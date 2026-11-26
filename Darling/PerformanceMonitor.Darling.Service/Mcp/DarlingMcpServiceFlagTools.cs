@@ -233,7 +233,7 @@ RETURNING old.capture_plans, old.query_store_backfill_enabled, old.query_store_t
 
         if ((int)previous["compose_statement_timeout_seconds"]! != (int)settings["compose_statement_timeout_seconds"]!)
         {
-            message += " compose_statement_timeout_seconds is set on the viewer and mcp database roles, not read per query: the service sets it on its next sweep"
+            message += " compose_statement_timeout_seconds is set on the viewer and mcp database roles, not read per query: the service sets it on its next sweep or its next start"
                 + " where it provisioned those roles (a managed store or the compose store), and a role uses it from its next session."
                 + " On a store whose roles you provisioned yourself the service does not touch them, so run ALTER ROLE ... SET statement_timeout there by hand.";
         }

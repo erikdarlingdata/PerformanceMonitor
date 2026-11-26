@@ -92,9 +92,11 @@ public sealed class DarlingMcpServiceFlagToolsLiveTests
                 /* Values that differ from every default and from each other, so "kept" and "written" cannot be confused. */
                 await ExecAsync(ownerConnection,
                     "INSERT INTO config.config_service (id, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, query_store_backfill_enabled, " +
-                    "query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n) VALUES (1, FALSE, TRUE, 5188, TRUE, 5199, FALSE, 40, 3, 250) " +
+                    "query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, plan_content_retention_days, compose_statement_timeout_seconds, plan_xml_compression) " +
+                    "VALUES (1, FALSE, TRUE, 5188, TRUE, 5199, FALSE, 40, 3, 250, 30, 90, 'gzip') " +
                     "ON CONFLICT (id) DO UPDATE SET capture_plans = FALSE, mcp_enabled = TRUE, mcp_port = 5188, web_enabled = TRUE, web_port = 5199, " +
-                    "query_store_backfill_enabled = FALSE, query_store_text_budget_mb = 40, max_concurrent_sweeps = 3, query_store_fetch_top_n = 250", ct);
+                    "query_store_backfill_enabled = FALSE, query_store_text_budget_mb = 40, max_concurrent_sweeps = 3, query_store_fetch_top_n = 250, " +
+                    "plan_content_retention_days = 30, compose_statement_timeout_seconds = 90, plan_xml_compression = 'gzip'", ct);
             }
 
             var mcpString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
@@ -142,12 +144,12 @@ public sealed class DarlingMcpServiceFlagToolsLiveTests
             /* paused, mcp_enabled, mcp_port, web_enabled, web_port are untouched; config_version moved by the self-bump trigger. */
             var versionAfter = await VersionAsync(owner, ct);
             Assert.True(versionAfter > versionBefore, "config_version must move so the running service reloads");
-            Assert.Equal($"f|t|t|5188|t|5199|f|128|3|250|n|n|{versionAfter}", await RowAsync(owner, ct));
+            Assert.Equal($"f|t|t|5188|t|5199|f|128|3|250|30|90|gzip|n|n|{versionAfter}", await RowAsync(owner, ct));
 
             var all = Parse(await DarlingMcpServiceFlagTools.UpdateServiceFlags(
                 mcp, false, true, 4, 16, 0, cancellationToken: ct));
             Assert.Equal("updated", (string)all["status"]!);
-            Assert.Equal($"f|f|t|5188|t|5199|t|4|16|0|n|n|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
+            Assert.Equal($"f|f|t|5188|t|5199|t|4|16|0|30|90|gzip|n|n|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
         });
     }
 
@@ -168,7 +170,7 @@ public sealed class DarlingMcpServiceFlagToolsLiveTests
             Assert.False((bool)set["settings"]!["query_store_text_trigram_index_enabled"]!);
             var versionAfterSet = await VersionAsync(owner, ct);
             Assert.True(versionAfterSet > versionBefore, "config_version must move so the running service reloads the options");
-            Assert.Equal($"f|f|t|5188|t|5199|f|40|3|250|t|f|{versionAfterSet}", await RowAsync(owner, ct));
+            Assert.Equal($"f|f|t|5188|t|5199|f|40|3|250|30|90|gzip|t|f|{versionAfterSet}", await RowAsync(owner, ct));
 
             /* A reset alone is a valid call; it empties the one option named and keeps the other. */
             var reset = Parse(await DarlingMcpServiceFlagTools.UpdateServiceFlags(
@@ -177,13 +179,13 @@ public sealed class DarlingMcpServiceFlagToolsLiveTests
             Assert.True((bool)reset["previous"]!["query_text_trigram_index_enabled"]!);
             Assert.Null(reset["settings"]!["query_text_trigram_index_enabled"]);
             Assert.False((bool)reset["settings"]!["query_store_text_trigram_index_enabled"]!);
-            Assert.Equal($"f|f|t|5188|t|5199|f|40|3|250|n|f|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
+            Assert.Equal($"f|f|t|5188|t|5199|f|40|3|250|30|90|gzip|n|f|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
 
             /* A reset of one option rides with a value for the other. */
             var both = Parse(await DarlingMcpServiceFlagTools.UpdateServiceFlags(
                 mcp, query_text_trigram_index_enabled: false, reset_to_file: ["query_store_text_trigram_index_enabled"], cancellationToken: ct));
             Assert.Equal("updated", (string)both["status"]!);
-            Assert.Equal($"f|f|t|5188|t|5199|f|40|3|250|f|n|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
+            Assert.Equal($"f|f|t|5188|t|5199|f|40|3|250|30|90|gzip|f|n|{await VersionAsync(owner, ct)}", await RowAsync(owner, ct));
         });
     }
 
