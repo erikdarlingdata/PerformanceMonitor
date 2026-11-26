@@ -52,6 +52,12 @@ internal static class McpWritePolicy
         "set_notification_route_enabled",
         "delete_notification_route",
 
+        /* #9639: the mute-rule writes, Darling's twins. get_mute_rules is a read. */
+        "create_mute_rule",
+        "update_mute_rule",
+        "delete_mute_rule",
+        "set_mute_rule_enabled",
+
         /* #5991: the query-tag and query-tag-rule writes, Darling's twins. The three reads (list_query_tags,
            list_query_tag_rules, test_query_tag_rule) are ordinary reads. */
         "create_query_tag",

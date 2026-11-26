@@ -177,6 +177,10 @@ public sealed class McpWritePolicyTests
     [Theory]
     [InlineData("mute_analysis_finding", "{\"finding_hash\":\"abc\"}")]
     [InlineData("unmute_analysis_finding", "{\"finding_hash\":\"abc\"}")]
+    [InlineData("create_mute_rule", "{}")]
+    [InlineData("update_mute_rule", "{\"rule_id\":\"x\",\"changes_json\":\"{}\"}")]
+    [InlineData("delete_mute_rule", "{\"rule_id\":\"x\"}")]
+    [InlineData("set_mute_rule_enabled", "{\"rule_id\":\"x\",\"enabled\":true}")]
     public async Task WritesOff_CallingAWriteTool_IsRefusedAsAnUnknownTool(string tool, string arguments)
     {
         using var server = await BuildServer(allowWrites: false);

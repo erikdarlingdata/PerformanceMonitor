@@ -11,7 +11,7 @@ using PerformanceMonitor.Common;
 namespace PerformanceMonitorLite.Mcp;
 
 [McpServerToolType]
-public sealed class McpAlertTools
+public sealed partial class McpAlertTools
 {
     /// <summary>SQL-process CPU only. Darling's <c>cpu_mode</c> spelling, which its own
     /// <c>update_alert_settings</c> validates against — see <c>ViewerDataService.CpuModeSql</c>.</summary>
@@ -918,24 +918,7 @@ public sealed class McpAlertTools
 
             var result = new
             {
-                mute_rules = rules.Select(r => new
-                {
-                    id = r.Id,
-                    enabled = r.Enabled,
-                    created_at_utc = r.CreatedAtUtc.ToString("o"),
-                    expires_at_utc = r.ExpiresAtUtc?.ToString("o"),
-                    reason = r.Reason,
-                    server_name = r.ServerName,
-                    metric_name = r.MetricName,
-                    /* #5654: always null in Lite (no external alert intake); the key keeps one rule shape across products. */
-                    external_source = (string?)null,
-                    database_pattern = r.DatabasePattern,
-                    query_text_pattern = r.QueryTextPattern,
-                    wait_type_pattern = r.WaitTypePattern,
-                    job_name_pattern = r.JobNamePattern,
-                    client_app_pattern = r.ClientAppPattern,
-                    match_summary = r.Summary
-                }).ToArray(),
+                mute_rules = rules.Select(MutePayload).ToArray(),
                 total_count = rules.Count
             };
 
