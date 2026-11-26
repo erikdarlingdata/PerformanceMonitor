@@ -115,8 +115,7 @@ public sealed class McpServerAdminTools
             return (null, error);
         }
 
-        var server = all.First(s => RemoteCollectorService.GetServerNameForStorage(s) == resolved.ServerName);
-        return (server, null);
+        return ServerResolver.PickByStorageName(all, resolved.ServerName);
     }
 
     private static string AuthWordOut(string authenticationType) => authenticationType switch

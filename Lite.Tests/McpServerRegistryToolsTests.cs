@@ -228,6 +228,86 @@ public sealed class McpServerRegistryToolsTests : IDisposable
         Assert.Equal("sql01b", Assert.Single(NewManager().GetAllServers()).ServerName);
     }
 
+    /// <summary>A manager over a servers.json written as given, which is how a pair saved before the duplicate check, or a hand-edited Id, reaches Lite.</summary>
+    private ServerManager Seeded(params ServerConnection[] servers)
+    {
+        File.WriteAllText(Path.Combine(_root, "servers.json"), JsonSerializer.Serialize(new { Servers = servers }));
+        return NewManager();
+    }
+
+    private static ServerConnection Entry(string id, string host, string name) =>
+        new() { Id = id, ServerName = host, DisplayName = name, AuthenticationType = AuthenticationTypes.Windows };
+
+    [Fact]
+    public async Task RemoveServer_ReadsNoSavedLogin_ForAServerWhoseIdIsNotAGuid()
+    {
+        const string LegacyUser = "svc_legacy_login";
+        var entry = Entry("legacy-id", "sql01", "Legacy");
+        entry.AuthenticationType = AuthenticationTypes.SqlServer;
+        var manager = Seeded(entry);
+        manager.CredentialService.SaveCredential("legacy-id", LegacyUser, Secret);
+        var hooks = new Hooks();
+
+        var answer = await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), "Legacy");
+
+        var root = Parse(answer);
+        Assert.Equal("removed", root.GetProperty("status").GetString());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("previous").GetProperty("username").ValueKind);
+        Assert.DoesNotContain(LegacyUser, answer, StringComparison.Ordinal);
+        Assert.DoesNotContain(Secret, answer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RemoveServer_RemovesNothing_WhenTwoEntriesShareAStorageName()
+    {
+        var manager = Seeded(Entry(Guid.NewGuid().ToString(), "sql01", "First"), Entry(Guid.NewGuid().ToString(), "sql01", "Second"));
+        var hooks = new Hooks();
+
+        var answer = Parse(await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), "sql01"));
+
+        Assert.Equal("invalid", answer.GetProperty("status").GetString());
+        Assert.Contains("'sql01'", answer.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("Lite window", answer.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Empty(hooks.Removed);
+        Assert.Equal(2, NewManager().GetAllServers().Count);
+    }
+
+    [Fact]
+    public async Task RemoveServer_RemovesNothing_WhenTwoEntriesShareOneId()
+    {
+        var id = Guid.NewGuid().ToString();
+        var manager = Seeded(Entry(id, "sql01", "First"), Entry(id, "sql02", "Second"));
+        var hooks = new Hooks();
+
+        var answer = Parse(await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), "sql01"));
+
+        Assert.Equal("invalid", answer.GetProperty("status").GetString());
+        Assert.Contains("shares the id", answer.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Empty(hooks.Removed);
+        Assert.Equal(2, NewManager().GetAllServers().Count);
+    }
+
+    [Fact]
+    public async Task RemoveServer_RemovesNothing_OnALonePartialMatch_AndAsksForTheFullName()
+    {
+        var manager = NewManager();
+        await McpServerRegistryTools.AddServersCore(manager, null, "[{\"host\":\"sql01a\"},{\"host\":\"other02\"}]", Reachable);
+        var hooks = new Hooks();
+
+        var answer = Parse(await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), "sql01"));
+
+        Assert.Equal("partial_match", answer.GetProperty("status").GetString());
+        Assert.Equal("partial", answer.GetProperty("matched_by").GetString());
+        Assert.Contains("full name", answer.GetProperty("message").GetString(), StringComparison.Ordinal);
+        var candidate = Assert.Single(answer.GetProperty("candidates").EnumerateArray());
+        Assert.Empty(hooks.Removed);
+        Assert.Equal(2, NewManager().GetAllServers().Count);
+
+        var again = Parse(await McpServerRegistryTools.RemoveServerCore(manager, hooks.For(manager), candidate.GetProperty("server").GetString()));
+        Assert.Equal("removed", again.GetProperty("status").GetString());
+        Assert.Equal("other02", Assert.Single(NewManager().GetAllServers()).ServerName);
+    }
+
     [Theory]
     [InlineData(false, false, false, false)]
     [InlineData(false, true, false, false)]

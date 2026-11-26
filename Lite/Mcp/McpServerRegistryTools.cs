@@ -164,15 +164,15 @@ public sealed class McpServerRegistryTools
     [McpServerTool(Name = "remove_server"), Description(
         "Write: removes a monitored server, with no confirm step, as Manage Servers' Delete does: its saved login, its long-query trace Extended Events session on the server, " +
         "its collection health, alert state and tag assignments, then its entry in the server list. Served only when mcp_allow_server_admin and mcp_allow_writes are both true. " +
-        "Already-collected history is NOT deleted. The name is matched exactly first (display name or storage name, any letter case), else as a part of a name; " +
+        "Already-collected history is NOT deleted. The name is matched exactly first (display name or storage name, any letter case). A part of a name removes nothing: one server that fits is returned as {status:\"partial_match\"} to re-issue with its full name; " +
         "when several servers match, nothing is removed and the candidates are listed. <<GUIDE>> " +
-        "Returns {status:\"removed\", server (the storage name), display_name, matched_by:\"exact\"|\"partial\", previous (the removed entry in the keys add_servers takes; " +
+        "Returns {status:\"removed\", server (the storage name), display_name, matched_by:\"exact\", previous (the removed entry in the keys add_servers takes; " +
         "a SQL or service-principal password cannot be read back, so it carries the placeholder <password>), undo (the add_servers arguments that re-add it), undo_note}, " +
-        "{status:\"ambiguous\", candidates:[{server, display_name}]} or {status:\"not_found\", message}.")]
+        "{status:\"partial_match\", matched_by, candidates:[{server, display_name}]}, {status:\"ambiguous\", candidates:[{server, display_name}]} or {status:\"not_found\", message}.")]
     public static async Task<string> RemoveServer(
         ServerManager serverManager,
         McpServerAdminHooks hooks,
-        [Description("The server to remove: its display name or storage name. A partial name is accepted only when it matches exactly one server.")] string server_name)
+        [Description("The server to remove: its display name or storage name. A part of a name removes nothing: the answer lists the match to re-issue by its full name.")] string server_name)
     {
         try
         {
@@ -218,18 +218,39 @@ public sealed class McpServerRegistryTools
         }
 
         var candidate = match.Candidates[0];
-        var target = servers.First(s => RemoteCollectorService.GetServerNameForStorage(s) == candidate.ServerName);
 
-        /* Read before the removal drops the saved login: the username only, never the password. */
+        /* A write never guesses (#9640): a name that fits only part of one server's name is not enough to remove it, so the one candidate is
+           shown and its full name asked for. The exact tiers (display name, host, storage name) name the server, so they go on. */
+        if (match.MatchedBy == "partial")
+        {
+            return JsonSerializer.Serialize(new
+            {
+                status = "partial_match",
+                message = $"'{serverName.Trim()}' fits only part of one monitored server's name; nothing was removed. " +
+                          "Re-issue remove_server with that server's full name (the candidate's server value).",
+                matched_by = match.MatchedBy,
+                candidates = match.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+            }, McpHelpers.JsonOptions);
+        }
+
+        var (target, duplicate) = ServerResolver.PickByStorageName(servers, candidate.ServerName);
+        if (target is null)
+        {
+            return duplicate!;
+        }
+
+        /* Read before the removal drops the saved login: the username only, never the password. A server whose Id is not a GUID has no
+           saved login to read (ServerCredentialIds), the same rule edit_server and the connection use. */
         string? username = null;
-        if (serverManager.CredentialService.TryReadCredential(target.Id, out var credential, out _) == CredentialReadOutcome.Found)
+        if (ServerCredentialIds.Allows(target.Id, target.DisplayName)
+            && serverManager.CredentialService.TryReadCredential(target.Id, out var credential, out _) == CredentialReadOutcome.Found)
         {
             username = credential!.Value.Username;
         }
 
         var previous = PreviousOf(target, username);
         var clean = await hooks.RemoveServer(target);
-        AppLogger.Info("MCP", "remove_server removed a server");
+        AppLogger.Info("MCP", $"remove_server removed the server '{RemoteCollectorService.GetServerNameForStorage(target)}'");
 
         var undoText = new JsonObject { ["servers_json"] = new JsonArray(previous.DeepClone()).ToJsonString() }.ToJsonString();
         return JsonSerializer.Serialize(new

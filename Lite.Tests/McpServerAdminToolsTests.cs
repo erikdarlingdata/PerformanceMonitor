@@ -87,6 +87,47 @@ public sealed class McpServerAdminToolsTests : IDisposable
 
     private ServerConnection Reread(string name) => Manager().GetAllServers().Single(s => s.DisplayName == name);
 
+    /// <summary>A manager over a servers.json written as given: a pair saved before the duplicate check, or a hand-edited Id.</summary>
+    private ServerManager SeededRaw(params ServerConnection[] servers)
+    {
+        File.WriteAllText(Path.Combine(_root, "servers.json"), System.Text.Json.JsonSerializer.Serialize(new { Servers = servers }));
+        return Manager();
+    }
+
+    [Fact]
+    public async Task Edit_RefusesAndChangesNothing_WhenTwoEntriesShareTheStorageName()
+    {
+        var manager = SeededRaw(
+            new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "sql01", DisplayName = "First", AuthenticationType = AuthenticationTypes.Windows },
+            new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "sql01", DisplayName = "Second", AuthenticationType = AuthenticationTypes.Windows });
+        var probe = new Probe();
+
+        var answer = await Edit(manager, "sql01", "{\"description\":\"changed\"}", probe);
+
+        Assert.Equal("invalid", Status(answer));
+        Assert.Contains("'sql01'", Parse(answer)["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.All(Manager().GetAllServers(), s => Assert.NotEqual("changed", s.Description));
+        var excluded = McpServerAdminTools.SetExcluded(manager, "sql01", new[] { "db1" });
+        Assert.Equal("invalid", Status(excluded));
+        Assert.All(Manager().GetAllServers(), s => Assert.Empty(s.ExcludedDatabases ?? []));
+    }
+
+    [Fact]
+    public async Task Edit_RefusesAndChangesNothing_WhenTwoEntriesShareOneId()
+    {
+        var id = Guid.NewGuid().ToString();
+        var manager = SeededRaw(
+            new ServerConnection { Id = id, ServerName = "sql01", DisplayName = "First", AuthenticationType = AuthenticationTypes.Windows },
+            new ServerConnection { Id = id, ServerName = "sql02", DisplayName = "Second", AuthenticationType = AuthenticationTypes.Windows });
+        var probe = new Probe();
+
+        var answer = await Edit(manager, "sql01", "{\"description\":\"changed\"}", probe);
+
+        Assert.Equal("invalid", Status(answer));
+        Assert.Contains("shares the id", Parse(answer)["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.All(Manager().GetAllServers(), s => Assert.NotEqual("changed", s.Description));
+    }
+
     [Fact]
     public async Task Edit_DisplayNameAndCost_IsSavedThroughTheWindowsStore_WithNoProbe()
     {

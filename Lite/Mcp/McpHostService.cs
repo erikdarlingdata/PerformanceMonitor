@@ -486,7 +486,7 @@ public sealed class McpHostService : BackgroundService
         if (serving.ServerAdmin)
         {
             lines.Add((LogLevel.Warning,
-                $"MCP server admin tools are ON ({McpWritePolicy.ServerAdminSetting}): {adminTools} are served to any client that has the MCP token. They change which servers Lite monitors and store a login."));
+                $"MCP server admin tools are ON ({McpWritePolicy.ServerAdminSetting}): {adminTools} are served to any client that has the MCP token. They change which servers Lite monitors and store a login. add_servers defaults to Windows authentication, so an entry with only a host connects with Lite's own Windows sign-in."));
         }
         else if (serving.AskedServerAdmin)
         {

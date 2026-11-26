@@ -69,6 +69,33 @@ public sealed class McpCollectorScheduleToolTests : IDisposable
     }
 
     [Fact]
+    public void Reset_RefusesAndChangesNothing_WhenTwoEntriesShareTheStorageName()
+    {
+        GiveAlphaItsOwnSchedule();
+        var twin = new ServerConnection { ServerName = _alpha.ServerName, DisplayName = "alpha twin" };
+
+        using var doc = Parse(McpCollectorScheduleTools.Reset(_schedules, [_alpha, twin], "alpha-host"));
+
+        Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
+        Assert.Contains("'alpha-host'", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("Lite window", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal(7, Reread().GetSchedulesForServer(_alpha.Id).First(s => s.Name == "wait_stats").FrequencyMinutes);
+    }
+
+    [Fact]
+    public void Reset_RefusesAndChangesNothing_WhenTwoEntriesShareOneId()
+    {
+        GiveAlphaItsOwnSchedule();
+        var sameId = new ServerConnection { Id = _alpha.Id, ServerName = "other-host", DisplayName = "other" };
+
+        using var doc = Parse(McpCollectorScheduleTools.Reset(_schedules, [_alpha, sameId], "alpha-host"));
+
+        Assert.Equal("invalid", doc.RootElement.GetProperty("status").GetString());
+        Assert.Contains("shares the id", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Equal(7, Reread().GetSchedulesForServer(_alpha.Id).First(s => s.Name == "wait_stats").FrequencyMinutes);
+    }
+
+    [Fact]
     public void Get_ShippedDefaults_IsEmpty_AndNamesEveryServersSchedule()
     {
         using var doc = Parse(Get());

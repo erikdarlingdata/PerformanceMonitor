@@ -98,8 +98,7 @@ public sealed class McpCollectorScheduleTools
             return (null, error);
         }
 
-        var server = servers.First(s => RemoteCollectorService.GetServerNameForStorage(s) == resolved.ServerName);
-        return (server, null);
+        return ServerResolver.PickByStorageName(servers, resolved.ServerName);
     }
 
     private static bool SameValues(CollectorSchedule a, CollectorSchedule b) =>
