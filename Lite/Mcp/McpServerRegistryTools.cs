@@ -75,18 +75,20 @@ public sealed class McpServerAdminHooks
 public sealed class McpServerRegistryTools
 {
     [McpServerTool(Name = "add_servers"), Description(
-        "Write: adds servers (a JSON ARRAY) to what Lite monitors, through the code behind --add-server: every entry is checked and connection-tested, " +
-        "then all are saved at once. Served only when mcp_allow_server_admin and mcp_allow_writes are both true. One refused or unreachable entry " +
-        "refuses the whole call and nothing is saved (unlike Darling, which reports each entry). A server already listed (same host, database and " +
+        "Write: adds servers (a JSON ARRAY) to what Lite monitors, through the code behind --add-server: every entry is checked and connection-tested first, " +
+        "then saved one at a time. Served only when mcp_allow_server_admin and mcp_allow_writes are both true. One refused or unreachable entry " +
+        "refuses the whole call before anything is saved (unlike Darling, which reports each entry). A server already listed (same host, database and " +
         "read-only intent) is updated in place, with the new password. A password is stored in Windows Credential Manager and never returned. <<GUIDE>> " +
+        "If a save fails, the entries before it stay saved, the answer names them (remove_server removes one) and the failed entry changes nothing. " +
         "Each object: host (REQUIRED); display_name (defaults to host); database; auth (\"Windows\" default, \"SQL\", \"ServicePrincipal\" (username is the " +
         "client id, password the secret), \"ManagedIdentity\" or \"EntraDefault\"); username and password (REQUIRED for \"SQL\" and \"ServicePrincipal\"); " +
         "encrypt_mode (\"Optional\"|\"Mandatory\"|\"Strict\"); trust_server_certificate, read_only_intent, multi_subnet_failover (booleans); engine, " +
         "only \"sqlserver\" (Lite monitors SQL Server only, so Darling's port, aws_role_arn, aws_external_id and query_store_replica are not read). " +
         "The password travels to this endpoint in the request. Returns {status:\"ok\", requested, added, updated, results:[{server, host, database, " +
-        "status:\"added\"|\"updated\"}]}, or {status:\"refused\", message} with nothing saved. An entry with Windows authentication (the default) and " +
-        "trust_server_certificate true or encrypt_mode Optional is refused before any connection is tried, as {status:\"invalid\", message (naming each such entry), hints:{parameter:\"servers_json\"}} with nothing saved: " +
-        "Windows authentication would present Lite's own Windows account to a host the connection does not verify. Use auth \"SQL\", or leave trust_server_certificate false and use encrypt_mode Mandatory or Strict; " +
+        "status:\"added\"|\"updated\"}]}, or {status:\"refused\", message, requested, added, updated} (added and updated count what stayed saved, and are 0 when nothing was). " +
+        "An entry with Windows authentication (the default) and trust_server_certificate true or encrypt_mode Optional is refused before any connection is tried, as " +
+        "{status:\"invalid\", message (naming each such entry), hints:{parameter:\"servers_json\"}} with nothing saved: Windows authentication would present Lite's own Windows account " +
+        "to a host the connection does not verify. Use auth \"SQL\", or leave trust_server_certificate false and use encrypt_mode Mandatory or Strict; " +
         "an operator can allow it with mcp_allow_windows_auth_over_unverified_tls in settings.json. The new server is collected from the next collection pass.")]
     public static async Task<string> AddServers(
         ServerManager serverManager,
@@ -195,8 +197,8 @@ public sealed class McpServerRegistryTools
     [McpServerTool(Name = "remove_server"), Description(
         "Write: removes a monitored server, with no confirm step, as Manage Servers' Delete does: its saved login, its long-query trace Extended Events session on the server, " +
         "its collection health, alert state and tag assignments, then its entry in the server list. Served only when mcp_allow_server_admin and mcp_allow_writes are both true. " +
-        "Already-collected history is NOT deleted. The name is matched exactly first (display name or storage name, any letter case). A part of a name removes nothing: one server that fits is returned as {status:\"partial_match\"} to re-issue with its full name; " +
-        "when several servers match, nothing is removed and the candidates are listed. <<GUIDE>> " +
+        "Already-collected history is NOT deleted. The name is matched exactly first (display name or storage name, any letter case). A part of a name removes nothing. <<GUIDE>> " +
+        "A part of a name that fits one server is returned as {status:\"partial_match\"} to re-issue with its full name; when several servers match, nothing is removed and the candidates are listed. " +
         "Returns {status:\"removed\", server (the storage name), display_name, matched_by:\"exact\", previous (the removed entry in the keys add_servers takes; " +
         "a SQL or service-principal password cannot be read back, so it carries the placeholder <password>), undo (the add_servers arguments that re-add it), undo_note}, " +
         "{status:\"partial_match\", matched_by, candidates:[{server, display_name}]}, {status:\"ambiguous\", candidates:[{server, display_name}]} or {status:\"not_found\", message}.")]
@@ -293,7 +295,10 @@ public sealed class McpServerRegistryTools
             previous = previous,
             undo = undoText,
             undo_note = "The undo re-adds the server with a fresh connection test. A SQL or service-principal row needs the real password in place of <password>. " +
-                "Collected history stays in the store and is shown again once the server is added back. Alert and tag state the removal dropped is not brought back.",
+                "Collected history stays in the store and is shown again once the server is added back. Alert and tag state the removal dropped is not brought back."
+                + (target.AuthenticationType is AuthenticationTypes.EntraMFA or AuthenticationTypes.EntraDeviceCode
+                    ? " This server signs in with Microsoft Entra MFA or device code, which add_servers does not take, so this undo cannot be replayed: add the server again in the Add Server window."
+                    : ""),
             cleanup = clean ? "complete" : "incomplete: the server's tag assignments were not cleared (the store was busy), and they come back if it is added again",
         }, McpHelpers.JsonOptions);
     }
