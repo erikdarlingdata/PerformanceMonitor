@@ -1282,14 +1282,14 @@ jobs:
           sh -n "${compose_stage}/${compose_dir}/setup.sh"
           tar -C "${compose_stage}" -czf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" "${compose_dir}"
           tar -tzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz"
-          if ! tar -tvzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" | grep -Eq '^-rwxr-xr-x .* '"${compose_dir}"'/setup\.sh$'; then
+          if ! tar -tvzf "releases/PerformanceMonitorDarling-compose-${version}.tar.gz" | grep -E '^-rwxr-xr-x .* '"${compose_dir}"'/setup\.sh$' >/dev/null; then
             echo "::error::setup.sh is missing from the compose archive or lacks its execute bit (#6140)."
             exit 1
           fi
           # The export tool's Linux zip. zip keeps the execute bit of darling-export, and the listing check fails the job without it.
           export_zip="PerformanceMonitorDarlingExport-${version}-linux-x64.zip"
           (cd publish/DarlingExport-linux && zip -q -r -X "${GITHUB_WORKSPACE}/releases/${export_zip}" .)
-          if ! zipinfo "releases/${export_zip}" darling-export | grep -Eq '^-rwxr-xr-x '; then
+          if ! zipinfo "releases/${export_zip}" darling-export | grep -E '^-rwxr-xr-x ' >/dev/null; then
             echo "::error::darling-export is missing from ${export_zip} or lacks its execute bit."
             exit 1
           fi
