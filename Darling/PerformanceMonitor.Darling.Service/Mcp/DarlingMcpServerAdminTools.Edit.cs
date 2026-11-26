@@ -643,7 +643,8 @@ LIMIT 1";
 
         logger?.LogInformation("Server edited through edit_server: id {ServerId}, fields {Fields}", serverId, string.Join(",", plan.ChangedFields));
 
-        var (previous, undo, undoNote) = EditUndoOf(row, plan, ModifiedAtToken(write.ModifiedAt));
+        var undoName = await UndoServerNameAsync(store, serverId, plan, logger, cancellationToken);
+        var (previous, undo, undoNote) = EditUndoOf(row, plan, ModifiedAtToken(write.ModifiedAt), undoName);
         return JsonSerializer.Serialize(new
         {
             status = EditStatus.Updated,
@@ -670,7 +671,7 @@ LIMIT 1";
     /// cannot be read, so neither is ever in <c>previous</c> or the undo, and the note says what the caller must add. An edit that changed nothing
     /// else (a password-only edit) has nothing a call can restore: <c>undo</c> is null and the note says why.
     /// </summary>
-    private static (JsonObject Previous, JsonObject? Undo, string? Note) EditUndoOf(ServerEditRow row, ServerEditPlan plan, string newModifiedAt)
+    private static (JsonObject Previous, JsonObject? Undo, string? Note) EditUndoOf(ServerEditRow row, ServerEditPlan plan, string newModifiedAt, string undoName)
     {
         var previous = new JsonObject();
         foreach (var field in plan.ChangedFields)
@@ -747,9 +748,41 @@ LIMIT 1";
         changes["expected_modified_at"] = newModifiedAt;
         return (previous, DarlingMcpUndoShape.Call("edit_server", new JsonObject
         {
-            ["server_name"] = plan.NewStorageKey,
+            ["server_name"] = undoName,
             ["changes_json"] = changes.ToJsonString(),
         }), note);
+    }
+
+    /// <summary>
+    /// The name the printed undo gives the edited server (#9693): its storage name while that name picks this registration
+    /// alone, else <c>id:&lt;server_id&gt;</c>. A storage name another registration has as its display name answers for both,
+    /// and <see cref="ResolveForEdit"/> refuses a name that answers for two, so an undo that named it could not be run.
+    /// <paramref name="others"/> is every other registration, and the edited one is judged by the names the edit left it.
+    /// </summary>
+    internal static string UndoServerName(IReadOnlyList<RegisteredServer> others, int serverId, string storageKey, string displayName)
+    {
+        List<RegisteredServer> registrations = [.. others.Where(o => o.ServerId != serverId), new RegisteredServer(serverId, storageKey, displayName)];
+        return ResolveForEdit(registrations, storageKey).Candidates.Count == 1 ? storageKey : ServerIdName(serverId);
+    }
+
+    private static string ServerIdName(int serverId) => ServerIdNamePrefix + serverId.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// <see cref="UndoServerName"/> over the store's other registrations. The edit is already committed when this reads, so a
+    /// read that fails does not fail the answer: the undo names the server by its id, the name that always picks one.
+    /// </summary>
+    private static async Task<string> UndoServerNameAsync(IServerEditStore store, int serverId, ServerEditPlan plan, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return UndoServerName(await store.LoadOtherRegistrationsAsync(serverId, cancellationToken), serverId, plan.NewStorageKey, plan.NewName);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning("edit_server could not list the other registrations for the undo of id {ServerId} ({Error}): the undo names the server by its id",
+                serverId, ex.GetType().Name);
+            return ServerIdName(serverId);
+        }
     }
 
     /// <summary>The answer for an edit whose connected database another definition already covers: the add refusal's text
@@ -1579,6 +1612,13 @@ LIMIT 1";
         /// <summary>The storage key of every OTHER definition.</summary>
         Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken);
 
+        /// <summary>
+        /// Every OTHER definition as a name is resolved against it: its id, storage name and display name. A store that
+        /// holds no other definition answers with none.
+        /// </summary>
+        Task<IReadOnlyList<RegisteredServer>> LoadOtherRegistrationsAsync(int serverId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<RegisteredServer>>([]);
+
         /// <summary>Re-checks and writes in one transaction: the identity lock (<see cref="IdentityLockSql"/>), then
         /// <c>config.edit_monitored_server</c>, which locks the row, compares <c>modified_at</c> with
         /// <paramref name="expectedModifiedAt"/>, refuses a move of host or port that keeps the stored secret, and writes
@@ -1711,6 +1751,9 @@ FROM config_monitored_servers WHERE server_id = $1";
 
             return keys;
         }
+
+        public async Task<IReadOnlyList<RegisteredServer>> LoadOtherRegistrationsAsync(int serverId, CancellationToken cancellationToken) =>
+            [.. (await LoadDefinitionsForRemovalAsync(_postgres)).Select(d => d.Server).Where(s => s.ServerId != serverId)];
 
         public async Task<ServerEditWrite> WriteAsync(
             int serverId, DateTime expectedModifiedAt, IReadOnlyList<EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, HeldCheck? heldCheck, CancellationToken cancellationToken)

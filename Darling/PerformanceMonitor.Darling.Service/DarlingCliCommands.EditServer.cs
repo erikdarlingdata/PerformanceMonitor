@@ -599,6 +599,9 @@ public static partial class DarlingCliCommands
         public Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken) =>
             inner.LoadOtherStorageKeysAsync(serverId, cancellationToken);
 
+        public Task<IReadOnlyList<RegisteredServer>> LoadOtherRegistrationsAsync(int serverId, CancellationToken cancellationToken) =>
+            inner.LoadOtherRegistrationsAsync(serverId, cancellationToken);
+
         public Task<DarlingMcpServerAdminTools.ServerEditWrite> WriteAsync(
             int serverId, DateTime expectedModifiedAt, IReadOnlyList<DarlingMcpServerAdminTools.EditColumnValue> sets,
             string? newStorageKey, string? actualStorageKey, DarlingMcpServerAdminTools.HeldCheck? heldCheck, CancellationToken cancellationToken)

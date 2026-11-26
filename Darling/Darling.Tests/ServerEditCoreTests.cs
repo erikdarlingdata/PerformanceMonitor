@@ -78,10 +78,20 @@ public sealed class ServerEditCoreTests : IDisposable
         public Task<List<string>> LoadOtherStorageKeysAsync(int serverId, CancellationToken cancellationToken) =>
             Task.FromResult(OtherKeys.ToList());
 
+        public List<RegisteredServer> Others { get; } = [];
+        public bool OthersCannotBeListed { get; set; }
+        public int LastWrittenId { get; private set; }
+
+        public Task<IReadOnlyList<RegisteredServer>> LoadOtherRegistrationsAsync(int serverId, CancellationToken cancellationToken) =>
+            OthersCannotBeListed
+                ? Task.FromException<IReadOnlyList<RegisteredServer>>(new InvalidOperationException("the store did not answer"))
+                : Task.FromResult<IReadOnlyList<RegisteredServer>>(Others.ToList());
+
         public Task<Edit.ServerEditWrite> WriteAsync(
             int serverId, DateTime expectedModifiedAt, IReadOnlyList<Edit.EditColumnValue> sets, string? newStorageKey, string? actualStorageKey, Edit.HeldCheck? heldCheck, CancellationToken cancellationToken)
         {
             Writes++;
+            LastWrittenId = serverId;
             LastSets = sets.ToList();
             LastNewKey = newStorageKey;
             LastActualKey = actualStorageKey;
@@ -1045,5 +1055,73 @@ public sealed class ServerEditCoreTests : IDisposable
 
         Assert.Null(error);
         Assert.NotNull(plan);
+    }
+
+    /// <summary>
+    /// #9693: a storage name another registration has as its display name answers for both of them, and an edit refuses a
+    /// name that answers for two. The printed undo names the edited server by its id, so the name it prints picks that one
+    /// server, and running the undo writes to it.
+    /// </summary>
+    [Fact]
+    public async Task TheUndoOfAServerWhoseStorageNameAnotherRegistrationHasAsItsDisplayName_NamesItsId_AndEditsThatServer()
+    {
+        const string edit = """{"monthly_cost_usd": 25}""";
+        var row = SqlRow();
+        var key = JsonNode.Parse(await Run(new FakeStore { Row = row }, edit))!["server"]!.GetValue<string>();
+        var store = new FakeStore { Row = row };
+        store.Others.Add(new RegisteredServer(42, "beta-01.example.test", key));
+
+        var answer = JsonNode.Parse(await Run(store, edit))!;
+
+        Assert.Equal("updated", answer["status"]!.GetValue<string>());
+        var undo = answer["undo"]!["arguments"]!;
+        var undoName = undo["server_name"]!.GetValue<string>();
+        Assert.Equal("id:41", undoName);
+
+        // The registry as the edit left it: the storage name answers for both, the printed name for the edited one.
+        List<RegisteredServer> registry = [new RegisteredServer(41, key, row.Name), .. store.Others];
+        Assert.Equal(2, Edit.ResolveForEdit(registry, key).Candidates.Count);
+        var picked = Assert.Single(Edit.ResolveForEdit(registry, undoName).Candidates);
+        Assert.Equal(41, picked.ServerId);
+
+        // The printed undo, run against the row as the edit left it.
+        store.Row = row with { MonthlyCostUsd = 25m, ModifiedAt = Stamp.AddSeconds(1) };
+        var undone = await Edit.EditServerCoreAsync(
+            store, picked.ServerId, undo["changes_json"]!.GetValue<string>(), ThrowingProbe, TestKeyRings.Healthy, null, CancellationToken.None);
+
+        Assert.Equal("updated", Status(undone));
+        Assert.Equal(2, store.Writes);
+        Assert.Equal(41, store.LastWrittenId);
+        var cost = Assert.Single(store.LastSets);
+        Assert.Equal("monthly_cost_usd", cost.Column);
+        Assert.Equal(row.MonthlyCostUsd, cost.Value);
+    }
+
+    /// <summary>#9693: a storage name no other registration answers to is the name the undo prints.</summary>
+    [Fact]
+    public async Task TheUndoOfAServerWhoseStorageNameNoOtherRegistrationAnswersTo_NamesTheStorageName()
+    {
+        var store = new FakeStore { Row = SqlRow() };
+        store.Others.Add(new RegisteredServer(42, "beta-01.example.test", "Beta"));
+
+        var answer = JsonNode.Parse(await Run(store, """{"monthly_cost_usd": 25}"""))!;
+
+        Assert.Equal(answer["server"]!.GetValue<string>(), answer["undo"]!["arguments"]!["server_name"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// #9693: the edit is committed before the other registrations are read for the undo. A read that fails leaves the
+    /// answer an update, and the undo names the server by its id.
+    /// </summary>
+    [Fact]
+    public async Task AnEditWhoseOtherRegistrationsCannotBeListed_StillAnswersUpdated_AndItsUndoNamesTheId()
+    {
+        var store = new FakeStore { Row = SqlRow(), OthersCannotBeListed = true };
+
+        var answer = JsonNode.Parse(await Run(store, """{"monthly_cost_usd": 25}"""))!;
+
+        Assert.Equal("updated", answer["status"]!.GetValue<string>());
+        Assert.Equal(1, store.Writes);
+        Assert.Equal("id:41", answer["undo"]!["arguments"]!["server_name"]!.GetValue<string>());
     }
 }
