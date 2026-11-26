@@ -161,15 +161,19 @@ stop_and_confirm() {
 # Puts the build in /opt/darling.previous back, with the unit file when this run replaced it, and starts it. The build it
 # replaces stays in /opt/darling.failed for a look. Returns the old build's own start and health check result. The
 # callers run it inside "if", where a failed command does not stop the script, so each step that moves a build is
-# checked here: when one fails, RESTORED stays 0, HEALTH_REASON says which, and nothing is started (#9688).
+# checked here: when one fails, RESTORED stays 0, HEALTH_REASON says which, and nothing is started. The same goes for
+# the unit file that this run replaced: when it cannot be put back, UNIT_PUT_BACK is 0 and the old build is not
+# started under the new build's unit (#9688).
 RESTORED=0
+UNIT_PUT_BACK=1
 restore_previous() {
     RESTORED=0
+    UNIT_PUT_BACK=1
     systemctl stop "${UNIT_NAME}" 2>/dev/null || true
     # A rollback copy that this script did not make can hold files of another account, so what goes back is a copy
     # of it on new files.
     if ! fresh_copy "${PREVIOUS_ROOT}" "${STAGED_RESTORE}"; then
-        HEALTH_REASON="could not copy ${PREVIOUS_ROOT} onto new files, so no build was moved"
+        HEALTH_REASON="could not copy ${PREVIOUS_ROOT} onto new files (${COPY_REFUSED}), so no build was moved"
         return 1
     fi
     if [ -d "${INSTALL_ROOT}" ]; then
@@ -186,8 +190,11 @@ restore_previous() {
     rm -rf "${PREVIOUS_ROOT}"
     RESTORED=1
     if [ "${unit_replaced}" = 1 ]; then
-        cp -p "${UNIT_PATH}.previous" "${UNIT_PATH}"
-        systemctl daemon-reload
+        if ! { cp -p "${UNIT_PATH}.previous" "${UNIT_PATH}" && systemctl daemon-reload; }; then
+            UNIT_PUT_BACK=0
+            HEALTH_REASON="could not put ${UNIT_PATH}.previous back as ${UNIT_PATH} and reload systemd"
+            return 1
+        fi
     fi
     start_and_check "${health_seconds}"
 }
@@ -272,11 +279,12 @@ RUN_STOP_CHECK=clear
 # ---- 3. the rollback copy and the new build ----
 # -T on each move of a whole folder: when the target is still there, the move fails, where a plain mv would put the
 # folder inside it.
-rm -rf "${PREVIOUS_ROOT}" || die_recorded "Could not remove the old rollback copy ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
 # The rollback copy is a copy on new files that root owns, whatever owners the old build's files record and whoever
-# holds one of them open. The old files go into the staging folder, which goes when the script ends.
-fresh_copy "${INSTALL_ROOT}" "${STAGED_PREVIOUS}" || die_recorded "Could not copy ${INSTALL_ROOT} onto new files for the rollback copy, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
-mv -T "${STAGED_PREVIOUS}" "${PREVIOUS_ROOT}" || die_recorded "Could not move the rollback copy to ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+# holds one of them open. The old files go into the staging folder, which goes when the script ends. The copy is made
+# before the rollback copy of an earlier upgrade is removed, so a copy that fails leaves that one as it is.
+fresh_copy "${INSTALL_ROOT}" "${STAGED_PREVIOUS}" || die_recorded "Could not copy ${INSTALL_ROOT} onto new files for the rollback copy (${COPY_REFUSED}), so nothing was replaced or removed. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+rm -rf "${PREVIOUS_ROOT}" || die_recorded "Could not remove the old rollback copy ${PREVIOUS_ROOT}, which may now be incomplete, so the build in ${INSTALL_ROOT} was not replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+mv -T "${STAGED_PREVIOUS}" "${PREVIOUS_ROOT}" || die_recorded "Could not move the new rollback copy to ${PREVIOUS_ROOT}, so the build in ${INSTALL_ROOT} was not replaced, and there is no rollback copy now. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
 RUN_ROLLBACK_FOLDER="${PREVIOUS_ROOT}"
 # The new build starts with the record of this run in its folder, so its first read stores the run as in_progress.
 write_upgrade_run "${STAGED_BUILD}" in_progress
@@ -325,4 +333,5 @@ if restore_previous; then
     die_recorded "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT} and is healthy. The new build is in ${FAILED_ROOT} for a look. Migrations the new build applied stay applied in the store."
 fi
 [ "${RESTORED}" = 1 ] || die_recorded "The upgrade to ${STAGED_VERSION} failed (${failure}), and the rollback did NOT finish: ${HEALTH_REASON}. The service is STOPPED and ${old_version} is still in ${PREVIOUS_ROOT}. Fix what stopped the move, then run this script with --rollback. Migrations the new build applied stay applied in the store."
+[ "${UNIT_PUT_BACK}" = 1 ] || die_recorded "The upgrade to ${STAGED_VERSION} failed (${failure}), and the rollback did NOT finish: ${old_version} is back in ${INSTALL_ROOT}, but the script ${HEALTH_REASON}, so the old build was not started under the new build's unit. The service is STOPPED. Copy ${UNIT_PATH}.previous over ${UNIT_PATH}, run 'systemctl daemon-reload', then start it with 'systemctl start darling'. The new build is in ${FAILED_ROOT}. Migrations the new build applied stay applied in the store."
 die_recorded "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT}, and its own health check failed too: ${HEALTH_REASON}. So the cause is probably not the new build: read 'journalctl -u darling' and the file log in ${LOG_DIR}. The new build is in ${FAILED_ROOT}."

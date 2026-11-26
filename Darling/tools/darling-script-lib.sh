@@ -37,14 +37,16 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 printable() { LC_ALL=C tr -c '\040-\176\n' '?'; }
 # The same for the lines a build prints for the operator to read, a line at a time. The pre-flight prints UTF-8 text
 # (an em dash in every result line). Where root's locale is UTF-8, a whole UTF-8 character stays and the rest goes:
-# the C0 control characters apart from tab, DEL, every byte that is not part of a whole UTF-8 character, and then the
-# C1 control characters in their UTF-8 form, in a loop until none is left, because taking one out can join the bytes
-# around it into another. In any other locale the terminal may read one byte at a time, where the second byte of a
-# UTF-8 character can be a C1 control character itself, so only printable ASCII and tab stay there (#9688).
+# NUL, the C0 control characters apart from tab, DEL, every byte that is not part of a whole UTF-8 character, and then
+# the C1 control characters in their UTF-8 form and the marks that change the direction of the text (U+200E, U+200F,
+# U+202A to U+202E, U+2066 to U+2069), which can show a line in another order than it was written. One pass takes
+# them all: what is left by then is whole UTF-8 characters, and the first byte of one is never a byte inside another.
+# In any other locale the terminal may read one byte at a time, where the second byte of a UTF-8 character can be a
+# C1 control character itself, so only printable ASCII and tab stay there (#9688).
 UTF8_CHARACTER='[\xc2-\xdf][\x80-\xbf]\|\xe0[\xa0-\xbf][\x80-\xbf]\|[\xe1-\xef][\x80-\xbf][\x80-\xbf]\|\xf0[\x90-\xbf][\x80-\xbf][\x80-\xbf]\|[\xf1-\xf4][\x80-\xbf][\x80-\xbf][\x80-\xbf]'
 printable_lines() {
     case "$(locale charmap 2>/dev/null || true)" in
-        UTF-8) LC_ALL=C sed -u -e 's/[\x01-\x08\x0b-\x1f\x7f]//g' -e "s/\\(${UTF8_CHARACTER}\\)\\|[\\x80-\\xff]/\\1/g" -e ':a' -e 's/\xc2[\x80-\x9f]//' -e 'ta' ;;
+        UTF-8) LC_ALL=C sed -u -e 's/\x00\|[\x01-\x08\x0b-\x1f\x7f]//g' -e "s/\\(${UTF8_CHARACTER}\\)\\|[\\x80-\\xff]/\\1/g" -e 's/\xc2[\x80-\x9f]\|\xe2\x80[\x8e\x8f\xaa-\xae]\|\xe2\x81[\xa6-\xa9]//g' ;;
         *) LC_ALL=C sed -u -e "s/${UTF8_CHARACTER}/?/g" -e 's/[^\x20-\x7e\t]/?/g' ;;
     esac
 }
@@ -54,9 +56,38 @@ printable_lines() {
 # reach nothing of the root session that started it, even on a host that lets one process of a user attach to another.
 # The command starts in /, because root's own folder can be closed to the service user (/root is), and find goes back
 # to its start folder before each -exec. It gets PATH and nothing else of root's environment, which every process of
-# the service user could read from /proc (#9688).
+# the service user could read from /proc. After PATH it gets the Environment= pairs of the unit, which the service
+# itself runs with: a host can need one of them for the build to start at all, such as
+# DOTNET_SYSTEM_GLOBALIZATION_INVARIANT without ICU, or a certificate file or a proxy to reach the store (#9688).
 as_service_user() {
-    (cd / && setsid -w runuser -u "${SERVICE_USER}" -- env -i "PATH=${PATH}" "$@" </dev/null)
+    unit_environment
+    (cd / && setsid -w runuser -u "${SERVICE_USER}" -- env -i "PATH=${PATH}" ${UNIT_ENVIRONMENT[@]+"${UNIT_ENVIRONMENT[@]}"} "$@" </dev/null)
+}
+
+# Sets UNIT_ENVIRONMENT to the NAME=value pairs that systemd holds for the unit, from its Environment= lines and its
+# drop-ins, and to nothing while no unit is installed. systemctl prints them on one line with a space between two
+# pairs, and puts a pair that holds a space or a quote inside double quotes, with a backslash before " \ ` and $.
+# PATH is left out, so the commands the scripts name are found the same way on every host. The values can be secrets
+# and are never printed.
+UNIT_ENVIRONMENT=()
+unit_environment() {
+    local text pair="" char quoted=0 i
+    UNIT_ENVIRONMENT=()
+    text="$(systemctl show -p Environment --value "${UNIT_NAME}" 2>/dev/null || true) "
+    for ((i = 0; i < ${#text}; i++)); do
+        char="${text:i:1}"
+        if [ "${quoted}" = 1 ] && [ "${char}" = '\' ]; then
+            i=$((i + 1))
+            pair+="${text:i:1}"
+        elif [ "${char}" = '"' ]; then
+            quoted=$((1 - quoted))
+        elif [ "${quoted}" = 0 ] && [ "${char}" = ' ' ]; then
+            case "${pair}" in PATH=*) ;; [A-Za-z_]*=*) UNIT_ENVIRONMENT+=("${pair}") ;; esac
+            pair=""
+        else
+            pair+="${char}"
+        fi
+    done
 }
 
 # True when root owns the path and neither its group nor other users can write it.
@@ -79,15 +110,40 @@ root_only_path() {
 # Copies the build folder $1 onto new files that root creates, as $2 in the staging folder, root's own and closed to
 # group and other writes. A build that was extracted by hand from an older tarball can belong to the uid of the machine
 # that built it. A rename keeps those files, and a process of that uid that holds one open for writing could still
-# change it after a chown. A copy leaves such a handle on the old file. No mode gets wider, so a file that was closed
-# to other accounts stays closed in the copy. Fails for a folder that holds a device node, a FIFO or a socket (#9688).
+# change it after a chown. A copy leaves such a handle on the old file. Root takes the old tree first, links included
+# and none followed, and checks that nothing in it is left to another account: while its old owner can write it, that
+# account can put a link in the place of a folder that root is about to walk, and root would copy what the link names.
+# A link in the copy that names a path outside the folder (an absolute target, or one with ".." in it) stops the copy,
+# so the copy loads no file that another account keeps. No mode gets wider, so a file that was closed to other
+# accounts stays closed in the copy. Fails too for a folder that holds a device node, a FIFO or a socket.
+# COPY_REFUSED then says why, for the caller's message (#9688).
+COPY_REFUSED=""
 fresh_copy() {
-    local from="$1" to="$2"
+    local from="$1" to="$2" entry
+    COPY_REFUSED="the copy itself failed"
     ensure_staging
     rm -rf "${to}"
+    if ! { chown -hR root:root "${from}/." && chmod -R go-w "${from}/."; }; then
+        COPY_REFUSED="root could not take every file in it"
+        return 1
+    fi
+    entry="$(find "${from}/." \( ! -user 0 -o \( ! -type l -perm /022 \) \) -print -quit)"
+    if [ -n "${entry}" ]; then
+        COPY_REFUSED="'$(printf '%s' "${entry#"${from}"/./}" | printable)' still belongs to another account, or its group or other users can write it"
+        return 1
+    fi
     mkdir -m 755 "${to}" || return 1
     cp -R "${from}/." "${to}/" || return 1
-    [ -z "$(find "${to}" ! -type f ! -type d ! -type l -print -quit)" ] || return 1
+    entry="$(find "${to}" ! -type f ! -type d ! -type l -print -quit)"
+    if [ -n "${entry}" ]; then
+        COPY_REFUSED="'$(printf '%s' "${entry#"${to}"/}" | printable)' is not a file, a folder or a link"
+        return 1
+    fi
+    entry="$(find "${to}" -type l \( -lname '/*' -o -lname '*..*' \) -print -quit)"
+    if [ -n "${entry}" ]; then
+        COPY_REFUSED="'$(printf '%s' "${entry#"${to}"/}" | printable)' is a link to a path outside the folder"
+        return 1
+    fi
     chown -R root:root "${to}" && chmod -R go-w "${to}"
 }
 
@@ -118,6 +174,12 @@ require_host() {
         command -v "${tool}" >/dev/null 2>&1 || die "The '${tool}' command is not on this host, and this script needs it."
     done
     [ -x "${DOTNET}" ] || die "${DOTNET} is missing. Install the .NET 10 runtime and the ASP.NET Core 10 runtime (docs/darling/linux.md, step 2). The unit starts the service with ${DOTNET}, so a dotnet in another folder needs a link there."
+    # The folders the fixed paths are in. An account that can write one of them can swap the staging folder, or the
+    # unit file, while the run works on it, and root would install its file as a root unit (#9688).
+    local folder
+    for folder in "$(dirname "${INSTALL_ROOT}")" "$(dirname "${UNIT_PATH}")"; do
+        root_only_path "${folder}" || die "${folder}, or a folder above it, is not owned by root, or its group or other users can write it. This script puts the build and the unit there as root, and an account that can write the folder could swap them during the run. Make root its owner, take away the write bit of its group and of other users (chown root:root, chmod go-w), then run this script again."
+    done
 }
 
 # Sets SOURCE_KIND (tarball or folder) and SOURCE_PATH from the --source value, or from the folder the script is in.
