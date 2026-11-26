@@ -98,6 +98,7 @@ deduped AS
             AND m.query_id = q.query_id
             AND m.replica_role IS NOT DISTINCT FROM q.replica_role
         WHERE server_id = $1
+        AND   q.query_plan_hash IS NOT NULL
         AND   execution_type_desc = 'Regular'
         AND   last_execution_time >= $2
         -- $3 is the window's end. A row collected after it was not in the store at that instant, so a pass as of a past
