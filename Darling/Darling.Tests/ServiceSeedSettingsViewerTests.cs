@@ -28,6 +28,7 @@ public sealed class ServiceSeedSettingsTests
     [InlineData("0", "5", "none", 0, 5, "none")]
     [InlineData(" 365 ", " 600 ", "gzip", 365, 600, "gzip")]
     [InlineData("7", "30", "none", 7, 30, "none")]
+    [InlineData("21", "60", " GZIP ", 21, 60, "gzip")]
     public void TryRead_AcceptsTheAllowedValues(string retention, string timeout, string compression, int days, int seconds, string plan)
     {
         var refusal = ServiceSeedSettings.TryRead(retention, timeout, compression, out var gotDays, out var gotSeconds, out var gotPlan, out var badField);
@@ -48,7 +49,6 @@ public sealed class ServiceSeedSettingsTests
     [InlineData("21", "601", "gzip", ServiceSeedSettings.TimeoutSecondsField)]
     [InlineData("21", "1.5", "gzip", ServiceSeedSettings.TimeoutSecondsField)]
     [InlineData("21", "60", "zip", ServiceSeedSettings.CompressionField)]
-    [InlineData("21", "60", "GZIP", ServiceSeedSettings.CompressionField)]
     [InlineData("21", "60", null, ServiceSeedSettings.CompressionField)]
     public void TryRead_RefusesAValueTheServiceWouldNotUseAsWritten(string retention, string timeout, string? compression, string field)
     {
@@ -67,7 +67,7 @@ public sealed class ServiceSeedSettingsTests
     public void TheWindowShowsTheRetentionTheServiceUses(int stored, int shown)
     {
         Assert.Equal(shown, ServiceSeedSettings.EffectiveRetentionDays(stored));
-        Assert.Null(ServiceSeedSettings.RetentionDaysError(shown));
+        Assert.Null(ServiceFlagLimits.PlanContentRetentionDaysError(shown));
     }
 
     [Theory]
@@ -79,7 +79,7 @@ public sealed class ServiceSeedSettingsTests
     public void TheWindowShowsTheTimeoutTheServiceUses(int stored, int shown)
     {
         Assert.Equal(shown, ServiceSeedSettings.EffectiveTimeoutSeconds(stored));
-        Assert.Null(ServiceSeedSettings.TimeoutSecondsError(shown));
+        Assert.Null(ServiceFlagLimits.ComposeStatementTimeoutSecondsError(shown));
     }
 
     [Theory]
@@ -91,7 +91,7 @@ public sealed class ServiceSeedSettingsTests
     public void TheWindowShowsTheStorageFormTheServiceUses(string? stored, string shown)
     {
         Assert.Equal(shown, ServiceSeedSettings.EffectiveCompression(stored));
-        Assert.Null(ServiceSeedSettings.CompressionError(shown));
+        Assert.Null(ServiceFlagLimits.PlanXmlCompressionError(shown));
     }
 
     [Fact]
