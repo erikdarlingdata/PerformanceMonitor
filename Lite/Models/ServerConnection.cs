@@ -407,11 +407,31 @@ public class ServerConnection : INotifyPropertyChanged
                 AuthenticationType == AuthenticationTypes.ServicePrincipal)
             {
                 /* A saved password is read only for a server whose Id is a GUID (ServerCredentialIds). */
-                var cred = ServerCredentialIds.Allows(Id, DisplayName) ? credentialService.GetCredential(Id) : null;
-                if (cred.HasValue)
+                (string Username, string Password)? cred = null;
+                var outcome = CredentialReadOutcome.NotFound;
+                string? failure = null;
+                if (ServerCredentialIds.Allows(Id, DisplayName))
+                {
+                    outcome = credentialService.TryReadCredential(Id, out cred, out failure);
+                }
+
+                if (outcome == CredentialReadOutcome.Found && cred.HasValue)
                 {
                     username = cred.Value.Username;
                     password = cred.Value.Password;
+                }
+                else if (ServerCredentialIds.IsUsable(Id))
+                {
+                    /* #9730: no readable saved password under this Windows logon connects with an empty user. Say why, once. An entry
+                       that exists but cannot be read (#6066) gets its own line, apart from one that is not there. */
+                    if (outcome == CredentialReadOutcome.Unreadable)
+                    {
+                        ServerCredentialIds.WarnPasswordUnreadable(Id, DisplayName, failure);
+                    }
+                    else
+                    {
+                        ServerCredentialIds.WarnPasswordMissing(Id, DisplayName);
+                    }
                 }
             }
             // ManagedIdentity fetches no credential (no secret).
@@ -434,11 +454,21 @@ public class ServerConnection : INotifyPropertyChanged
         if (profile.AuthType == AuthenticationTypes.SqlServer ||
             profile.AuthType == AuthenticationTypes.ServicePrincipal)
         {
-            var cred = credentialService.GetCredential(ProfileManager.ProfileCredentialId(profile.Id));
-            if (cred.HasValue)
+            var profileOutcome = credentialService.TryReadCredential(ProfileManager.ProfileCredentialId(profile.Id), out var cred, out var profileFailure);
+            if (profileOutcome == CredentialReadOutcome.Found && cred.HasValue)
             {
                 profileUser = cred.Value.Username;
                 profileSecret = cred.Value.Password;
+            }
+            else if (profileOutcome == CredentialReadOutcome.Unreadable)
+            {
+                /* #9730: the entry exists but Windows refused to read it (#6066). */
+                ServerCredentialIds.WarnProfileSecretUnreadable(profile.Id, profile.Name, DisplayName, profileFailure);
+            }
+            else
+            {
+                /* #9730: the same empty-user connection as a server with no saved password. */
+                ServerCredentialIds.WarnProfileSecretMissing(profile.Id, profile.Name, DisplayName);
             }
         }
         // ManagedIdentity profile carries no secret.

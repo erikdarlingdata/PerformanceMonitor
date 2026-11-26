@@ -348,7 +348,7 @@ public sealed class ExportRunner
 
             connectionStringBuilder ??= StoreConnectionFactory.Build(options);
             await using var optionalConnection = await StoreConnectionFactory.OpenAsync(connectionStringBuilder, ct).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand(SqlBuilder.OptionalColumnDiscoverySql, optionalConnection);
+            await using var command = new NpgsqlCommand(SqlBuilder.OptionalColumnDiscoverySqlFor(table), optionalConnection);
             command.Parameters.AddWithValue("schema", table.Schema);
             command.Parameters.AddWithValue("table", table.Name);
             var columns = new List<DiscoveredColumn>();

@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Changed
+
+- **The exporter can send 20 more store tables, among them `query_snapshots`, `waiting_tasks`, `object_usage_snapshots` and the query tag tables** ([#9736])
+
 ## [3.14.0] - 2026-11-27
 
 Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
@@ -8468,6 +8472,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9570]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9570
 [#9572]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9572
 [#9578]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9578
+[#9736]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9736
 [#9579]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9579
 [#9586]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9586
 [#9589]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9589
