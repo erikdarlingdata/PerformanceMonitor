@@ -21,18 +21,19 @@ if (args.Length > 0 && args[0] == "describe-tables")
     return RunDescribeTables(args);
 }
 
+if (args.Length > 0 && args[0] is "--help" or "-h" or "help")
+{
+    Console.Out.Write(Usage.Text());
+    return 0;
+}
+
 if (args.Length == 0 || args[0] != "export")
 {
-    Console.Error.WriteLine("Usage: darling-export export [--config <file>] --store <name> --from <ISO UTC> --to <ISO UTC> --out <dir> [options]");
-    Console.Error.WriteLine("       darling-export run (--config <file> | --settings <file>) [--plan-only] [--now <ISO UTC>]");
-    Console.Error.WriteLine("       darling-export check-config --config <file>");
-    Console.Error.WriteLine("       darling-export describe-tables [--json]");
-    Console.Error.WriteLine("  --config <file>     Read defaults from a JSON config; any flag given overrides it.");
-    Console.Error.WriteLine("  --allow-compressed  Manual catch-up only: skip the compressed-chunk guard's refusal and double the content-fetch pacer's sleeps. The scheduler never passes this flag.");
+    Console.Error.Write(Usage.Text());
     return 1;
 }
 
-return await CliVerbs.ExportAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
+return await CliVerbs.ExportAsync(args[1..], Console.Out, Console.Error, CancellationToken.None, stdoutIsConsole: !Console.IsOutputRedirected);
 
 // describe-tables [--json]: kind, time column, keys and grain for every table. No store connection.
 static int RunDescribeTables(string[] args)

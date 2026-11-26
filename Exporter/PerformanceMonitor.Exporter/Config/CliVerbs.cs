@@ -6,11 +6,12 @@ namespace PerformanceMonitor.Exporter;
 /// </summary>
 public static class CliVerbs
 {
-    public static async Task<int> ExportAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct)
+    public static async Task<int> ExportAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct, bool stdoutIsConsole = false)
     {
         try
         {
             var invocation = ExportCommand.Parse(args, DateTime.UtcNow);
+            ExporterLog.Verbose = invocation.Verbose;
             DuckDbSession.Configure(invocation.DuckDbMemoryLimit, invocation.DuckDbThreads);
             return await ExportRunner.RunAsync(invocation.Options, output, ct).ConfigureAwait(false);
         }
@@ -26,11 +27,11 @@ public static class CliVerbs
         }
         catch (Exception ex)
         {
-            // The whole exception (its type, every inner exception and the stack) goes to stdout, which the scheduler keeps in the
-            // run's log, so a failure names the layer that raised it: a bare "The operation has timed out" can come from a
-            // connection open, a read or an upload. stderr stays one line, because the scheduler records it as the family's last
+            // The failure goes to stdout, which the scheduler keeps in the run's log: the full exception, stack frames included, when
+            // stdout is redirected, so a bug in a scheduled run stays diagnosable. An interactive console gets the chain of types and
+            // messages alone unless --verbose is given. stderr stays one line, because the scheduler records it as the family's last
             // error and the stale alert quotes it, so the line only gains the exception types.
-            output.WriteLine(ex.ToString());
+            output.WriteLine(ExporterLog.DescribeFailure(ex, stdoutIsConsole));
             var types = ex.GetType().Name + (ex.InnerException is { } inner ? " <- " + inner.GetType().Name : "");
             error.WriteLine($"Export failed: {ex.Message} ({types})");
             return 1;

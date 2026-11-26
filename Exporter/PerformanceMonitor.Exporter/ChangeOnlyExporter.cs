@@ -265,7 +265,11 @@ public static class ChangeOnlyExporter
             }
         }
 
-        var orderBy = timeColumn is not null ? $"server_name, {QuoteIdentifier(timeColumn)}" : "server_name";
+        // The documented sort first, then every other exported column and change_kind, so rows that tie on the documented
+        // columns come out in the same order on every export.
+        var orderBy = TotalOrder.Columns(
+            timeColumn is not null ? ["server_name", timeColumn] : ["server_name"],
+            duckColumns.Select(c => c.Name).Append("change_kind"));
         var parts = new List<ChangeOnlyPart>();
         try
         {
@@ -447,7 +451,7 @@ public static class ChangeOnlyExporter
         var absolutePath = Path.Combine(outDir, store, relativePath.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(Path.GetDirectoryName(absolutePath)!);
 
-        Execute(connection, $"COPY (SELECT * FROM rolled ORDER BY server_name, hour) TO '{absolutePath.Replace("'", "''")}' ({PartParquetOptions})");
+        Execute(connection, $"COPY (SELECT * FROM rolled ORDER BY {TotalOrder.ForTable(connection, "rolled", "server_name", "hour")}) TO '{absolutePath.Replace("'", "''")}' ({PartParquetOptions})");
 
         var rolledRowCount = Convert.ToInt64(ExecuteScalar(connection, "SELECT count(*) FROM rolled"), CultureInfo.InvariantCulture);
         var byteSize = new FileInfo(absolutePath).Length;
