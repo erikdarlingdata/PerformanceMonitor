@@ -178,19 +178,19 @@ internal static class DarlingMcpInstructions
             {
                 off.Add("this token has the operator role: the investigation tools are served only to an agent token");
                 if (!adminServed)
-                    off.Add($"the {adminCount} tools that add, edit and remove monitored servers, or switch agent actions, need " +
+                    off.Add($"the {adminCount} tools that add, edit and remove monitored servers, switch agent actions, or make, revoke and list personal tokens, need " +
                         $"both `{DarlingMcpWritePolicy.WritesSetting}` and `{DarlingMcpWritePolicy.ServerAdminSetting}` on");
             }
         }
         else if (!writesServed)
-            off.Add($"the write tools are off, so the {writeCount + adminCount - agentServedWrites} that change monitoring configuration are not served " +
+            off.Add($"the write tools are off, so the {writeCount + adminCount - agentServedWrites} that change monitoring configuration or list personal tokens are not served " +
                     $"(`{DarlingMcpWritePolicy.WritesSetting}` with a token adds {writeCount - agentServedWrites}, `{DarlingMcpWritePolicy.ServerAdminSetting}` " +
                     $"{adminCount} more)" + (agentActionServed > 0
                         ? $"; the {agentActionServed} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch)" + (agentMuteRules ? $", except the four mute rule tools, which an agent token (named, or the unnamed one under `mcp.allowInvestigations`) may also call without one for {DirectMuteLimits} (reason and expires_at required)" : string.Empty)
                         : string.Empty));
         else if (!adminServed)
             off.Add($"`{DarlingMcpWritePolicy.ServerAdminSetting}` is off, so the {adminCount} tools that add, edit and remove " +
-                    "monitored servers, or switch agent actions, are not served");
+                    "monitored servers, switch agent actions, or make, revoke and list personal tokens, are not served");
         if (named is null && !investigationsServed && investigationCount > 0)
             off.Add(writesServed
                 ? $"the {investigationCount} investigation tools stay off while `{DarlingMcpWritePolicy.WritesSetting}` is on (one token " +

@@ -44,6 +44,10 @@ public sealed class DarlingMcpWritePolicyTests
        tool but those two, and the whole catalog is a policy no start resolves; only the census reference reads it. */
     private static readonly int InvestigationCount = DarlingMcpWritePolicy.InvestigationTools.Count;
 
+    /* #9643: the server admin tools that are reads (the personal token list and the web access group list). They are served only with the server admin writes, so the default
+       policy leaves them out beside the writes. */
+    private static readonly int ServerAdminReadCount = DarlingMcpWritePolicy.ServerAdminTools.Count(n => !DarlingMcpWritePolicy.IsWrite(n));
+
     private static readonly McpConfig NoWrites = new();
     private static readonly McpConfig WritesConfig = new() { AllowWrites = true };
     internal static readonly McpConfig EverythingConfig = new() { AllowWrites = true, AllowServerAdmin = true };
@@ -84,9 +88,8 @@ public sealed class DarlingMcpWritePolicyTests
             + $"mark it with [DarlingToolAccess] and, for a write or an investigation tool, add it to its set: [{string.Join(", ", unclassified)}]");
         Assert.True(both.Length == 0, $"a tool is marked ToolAccess.Read AND is in the write or investigation set: [{string.Join(", ", both)}]");
         Assert.True(stale.Length == 0, $"a classified name is not a registered tool: [{string.Join(", ", stale)}]");
-        /* The server admin set is the registry and group writes, and the one group list read that is served only beside them. */
-        Assert.True(DarlingMcpWritePolicy.ServerAdminTools.Where(n => n != "get_web_access_groups").ToHashSet().IsSubsetOf(writes));
-        Assert.Contains("get_web_access_groups", readOnly);
+        /* A server admin tool is a write, except a read that is served only with them (#9643, the personal token list). */
+        Assert.All(DarlingMcpWritePolicy.ServerAdminTools.Except(writes), n => Assert.Contains(n, readOnly));
         Assert.Contains("edit_server", writes);
         Assert.Contains("edit_server", DarlingMcpWritePolicy.ServerAdminTools);
     }
@@ -107,9 +110,6 @@ public sealed class DarlingMcpWritePolicyTests
             Assert.Equal(isWrite, hints.DestructiveHint);
         }
     }
-
-    /// <summary>The reads that sit in the server admin set (#9642): served only where the admin writes are.</summary>
-    private static readonly int AdminOnlyReads = DarlingMcpWritePolicy.ServerAdminTools.Count(n => !DarlingMcpWritePolicy.IsWrite(n));
 
     [Fact]
     public void TheWebAccessGroupList_IsServedOnlyWhereTheGroupWritesAre_AndNoAgentIsOfferedAnyOfTheSix()
@@ -140,7 +140,7 @@ public sealed class DarlingMcpWritePolicyTests
 
         var names = Names(served);
         Assert.DoesNotContain(names, DarlingMcpWritePolicy.IsWrite);
-        Assert.Equal(all.Count - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount - AdminOnlyReads, served.Count);
+        Assert.Equal(all.Count - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount - ServerAdminReadCount, served.Count);
         Assert.DoesNotContain(names, DarlingMcpWritePolicy.IsInvestigation);
         Assert.Contains("list_servers", names);
         Assert.Contains("get_tool_guide", names);
@@ -237,7 +237,7 @@ public sealed class DarlingMcpWritePolicyTests
         var before = narrowed.Count;
         DarlingMcpWritePolicy.Apply(narrowed, DarlingMcpWritePolicy.Effective.Off);
 
-        Assert.Equal(before - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount - AdminOnlyReads, narrowed.Count);
+        Assert.Equal(before - DarlingMcpWritePolicy.WriteTools.Count - InvestigationCount - ServerAdminReadCount, narrowed.Count);
         Assert.All(narrowed, tool =>
         {
             Assert.NotNull(tool.ProtocolTool.Annotations);

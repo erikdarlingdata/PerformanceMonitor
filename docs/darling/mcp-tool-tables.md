@@ -213,6 +213,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_notification_routes` | `config.config_notification_routes`<br>`config.investigation_requests`<br>`config.config_monitored_servers`<br>`config.server_tags`<br>`config.server_tag_map` |
 | `get_oversized_plan_backlog` | `collect.oversized_plan_backlog`<br>`collect.servers` |
 | `get_people` | `config.person`<br>`config.person_identity`<br>`config.person_grant`<br>`config.config_monitored_servers`<br>`config.server_tags` |
+| `get_personal_tokens` | `config.mcp_personal_token` |
 | `get_read_latency` | `collect.read_latency` |
 | `get_server_actions` | `config.config_monitored_servers`<br>`config.config_server_actions`<br>`collect.servers` |
 | `get_server_settings` | `config.config_monitored_servers` |
@@ -292,6 +293,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `generate_webhook_signing_key` | `config.config_notification`<br>`config.config_notification_routes` |
 | `kill_session` | `collect.server_properties`<br>`collect.dmv_blocking_snapshots` (through the view `collect.v_dmv_blocking_snapshots`)<br>`collect.blocked_process_reports` |
 | `merge_deadlock_signatures` | `config.investigation_signature_merges`<br>`config.investigation_signature_days` |
+| `mint_personal_token` | `config.mcp_personal_token` (insert)<br>`config.investigation_journal` |
 | `mute_analysis_finding` | `config.analysis_muted`<br>`collect.analysis_findings` |
 | `pause_collection` | `config.config_command`<br>`config.config_service` |
 | `post_investigation_message` | `config.investigation_requests` (claim check)<br>`config.investigation_journal` (insert) |
@@ -309,6 +311,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `restore_alert_history` | `config.config_alert_log` |
 | `resume_collection` | `config.config_command`<br>`config.config_service` |
 | `rotate_web_access_group_token` | `config.web_access_groups` (update)<br>`config.web_access_group_events` (insert) |
+| `revoke_personal_token` | `config.mcp_personal_token` (update)<br>`config.investigation_journal` |
 | `run_collectors_now` | `config.config_command` |
 | `save_environment_profile` | `config.agent_environment_profiles` (upsert/delete)<br>`config.server_tags` (tag exists check)<br>`config.config_monitored_servers` (server exists check)<br>`config.investigation_journal` |
 | `send_daily_health_report_now` | `config.config_alert_log` (insert, the alert history row)<br>`config.config_alert_settings` (read)<br>`config.config_notification_routes` (read)<br>`config.config_mute_rules` (read)<br>The objects that `get_daily_health_report` reads. |

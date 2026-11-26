@@ -15,8 +15,11 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 
 /// <summary>What a service that serves personal MCP tokens (#8737) applies: the limits after clamping, the strongest role an admin's
 /// token may take, and the data level it can only narrow.</summary>
-internal sealed record PersonalTokenSettings(int MaxLifetimeDays, int MaxTokensPerPerson, string AdminRole, McpDataDetail? DataDetail)
+internal sealed record PersonalTokenSettings(int MaxLifetimeDays, int MaxTokensPerPerson, string AdminRole, McpDataDetail? DataDetail, McpDataDetail ServiceDetail = McpDataDetail.Full)
 {
+    /// <summary>The level a personal token is served: the stricter of the service's own level and the personal tokens' <c>dataDetail</c>.</summary>
+    public McpDataDetail ServedDetail => DataDetail is { } own && own > ServiceDetail ? own : ServiceDetail;
+
     /// <summary>True when an admin may mint an <c>operator</c> token.</summary>
     public bool AdminMayMintOperator => AdminRole == McpTokenEntry.OperatorRole;
 }
@@ -112,7 +115,7 @@ internal static class DarlingPersonalTokenSettings
             problems.Add($"{Setting}.adminRole is not operator or reader; admins are served reader.");
         }
 
-        return (new PersonalTokenSettings(lifetime, perPerson, adminRole, dataDetail), problems);
+        return (new PersonalTokenSettings(lifetime, perPerson, adminRole, dataDetail, McpDataDetailModes.Resolve(config.Mcp.DataDetail)), problems);
     }
 
     private static int Clamp(int value, int min, int max, string name, List<string> problems)
