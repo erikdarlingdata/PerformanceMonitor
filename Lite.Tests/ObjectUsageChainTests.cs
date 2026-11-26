@@ -245,6 +245,51 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
     }
 
     [Fact]
+    public async Task ASnapshotWhoseRunHasNotFinished_IsLeftUnfolded_AndFoldedWhole_OnceItsRunIsLogged()
+    {
+        var rows = ObjectUsageChainHistory.Generate();
+        var newest = rows.Max(r => r.CollectionTime);
+        var newestRows = rows.Where(r => r.CollectionTime == newest).OrderBy(r => r.ObjectId).ThenBy(r => r.IndexId).ToList();
+        var landed = newestRows.Take(newestRows.Count / 2).ToList();
+        var later = newestRows.Skip(newestRows.Count / 2).ToList();
+        Assert.NotEmpty(landed);
+        Assert.NotEmpty(later);
+
+        /* The collector's appender flushes a database's rows without a transaction, so a read between flushes sees part of the newest snapshot, and
+           its run has no collection_log row yet. */
+        await SeedAsync(rows: rows.Where(r => r.CollectionTime < newest));
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, Database, landed, firstId: -500000, logRuns: false);
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now);
+        Assert.Equal(ObjectUsageChainHistory.SnapshotDays().Count() - 1, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(ObjectUsageChainHistory.SnapshotDays().Count() - 1L, await CountAsync("object_usage_snapshots"));
+        Assert.Equal(0L, await CountAsync("object_usage_snapshots WHERE collection_time = TIMESTAMP '" + newest.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "'"));
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+
+        /* The rest lands and the run is logged: the next pass folds the whole snapshot, and the answers are the fold's. */
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, Database, later, firstId: -600000, logRuns: false);
+        await ObjectUsageChainHistory.SeedLogAsync(_duckDb, _serverId, ServerName, [newest]);
+        Assert.Equal(1, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        foreach (var daysBack in new[] { 7, 90 })
+        {
+            var full = await _dataService.GetObjectUsageWindowFullAsync(_serverId, Database, Start(daysBack));
+            var (persisted, reason) = await _dataService.TryReadObjectUsageChainAsync(_serverId, Database, Start(daysBack));
+            Assert.Null(reason);
+            Assert.Equal(Json(full), Json(persisted!));
+        }
+    }
+
+    [Fact]
+    public async Task AServerWithNoRunLogged_HasNothingFolded()
+    {
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, Database, ObjectUsageChainHistory.Generate(), logRuns: false);
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now);
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(0L, await CountAsync("object_usage_snapshots"));
+        var full = await _dataService.GetObjectUsageWindowFullAsync(_serverId, Database, Start(7));
+        Assert.Equal(Json(full), Json(await _dataService.GetObjectUsageWindowAsync(_serverId, Database, Start(7))));
+    }
+
+    [Fact]
     public async Task AChainBuiltUnderOlderRules_IsDeletedAndRebuilt_AndTheFoldAnswersMeanwhile()
     {
         await SeedAsync();

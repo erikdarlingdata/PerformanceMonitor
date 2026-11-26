@@ -356,6 +356,14 @@ internal sealed class ObjectUsageChainBuilder
         }
 
         var times = await ReadTimesAsync(serverId, databaseName, watermark, cancellationToken);
+
+        /* #9596: only a snapshot whose collection run has finished. The collector appends a database's rows through one appender with no explicit
+           transaction, which may flush part of a snapshot before the rest lands, and a snapshot folded short would never be folded again. A run's
+           collection_log row is written when it ends and is stamped with its start, a little before the rows' own time, so a snapshot is whole when
+           some row of the log ends at or after it: its own, or a later run's when its own was never written (a crash). A server with no log row
+           for the collector has no whole snapshot yet. */
+        var horizon = await ReadRunHorizonAsync(serverId, cancellationToken);
+        times = horizon is { } whole ? times.FindAll(t => t <= whole) : [];
         var steps = 0;
         foreach (var time in times)
         {
@@ -570,6 +578,23 @@ internal sealed class ObjectUsageChainBuilder
         }
 
         return times;
+    }
+
+    /// <summary>The end of the newest <c>index_object_stats</c> collection run of a server that the log knows, plus a second of slack, or null when it has none.</summary>
+    private async Task<DateTime?> ReadRunHorizonAsync(int serverId, CancellationToken cancellationToken)
+    {
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT max(collection_time + to_milliseconds(COALESCE(duration_ms, 0) + 1000))
+            FROM v_collection_log
+            WHERE server_id = $1
+            AND   collector_name = 'index_object_stats'
+            """;
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        return await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
     }
 
     /// <summary>

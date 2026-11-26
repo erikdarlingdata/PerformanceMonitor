@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -158,9 +159,48 @@ internal static class ObjectUsageChainHistory
         }
     }
 
-    /// <summary>Stores the rows for one server and database in <c>index_object_stats</c>, one transaction under the store's write lock.</summary>
-    internal static async Task SeedAsync(DuckDbInitializer duckDb, int serverId, string serverName, string database, IEnumerable<Row> rows, long firstId = -1)
+    private static long s_nextLogId = -1_000_000_000;
+
+    /// <summary>
+    /// Stores one finished <c>index_object_stats</c> collection run in <c>collection_log</c> for each start: stamped with the start (the same
+    /// second as the rows) and a duration, the way the collector logs a run when it ends. The chain builder folds a snapshot only once such a
+    /// row covers it.
+    /// </summary>
+    internal static async Task SeedLogAsync(DuckDbInitializer duckDb, int serverId, string serverName, IEnumerable<DateTime> starts)
     {
+        using var writeLock = duckDb.AcquireWriteLock();
+        using var connection = duckDb.CreateConnection();
+        await connection.OpenAsync();
+        using var transaction = connection.BeginTransaction();
+        foreach (var start in starts)
+        {
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"INSERT INTO collection_log (log_id, server_id, server_name, collector_name, collection_time, duration_ms, status, rows_collected)
+                VALUES ($1, $2, $3, 'index_object_stats', $4, 2000, 'SUCCESS', 1)";
+            cmd.Parameters.Add(new DuckDBParameter { Value = System.Threading.Interlocked.Decrement(ref s_nextLogId) });
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverName });
+            cmd.Parameters.Add(new DuckDBParameter { Value = start });
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        transaction.Commit();
+    }
+
+    /// <summary>
+    /// Stores the rows for one server and database in <c>index_object_stats</c>, one transaction under the store's write lock, and one finished
+    /// collection run in <c>collection_log</c> for each snapshot time unless <paramref name="logRuns"/> is false.
+    /// </summary>
+    internal static async Task SeedAsync(
+        DuckDbInitializer duckDb, int serverId, string serverName, string database, IEnumerable<Row> rows, long firstId = -1, bool logRuns = true)
+    {
+        var materialized = rows as IReadOnlyCollection<Row> ?? rows.ToList();
+        if (logRuns)
+        {
+            await SeedLogAsync(duckDb, serverId, serverName, materialized.Select(r => r.CollectionTime).Distinct().ToList());
+        }
+
+        rows = materialized;
         using var writeLock = duckDb.AcquireWriteLock();
         using var connection = duckDb.CreateConnection();
         await connection.OpenAsync();
