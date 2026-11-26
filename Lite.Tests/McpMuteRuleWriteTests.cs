@@ -166,6 +166,38 @@ public sealed class McpMuteRuleWriteTests : IDisposable
         Assert.True((await OnlyStoredRuleAsync()).Enabled);
     }
 
+    [Fact]
+    public async Task AllFourWrites_AnswerUnavailable_WhileARestoreOfTheTableIsPending_AndChangeNothing()
+    {
+        await CreateAsync("SQLA", "High CPU");
+        var before = await OnlyStoredRuleAsync();
+        File.WriteAllText(
+            Path.Combine(Archive, PreservedTableRestore.RestoreMarkerFileName),
+            "pm_preserve_r6
+config_mute_rules
+");
+
+        var answers = new[]
+        {
+            await CreateAsync("SQLB", "Blocking Detected"),
+            await McpAlertTools.UpdateMuteRuleAsync(_service, Archive, before.Id, "{\"reason\":\"changed\"}"),
+            await McpAlertTools.SetMuteRuleEnabledAsync(_service, Archive, before.Id, false),
+            await McpAlertTools.DeleteMuteRuleAsync(_service, Archive, before.Id),
+        };
+
+        foreach (var answer in answers)
+        {
+            using var doc = Parse(answer);
+            Assert.Equal("unavailable", doc.RootElement.GetProperty("status").GetString());
+            Assert.Contains("until Lite restarts", doc.RootElement.GetProperty("message").GetString(), StringComparison.Ordinal);
+        }
+
+        var after = await OnlyStoredRuleAsync();
+        Assert.Equal(before.Id, after.Id);
+        Assert.True(after.Enabled);
+        Assert.Equal(before.Reason, after.Reason);
+    }
+
     [Theory]
     [InlineData("missing-id", "not_found")]
     [InlineData("  ", "invalid")]
