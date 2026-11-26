@@ -45,9 +45,9 @@ public sealed class DarlingMcpPasswordKeyTools
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "new_password_key"), Description(
         "Writes a new password key to the service's own pending-password-keys folder on its machine, for a passwordKey secret (the same as the --new-password-key verb), and returns the file's path and the key's fingerprint, never the key. " +
-        "Takes no path: the folder is next to the folder that holds the service's active password key file, and the file is named new-password-key-<fingerprint>.key. " +
+        "Takes no path: the folder is inside the folder that holds the service's active password key file, and the file is named new-password-key-<fingerprint>.key. " +
         "Needs mcp.allowWrites and mcp.allowServerAdmin. " +
-        "The folder is created readable only by the account the service runs as, and an existing folder that is a link, is owned by another account or that anyone else can reach is refused and left as it is. " +
+        "The folder is created readable only by the account the service runs as, and an existing folder that is a link, is owned by another account or that anyone else can read or change is refused and left as it is. A key folder on a network location is refused before anything is made. " +
         "It is refused when the active password key comes from the passwordKey setting or the service has no key file yet, and when 5 key files are already waiting in the folder: install or delete them first. " +
         "It never writes over anything. It changes nothing else: put the key in your secret store, point passwordKey in darling.json at it, then delete the file. Making a key does not seal or unseal any saved password: " +
         "a saved password is sealed with the key the store publishes, and only reset_password_key replaces that key, after which every saved password must be entered again. " +

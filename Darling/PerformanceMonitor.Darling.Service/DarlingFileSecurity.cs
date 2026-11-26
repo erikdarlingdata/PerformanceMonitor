@@ -529,6 +529,54 @@ public static class DarlingFileSecurity
         }
     }
 
+    /// <summary>The folders <see cref="PinFolders"/> holds open. Dispose it when the work inside them is done.</summary>
+    internal sealed class FolderChainPin : IDisposable
+    {
+        private readonly List<Microsoft.Win32.SafeHandles.SafeFileHandle> _held;
+
+        internal FolderChainPin(List<Microsoft.Win32.SafeHandles.SafeFileHandle> held) => _held = held;
+
+        public void Dispose()
+        {
+            foreach (var handle in _held)
+            {
+                handle.Dispose();
+            }
+
+            _held.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Holds every folder from the volume root down to <paramref name="folder"/> open (<see cref="PinFolderChain"/>) for as long as
+    /// the returned pin lives, so a caller that checks the folder and then writes into it by path (#9644) works on the folder it
+    /// checked: none of them can be renamed, deleted or turned into a link in between. Windows only. When one of them is a junction
+    /// or symbolic link, <paramref name="refusal"/> says which, and the result is null with nothing held.
+    /// </summary>
+    internal static FolderChainPin? PinFolders(string folder, out string? refusal)
+    {
+        var held = new List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+        try
+        {
+            refusal = PinFolderChain(Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)), held);
+            if (refusal is null)
+            {
+                var pin = new FolderChainPin(held);
+                held = [];
+                return pin;
+            }
+
+            return null;
+        }
+        finally
+        {
+            foreach (var handle in held)
+            {
+                handle.Dispose();
+            }
+        }
+    }
+
     /// <summary>
     /// Opens every folder from the volume root down to <paramref name="folder"/> without following a link, adds each
     /// handle to <paramref name="held"/> (the caller closes them after the change), and returns why the chain cannot be
@@ -988,6 +1036,25 @@ public static class DarlingFileSecurity
         try
         {
             return WriteAccessBeyondTrusted(new DirectoryInfo(directory).GetAccessControl());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
+        {
+            return $"its permissions could not be read ({ex.Message})";
+        }
+    }
+
+    /// <summary>
+    /// The accounts beyond SYSTEM, Administrators and the service account that hold ANY Allow entry on the directory
+    /// <paramref name="directory"/>, whatever the right (read and list included), as one line, or null when there are none
+    /// (#9644). The folder check for a folder whose contents only the service may see. An entry that only children inherit is
+    /// counted, because the files made inside would carry it. The owner is not judged here (<see cref="IsTrustedOwner"/> is).
+    /// A DACL that cannot be read is reported, not passed.
+    /// </summary>
+    internal static string? DirectoryAccessBeyondTrusted(string directory)
+    {
+        try
+        {
+            return AccessBeyondTrusted(new DirectoryInfo(directory).GetAccessControl());
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or PlatformNotSupportedException)
         {

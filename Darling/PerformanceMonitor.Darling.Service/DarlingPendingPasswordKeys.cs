@@ -17,11 +17,13 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// Where the MCP <c>new_password_key</c> tool writes a new password key (#9644): one folder the service owns,
-/// <c>pending-password-keys</c>, next to the folder that holds the service's active password key file, with a file name
+/// <c>pending-password-keys</c>, inside the folder that holds the service's active password key file, with a file name
 /// the service makes (<c>new-password-key-&lt;fingerprint&gt;.key</c>). The caller names no path. The folder is created
 /// with its owner-only mode (Unix) or hardened ACL (Windows) at creation, never locked afterwards, and a folder that is
-/// already there is used only when it is a real folder, owned by the service's account, that nobody else can reach. One
-/// that is not is refused and left as it is.
+/// already there is used only when it is a real folder, owned by the service's account, that nobody else can read or change. One
+/// that is not is refused and left as it is. A credentials folder on a network location is refused before anything is made.
+/// On Windows the folders from the volume root down to the pending folder are held open without following a link from the
+/// check until the key file is made, so the folder written into is the folder checked.
 /// </summary>
 internal static class DarlingPendingPasswordKeys
 {
@@ -40,12 +42,40 @@ internal static class DarlingPendingPasswordKeys
     /// <see cref="Fingerprint"/>, or not, and <see cref="Message"/> says why. Never the key.</summary>
     internal sealed record PendingKeyOutcome(bool Written, string Message, string? FilePath, string? Fingerprint, bool Failed = false);
 
-    /// <summary>The pending folder for a service whose active password key file is in <paramref name="credentialsDirectory"/>.</summary>
-    internal static string DirectoryFor(string credentialsDirectory)
+    /// <summary>The pending folder for a service whose active password key file is in <paramref name="credentialsDirectory"/>: a
+    /// folder inside it, so it is under the same owner and access as the credentials, and on the same volume.</summary>
+    internal static string DirectoryFor(string credentialsDirectory) =>
+        Path.Combine(Path.TrimEndingDirectorySeparator(Path.GetFullPath(credentialsDirectory)), DirectoryName);
+
+    /// <summary>True when <paramref name="fullPath"/> is on a network location: a UNC path, or a drive that is mapped to a share.
+    /// Windows only, because only there is a pair of backslashes a share.</summary>
+    internal static bool IsNetworkLocation(string fullPath)
     {
-        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(credentialsDirectory));
-        var parent = Path.GetDirectoryName(full) ?? throw new InvalidOperationException($"{full} has no parent folder.");
-        return Path.Combine(parent, DirectoryName);
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        if (fullPath.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (fullPath.StartsWith(@"\\", StringComparison.Ordinal)
+            && !fullPath.StartsWith(@"\\?\", StringComparison.Ordinal)
+            && !fullPath.StartsWith(@"\\.\", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        try
+        {
+            return Path.GetPathRoot(fullPath) is { Length: > 0 } root && new DriveInfo(root).DriveType == DriveType.Network;
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -54,7 +84,12 @@ internal static class DarlingPendingPasswordKeys
     /// <c>passwordKey</c>, so the active key is not a file the service keeps. Both of those, and a service that has no key file yet,
     /// are refused: there is then no folder the service owns to put a key in, and nothing falls back to another place.
     /// </summary>
-    internal static PendingKeyOutcome Create(string? credentialsDirectory, bool keyFromSetting, ILogger? logger)
+    internal static PendingKeyOutcome Create(string? credentialsDirectory, bool keyFromSetting, ILogger? logger) =>
+        Create(credentialsDirectory, keyFromSetting, logger, afterFolderChecked: null);
+
+    /// <summary><see cref="Create(string?, bool, ILogger?)"/> that calls <paramref name="afterFolderChecked"/> with the pending folder
+    /// once it has passed its checks and before the key file is made, so a test can try to swap the folder at the moment that matters.</summary>
+    internal static PendingKeyOutcome Create(string? credentialsDirectory, bool keyFromSetting, ILogger? logger, Action<string>? afterFolderChecked)
     {
         if (keyFromSetting)
         {
@@ -66,15 +101,22 @@ internal static class DarlingPendingPasswordKeys
             return Refused("The folder where the service keeps its password key could not be found, so there is no folder of the service's own to put a new key in.");
         }
 
+        IDisposable? pin = null;
         try
         {
+            var credentialsFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(credentialsDirectory));
+            if (IsNetworkLocation(credentialsFull))
+            {
+                return Refused($"The folder where the service keeps its password key, {credentialsFull}, is on a network location, so no folder for new keys is made there. Nothing was written. Whoever can reach the share could read or change a key kept on it.");
+            }
+
             if (!DarlingServiceKeyFile.AnythingAt(Path.Combine(credentialsDirectory, DarlingPasswordKeyFile.FileName)))
             {
                 return Refused("The service keeps no password key file yet, so there is no folder of the service's own to put a new key in. Try again once the service has started with its store.");
             }
 
             var directory = DirectoryFor(credentialsDirectory);
-            if (EnsureFolder(directory) is { } problem)
+            if (EnsureFolder(directory, out pin) is { } problem)
             {
                 logger?.LogWarning("The pending password key folder was not used: {Reason}", problem);
                 return Refused($"The folder for new password keys, {directory}, was not used: {problem}. Nothing was written. Remove it or fix it, then try again.");
@@ -86,6 +128,7 @@ internal static class DarlingPendingPasswordKeys
                 return Refused($"{pending.ToString(CultureInfo.InvariantCulture)} new password key files are already waiting in {directory}. Install the one you want, or delete the ones you do not, then try again.");
             }
 
+            afterFolderChecked?.Invoke(directory);
             using var output = new StringWriter(CultureInfo.InvariantCulture);
             using var error = new StringWriter(CultureInfo.InvariantCulture);
             var write = DarlingCliCommands.WriteNewPasswordKey(
@@ -101,14 +144,19 @@ internal static class DarlingPendingPasswordKeys
             logger?.LogWarning("A new password key was not written: {Message}", ex.Message);
             return new PendingKeyOutcome(false, "The folder for new password keys could not be checked or written. The service log has the reason.", null, null, Failed: true);
         }
+        finally
+        {
+            pin?.Dispose();
+        }
     }
 
     private static PendingKeyOutcome Refused(string message) => new(false, message, null, null);
 
     /// <summary>Creates the folder owner-only if it is not there, then checks it. Null when the folder is a real folder only the
     /// service's account can reach, otherwise why not. An existing folder is judged, never repaired.</summary>
-    private static string? EnsureFolder(string directory)
+    private static string? EnsureFolder(string directory, out IDisposable? pin)
     {
+        pin = null;
         var info = new DirectoryInfo(directory);
         if (info.LinkTarget is not null)
         {
@@ -167,13 +215,22 @@ internal static class DarlingPendingPasswordKeys
             return "this platform has no way to check it";
         }
 
+        /* Held from here until the key file is made: the folders down to this one are opened without following a link, and
+           none can be renamed, deleted or replaced while they are held, so what is checked below is what is written into. */
+        var held = DarlingFileSecurity.PinFolders(directory, out var chainProblem);
+        if (held is null)
+        {
+            return chainProblem;
+        }
+
+        pin = held;
         if (!DarlingFileSecurity.IsTrustedOwner(directory))
         {
             return "it is not owned by SYSTEM, Administrators or the service account";
         }
 
-        return DarlingFileSecurity.WriteAccessBeyondTrusted(directory) is { } accounts
-            ? $"accounts beyond SYSTEM, Administrators and the service account can change it: {accounts}"
+        return DarlingFileSecurity.DirectoryAccessBeyondTrusted(directory) is { } accounts
+            ? $"accounts beyond SYSTEM, Administrators and the service account have access to it: {accounts}"
             : null;
     }
 }

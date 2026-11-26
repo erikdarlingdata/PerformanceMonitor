@@ -43,7 +43,7 @@ public sealed class DarlingMcpPasswordKeyToolsTests
         var credentials = Path.Combine(root, "credentials");
         Directory.CreateDirectory(credentials);
         File.WriteAllText(Path.Combine(credentials, DarlingPasswordKeyFile.FileName), "placeholder");
-        return (root, credentials, Path.Combine(root, DarlingPendingPasswordKeys.DirectoryName));
+        return (root, credentials, Path.Combine(credentials, DarlingPendingPasswordKeys.DirectoryName));
     }
 
     private const UnixFileMode Mode755 =
