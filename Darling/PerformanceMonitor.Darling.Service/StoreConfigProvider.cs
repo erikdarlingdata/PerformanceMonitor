@@ -632,7 +632,7 @@ public sealed class StoreConfigProvider
                 + "or the MCP add_servers tool. Note --test-connection reads darling.json, so it will keep "
                 + "reporting them as PASS while they collect nothing.",
                 neverRegistered.Count,
-                string.Join(", ", neverRegistered));
+                string.Join(", ", neverRegistered.Select(ServerFieldText.Escape)));
         }
 
         /* Cause 2 — monitored once, then removed, and the file was left alone. A CORRECT state, so this is
@@ -647,7 +647,7 @@ public sealed class StoreConfigProvider
                 + "the file. Delete them from darling.json to silence this line; their collected history is "
                 + "kept either way.",
                 deliberatelyRemoved.Count,
-                string.Join(", ", deliberatelyRemoved));
+                string.Join(", ", deliberatelyRemoved.Select(ServerFieldText.Escape)));
         }
     }
 
@@ -1538,6 +1538,8 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
         for (int i = 0; i < shown; i++)
         {
             var server = drifted[i];
+            /* #9787: a row saved before the control-character rule can hold one in any of these values; it prints as \uXXXX text
+               (DriftValue and DriftFieldValue escape every character that does not print, #9693). */
             var fields = server.Fields.Select(f => $"{f.Field} (file={DriftFieldValue(f.FileValue)}, store={DriftFieldValue(f.StoreValue)})");
             parts.Add($"{DriftValue(server.Server)}: {string.Join(", ", fields)}");
         }

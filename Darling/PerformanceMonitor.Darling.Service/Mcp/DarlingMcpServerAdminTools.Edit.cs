@@ -977,12 +977,22 @@ LIMIT 1";
                         return (null, "display_name must be text.");
                     }
 
+                    if (ServerFieldText.Refusal("display_name", displayName) is { } displayNameRefusal)
+                    {
+                        return (null, displayNameRefusal);
+                    }
+
                     changes.DisplayName = displayName.Trim();
                     break;
                 case "host":
                     if (!TryEditString(node, out var host) || string.IsNullOrWhiteSpace(host))
                     {
                         return (null, "host must be non-blank text.");
+                    }
+
+                    if (ServerFieldText.Refusal("host", host) is { } hostRefusal)
+                    {
+                        return (null, hostRefusal);
                     }
 
                     changes.Host = host.Trim();
@@ -1000,6 +1010,11 @@ LIMIT 1";
                     if (node is not null && !TryEditString(node, out _))
                     {
                         return (null, "database must be text, or null to clear it.");
+                    }
+
+                    if (ServerFieldText.Refusal("database", TryGetString(body, "database")) is { } databaseRefusal)
+                    {
+                        return (null, databaseRefusal);
                     }
 
                     changes.HasDatabase = true;
@@ -1050,6 +1065,11 @@ LIMIT 1";
                     if (node is not null && !TryEditString(node, out _))
                     {
                         return (null, "username must be text, or null to clear it.");
+                    }
+
+                    if (ServerFieldText.Refusal("username", TryGetString(body, "username")) is { } usernameRefusal)
+                    {
+                        return (null, usernameRefusal);
                     }
 
                     changes.HasUsername = true;

@@ -315,6 +315,109 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Empty(run.Tested);
     }
 
+    /// <summary>#9787: the same rule as Darling's writers. Each of the four text fields with a line feed, a line separator or an
+    /// invisible tag character is refused by field name, the error lines carry no control character, and nothing changes.</summary>
+    [Theory]
+    [InlineData("display_name", "\n")]
+    [InlineData("host", "\u2028")]
+    [InlineData("database", "\u202E")]
+    [InlineData("username", "\U000E0041")]
+    public async Task AFieldHoldingAControlCharacter_IsRefusedByName_AndChangesNothing(string field, string character)
+    {
+        var entry = new Dictionary<string, object> { ["host"] = "sql01", ["auth"] = "windows", [field] = "x" + character + "y" };
+        var run = await RunVerbAsync(["--add-server"], JsonSerializer.Serialize(new[] { entry }));
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains($"{field} holds a control character", run.Err, StringComparison.Ordinal);
+        Assert.All(run.Err.Split('\n'), line => Assert.DoesNotContain(line.TrimEnd('\r'), ServerFieldText.IsControl));
+        Assert.Empty(ServerNames());
+        Assert.Empty(run.Tested);
+        Assert.Empty(StoredKeys());
+    }
+
+    /// <summary>#9787: a zero-width non-joiner is part of an ordinary Persian word, so a database holding one is added.</summary>
+    [Fact]
+    public async Task ADatabaseHoldingAZeroWidthNonJoiner_IsAdded()
+    {
+        var database = "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645";
+        var entry = new Dictionary<string, object> { ["host"] = "sql01", ["auth"] = "windows", ["database"] = database };
+        var run = await RunVerbAsync(["--add-server"], JsonSerializer.Serialize(new[] { entry }));
+
+        Assert.Equal(0, run.Exit);
+        Assert.Equal(["sql01"], ServerNames());
+        Assert.Equal(database, Reload().GetAllServers().Single().DatabaseName);
+    }
+
+    [Fact]
+    public void ServerManagerAddServer_RefusesAControlCharacterInTheDisplayName_AndWritesNothing()
+    {
+        var manager = Reload();
+
+        var refused = Assert.Throws<InvalidOperationException>(
+            () => manager.AddServer(new ServerConnection { ServerName = "sql01", DisplayName = "a\u2028b" }));
+
+        Assert.Contains("display_name holds a control character", refused.Message, StringComparison.Ordinal);
+        Assert.Empty(manager.GetAllServers());
+        Assert.Empty(ServerNames());
+    }
+
+    /// <summary>#9787: ServerManager.UpdateServer holds a CHANGED display name, host, database or login to the rule, so every caller
+    /// is covered. A field that keeps its saved text is not checked, so a row saved before the rule stays editable on its other fields.</summary>
+    [Fact]
+    public void UpdateServer_RefusesAChangedDisplayNameHoldingAnOverride_AndAcceptsAnEditToAnotherFieldOfALegacyRow()
+    {
+        var manager = Reload();
+        var server = new ServerConnection { ServerName = "sql01", DisplayName = "Orders", AuthenticationType = AuthenticationTypes.Windows };
+        manager.AddServer(server);
+
+        /* A row saved before the rule: the name is written without the rule, as an older build did. */
+        server.DisplayName = "Or\u202Eders";
+        manager.UpdateServerSettings(server);
+        var legacy = Reload();
+        var row = legacy.GetAllServers().Single();
+        Assert.Equal("Or\u202Eders", row.DisplayName);
+
+        row.Description = "an edit to another field";
+        legacy.UpdateServer(row);
+        Assert.Equal("an edit to another field", Reload().GetAllServers().Single().Description);
+        Assert.Equal("Or\u202Eders", Reload().GetAllServers().Single().DisplayName);
+
+        row.DisplayName = "Pay\u202Eroll";
+        var refused = Assert.Throws<InvalidOperationException>(() => legacy.UpdateServer(row));
+        Assert.Contains("display_name holds a control character", refused.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Pay", refused.Message, StringComparison.Ordinal);
+        Assert.Equal("Or\u202Eders", Reload().GetAllServers().Single().DisplayName);
+    }
+
+    /// <summary>#9787: Import Settings skips and counts an entry whose display name, host or database holds a control character, writes its
+    /// name to the log escaped, and still imports a clean neighbour.</summary>
+    [Fact]
+    public void ImportSettings_SkipsAndCountsAnEntryHoldingAControlCharacter_LogsItEscaped_AndImportsTheNeighbour()
+    {
+        var file = Path.Combine(_root, "import-servers.json");
+        File.WriteAllText(file, JsonSerializer.Serialize(new
+        {
+            Servers = new[]
+            {
+                new ServerConnection { ServerName = "sql01", DisplayName = "prod\nFAKE" },
+                new ServerConnection { ServerName = "sql02\u202Efake", DisplayName = "bidi" },
+                new ServerConnection { ServerName = "sql03", DisplayName = "tag", DatabaseName = "db\U000E0041" },
+                new ServerConnection { ServerName = "sql04", DisplayName = "clean" },
+            },
+        }));
+        var manager = new ServerManager(_root, _log, HostsFile, new CredentialService(_store));
+
+        var (imported, skipped, collided) = manager.ImportServersFromFile(file);
+
+        Assert.Equal((1, 3, 0), (imported, skipped, collided));
+        Assert.Equal("sql04", manager.GetAllServers().Single().ServerName);
+        Assert.Equal(["sql04"], ServerNames());
+        var refusals = _log.Lines.Where(l => l.Contains("holds a control character", StringComparison.Ordinal)).ToList();
+        Assert.Equal(3, refusals.Count);
+        Assert.All(refusals, line => Assert.DoesNotContain(line, ServerFieldText.IsControl));
+        Assert.Contains(refusals, l => l.Contains("prod\\u000AFAKE", StringComparison.Ordinal));
+    }
+
     [Theory]
     [InlineData("""[{"host":"np:sql01","auth":"windows"}]""")]
     [InlineData("""[{"host":"sql01","auth":"sql","password":"p"}]""")]

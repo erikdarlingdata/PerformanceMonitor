@@ -9820,7 +9820,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
 
         if (server.IsPostgres)
         {
-            output.WriteLine($"'{server.DisplayName}' is a PostgreSQL target. It has no Extended Events sessions, so there is nothing to drop and nothing was connected to.");
+            output.WriteLine($"'{ServerFieldText.Escape(server.DisplayName)}' is a PostgreSQL target. It has no Extended Events sessions, so there is nothing to drop and nothing was connected to.");
             return DropXeSessionsExitCode.Success;
         }
 
@@ -9833,7 +9833,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            error.WriteLine($"Could not connect to '{server.DisplayName}': {ex.Message}");
+            error.WriteLine($"Could not connect to '{ServerFieldText.Escape(server.DisplayName)}': {ex.Message}");
             error.WriteLine(DarlingXeSessionCleanup.PrintSqlHint);
             return DropXeSessionsExitCode.TargetUnavailable;
         }

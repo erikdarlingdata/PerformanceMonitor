@@ -333,17 +333,22 @@ public sealed class McpServerAdminTools
             {
                 case "display_name":
                     if (!isNull && value.ValueKind != JsonValueKind.String) return BadType(key, "text");
-                    if (Text(value) is { } displayText && displayText.Any(char.IsControl))
-                        return Refuse(EditTool, "invalid", "display_name must not contain control characters (line breaks, tabs and the like).", key);
+                    /* #9787: the one four-field rule every writer applies. A field the call does not name is not checked, so a row saved before the rule stays editable. */
+                    if (ServerFieldText.Refusal("display_name", Text(value)) is { } displayRefusal)
+                        return Refuse(EditTool, "invalid", displayRefusal, key);
                     next.DisplayName = NullIfBlank(Text(value)) ?? string.Empty;
                     break;
                 case "host":
                     if (value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()))
                         return Refuse(EditTool, "invalid", "host must be the server's address (text, not blank).", key);
+                    if (ServerFieldText.Refusal("host", value.GetString()) is { } hostFieldRefusal)
+                        return Refuse(EditTool, "invalid", hostFieldRefusal, key);
                     next.ServerName = value.GetString()!.Trim();
                     break;
                 case "database":
                     if (!isNull && value.ValueKind != JsonValueKind.String) return BadType(key, "text, or null for none");
+                    if (ServerFieldText.Refusal("database", Text(value)) is { } databaseRefusal)
+                        return Refuse(EditTool, "invalid", databaseRefusal, key);
                     next.DatabaseName = NullIfBlank(Text(value));
                     break;
                 case "read_only_intent":
@@ -424,6 +429,10 @@ public sealed class McpServerAdminTools
                     next.ManagedIdentityClientId = NullIfBlank(Text(value));
                     break;
                 case "username":
+                    if (!isNull && value.ValueKind != JsonValueKind.String) return BadType(key, "text");
+                    if (ServerFieldText.Refusal("username", Text(value)) is { } usernameRefusal)
+                        return Refuse(EditTool, "invalid", usernameRefusal, key);
+                    break;
                 case "password":
                     if (!isNull && value.ValueKind != JsonValueKind.String) return BadType(key, "text");
                     break;

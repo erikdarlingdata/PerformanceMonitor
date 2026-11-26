@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -316,14 +317,14 @@ WHERE status = 'in_progress'
                    for. Asked BEFORE the probe, so a refused test resolves nothing and connects to nothing. */
                 if (await TestConnectReferenceRefusalAsync(server, StoredSettingsOfReferenceAsync, cancellationToken) is { } refusal)
                 {
-                    _logger?.LogInformation("Command {Id} (test_connect '{Server}') => refused", command.CommandId, server.DisplayName);
+                    _logger?.LogInformation("Command {Id} (test_connect '{Server}') => refused", command.CommandId, ServerFieldText.Escape(server.DisplayName));
                     return new CommandOutcome(false, "refused", ErrorJson(refusal));
                 }
 
                 var columnStatsDatabases = await ReadColumnStatsGrantDatabasesAsync(server, cancellationToken);
                 var probe = await DarlingServerConnector.ProbeAsync(server, _logger, cancellationToken, columnStatsDatabases: columnStatsDatabases);
                 var (resultStatus, resultJson) = MapProbeResult(probe, server);
-                _logger?.LogInformation("Command {Id} (test_connect '{Server}') => {Result}", command.CommandId, server.DisplayName, resultStatus);
+                _logger?.LogInformation("Command {Id} (test_connect '{Server}') => {Result}", command.CommandId, ServerFieldText.Escape(server.DisplayName), resultStatus);
                 return new CommandOutcome(probe.Success, resultStatus, resultJson);
             }
 
