@@ -10,6 +10,7 @@ using System;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -22,6 +23,8 @@ internal readonly record struct StatementTiming(int Ordinal, string Label, strin
 internal static class StatementLabel
 {
     internal const int MaxLabelLength = 120;
+
+    private static readonly Regex s_passwordKeyword = new(@"\sPASSWORD\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     /// <summary>The statement's own first line: leading whitespace, <c>--</c> line comments and
     /// <c>/* */</c> block comments are skipped (a product query often opens with a comment that explains it),
@@ -64,6 +67,15 @@ internal static class StatementLabel
 
         var end = text.IndexOf('\n', i);
         var line = (end < 0 ? text.AsSpan(i) : text.AsSpan(i, end - i)).Trim().ToString();
+
+        /* #9641: a statement that sets a login's password (CREATE ROLE or ALTER ROLE ... PASSWORD 'SCRAM-SHA-256$...') carries the
+           password's salt and stored key. The label stops before the keyword, so a slow-read line never shows them. */
+        var password = s_passwordKeyword.Match(line);
+        if (password.Success)
+        {
+            line = line[..password.Index].TrimEnd();
+        }
+
         return line.Length > MaxLabelLength ? line[..MaxLabelLength] : line;
     }
 

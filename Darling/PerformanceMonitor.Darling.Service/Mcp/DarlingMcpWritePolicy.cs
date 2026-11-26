@@ -66,6 +66,10 @@ internal static class DarlingMcpWritePolicy
         "set_advanced_web_access",
         "update_web_access_group",
         "get_web_access_groups",
+        /* #9641: they create, change and drop a database login, so they sit behind the same switch. */
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
@@ -91,6 +95,9 @@ internal static class DarlingMcpWritePolicy
         "rotate_web_access_group_token",
         "set_advanced_web_access",
         "update_web_access_group",
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
         "mute_analysis_finding",
         "unmute_analysis_finding",
         "create_mute_rule",
@@ -289,6 +296,10 @@ internal static class DarlingMcpWritePolicy
         "set_advanced_web_access",
         "update_web_access_group",
         "get_web_access_groups",
+        /* #9641: a database login is never an agent's to create, change or drop. */
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
         "undo_plan_change",
         "write_investigation_note",
         "approve_investigation_note",

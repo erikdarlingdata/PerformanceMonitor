@@ -165,7 +165,7 @@ public sealed class McpToolGuideHeadsPlatformTests
         ("edit_server", "probed first and saved only if the server answers"),
         ("remove_server", "immediately, no confirm step"),
         ("remove_server", "Already-collected historical data is NOT deleted"),
-        ("remove_server", "a partial match is honored only if exactly one definition contains it"),
+        ("remove_server", "A partial match deletes nothing"),
         ("remove_server", "Matches against DEFINITIONS, not the connected registry"),
     ];
 
