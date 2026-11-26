@@ -61,8 +61,8 @@ public sealed partial class DarlingMcpWebAccessTools
         [Description("The group's name, unique across groups.")] string name,
         [Description("tags or all_servers. An empty tag grant never means all servers.")] string scope,
         [Description("For scope tags, one or more server tag ids (from get_fleet_overview tags). Leave out for all_servers.")] int[]? tag_ids = null,
-        StoreOwnerSource? ownerSource = null, IPasswordKeyRing? ring = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
-        CreateAsync(ownerSource?.Read(), ring, name, scope, tag_ids, ActorOf(), logger, cancellationToken);
+        StoreOwnerSource? ownerSource = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
+        CreateAsync(ownerSource?.Read(), DarlingPasswordKey.Current, name, scope, tag_ids, ActorOf(), logger, cancellationToken);
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_web_access_group"), Description(
@@ -83,8 +83,8 @@ public sealed partial class DarlingMcpWebAccessTools
     public static Task<string> RotateWebAccessGroupToken(
         [Description("The group's id, or its exact name, as get_web_access_groups shows.")] string group,
         [Description("Must be true. Without it nothing changes and the answer says what a rotate does.")] bool confirm = false,
-        StoreOwnerSource? ownerSource = null, IPasswordKeyRing? ring = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
-        RotateAsync(ownerSource?.Read(), ring, group, confirm, ActorOf(), logger, cancellationToken);
+        StoreOwnerSource? ownerSource = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
+        RotateAsync(ownerSource?.Read(), DarlingPasswordKey.Current, group, confirm, ActorOf(), logger, cancellationToken);
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "delete_web_access_group"), Description(

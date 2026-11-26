@@ -134,6 +134,8 @@ public static partial class DarlingWebEndpoints
     public static readonly IReadOnlySet<string> ExcludedToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
         "analyze_server",
+        // #9642: the web access groups are managed from the Viewer and these MCP tools. The web dashboard serves no page for them, so a group list is not a page read.
+        "get_web_access_groups",
         "mute_analysis_finding",
         "unmute_analysis_finding",
         "analyze_query_plan",
