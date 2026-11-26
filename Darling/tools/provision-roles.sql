@@ -1332,7 +1332,7 @@ REVOKE UPDATE (paused) ON config.config_service FROM mcp;
 DO $do$
 BEGIN
    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'config' AND table_name = 'config_service' AND column_name = 'query_store_text_trigram_index_enabled') THEN
-      GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled) ON config.config_service TO mcp;
+      GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled, plan_content_retention_days, compose_statement_timeout_seconds, plan_xml_compression) ON config.config_service TO mcp;
    ELSE
       RAISE WARNING 'config.config_service has no query_store_text_trigram_index_enabled column yet: skipped the mcp service-flag column grant. Start the service once to migrate the store, then re-run this script.';
    END IF;

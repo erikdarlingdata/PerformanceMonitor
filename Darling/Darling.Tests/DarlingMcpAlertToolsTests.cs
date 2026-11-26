@@ -69,6 +69,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         "purge_expired_mute_rules",
         "remove_webhook_signing_key",
         "restore_alert_history",
+        "send_test_notification",
         "set_mute_rule_enabled",
         "set_notification_route_enabled",
         "set_notification_route_fallback",
