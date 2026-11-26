@@ -296,14 +296,16 @@ public sealed class EditServerSecurityTests
         return received;
     }
 
-    /// <summary>The four names a pasted Windows command has to carry (#9693): a named instance, a name with a space, a name
-    /// with a single quote and a name with a double quote, each with the id it is registered under.</summary>
+    /// <summary>The five names a pasted Windows command has to carry (#9693): a named instance, a name with a space, a name
+    /// with a single quote, a name with a double quote and a name that starts with two dashes, each with the id it is
+    /// registered under.</summary>
     private static readonly (int Id, string Name)[] s_pastedNames =
     [
         (11, "SQL01\\INST"),
         (12, "orders db"),
         (13, "O'Brien's"),
         (14, "say \"hi\""),
+        (15, "--prod"),
     ];
 
     [Theory]
@@ -349,8 +351,14 @@ public sealed class EditServerSecurityTests
             Assert.Equal(id, Assert.Single(match.Candidates).ServerId);
 
             /* A named instance, a space and a single quote arrive as the name itself. A double quote cannot be handed to an
-               executable by Windows PowerShell 5.1, so that server is named by its id. */
-            Assert.Equal(name.Contains('"', StringComparison.Ordinal) ? "id:" + id.ToString(System.Globalization.CultureInfo.InvariantCulture) : name, received[i][1]);
+               executable by Windows PowerShell 5.1, and the verb reads a first word that starts with -- as an option, so those
+               two servers are named by their ids. */
+            var byId = name.Contains('"', StringComparison.Ordinal) || name.StartsWith("--", StringComparison.Ordinal);
+            Assert.Equal(byId ? "id:" + id.ToString(System.Globalization.CultureInfo.InvariantCulture) : name, received[i][1]);
+
+            /* The verb takes what the shell handed over. */
+            Assert.True(DarlingCliCommands.TryParseEditServerArgs(received[i].Skip(1).ToArray(), out var request, out var error), error);
+            Assert.Equal(received[i][1], request!.ServerName);
         }
     }
 
@@ -385,6 +393,30 @@ public sealed class EditServerSecurityTests
         Assert.True(DarlingCliCommands.TryParseEditServerArgs(["orders db", "--set", "host=host\\inst"], out var request, out var error), error);
         Assert.Equal("orders db", request!.ServerName);
         Assert.Equal("host\\inst", request.Changes!["host"]!.GetValue<string>());
+    }
+
+    /// <summary>#9693: the verb reads a first word that starts with <c>--</c> as an option, so the printed command names a server
+    /// whose name starts that way by its id. The printed words go back through the verb's own parser and name that server and no
+    /// other. Every word of these commands is free of spaces and quotes, so each shell hands it over as the text between its quotes.</summary>
+    [Theory]
+    [InlineData("--prod", false)]
+    [InlineData("--prod", true)]
+    [InlineData("--set", false)]
+    [InlineData("--config", true)]
+    public void A_server_whose_name_starts_with_two_dashes_is_printed_by_its_id_and_the_verb_takes_the_printed_command(string name, bool windows)
+    {
+        var registry = new List<RegisteredServer> { new(41, name, name), new(42, "orders", "orders") };
+        var line = Assert.Single(StoreConfigProvider.BuildSettingDriftWarnings(
+            [new StoreConfigProvider.ServerSettingDrift(name, true, [new StoreConfigProvider.SettingDrift("host", "new", "old", true)], ServerId: 41)],
+            maxServers: 10, entryPoint: "darling", windows: windows));
+        var printed = line[(line.IndexOf("run: ", StringComparison.Ordinal) + 5)..].Split(' ')
+            .Select(w => w.Length >= 2 && w[0] == '\'' && w[^1] == '\'' ? w[1..^1] : w)
+            .ToArray();
+
+        Assert.Equal(["darling", "--edit-server"], printed[..2]);
+        Assert.True(DarlingCliCommands.TryParseEditServerArgs(printed[2..], out var request, out var error), error);
+        Assert.Equal(41, Assert.Single(Edit.ResolveForEdit(registry, request!.ServerName).Candidates).ServerId);
+        Assert.Equal("new", request.Changes!["host"]!.GetValue<string>());
     }
 
     /* ---- the drift line ---- */

@@ -113,6 +113,10 @@ public static partial class DarlingCliCommands
         "Example:" + Environment.NewLine +
         "  " + OperatorVerbForm.EntryPointHere() + " --edit-server sql01 --set trustServerCertificate=true --set encryptMode=Mandatory";
 
+    /// <summary>True when <paramref name="word"/> starts with <c>--</c>, which the verb reads as an option and never as a server's
+    /// name. The printed command names a server whose name starts that way by its id (<see cref="StoreConfigProvider.ServerWord"/>).</summary>
+    internal static bool ReadsAsAnOption(string word) => word.StartsWith("--", StringComparison.Ordinal);
+
     /// <summary>
     /// Parses the arguments after <c>--edit-server</c>: the server name first, then <c>--set field=value</c> (or <c>--set=field=value</c>)
     /// one or more times and an optional <c>--config &lt;path&gt;</c>. A password field, a field that is not settable, a field named
@@ -122,7 +126,7 @@ public static partial class DarlingCliCommands
     {
         request = null;
         errorMessage = null;
-        if (rest is null || rest.Length == 0 || rest[0].StartsWith("--", StringComparison.Ordinal) || string.IsNullOrWhiteSpace(rest[0]))
+        if (rest is null || rest.Length == 0 || ReadsAsAnOption(rest[0]) || string.IsNullOrWhiteSpace(rest[0]))
         {
             errorMessage = "--edit-server needs the server's name first." + Environment.NewLine + Environment.NewLine + EditServerUsageText();
             return false;

@@ -824,11 +824,12 @@ public sealed class StoreConfigProvider
     /// <summary>The word that names <paramref name="server"/> in the printed command (#9693): its name, when that name answers
     /// for this server and no other under the rule the verb resolves a name by and the shell's quoting can carry it, else
     /// <c>id:&lt;server id&gt;</c>, which names exactly one server and is one plain word in every shell. A name several servers
-    /// answer to would be refused by the verb, and a name with a double quote cannot be handed to an executable by Windows
-    /// PowerShell 5.1, so the paste names the server by its id in both cases. Null when neither can be printed.</summary>
+    /// answer to would be refused by the verb, a name that starts with <c>--</c> is read by the verb as an option
+    /// (<see cref="DarlingCliCommands.ReadsAsAnOption"/>), and a name with a double quote cannot be handed to an executable by
+    /// Windows PowerShell 5.1, so the paste names the server by its id in all three cases. Null when neither can be printed.</summary>
     internal static string? ServerWord(ServerSettingDrift server, bool powershell)
     {
-        var byName = server.NamePicksOne ? CommandWord(server.Server, powershell) : null;
+        var byName = server.NamePicksOne && !DarlingCliCommands.ReadsAsAnOption(server.Server) ? CommandWord(server.Server, powershell) : null;
         return byName
             ?? (server.ServerId is { } id
                 ? CommandWord(Mcp.DarlingMcpServerAdminTools.ServerIdNamePrefix + id.ToString(CultureInfo.InvariantCulture), powershell)
