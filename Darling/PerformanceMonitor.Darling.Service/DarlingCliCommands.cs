@@ -7600,7 +7600,7 @@ public static partial class DarlingCliCommands
                     var names = ignored.EnumerateArray().Select(k => (
                         Key: k.TryGetProperty("key", out var key) ? key.GetString() ?? string.Empty : string.Empty,
                         DidYouMean: k.TryGetProperty("did_you_mean", out var hint) && hint.ValueKind == JsonValueKind.String ? hint.GetString() : null));
-                    lines.Add($"    Not read, so not applied: {DarlingMcpAddServerKeys.Describe(names)}");
+                    lines.Add($"    Not read, so not applied: {AddServerEntryKeys.Describe(names)}");
                 }
             }
 
