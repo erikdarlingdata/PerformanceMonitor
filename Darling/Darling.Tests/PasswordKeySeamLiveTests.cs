@@ -91,7 +91,7 @@ VALUES (@id, @name, 'alpha-example', 'example_db', 'sqlserver', 1433, FALSE, 'sq
             // The same text under another connection setting is refused, and so is a different host after a later edit.
             await ExecAsync(source, "UPDATE config.config_monitored_servers SET host = 'beta-example' WHERE server_id = 1;", ct);
             var moved = await LoadOnlyServerAsync(source, ct);
-            var refused = Assert.Throws<InvalidOperationException>(
+            var refused = Assert.Throws<SavedSecretUnavailableException>(
                 () => DarlingSecrets.ResolvePassword(moved, out _, ring!, new LegacyDpapi(false, NoDpapi)));
             Assert.DoesNotContain(FakePassword, refused.Message, StringComparison.Ordinal);
             bodySucceeded = true;
@@ -154,7 +154,7 @@ VALUES (@id, @name, 'alpha-example', 'example_db', 'sqlserver', 1433, FALSE, 'sq
             await ExecAsync(source, "UPDATE config.config_monitored_servers SET host = 'beta-example' WHERE server_id = 1;", ct);
             var moved = await LoadOnlyServerAsync(source, ct);
             var openedBeforeRefusal = opened;
-            var refused = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(moved, out _, ring!, dpapi));
+            var refused = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(moved, out _, ring!, dpapi));
             Assert.DoesNotContain(FakePassword, refused.Message, StringComparison.Ordinal);
             Assert.Equal(openedBeforeRefusal, opened);
             bodySucceeded = true;
