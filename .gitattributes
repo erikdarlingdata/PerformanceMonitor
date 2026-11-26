@@ -2,6 +2,9 @@
 
 # Shell scripts must stay LF (this repo uses Git Bash) — CRLF breaks them.
 *.sh text eol=lf
+# #9688: the systemd unit and the Linux config sample ship in the linux-x64 tarball. systemd reads a CR as part of a value.
+Darling/tools/darling.service text eol=lf
+Darling/tools/darling.linux.sample.json text eol=lf
 
 # Explicit binary markers (prevent text mis-detection / corruption):
 *.png binary

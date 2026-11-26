@@ -1,0 +1,29 @@
+{
+  // The Linux starting point for /etc/darling/darling.json (#9688). install-darling.sh copies it there when
+  // no config exists yet. Comments are allowed. Every field is in docs/darling/configuration.md, and
+  // docs/darling/linux.md walks through this file.
+  //
+  // Nothing secret goes in this file. Each secret is a file: reference to a file that only the darling
+  // user can read (mode 600), or an env:NAME reference.
+  "postgres": {
+    // On Linux you run the store yourself, so managed is false. The file holds one line, the Npgsql
+    // connection string of the role that owns the store database, for example:
+    //   Host=127.0.0.1;Port=5432;Username=darling;Password=<store-password>;Database=darling
+    "managed": false,
+    "connectionString": "file:/etc/darling/store_connection"
+  },
+  // The first start copies this list into the store. After that the store holds the list, and an edit
+  // here does nothing. A PostgreSQL target adds "engine": "postgres" to its entry.
+  "servers": [
+    {
+      "host": "<sql-server>,1433",
+      "name": "<display-name>",
+      "auth": "sql",
+      "username": "<monitoring-login>",
+      // The file holds one line, the password of the monitoring login.
+      "password": "file:/etc/darling/sql_password"
+    }
+  ],
+  "web": { "enabled": false },
+  "mcp": { "enabled": false }
+}
