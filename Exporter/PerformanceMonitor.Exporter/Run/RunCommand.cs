@@ -9,12 +9,13 @@ namespace PerformanceMonitor.Exporter.Run;
 /// </summary>
 public static class RunCommand
 {
-    public const string Usage = "Usage: darling-export run (--config <file> | --settings <file>) [--plan-only] [--now <ISO UTC>]";
+    public const string Usage = "Usage: darling-export run (--config <file> | --settings <file>) [--plan-only] [--now <ISO UTC>] [--verbose]";
 
     public static async Task<int> MainAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct)
     {
         string? settingsPath = null, configPath = null;
         var planOnly = false;
+        var verbose = false;
         DateTime? now = null;
         for (var i = 0; i < args.Length; i++)
         {
@@ -23,6 +24,7 @@ public static class RunCommand
                 case "--settings" when i + 1 < args.Length: settingsPath = args[++i]; break;
                 case "--config" when i + 1 < args.Length: configPath = args[++i]; break;
                 case "--plan-only": planOnly = true; break;
+                case "--verbose": verbose = true; break;
                 case "--now" when i + 1 < args.Length:
                     if (!DateTime.TryParse(args[++i], CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var parsed))
                     {
@@ -63,6 +65,12 @@ public static class RunCommand
                 error.WriteLine($"cannot read settings {settingsPath}: {ex.Message}");
                 return RunScheduler.ExitRefused;
             }
+        }
+
+        if (verbose)
+        {
+            ExporterLog.Verbose = true;
+            settings = settings with { Verbose = true };
         }
 
         var memory = new SystemHostMemory(error);

@@ -21,20 +21,22 @@ if (args.Length > 0 && args[0] == "describe-tables")
     return RunDescribeTables(args);
 }
 
+if (args.Length > 0 && args[0] is "--help" or "-h" or "help")
+{
+    Console.Out.Write(Usage.Text());
+    return 0;
+}
+
 if (args.Length == 0 || args[0] != "export")
 {
-    Console.Error.WriteLine("Usage: darling-export export [--config <file>] --store <name> --from <ISO UTC> --to <ISO UTC> --out <dir> [options]");
-    Console.Error.WriteLine("       darling-export run (--config <file> | --settings <file>) [--plan-only] [--now <ISO UTC>]");
-    Console.Error.WriteLine("       darling-export check-config --config <file>");
-    Console.Error.WriteLine("       darling-export describe-tables [--json]");
-    Console.Error.WriteLine("  --config <file>     Read defaults from a JSON config; any flag given overrides it.");
-    Console.Error.WriteLine("  --allow-compressed  Manual catch-up only: skip the compressed-chunk guard's refusal and double the content-fetch pacer's sleeps. The scheduler never passes this flag.");
+    Console.Error.Write(Usage.Text());
     return 1;
 }
 
 try
 {
     var invocation = ExportCommand.Parse(args[1..], DateTime.UtcNow);
+    ExporterLog.Verbose = invocation.Verbose;
     DuckDbSession.Configure(invocation.DuckDbMemoryLimit, invocation.DuckDbThreads);
     return await ExportRunner.RunAsync(invocation.Options, Console.Out, CancellationToken.None).ConfigureAwait(false);
 }
@@ -50,11 +52,11 @@ catch (Exception ex) when (ex is ConfigException or CredentialException)
 }
 catch (Exception ex)
 {
-    // The whole exception (its type, every inner exception and the stack) goes to stdout, which the scheduler keeps in the
-    // run's log, so a failure names the layer that raised it: a bare "The operation has timed out" can come from a
-    // connection open, a read or an upload. stderr stays one line, because the scheduler records it as the family's last
+    // The failure goes to stdout, which the scheduler keeps in the run's log: the full exception, stack frames included, when
+    // stdout is redirected, so a bug in a scheduled run stays diagnosable. An interactive console gets the chain of types and
+    // messages alone unless --verbose is given. stderr stays one line, because the scheduler records it as the family's last
     // error and the stale alert quotes it, so the line only gains the exception types.
-    Console.Out.WriteLine(ex.ToString());
+    Console.Out.WriteLine(ExporterLog.DescribeFailure(ex, stdoutIsConsole: !Console.IsOutputRedirected));
     var types = ex.GetType().Name + (ex.InnerException is { } inner ? " <- " + inner.GetType().Name : "");
     Console.Error.WriteLine($"Export failed: {ex.Message} ({types})");
     return 1;

@@ -13,7 +13,11 @@ darling-export run --config <file> [--plan-only] [--now <ISO UTC>]
 darling-export export [--config <file>] --store <name> --from <ISO UTC> --to <ISO UTC> --out <dir> [options]
 darling-export check-config --config <file>
 darling-export describe-tables [--json]
+darling-export explain-gate --tables <a,b,c> --from <ISO UTC> --to <ISO UTC> [--store <name>]
 ```
+
+Run `darling-export` with no verb, or `darling-export --help`, to print the usage with every `export` option.
+`--verbose` on `export` and `run` also prints the session-guard lines and, on an interactive console, the full stack trace of a failure. Without it a run prints each warning once and a failure on a console as its exception chain. A failure with stdout redirected, as in a scheduled run, always prints the full exception to stdout.
 
 ### `run`
 
@@ -25,7 +29,8 @@ Each run does these steps:
 3. It uploads the Parquet files first and the manifest last.
 4. It writes a daily log and removes old logs, output and temporary files.
 
-`--plan-only` prints and logs what a run would do. It does not open the store and does not upload anything.
+`--plan-only` prints and logs what a run would do. It lists every due window per family on the console and writes the same plan to `plan-only-<store>-<date>.jsonl` in the log folder. It does not open the store and does not upload anything.
+After each window `run` prints the exit code and `log:`, the daily log `export-<store>-<date>.log` in the log folder that holds the window's output.
 `--now` sets the clock for a plan.
 
 The three families are `fresh_fast` (the fast window), `fresh` (hourly) and `query_store` (Query Store, a few hours behind).
@@ -50,7 +55,11 @@ It exits 2 when the config is not valid.
 ### `describe-tables`
 
 Prints one line per table: the origin, the kind, the time column, the grain and the key columns.
-`--json` prints the same facts as JSON.
+`--json` prints the same facts as JSON, with a `blocked` field for the optional tables the registry lists but does not export.
+
+### `explain-gate`
+
+Prints the SQL of the schema gate for the optional tables you name. It does not connect to the store.
 
 ## The config file
 
