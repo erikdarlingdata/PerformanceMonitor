@@ -212,8 +212,15 @@ internal static class AddServerCommand
         return errorMessage is null;
     }
 
-    /// <summary>Normalises the entries: the JSON array, or the one entry the flags name with its password read from <paramref name="input"/>.</summary>
-    internal static (List<Entry>? Entries, string? Problem) ReadEntries(AddServerFlags flags, TextReader input, bool inputRedirected)
+    /// <summary>
+    /// The most bytes of a piped password the strict reader holds (#9753): the characters Credential Manager stores
+    /// (<see cref="CredentialStore.MaxSecretLength"/>, UTF-16 units) at their longest in UTF-8, three bytes each. A longer password is
+    /// refused before it is read in full, and one between the store's own limit and this one is refused by the save with its length.
+    /// </summary>
+    internal const int MaxPipedPasswordBytes = CredentialStore.MaxSecretLength * 3;
+
+    /// <summary>Normalises the entries: the JSON array, or the one entry the flags name with its password read from <paramref name="passwordInput"/> as bytes (#9753).</summary>
+    internal static (List<Entry>? Entries, string? Problem) ReadEntries(AddServerFlags flags, TextReader input, bool inputRedirected, Stream? passwordInput = null)
     {
         if (flags.Any)
         {
@@ -236,7 +243,17 @@ internal static class AddServerCommand
                         + "There is no password prompt (this program has no console of its own, so a shell and the program would both read the keys). "
                         + "Pipe the password as one line, or pipe a JSON array with a password field.");
 
-                password = input.ReadLine();
+                /* #9753: the password is read as bytes with the strict reader Darling's --add-server and --set-login-password use, not through
+                   a text reader: a byte order mark, UTF-16 from a Windows pipe, a second line and a non-UTF-8 byte are refused, and the characters
+                   saved are the UTF-8 characters sent. */
+                password = StrictStdinPassword.Read(
+                    passwordInput ?? Stream.Null, MaxPipedPasswordBytes,
+                    "The password is longer than can be stored. Nothing was changed.",
+                    "The password contains characters that cannot be stored. Nothing was changed.",
+                    out var refusal);
+                if (refusal is not null)
+                    return (null, refusal);
+
                 if (string.IsNullOrEmpty(password))
                     return (null, "No password was read from stdin, so no server was added.");
             }
@@ -372,7 +389,7 @@ internal static class AddServerCommand
     /// on <paramref name="error"/>, nothing changed).
     /// </summary>
     internal static async Task<int> RunAsync(
-        IEnumerable<string> args, TextReader input, bool inputRedirected, TextWriter output, TextWriter error, Machine env)
+        IEnumerable<string> args, TextReader input, bool inputRedirected, TextWriter output, TextWriter error, Machine env, Stream? passwordInput = null)
     {
         if (!TryParseArgs(args, out var flags, out var argError))
         {
@@ -388,7 +405,7 @@ internal static class AddServerCommand
             return ExitRefused;
         }
 
-        var (entries, problem) = ReadEntries(flags, input, inputRedirected);
+        var (entries, problem) = ReadEntries(flags, input, inputRedirected, passwordInput);
         if (entries is null)
         {
             if (problem == UsageText())
@@ -845,6 +862,7 @@ internal static class AddServerCommand
         }
 
         var input = ParentConsole.OpenInput(out var redirected);
+        var passwordInput = ParentConsole.OpenInputBytes();
         var hostFolder = Path.Combine(
             System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), DataRootMigration.DataRootName, "config");
         var env = new Machine(
@@ -856,7 +874,7 @@ internal static class AddServerCommand
             (server, username, password) => ServerEntryRules.TestConnectionAsync(server, username, password, CancellationToken.None),
             WindowsIdentity.GetCurrent().Name,
             hostFolder);
-        return RunAsync(args, input, redirected, output, error, env).GetAwaiter().GetResult();
+        return RunAsync(args, input, redirected, output, error, env, passwordInput).GetAwaiter().GetResult();
     }
 
     /// <summary>True when another Lite process exists in any session and for any user: the shared servers.json is theirs to rewrite too.</summary>

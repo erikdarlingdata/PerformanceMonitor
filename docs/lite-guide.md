@@ -333,6 +333,8 @@ A setting that you give is recorded as confirmed for the Windows account that ru
 
 A SQL login then needs its password as one line on standard input. There is no password flag, because a flag shows in the process list. There is no password prompt either, because a command prompt does not wait for Lite. Always pipe the input, so that the shell waits for Lite and you can read the exit code.
 
+The password is read the way Darling's `--add-server` reads it. It is one line of UTF-8 text, read as bytes, so the characters saved are the ones sent. A trailing newline is fine. Stdin that holds more than one non-empty line, starts with a byte order mark, holds a NUL byte (UTF-16 does) or a lone carriage return, is not UTF-8, or is longer than a password can be is refused with exit code `1`, and no server is added.
+
 The command runs the same checks and the same connection test as the Add Server window. It writes `servers.json`, saves the password for the user that runs it, and records the host confirmation for that user. If a server is already in the list, the command replaces its saved password and adds no second entry.
 
 If any entry fails, the command still tests every entry, lists each failure on standard error with its entry number and host, and exits with code 1. It adds and updates nothing, including the entries that passed, and its last line says so. Fix the failed entries and run the command again with all of them. When it succeeds, it exits with code 0 and prints the Windows account and the folders it wrote to.
