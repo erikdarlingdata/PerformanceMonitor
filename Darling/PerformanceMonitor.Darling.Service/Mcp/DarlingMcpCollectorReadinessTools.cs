@@ -55,7 +55,7 @@ public sealed class DarlingMcpCollectorReadinessTools
         + "Reads the collection log since the service's own start instant (the started_at get_collection_health carries) and the collector schedules. "
         + "verdict says either that every due collector has a good cycle since the start, or how many have not and the longest wait. "
         + "waiting lists each (server, collector) due with no good cycle since the start: waiting_since is when it came due (the start, or later for a collector that ran just before the restart and waits out its interval), plus errors_since_start, skips_since_start and the newest error. "
-        + "not_yet_due_count (collectors_not_yet_due per server in the fleet answer) counts collectors that ran just before the restart and are not due again yet, and fixed_time_count (collectors_fixed_time) counts collectors that run at a set time of day and have not run since the start, and neither is waiting. "
+        + "not_yet_due_count (collectors_not_yet_due per server in the fleet answer) counts collectors that ran just before the restart and are not due again yet, and fixed_time_count (collectors_fixed_time) counts collectors that run at a set time of day and have no good cycle since the start, and neither is waiting. "
         + "done lists the collectors with a good cycle since the start: first_good_at, errors_since_start and skips_since_start for one server, one summary row per server (counts of collectors, no error counts) for the fleet. "
         + "first_full_cycle is the first moment every collector that was due at the start had a good cycle on every enrolled server: status reached with at, or not yet with at null. "
         + "A good cycle is a SUCCESS run. An error is ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING or ABANDONED. A skip is any other status, such as SKIPPED or YIELDED. "
@@ -457,13 +457,13 @@ CROSS JOIN LATERAL (
         }
 
         var dueTotal = doneRows.Count + ordered.Count;
-        /* The all-done verdict names each count as the reply's own fields do: not_yet_due_count as "not due yet" and fixed_time_count as the set-time collectors that have not run since the start (#9585). The waiting verdict names neither, and the two fields and the note carry them. */
+        /* The all-done verdict names each count as the reply's own fields do: not_yet_due_count as "not due yet" and fixed_time_count as the set-time collectors with no good cycle since the start (#9585). The waiting verdict names neither, and the two fields and the note carry them. */
         string verdict;
         if (ordered.Count == 0)
         {
             verdict = $"Every due collector has a good cycle since the service started at {Stamp(startUtc)}: {doneRows.Count} done on {servers.Count} server(s)"
                 + (notYetDue > 0 ? $", {notYetDue} not due yet" : "")
-                + (fixedTime > 0 ? $", {fixedTime} run at a set time and have not run since the start" : "")
+                + (fixedTime > 0 ? $", {fixedTime} run at a set time and have no good cycle since the start" : "")
                 + (reached ? $". First full cycle at {Stamp(lastFirstGood!.Value)}." : ".");
         }
         else

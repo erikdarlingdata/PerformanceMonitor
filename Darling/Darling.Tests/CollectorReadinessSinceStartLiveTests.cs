@@ -216,7 +216,7 @@ public sealed class CollectorReadinessSinceStartLiveTests
     }
 
     /// <summary>
-    /// #9585: with no collector waiting, three collectors that run at a set time and have not run since the start are named as such in the
+    /// #9585: with no collector waiting, three collectors that run at a set time and have no good cycle since the start (one logged an ERROR, two have not run) are named as such in the
     /// verdict, not counted as "not due yet". The reply's own fields say the same: not_yet_due_count 0 and fixed_time_count 3.
     /// </summary>
     [Fact]
@@ -238,13 +238,15 @@ public sealed class CollectorReadinessSinceStartLiveTests
             var start = now.AddMinutes(-10);
             await RegisterServerAsync(connection, 9585001, "readiness-settime", ct);
 
-            /* Three daily collectors run at a fixed time of day and have no run at all. Every other collector the catalog runs has a good cycle since the start. */
+            /* Three daily collectors run at a fixed time of day and have no good cycle: the first has an ERROR run since the start, the other two have no run at all. Every other collector the catalog runs has a good cycle since the start. */
             var setTime = DailyCollectors(3);
             Assert.Equal(3, setTime.Count);
             foreach (var name in setTime)
             {
                 await SetRunTimeAsync(connection, 9585001, name, 120, ct);
             }
+
+            await InsertAsync(connection, 9585001, "readiness-settime", setTime[0], start.AddMinutes(2), "ERROR", "simulated failure", ct);
 
             foreach (var name in CollectorCatalog.All.Select(d => d.Name).Except(setTime))
             {
@@ -258,7 +260,7 @@ public sealed class CollectorReadinessSinceStartLiveTests
             Assert.Equal(0, root.GetProperty("not_yet_due_count").GetInt32());
             Assert.Equal(3, root.GetProperty("fixed_time_count").GetInt32());
             Assert.StartsWith("Every due collector has a good cycle", verdict, StringComparison.Ordinal);
-            Assert.Contains(", 3 run at a set time and have not run since the start", verdict, StringComparison.Ordinal);
+            Assert.Contains(", 3 run at a set time and have no good cycle since the start", verdict, StringComparison.Ordinal);
             Assert.DoesNotContain("not due yet", verdict, StringComparison.Ordinal);
 
             bodySucceeded = true;
@@ -322,7 +324,7 @@ public sealed class CollectorReadinessSinceStartLiveTests
             Assert.Equal(2, notYetDueCount);
             Assert.Equal(3, fixedTimeCount);
             Assert.Contains($", {notYetDueCount} not due yet", verdict, StringComparison.Ordinal);
-            Assert.Contains($", {fixedTimeCount} run at a set time and have not run since the start", verdict, StringComparison.Ordinal);
+            Assert.Contains($", {fixedTimeCount} run at a set time and have no good cycle since the start", verdict, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }
