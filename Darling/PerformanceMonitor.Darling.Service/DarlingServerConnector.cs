@@ -900,8 +900,34 @@ FROM pg_catalog.pg_control_system() AS s";
                 /* #6183: SqlClient's native library failing to load reads "The type initializer for ... TdsParser
                    threw an exception" and says nothing about why. One shared explanation, for every caller. */
                 Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
-                SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex));
+                SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex),
+                TransportFailure: IsTransportFailure(ex));
         }
+    }
+
+    /// <summary>
+    /// #9674: true when <paramref name="ex"/> is a <see cref="SqlException"/> (or wraps one) none of whose errors the server sent. A
+    /// server-sent error has a class below 20 and a positive number: a login failure, 4064, 40613. A reset connection (10054), a
+    /// certificate chain failure, a refused port, a timeout and other client-side errors are transport failures. Any exception that is
+    /// not a SqlException, such as a secret that cannot be read before the connection is made, is not.
+    /// </summary>
+    internal static bool IsTransportFailure(Exception ex)
+    {
+        var sql = ex as SqlException ?? ex.InnerException as SqlException;
+        if (sql is null)
+        {
+            return false;
+        }
+
+        foreach (SqlError error in sql.Errors)
+        {
+            if (error.Class < 20 && error.Number > 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -1230,7 +1256,12 @@ public sealed record ConnectionProbeResult(
     bool QueryStoreReplicaIgnoredOnAzureSqlDb = false,
     /* #6472: the sentence naming each missing base grant with the statement that adds it, or null when none is missing (or the check could
        not read). A warning beside a successful connection. Trailing and defaulted, like the fields above. */
-    string? MissingGrantsNote = null)
+    string? MissingGrantsNote = null,
+    /* #9674: true when a failed SQL Server connect was a transport failure (a SqlException none of whose errors the server sent, see
+       DarlingServerConnector.IsTransportFailure). False for a success, a server-sent error such as a login failure, any other exception
+       (a secret that could not be read) and a PostgreSQL target. A failed Strict connection test gives the Strict hint only when it is
+       true. Trailing and defaulted, like the fields above. */
+    bool TransportFailure = false)
 {
     /// <summary>
     /// Rebuilds the gate's-eye view of this target, so a caller can ask which collectors would actually

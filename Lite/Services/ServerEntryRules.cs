@@ -113,7 +113,50 @@ internal static class ServerEntryRules
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message;
+            return FailureText(ex, server.EncryptMode);
         }
+    }
+
+    /// <summary>
+    /// #9674: the failure text a connection test shows. The driver's message, with the Strict line after it when the entry used
+    /// Strict and the failure is a transport failure (<see cref="IsTransportFailure"/>, <see cref="StrictEncryptionHint"/>). The Add Server window uses it too.
+    /// </summary>
+    internal static string FailureText(Exception ex, string? encryptMode)
+    {
+        var text = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message;
+        /* A native-library load failure is not a Strict problem: no SQL Server connection can work from this install. */
+        if (ex is OperationCanceledException || SqlClientNativeLoadFailure.IsMatch(ex))
+        {
+            return text;
+        }
+
+        /* Lite connects with Strict only for the exact stored word, so a "strict" it builds as Mandatory gets no Strict line. */
+        var usedStrict = EncryptOptionFor(encryptMode) == SqlConnectionEncryptOption.Strict;
+        return StrictEncryptionHint.Append(text, usedStrict ? "Strict" : null, IsTransportFailure(ex));
+    }
+
+    /// <summary>
+    /// #9674: true when <paramref name="ex"/> is a <see cref="SqlException"/> (or wraps one) none of whose errors the server sent. A
+    /// server-sent error has a class below 20 and a positive number: a login failure, 4064, 40613. A reset connection (10054), a
+    /// certificate chain failure, a refused port, a timeout and other client-side errors are transport failures. Any exception that is
+    /// not a SqlException, such as a failure to build the connection before it is made, is not.
+    /// </summary>
+    internal static bool IsTransportFailure(Exception ex)
+    {
+        var sql = ex as SqlException ?? ex.InnerException as SqlException;
+        if (sql is null)
+        {
+            return false;
+        }
+
+        foreach (SqlError error in sql.Errors)
+        {
+            if (error.Class < 20 && error.Number > 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

@@ -1060,6 +1060,12 @@ public static partial class DarlingCliCommands
             cancellationToken.ThrowIfCancellationRequested();
             var (probe, notes) = await DarlingServiceConnectionTest.TestAsync(
                 server, serviceTester, probeAsConsole, consoleIdentity, windowsHost, cancellationToken);
+            /* #9674: a failed Strict test says what Strict needs. A probe the service answered already carries the line in its error text. */
+            if (!probe.Success && Array.IndexOf(notes, DarlingServiceConnectionTest.TestedByServiceNote) < 0 && DarlingMcpServerAdminTools.StrictHintFor(server, probe) is { } strict)
+            {
+                probe = probe with { Error = probe.Error + Environment.NewLine + strict };
+            }
+
             if (probe.SqlClientNativeLoadFailed)
             {
                 /* #6183: SqlClient's native library did not load, so no SQL Server connection can work from this

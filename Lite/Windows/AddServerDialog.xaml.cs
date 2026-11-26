@@ -499,7 +499,7 @@ public partial class AddServerDialog : Window
         {
             /* #6183: SqlClient's native library not loading says "type initializer ... TdsParser threw an exception"
                and nothing about why. The shared explanation names the cause, and the long install path. */
-            errorMessage = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message;
+            errorMessage = ServerEntryRules.FailureText(ex, GetSelectedEncryptMode());
             if (EntraMfaAuthRadio.IsChecked == true && MfaAuthenticationHelper.IsMfaCancelledException(ex))
             {
                 signInCancelled = true;
