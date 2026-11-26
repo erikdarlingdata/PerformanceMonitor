@@ -237,6 +237,8 @@ public sealed class AlertSourceConfirmAndStatementLiveTests
                 kept++;
                 Assert.DoesNotContain("SCRAM-SHA-256", record.StatementsJson, StringComparison.Ordinal);
                 Assert.DoesNotMatch(@"(?i)password\s*'", record.StatementsJson);
+                /* The server admin tool's statements are not captured at all, so no label is kept whatever it says. */
+                Assert.Empty(JsonNode.Parse(record.StatementsJson)!.AsArray());
             }
 
             Assert.True(kept >= 1, "the call was kept in the slow-read log");
