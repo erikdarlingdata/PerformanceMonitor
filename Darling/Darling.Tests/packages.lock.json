@@ -830,6 +830,7 @@
           "Microsoft.Data.SqlClient": "[7.1.2, )",
           "Microsoft.Data.SqlClient.Extensions.Azure": "[7.1.2, )",
           "Microsoft.Extensions.Hosting": "[10.0.15, )",
+          "Microsoft.Extensions.Hosting.Systemd": "[10.0.15, )",
           "Microsoft.Extensions.Hosting.WindowsServices": "[10.0.15, )",
           "ModelContextProtocol": "[2.4.0, )",
           "ModelContextProtocol.AspNetCore": "[2.4.0, )",
@@ -1027,6 +1028,15 @@
           "Microsoft.Extensions.Logging.EventLog": "10.0.15",
           "Microsoft.Extensions.Logging.EventSource": "10.0.15",
           "Microsoft.Extensions.Options": "10.0.15"
+        }
+      },
+      "Microsoft.Extensions.Hosting.Systemd": {
+        "type": "CentralTransitive",
+        "requested": "[10.0.15, )",
+        "resolved": "10.0.15",
+        "contentHash": "jotnBhetYL4CL1bb+8zpjKVQRrmLW8T06f1NGeyQiOsgV5PPIlyF8xUhfra1oNsuPpcM8dJez957flSnFyUL1A==",
+        "dependencies": {
+          "Microsoft.Extensions.Hosting": "10.0.15"
         }
       },
       "Microsoft.Extensions.Hosting.WindowsServices": {

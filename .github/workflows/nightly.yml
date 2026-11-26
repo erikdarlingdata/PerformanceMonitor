@@ -1709,7 +1709,8 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.VERSION }}"
           mkdir -p releases
-          tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
+          # #9701: owned by root, so a root extract (sudo tar -xzf) does not leave the build machine's uid on every file.
+          tar --owner=0 --group=0 --numeric-owner -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
           # #5796: the PowerShell scripts ship signed in the Windows zip only. The service csproj leaves them out
           # of a Linux publish; this fails the job if one comes back. Same check as build.yml's release job.
           listing="$(tar -tzf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz")"
