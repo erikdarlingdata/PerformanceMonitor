@@ -178,7 +178,7 @@ That lets the role read any file in the data directory and in an absolute `log_d
 
 ## Step 4: Download and verify
 
-Each release on the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) has `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. Download both into one folder. The checksum file lists the compose archive too, so tell `sha256sum` to skip the file that you did not download:
+Each release on the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) has `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. Download both into a new, empty folder for this release. Every release names its checksum file `SHA256SUMS-linux.txt`, so a download into the folder of an earlier release replaces that release's file, and its archive can no longer be checked. The checksum file lists the compose archive too, so tell `sha256sum` to skip the file that you did not download:
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS-linux.txt
