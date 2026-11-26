@@ -142,7 +142,7 @@ internal static class ComposeStoreAvailability
     /// who comes any time after a pass has the pass's answer to route on and waits for no probe.</summary>
     internal static readonly TimeSpan StaleServeLimit = TimeSpan.FromHours(1);
 
-    private sealed class StoreEntry
+    internal sealed class StoreEntry
     {
         public (RollupAvailability Rollups, RollupCoverage Coverage) Answer;
         public bool Has;
@@ -150,10 +150,23 @@ internal static class ComposeStoreAvailability
         public Task? Refresh;
     }
 
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<object, StoreEntry> s_storeEntries = new();
+    /// <summary>The store-keyed gates a set of reads share. The service has one, <see cref="s_sharedGates"/>. A test that counts probes
+    /// over a store key of its own passes a set of its own, so a <see cref="ResetStoreGatesForTests"/> from another class running
+    /// beside it cannot forget the gate it is counting on.</summary>
+    internal sealed class StoreGates
+    {
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<object, StoreEntry> _entries = new();
 
-    /// <summary>Test-only. Forgets every store's gate, so a test that changed a store's shape reads it fresh.</summary>
-    internal static void ResetStoreGatesForTests() => s_storeEntries.Clear();
+        internal StoreEntry For(object storeKey) => _entries.GetOrAdd(storeKey, static _ => new StoreEntry());
+
+        internal void Clear() => _entries.Clear();
+    }
+
+    private static readonly StoreGates s_sharedGates = new();
+
+    /// <summary>Test-only. Forgets every store's shared gate, so a test that changed a store's shape reads it fresh. Gates a test
+    /// owns (<see cref="StoreGates"/>) are not reached.</summary>
+    internal static void ResetStoreGatesForTests() => s_sharedGates.Clear();
 
     /// <summary>
     /// #8824: <see cref="GetMeasuredRollupsAsync(NpgsqlDataSource, CancellationToken)"/> for the daily-summary reader, kept per
@@ -171,17 +184,19 @@ internal static class ComposeStoreAvailability
         object storeKey, NpgsqlDataSource postgres, CancellationToken cancellationToken)
         => await GetMeasuredRollupsForStoreAsync(storeKey, postgres, ProbeAsync, cancellationToken);
 
-    /// <summary><see cref="GetMeasuredRollupsForStoreAsync(object, NpgsqlDataSource, CancellationToken)"/> with the probe substitutable.</summary>
+    /// <summary><see cref="GetMeasuredRollupsForStoreAsync(object, NpgsqlDataSource, CancellationToken)"/> with the probe, the clock and
+    /// the gates substitutable (<paramref name="gates"/> null is the service's shared set).</summary>
     internal static async ValueTask<(RollupAvailability Rollups, RollupCoverage Coverage)> GetMeasuredRollupsForStoreAsync(
         object storeKey,
         NpgsqlDataSource postgres,
         Func<NpgsqlDataSource, CancellationToken, Task<(RollupAvailability Rollups, RollupCoverage Coverage)>> probe,
         CancellationToken cancellationToken,
-        Func<DateTime>? clock = null)
+        Func<DateTime>? clock = null,
+        StoreGates? gates = null)
     {
         ArgumentNullException.ThrowIfNull(storeKey);
         clock ??= static () => DateTime.UtcNow;
-        var entry = s_storeEntries.GetOrAdd(storeKey, static _ => new StoreEntry());
+        var entry = (gates ?? s_sharedGates).For(storeKey);
         var now = clock();
 
         lock (entry)

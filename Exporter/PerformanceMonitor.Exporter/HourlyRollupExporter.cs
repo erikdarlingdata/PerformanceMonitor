@@ -24,7 +24,7 @@ public sealed class HourlyRollupExportResult
 /// Exports one hourly-rollup optional table: the window's single raw read is appended into an in-memory DuckDB table
 /// named <c>raw</c> (the same appender loop <see cref="OptionalTableExporter"/> uses), then <see
 /// cref="RollupSql.Build"/> turns that into <c>rolled</c>, which is written out as exactly ONE Parquet part named
-/// after the spec's <c>Name</c> (e.g. <c>pg_statement_stats_hourly</c>), ordered by <c>server_name, hour</c>. No raw
+/// after the spec's <c>Name</c> (e.g. <c>pg_statement_stats_hourly</c>), ordered by <c>server_name, hour</c> and then every other column. No raw
 /// part is ever written for an Hourly-grain table.
 /// </summary>
 public static class HourlyRollupExporter
@@ -119,7 +119,7 @@ public static class HourlyRollupExporter
                 Directory.CreateDirectory(Path.GetDirectoryName(absolutePath)!);
 
                 Execute(connection,
-                    $"COPY (SELECT * FROM rolled ORDER BY server_name, hour) TO '{absolutePath.Replace("'", "''")}' ({PartParquetOptions})");
+                    $"COPY (SELECT * FROM rolled ORDER BY {TotalOrder.ForTable(connection, "rolled", "server_name", "hour")}) TO '{absolutePath.Replace("'", "''")}' ({PartParquetOptions})");
 
                 var rolledRowCount = Convert.ToInt64(
                     ExecuteScalar(connection, "SELECT count(*) FROM rolled"), System.Globalization.CultureInfo.InvariantCulture);

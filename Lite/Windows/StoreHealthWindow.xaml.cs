@@ -85,7 +85,7 @@ public partial class StoreHealthWindow : Window
     private void Apply(StoreHealthSnapshot snapshot)
     {
         var ci = CultureInfo.InvariantCulture;
-        StatusText.Text = $"Read at {snapshot.ReadAtUtc.ToLocalTime():HH:mm:ss}";
+        StatusText.Text = StoreHealthText.ReadAt(snapshot.ReadAtUtc);
 
         var store = snapshot.Store;
         StoreSentenceText.Text = StoreHealthText.StoreSentence(store);
@@ -105,10 +105,10 @@ public partial class StoreHealthWindow : Window
             e.TimeUtc,
             StoreHealthText.KindLabel(e.Kind),
             StoreHealthText.OutcomeLabel(e.Outcome),
-            StoreHealthText.WorkSummary(e),
+            StoreHealthText.MovedText(e),
             e.UsedMb is { } mb ? mb.ToString("0", ci) : "",
             e.Count,
-            e.Message ?? "",
+            StoreHealthText.MessageText(e),
             e.Outcome == StoreHousekeepingHistory.OutcomeFailed)).ToList();
         NoHistoryMessage.Visibility = snapshot.History.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
