@@ -118,7 +118,7 @@ Naming a blocked table in `--tables` writes a `skipped_optional` entry whose rea
 Notes that apply to every table:
 
 - Join rows across tables with `source_store` and `server_name`. Never join on `server_id`. The numeric id belongs to one store and does not match across stores.
-- Timestamps are UTC and have no time zone.
+- Timestamps are UTC and have no time zone, except `first_seen` and `last_seen` in `query_tag_sightings`, which are timestamps with a time zone (UTC).
 - A column keeps the unit of the store column it comes from. The exporter does not convert units. Column names end in a unit when there is one, such as `_ms`, `_us`, `_mb`, `_bytes` or `_seconds`.
 - A column that was added later in the store can be missing from older files. Treat a missing column as null.
 
@@ -170,13 +170,13 @@ An optional table is exported the same way wherever it is named: `--also`, `opti
 | Table | Kind | Grain | Time column | Key columns | Exported |
 |---|---|---|---|---|---|
 | `plan_correction` | window | change | `collection_time` | change key: `server_name`, `database_name`, `recommendation_name` | yes |
-| `default_trace_events` | window | event | `collection_time` | none | blocked |
+| `default_trace_events` | window | event | `collection_time` | none | yes |
 | `memory_grant_stats` | window | hourly | `hour` | none | yes |
 | `plan_cache_stats` | window | event | `collection_time` | none | yes |
 | `session_stats` | window | event | `collection_time` | none | yes |
 | `session_summary_stats` | window | hourly | `hour` | none | yes |
-| `waiting_tasks` | window | event | `collection_time` | none | blocked |
-| `dmv_blocking_snapshots` | window | event | `collection_time` | none | blocked |
+| `waiting_tasks` | window | event | `collection_time` | none | yes |
+| `dmv_blocking_snapshots` | window | event | `collection_time` | none | yes |
 | `memory_clerks` | window | event | `collection_time` | none | yes |
 | `memory_pressure_events` | window | event | `collection_time` | none | yes |
 | `cpu_scheduler_stats` | window | hourly | `hour` | none | yes |
@@ -200,16 +200,29 @@ An optional table is exported the same way wherever it is named: `--also`, `opti
 | `attention_events` | window | event | `collection_time` | none | yes |
 | `column_stats` | snapshot | event | `snapshot_time` | none | blocked |
 | `column_stats_runs` | window | event | `collection_time` | none | yes |
-| `query_snapshots` | window | event | `collection_time` | none | blocked |
+| `query_store_hints` | window | event | `collection_time` | none | yes |
+| `query_store_forced_plans` | window | event | `collection_time` | none | yes |
+| `object_inventory` | window | event | `collection_time` | none | yes |
+| `object_dependencies` | window | event | `collection_time` | none | yes |
+| `identity_capacity` | window | event | `collection_time` | none | yes |
+| `database_protection` | window | event | `collection_time` | none | yes |
+| `object_usage_snapshots` | window | event | `collection_time` | none | yes |
+| `object_usage_deltas` | window | event | `collection_time` | none | yes |
+| `query_tag_sightings` | window | event | `last_seen` | none | yes |
+| `query_tags` | snapshot | event | `snapshot_time` | none | yes |
+| `query_tag_assignments` | snapshot | event | `snapshot_time` | none | yes |
+| `query_tag_rules` | snapshot | event | `snapshot_time` | none | yes |
+| `query_tag_map` | snapshot | event | `snapshot_time` | none | yes |
+| `query_snapshots` | window | event | `collection_time` | none | yes |
 | `pg_autovacuum_stats` | window | daily | `collection_time` | none | yes |
-| `pg_blocking_edges` | window | event | `collection_time` | none | blocked |
+| `pg_blocking_edges` | window | event | `collection_time` | none | yes |
 | `pg_buffer_usage` | window | event | `collection_time` | none | yes |
 | `pg_column_stats` | window | daily | `collection_time` | none | yes |
 | `pg_cpu_utilization` | window | hourly | `hour` | none | yes |
 | `pg_database_size_stats` | window | daily | `collection_time` | none | yes |
 | `pg_database_stats` | window | hourly | `hour` | none | yes |
 | `pg_deadlocks` | window | event | `collection_time` | none | yes |
-| `pg_extension_availability` | window | event | `collection_time` | none | blocked |
+| `pg_extension_availability` | window | event | `collection_time` | none | yes |
 | `pg_index_bloat` | window | daily | `collection_time` | none | yes |
 | `pg_index_usage_stats` | window | daily | `collection_time` | none | yes |
 | `pg_io_stats` | window | hourly | `hour` | none | yes |
@@ -219,7 +232,7 @@ An optional table is exported the same way wherever it is named: `--also`, `opti
 | `pg_replication_slot_stats` | window | hourly | `hour` | none | yes |
 | `pg_replication_stats` | window | hourly | `hour` | none | yes |
 | `pg_server_config` | window | change | `collection_time` | change key: `server_name`, `name`, `database_name`, `role_name` | yes |
-| `pg_session_states` | window | event | `collection_time` | none | blocked |
+| `pg_session_states` | window | event | `collection_time` | none | yes |
 | `pg_statement_stats` | window | hourly | `hour` | none | yes |
 | `pg_table_bloat_stats` | window | daily | `collection_time` | none | yes |
 | `pg_wait_stats` | window | hourly | `hour` | none | yes |
@@ -227,6 +240,15 @@ An optional table is exported the same way wherever it is named: `--also`, `opti
 | `pg_write_stats` | window | hourly | `hour` | none | yes |
 | `pg_xmin_horizon` | window | hourly | `hour` | none | yes |
 | `pg_statement_text` | dimension | event | none | `source_store`, `server_name`, `queryid` | yes |
+
+Some optional tables leave a column out, or add one the store table does not have:
+
+- `query_snapshots` leaves out `query_plan` and `live_query_plan`. The plan XML reaches the files through `plan_shape`, `plan_features`, `plan_warnings` and `plan_missing_indexes`.
+- `query_tag_sightings` leaves out `text_sample`, the query text sample kept with each sighting.
+- `object_usage_snapshots`, `object_usage_deltas`, `query_tag_sightings`, `query_tag_assignments`, `query_tag_rules` and `query_tag_map` have no `server_name` in the store, only a `server_id`. The export adds `server_name` as the first column, read from `collect.servers`. It is NULL when the server is no longer registered. In `query_tag_assignments` and `query_tag_rules` a NULL `server_name` also means the row applies to every server.
+- `query_tags`, `query_tag_assignments` and `query_tag_rules` keep their `id` column. Other tables name a row by it (`tag_id`, `rule_id`), so the `id` columns are the keys you join on. These ids belong to one store.
+- `query_tag_sightings` has no `collection_time`. It is a table of state that is updated in place, so it is read on `last_seen`: each window holds the rows touched in that window, with their `first_seen` and `seen_count` as they stood at the read. `first_seen` and `last_seen` are timestamps with a time zone, in UTC.
+- `query_tags`, `query_tag_assignments`, `query_tag_rules` and `query_tag_map` are small and have no time column. They are read whole, once a day, like `servers`.
 
 A table with grain `hourly` writes its rollup to `<table>_hourly` and no raw rows. The tables that do this are: `ag_database_replica_states`, `cpu_scheduler_stats`, `memory_grant_stats`, `pg_cpu_utilization`, `pg_database_stats`, `pg_io_stats`, `pg_replication_slot_stats`, `pg_replication_stats`, `pg_statement_stats`, `pg_wait_stats`, `pg_write_stats`, `pg_xmin_horizon`, `session_summary_stats`.
 

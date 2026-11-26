@@ -747,6 +747,21 @@ public static class SqlBuilder
         "ORDER BY ordinal_position";
 
     /// <summary>
+    /// The discovery read for a table whose identity or serial columns are real keys (<see
+    /// cref="OptionalTable.KeepIdentityColumns"/>): the same read as <see cref="OptionalColumnDiscoverySql"/> without the
+    /// identity and serial filters. <c>server_id</c> and <c>collection_id</c> are still left out.
+    /// </summary>
+    public const string OptionalColumnDiscoveryKeepingIdentitySql =
+        "/* darling-export:opt.column_discovery */ SELECT column_name, data_type, udt_name FROM information_schema.columns " +
+        "WHERE table_schema = @schema AND table_name = @table " +
+        "AND column_name NOT IN ('server_id', 'collection_id') " +
+        "ORDER BY ordinal_position";
+
+    /// <summary>The column discovery read for <paramref name="table"/>: it keeps identity columns only when the entry asks for them.</summary>
+    public static string OptionalColumnDiscoverySqlFor(OptionalTable table) =>
+        table.KeepIdentityColumns ? OptionalColumnDiscoveryKeepingIdentitySql : OptionalColumnDiscoverySql;
+
+    /// <summary>
     /// Builds the SELECT for an optional table: an explicit, ordinal-ordered column list (as discovered by <see
     /// cref="OptionalColumnDiscoverySql"/>), tagged so pg_stat_statements deltas can name the table, against <c><see
     /// cref="OptionalTable.Schema"/>.&lt;table&gt;</c>. A window table is filtered on its time column for the export
@@ -790,6 +805,16 @@ public static class SqlBuilder
             ?? new Dictionary<string, ColumnRule>(StringComparer.Ordinal);
 
         var projections = new List<string>();
+
+        // A table with server_id but no server_name: discovery leaves server_id out, so the read looks the name up by
+        // primary key in collect.servers. The outer column is fully qualified so it cannot bind to the subquery's own
+        // server_id. NULL when the table's server_id is NULL or the server is gone.
+        if (table.ResolveServerName && !projected.Any(c => string.Equals(c.Name, "server_name", StringComparison.Ordinal)))
+        {
+            projections.Add(
+                $"(SELECT s.server_name FROM collect.servers AS s WHERE s.server_id = {table.Schema}.{QuoteIdentifier(table.Name)}.server_id) AS server_name");
+        }
+
         foreach (var column in projected)
         {
             if (!rulesByColumn.TryGetValue(column.Name, out var rule))
@@ -830,7 +855,11 @@ public static class SqlBuilder
                 throw new ArgumentException($"Optional table '{table.Name}' is a window table but has no TimeColumn.");
             }
 
-            sql += $" WHERE {table.TimeColumn} >= @from AND {table.TimeColumn} < @to";
+            // A timestamptz column is compared with the bounds read as UTC, whatever the session TimeZone is. The CAST is
+            // a no-op for the timestamp parameter and keeps the bound a timestamp when a literal stands in for it.
+            var from = table.TimeColumnHasTimeZone ? "CAST(@from AS timestamp) AT TIME ZONE 'UTC'" : "@from";
+            var to = table.TimeColumnHasTimeZone ? "CAST(@to AS timestamp) AT TIME ZONE 'UTC'" : "@to";
+            sql += $" WHERE {table.TimeColumn} >= {from} AND {table.TimeColumn} < {to}";
         }
 
         return sql;
