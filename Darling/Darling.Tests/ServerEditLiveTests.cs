@@ -289,6 +289,89 @@ public sealed partial class ServerEditLiveTests : IDisposable
         }
     }
 
+    /* #9635: add_servers stores each value of the two settings, an entry without the keys still stores NULL, and an invalid value writes nothing. */
+    [Fact]
+    public async Task TheAddServersTool_StoresTheTwoSettings_AsTheEntryNamesThem_AndTheRemoveUndoBringsThemBack()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            var answer = Parse(await Edit.AddServersAsync(rig.Mcp,
+                "[{\"host\":\"add-on.example.test\",\"capture_plans\":true,\"alert_delivery_mode_override\":\"summary\"},"
+                + "{\"host\":\"add-off.example.test\",\"capture_plans\":false,\"alert_delivery_mode_override\":\"PerEvent\"},"
+                + "{\"host\":\"add-null.example.test\",\"capture_plans\":null,\"alert_delivery_mode_override\":null},"
+                + "{\"host\":\"add-none.example.test\"},"
+                + "{\"host\":\"add-bad.example.test\",\"capture_plans\":\"yes\"},"
+                + "{\"host\":\"add-bad2.example.test\",\"alert_delivery_mode_override\":\"Bogus\"}]",
+                Reachable, ct, ring: TestKeyRings.Healthy, policy: DarlingMcpAddServersPolicy.Default));
+            Assert.Equal(4, answer["added"]!.GetValue<int>());
+            Assert.Equal(2, answer["failed"]!.GetValue<int>());
+            var bad = answer["results"]!.AsArray().Where(r => r!["status"]!.GetValue<string>() == "invalid").Select(r => r!["detail"]!.GetValue<string>()).ToList();
+            Assert.Contains(bad, d => d.StartsWith("capture_plans must be true, false, or null", StringComparison.Ordinal));
+            Assert.Contains(bad, d => d.StartsWith("alert_delivery_mode_override must be", StringComparison.Ordinal));
+
+            const string Read = "SELECT concat_ws('|', coalesce(capture_plans::text, 'null'), coalesce(alert_delivery_mode_override, 'null')) FROM config_monitored_servers WHERE host = '";
+            Assert.Equal("true|Summary", await ScalarAsync<string>(rig.Owner, Read + "add-on.example.test'", ct));
+            Assert.Equal("false|PerEvent", await ScalarAsync<string>(rig.Owner, Read + "add-off.example.test'", ct));
+            Assert.Equal("null|null", await ScalarAsync<string>(rig.Owner, Read + "add-null.example.test'", ct));
+            Assert.Equal("null|null", await ScalarAsync<string>(rig.Owner, Read + "add-none.example.test'", ct));
+            Assert.Equal(0L, await ScalarAsync<long>(rig.Owner, "SELECT count(*) FROM config_monitored_servers WHERE host LIKE 'add-bad%'", ct));
+
+            /* get_server_settings reads both back, in the form edit_server takes. */
+            var settings = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "add-off.example.test", ct))["settings"]!.AsObject();
+            Assert.False(settings["capture_plans"]!.GetValue<bool>());
+            Assert.Equal("PerEvent", settings["alert_delivery_mode_override"]!.GetValue<string>());
+            var unset = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "add-none.example.test", ct))["settings"]!.AsObject();
+            Assert.Null(unset["capture_plans"]);
+            Assert.Null(unset["alert_delivery_mode_override"]);
+
+            /* The undo of a removal re-adds the definition with the two settings it had. */
+            var removed = Parse(await Edit.RemoveServer(rig.Mcp, "add-on.example.test"));
+            Assert.True(removed["previous"]!["capture_plans"]!.GetValue<bool>());
+            Assert.Equal("Summary", removed["previous"]!["alert_delivery_mode_override"]!.GetValue<string>());
+            var readd = Parse(await Edit.AddServersAsync(rig.Mcp, removed["undo"]!["arguments"]!["servers_json"]!.GetValue<string>(), Reachable, ct,
+                ring: TestKeyRings.Healthy, policy: DarlingMcpAddServersPolicy.Default));
+            Assert.Equal(1, readd["added"]!.GetValue<int>());
+            Assert.Equal("true|Summary", await ScalarAsync<string>(rig.Owner, Read + "add-on.example.test'", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task GetServerSettings_ShowsTheTwoPerServerSettings_AfterAnEditServerSetsThem()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5192, "delta-01", "delta-01.example.test", "integrated", null, null, ct);
+            var edit = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "delta-01", "{\"capture_plans\":false,\"alert_delivery_mode_override\":\"Summary\"}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", edit["status"]!.GetValue<string>());
+
+            var settings = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "delta-01", ct))["settings"]!.AsObject();
+            Assert.False(settings["capture_plans"]!.GetValue<bool>());
+            Assert.Equal("Summary", settings["alert_delivery_mode_override"]!.GetValue<string>());
+
+            var cleared = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "delta-01", "{\"capture_plans\":null,\"alert_delivery_mode_override\":null}", Reachable, TestKeyRings.Healthy, null, ct));
+            Assert.Equal("updated", cleared["status"]!.GetValue<string>());
+            var after = Parse(await DarlingMcpCollectionStateTools.GetServerSettings(rig.Mcp, "delta-01", ct))["settings"]!.AsObject();
+            Assert.Null(after["capture_plans"]);
+            Assert.Null(after["alert_delivery_mode_override"]);
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
     [Fact]
     public async Task GetServerSettings_ShowsTheFieldsEditServerChanges_BeforeAndAfterAnEdit_AndNeverASecret()
     {

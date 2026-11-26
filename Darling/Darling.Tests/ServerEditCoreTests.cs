@@ -269,6 +269,43 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal(0, store.Writes);
     }
 
+    /* #9635: add_servers takes the same two settings, with the values and the refusals edit_server gives. */
+    [Theory]
+    [InlineData("\"capture_plans\":true", true, null)]
+    [InlineData("\"capture_plans\":false", false, null)]
+    [InlineData("\"capture_plans\":null", null, null)]
+    [InlineData("\"alert_delivery_mode_override\":\"PerEvent\"", null, AlertNotificationMode.PerEvent)]
+    [InlineData("\"alert_delivery_mode_override\":\" summary \"", null, AlertNotificationMode.Summary)]
+    [InlineData("\"alert_delivery_mode_override\":null", null, null)]
+    [InlineData("\"unrelated\":1", null, null)]
+    public void AnAddedEntry_CarriesTheTwoSettingsToTheInsert_AndNullWhenItNamesNone(string keys, bool? capture, AlertNotificationMode? delivery)
+    {
+        var (entries, invalid, whole) = Edit.ParseRequest("[{\"host\":\"sql01\"," + keys + "}]");
+
+        Assert.Null(whole);
+        Assert.Empty(invalid);
+        var config = Assert.Single(entries).ProbeConfig;
+        Assert.Equal(capture, config.CapturePlans);
+        Assert.Equal(delivery, config.AlertDeliveryModeOverride);
+    }
+
+    [Theory]
+    [InlineData("\"capture_plans\":\"yes\"", "capture_plans must be true, false, or null")]
+    [InlineData("\"capture_plans\":1", "capture_plans must be true, false, or null")]
+    [InlineData("\"alert_delivery_mode_override\":\"Bogus\"", "alert_delivery_mode_override must be")]
+    [InlineData("\"alert_delivery_mode_override\":\"1\"", "alert_delivery_mode_override must be")]
+    [InlineData("\"alert_delivery_mode_override\":true", "alert_delivery_mode_override must be")]
+    public void AnAddedEntryWithAnInvalidSetting_IsRefusedWithTheMessageEditServerGives(string keys, string message)
+    {
+        var (entries, invalid, whole) = Edit.ParseRequest("[{\"host\":\"sql01\"," + keys + "}]");
+
+        Assert.Null(whole);
+        Assert.Empty(entries);
+        var refused = Assert.Single(invalid);
+        Assert.Equal("invalid", refused.Status);
+        Assert.StartsWith(message, refused.Detail, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("excluded_databases")]
     [InlineData("is_enabled")]
