@@ -223,7 +223,7 @@ Least-privilege roles ready (admin: ...; viewer: ...; web: ...; mcp: ...)
 TimescaleDB detected — hypertables, chunk-based retention, and compression enabled
 TimescaleDB: <n>/<n> collector table(s) are hypertables
 PerformanceMonitor Darling collection loop started
-[SQL2022] Connected (major <major>, edition <edition>, server_id <id>)
+[SQL2022] Connected (major <major>, engine <engine type>, edition <edition>, server_id <id>)
   [SQL2022] wait_stats => <count> rows (sql:<ms>ms, pg:<ms>ms)
 ```
 
