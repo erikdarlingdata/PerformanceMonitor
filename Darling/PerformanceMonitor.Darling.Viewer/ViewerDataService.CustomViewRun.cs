@@ -33,9 +33,9 @@ public sealed record ViewerPanelRun(JsonObject? Payload, string? Error)
 /// </summary>
 public sealed partial class ViewerDataService
 {
-    /// <summary>The bounds the store clamps the compose statement timeout to; they mirror the service's
-    /// <c>StoreConfigProvider.ClampComposeStatementTimeoutSeconds</c> (a test holds the two equal).</summary>
-    internal static int ClampComposeSeconds(int value) => Math.Clamp(value <= 0 ? 60 : value, 5, 600);
+    /// <summary>The bounds the store clamps the compose statement timeout to: the service's own clamp, shared through
+    /// <c>ServiceFlagLimits</c>.</summary>
+    internal static int ClampComposeSeconds(int value) => PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ClampComposeStatementTimeoutSeconds(value);
 
     private const string ComposeDeadlineSql = "SELECT compose_statement_timeout_seconds FROM config.config_service WHERE id = 1";
 

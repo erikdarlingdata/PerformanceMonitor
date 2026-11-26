@@ -145,6 +145,12 @@ public partial class SettingsWindow : Window
         QueryStoreTextBudgetMbTextBox.Text = "64";
         MaxConcurrentSweepsTextBox.Text = "4";
         QueryStoreFetchTopNTextBox.Text = "100";
+        /* #9638: the three settings darling.json only seeds. The store read overwrites these. */
+        PlanXmlCompressionComboBox.ItemsSource = ServiceSeedSettings.CompressionChoices;
+        PlanContentRetentionDaysTextBox.Text = ServiceSeedSettings.DefaultRetentionDays.ToString(CultureInfo.InvariantCulture);
+        ComposeStatementTimeoutSecondsTextBox.Text = ServiceSeedSettings.DefaultTimeoutSeconds.ToString(CultureInfo.InvariantCulture);
+        PlanXmlCompressionComboBox.SelectedItem = ServiceSeedSettings.DefaultCompression;
+        ServiceSeedSettingsHelp.Text = ServiceSeedSettings.HelpText;
 
         /* Manage Mute Rules writes the shared Postgres config; needs a live store connection. */
         ManageMuteRulesButton.IsEnabled = _dataService is not null;
@@ -194,6 +200,9 @@ public partial class SettingsWindow : Window
                 QueryStoreTextBudgetMbTextBox.Text = sections.Service.QueryStoreTextBudgetMb.ToString(CultureInfo.InvariantCulture);
                 MaxConcurrentSweepsTextBox.Text = sections.Service.MaxConcurrentSweeps.ToString(CultureInfo.InvariantCulture);
                 QueryStoreFetchTopNTextBox.Text = sections.Service.QueryStoreFetchTopN.ToString(CultureInfo.InvariantCulture);
+                PlanContentRetentionDaysTextBox.Text = ServiceSeedSettings.EffectiveRetentionDays(sections.Service.PlanContentRetentionDays).ToString(CultureInfo.InvariantCulture);
+                ComposeStatementTimeoutSecondsTextBox.Text = ServiceSeedSettings.EffectiveTimeoutSeconds(sections.Service.ComposeStatementTimeoutSeconds).ToString(CultureInfo.InvariantCulture);
+                PlanXmlCompressionComboBox.SelectedItem = ServiceSeedSettings.EffectiveCompression(sections.Service.PlanXmlCompression);
                 McpEnabledCheckBox.IsChecked = sections.Service.McpEnabled;
                 McpPortTextBox.Text = sections.Service.McpPort.ToString(CultureInfo.InvariantCulture);
                 WebEnabledCheckBox.IsChecked = sections.Service.WebEnabled;
@@ -547,8 +556,12 @@ public partial class SettingsWindow : Window
     /// with a bad port keeps its last-known value and does not block the save).</summary>
     private bool TryReadServiceFlags(
         out bool capturePlans, out bool mcpEnabled, out int mcpPort, out bool webEnabled, out int webPort,
-        out int textBudgetMb, out int maxSweeps, out int fetchTopN)
+        out int textBudgetMb, out int maxSweeps, out int fetchTopN,
+        out int planRetentionDays, out int composeTimeoutSeconds, out string planXmlCompression)
     {
+        planRetentionDays = ServiceSeedSettings.DefaultRetentionDays;
+        composeTimeoutSeconds = ServiceSeedSettings.DefaultTimeoutSeconds;
+        planXmlCompression = ServiceSeedSettings.DefaultCompression;
         capturePlans = CapturePlansCheckBox.IsChecked == true;
         textBudgetMb = 64;
         maxSweeps = 4;
@@ -625,6 +638,22 @@ public partial class SettingsWindow : Window
             MessageBox.Show(
                 ServiceFlagLimits.FetchTopNMessage,
                 "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+
+        /* #9638: plan retention, the composed reads' timeout and the plan storage form. Always in force, like the knobs above. */
+        var seedRefusal = ServiceSeedSettings.TryRead(
+            PlanContentRetentionDaysTextBox.Text, ComposeStatementTimeoutSecondsTextBox.Text, PlanXmlCompressionComboBox.SelectedItem as string,
+            out planRetentionDays, out composeTimeoutSeconds, out planXmlCompression, out var seedBadField);
+        if (seedRefusal is not null)
+        {
+            SelectTabOf(seedBadField switch
+            {
+                ServiceSeedSettings.RetentionDaysField => PlanContentRetentionDaysTextBox,
+                ServiceSeedSettings.TimeoutSecondsField => ComposeStatementTimeoutSecondsTextBox,
+                _ => PlanXmlCompressionComboBox,
+            });
+            MessageBox.Show(seedRefusal, "Validation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
 
@@ -2585,7 +2614,8 @@ public partial class SettingsWindow : Window
         var errors = new SettingsValidationErrors();
         var mcpValid = TryReadServiceFlags(
             out var capturePlans, out var mcpEnabled, out var mcpPort, out var webEnabled, out var webPort,
-            out var textBudgetMb, out var maxSweeps, out var fetchTopN);
+            out var textBudgetMb, out var maxSweeps, out var fetchTopN,
+            out var planRetentionDays, out var composeTimeoutSeconds, out var planXmlCompression);
         var alertRow = BuildAlertRowFromControls(errors);
         SaveViewerLocalAlertFields(errors);
         var notifyRow = BuildNotificationRowFromControls(errors);
@@ -2688,7 +2718,8 @@ public partial class SettingsWindow : Window
                 await _dataService.UpsertAlertSettingsAsync(alertRow);
                 await _dataService.UpsertNotificationCheckingSigningKeysAsync(notifyRow, (stored, ids) => SigningKeyRefusal(notifyRow, stored, ids));
                 await _dataService.UpdateServiceFlagsAsync(capturePlans, mcpEnabled, mcpPort, webEnabled, webPort,
-                    QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps, fetchTopN);
+                    QueryStoreBackfillCheckBox.IsChecked == true, textBudgetMb, maxSweeps, fetchTopN,
+                    planRetentionDays, composeTimeoutSeconds, planXmlCompression);
                 if (routeValuesNeedEnteringAgain)
                 {
                     /* The settings were saved; the routes' sealed values were bound to the old proxy (#5366). */
