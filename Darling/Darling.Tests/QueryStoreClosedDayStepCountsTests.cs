@@ -42,6 +42,17 @@ public sealed class QueryStoreClosedDayStepCountsTests
     }
 
     [Fact]
+    public void AClutterDayFoldFailure_CountsAsAFailure_SoTheStepReadsFailed()
+    {
+        var counts = DarlingWorker.QueryStoreClosedDayStepCounts(
+            new QueryStoreClosedDayRollup.TickResult(2, 0, 3, 0, HoursBuilt: 5, ClutterDaysFolded: 1, ClutterDaysFailed: 2));
+
+        Assert.Equal(2, counts.Failed);
+        Assert.Equal(8L, counts.Built);
+        Assert.Null(counts.Detail);
+    }
+
+    [Fact]
     public void ATickWithoutAPruneFailure_KeepsTheSameCountsAsBefore()
     {
         var counts = DarlingWorker.QueryStoreClosedDayStepCounts(

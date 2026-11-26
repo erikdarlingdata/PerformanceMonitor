@@ -196,8 +196,8 @@ FROM
         }
     }
 
-    private static Task<QueryStoreClosedDayRollup.TickResult> TickAsync(QueryStoreClosedDayRollupLiveTests.Store store, DateTime now, CancellationToken ct) =>
-        QueryStoreClosedDayRollupLiveTests.TickAsync(store, DayRetention, ct, now, RawRetention);
+    private static Task<QueryStoreClosedDayRollup.TickResult> TickAsync(QueryStoreClosedDayRollupLiveTests.Store store, DateTime now, CancellationToken ct, bool allowStepFailure = false) =>
+        QueryStoreClosedDayRollupLiveTests.TickAsync(store, DayRetention, ct, now, RawRetention, allowStepFailure);
 
     private static Task<long> CountAsync(QueryStoreClosedDayRollupLiveTests.Store store, string sql, CancellationToken ct, params (string Name, object Value)[] parameters) =>
         QueryStoreClosedDayRollupLiveTests.ScalarAsync<long>(store.Connection, sql, ct, parameters);
@@ -395,15 +395,55 @@ VALUES (990384001, @at, @server_id, 'late', 'dbA', 7778, 77780, '0xQ', '0xP', 'S
         await ExecuteAsync(store, @"
 CREATE FUNCTION collect.fail_hourly_unstamp() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the hourly unstamp is made to fail'; END $$;
 CREATE TRIGGER fail_hourly_unstamp BEFORE DELETE ON collect.query_store_clutter_hour_built FOR EACH STATEMENT EXECUTE FUNCTION collect.fail_hourly_unstamp();", ct);
-        var failed = await TickAsync(store, FoldNow.AddHours(1), ct);
+        /* #9721: a closed day whose stamp is gone is a daily build the failed tick must still run, and its hourly failure must reach the tick result. */
+        var otherDay = DateOnly.FromDateTime(E.AddDays(-3));
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_closed_day_built WHERE server_id = @server_id AND day_utc = @day", ct, ("server_id", A), ("day", otherDay));
+        var failed = await TickAsync(store, FoldNow.AddHours(1), ct, allowStepFailure: true);
         Assert.Equal(0, failed.ClutterDaysFolded);
+        Assert.Equal(0, failed.ClutterDaysFailed);
+        Assert.True(failed.HoursFailed >= 1, $"the hourly step threw, so the tick must report a failure: {failed}");
+        Assert.True(failed.Built >= 1, $"the daily builds still run after the hourly step threw: {failed}");
         Assert.Equal(0L, await CountAsync(store, FoldStamps, ct, dayArgs));
 
         await ExecuteAsync(store, "DROP TRIGGER fail_hourly_unstamp ON collect.query_store_clutter_hour_built; DROP FUNCTION collect.fail_hourly_unstamp();", ct);
         var next = await TickAsync(store, FoldNow.AddHours(1), ct);
         Assert.Equal(1, next.ClutterDaysFolded);
+        Assert.Equal(0, next.HoursFailed);
         Assert.Equal(1L, await CountAsync(store, FoldStamps, ct, dayArgs));
         Assert.Equal(0L, await CountAsync(store, FoldDiffSql, ct, ("server_id", A), ("day", day)));
+    }
+
+    /// <summary>
+    /// #9721: a clutter day fold that fails reaches the tick result as a failure, so the step reads failed, and the hourly step is untouched. The
+    /// day's stamp is removed with its hours built, so only a fold writes it again, and a trigger fails that insert.
+    /// </summary>
+    [Fact]
+    public async Task ATickWhoseClutterDayFoldFailed_ReportsTheFailure_AndTheHourlyStepStillRan()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+        var day = DateOnly.FromDateTime(E.AddDays(-1));
+        var dayArgs = new (string Name, object Value)[] { ("server_id", A), ("day", day) };
+
+        await TickAsync(store, FoldNow, ct);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_collections_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+
+        await ExecuteAsync(store, @"
+CREATE FUNCTION collect.fail_day_fold() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the day fold is made to fail'; END $$;
+CREATE TRIGGER fail_day_fold BEFORE INSERT ON collect.query_store_clutter_day_built FOR EACH ROW EXECUTE FUNCTION collect.fail_day_fold();", ct);
+        var failed = await TickAsync(store, FoldNow.AddHours(1), ct, allowStepFailure: true);
+        Assert.Equal(0, failed.ClutterDaysFolded);
+        Assert.True(failed.ClutterDaysFailed >= 1, $"the fold failed, so the tick must report a failure: {failed}");
+        Assert.Equal(0, failed.HoursFailed);
+
+        await ExecuteAsync(store, "DROP TRIGGER fail_day_fold ON collect.query_store_clutter_day_built; DROP FUNCTION collect.fail_day_fold();", ct);
+        var next = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(1, next.ClutterDaysFolded);
+        Assert.Equal(0, next.ClutterDaysFailed);
     }
 
     /// <summary>
