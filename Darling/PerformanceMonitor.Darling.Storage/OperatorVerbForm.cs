@@ -35,4 +35,29 @@ public static class OperatorVerbForm
 
     /// <summary>The same, for the host this process is running on.</summary>
     public static string CommandHere(string verb) => Command(verb, OperatingSystem.IsWindows());
+
+    /// <summary>The command to type for the entry point, naming the install folder when the host is not Windows
+    /// (#9703). A Linux operator is usually not in the install folder (<c>/opt/darling</c> in the quick start), so
+    /// <c>dotnet PerformanceMonitor.Darling.Service.dll</c> alone fails for them where
+    /// <c>dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll</c> runs from anywhere. A folder with a space
+    /// is quoted. Pure: the platform and the folder are arguments.</summary>
+    public static string EntryPoint(bool isWindows, string? installDir)
+    {
+        if (isWindows || string.IsNullOrWhiteSpace(installDir))
+        {
+            return isWindows ? WindowsEntryPoint : PortableEntryPoint;
+        }
+        var dll = installDir.TrimEnd('/') + "/PerformanceMonitor.Darling.Service.dll";
+        return "dotnet " + (dll.Contains(' ') ? "\"" + dll + "\"" : dll);
+    }
+
+    /// <summary>The entry point to type on the host this process runs on, from the folder it runs from.</summary>
+    public static string EntryPointHere() => EntryPoint(OperatingSystem.IsWindows(), AppContext.BaseDirectory);
+
+    /// <summary>The full command for <paramref name="verb"/> on this host, with the install folder named off Windows.</summary>
+    public static string InstalledCommandHere(string verb)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(verb);
+        return EntryPointHere() + " " + verb;
+    }
 }

@@ -10,7 +10,7 @@ Each page starts with an `Audience:` line under its title. The line tells you if
 - [Lite guide](lite-guide.md): install, upgrade and configure Lite.
 - [Darling guides](darling/README.md): the reading order for all Darling pages.
 - [Install Darling](darling/install.md): from a downloaded zip to a service that collects data.
-- [Darling quick start](darling-quick-start.md): the short path for Windows and Linux, plus the web dashboard.
+- [Darling quick start](darling-quick-start.md): the short path for Windows and Linux, plus the web dashboard. Linux under systemd has its own page, [Install Darling on Linux with systemd](darling/linux.md).
 - [Darling install guide (moved)](uat-onboarding.md): a pointer from the old install guide to the new pages.
 - [PostgreSQL target runbook](postgres-first-target-runbook.md): point Darling at a PostgreSQL target, with a proof point at each step.
 
