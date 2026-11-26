@@ -284,7 +284,12 @@ public sealed partial class McpAlertTools
                 }
 
                 off.Remove(channel);
-                return text == ClearMarker ? "" : text;
+                if (text == ClearMarker)
+                {
+                    return string.Empty;
+                }
+
+                return text;
             }
 
             var teams = Resolve(destinations.Teams, existing.TeamsUrl, NotificationRouter.TeamsChannel);
