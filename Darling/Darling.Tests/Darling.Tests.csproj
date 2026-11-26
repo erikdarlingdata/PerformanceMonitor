@@ -165,4 +165,43 @@
     <!-- Some Viewer windows name their icon by a root-relative URI, which resolves against the entry assembly, this one, when a test builds a window. -->
     <Resource Include="..\PerformanceMonitor.Darling.Viewer\EDD.ico" Link="EDD.ico" />
   </ItemGroup>
+
+  <!-- #9686: the build that runs on Linux, chosen with -p:DarlingTestsWithoutViewer=true. The WPF Viewer needs the Windows
+       Desktop runtime, so this build targets net10.0, drops the Viewer reference, and leaves out every test file that names
+       the Viewer, the shared WPF library or a System.Windows namespace. Without the property nothing here applies, and the
+       project is the Windows one above. Its packages are not locked: the lock file beside this project describes the
+       Windows package graph, so this build points NuGet at a path that holds no lock file. -->
+  <PropertyGroup Condition="'$(DarlingTestsWithoutViewer)' == 'true'">
+    <TargetFramework>net10.0</TargetFramework>
+    <UseWPF>false</UseWPF>
+    <NuGetLockFilePath>$(MSBuildProjectDirectory)\obj\without-viewer.packages.lock.json</NuGetLockFilePath>
+    <!-- CA1416 (a Windows-only API is called from code that can run anywhere): the Windows build targets net10.0-windows, where
+         the rule has nothing to report. Here it fires on every test of a Windows-only part of the service (the managed store,
+         the ACL checks, the firewall rules). Those tests skip themselves off Windows or carry the Platform=Windows trait. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(DarlingTestsWithoutViewer)' == 'true'">
+    <ProjectReference Remove="..\PerformanceMonitor.Darling.Viewer\PerformanceMonitor.Darling.Viewer.csproj" />
+    <Resource Remove="..\PerformanceMonitor.Darling.Viewer\EDD.ico" />
+  </ItemGroup>
+  <Target Name="LeaveOutViewerTestFiles" BeforeTargets="CoreCompile" Condition="'$(DarlingTestsWithoutViewer)' == 'true'">
+    <ItemGroup>
+      <!-- ScottPlot is the Viewer's chart package and reaches this project only through the Viewer. -->
+      <ViewerTestFile Include="@(Compile)" Condition="$([System.Text.RegularExpressions.Regex]::IsMatch($([System.IO.File]::ReadAllText('%(Compile.FullPath)')), 'PerformanceMonitor\.Darling\.Viewer|PerformanceMonitor\.Ui\b|System\.Windows\b|(?m)^using ScottPlot\b'))" />
+      <Compile Remove="@(ViewerTestFile)" />
+      <!-- These name nothing from the Viewer themselves. Each uses a helper that is declared in a file left out above, so it
+           is left out by name. A new file of this kind fails this build with CS0103 or CS0246 on the helper's name: add it
+           here, or move the helper into a file of its own. -->
+      <!-- StoreParseFailureFixtures, declared in DarlingStoreConnectionParseFailureTests.cs. -->
+      <ViewerHelperUser Include="DarlingCliUnusableStoreConnectionTests.cs;DarlingCollectorToggleExitCodeTests.cs" />
+      <!-- QueryStoreClosedDayRollupLiveTests, whose members they call. -->
+      <ViewerHelperUser Include="QueryStoreClutterHourlyLiveTests.cs;QueryStoreClutterRollupLiveTests.cs;QueryStoreClutterFleetP95LiveTests.cs" />
+      <!-- FrontDoorWebHarness, declared in FrontDoor\FrontDoorWebProxyTests.cs. -->
+      <ViewerHelperUser Include="FrontDoor\FrontDoorViewerRoleTests.cs" />
+      <!-- A chart helper that names ScottPlot types by their full name, with no using line for the rule above to see. -->
+      <ViewerHelperUser Include="GridlineContrast.cs" />
+      <Compile Remove="@(ViewerHelperUser)" />
+    </ItemGroup>
+    <Message Importance="high" Text="DarlingTestsWithoutViewer: left out @(ViewerTestFile->Count()) test files that name the Viewer or WPF and @(ViewerHelperUser->Count()) named in the project file, compiling @(Compile->Count())." />
+  </Target>
 </Project>
