@@ -380,6 +380,7 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
         "save_environment_profile 01100 StoreRequired server_name",
         "self_check_password_key 11111 FanOut",
         "send_daily_health_report_now 01100 StoreRequired",
+        "send_test_notification 01100 StoreRequired",
         "set_agent_actions_enabled 01100 StoreRequired",
         "set_alert_threshold_override 01111 StoreRequired server_name",
         "set_collector_databases 01100 StoreRequired server_name",
