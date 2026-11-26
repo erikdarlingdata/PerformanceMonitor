@@ -57,13 +57,14 @@ public sealed class McpToolGuideTests
         Assert.True(overLong.Count == 0, "served head(s) over the 620 target: " + string.Join(", ", overLong));
     }
 
-    /// <summary>Shared tools whose head is true for one SKU only, so the byte-identical head comparison skips them (#9639). The marker check still applies:
-    /// both SKUs carry the marker, each with its own true head. The value is why the heads differ.</summary>
+    /// <summary>Shared tool names whose served head is true for one SKU only. The marker check still applies to each; only the
+    /// byte-identical head comparison is skipped. The value says why the heads differ.</summary>
     private static readonly Dictionary<string, string> SkuSpecificHeads = new(StringComparer.Ordinal)
     {
         ["create_mute_rule"] = "Darling's head names the agent_action arm, the service's next collection sweep, and arguments Lite has no field for (server_id, starts_at, external_source, repeat schedule, action).",
         ["update_mute_rule"] = "Darling's head names the agent_action arm and the service's next collection sweep, and its editable fields include ones Lite has no column for.",
         ["set_mute_rule_enabled"] = "Darling's head names the agent_action arm and the service's next collection sweep.",
+        ["update_alert_settings"] = "Darling's head names the service's single settings row, retired poison_wait.threshold_ms and the health_bands and fleet_sweep groups, none of which Lite has; Lite's head says it is a write served by mcp_allow_writes and takes effect in the running app (#9639).",
     };
 
     /// <summary>

@@ -222,6 +222,17 @@ public sealed class McpWritePolicyTests
         Assert.Contains("analyze_server", names);
     }
 
+    /// <summary>#9639: update_alert_settings is registered, is absent while writes are off, and is served once they are on.</summary>
+    [Fact]
+    public void UpdateAlertSettings_IsServedOnlyWhenWritesAreOn()
+    {
+        var all = RegisteredTools();
+
+        Assert.Contains("update_alert_settings", Names(all));
+        Assert.DoesNotContain("update_alert_settings", Names(McpWritePolicy.FilterToolCollection(all, allowWrites: false)));
+        Assert.Contains("update_alert_settings", Names(McpWritePolicy.FilterToolCollection(all, allowWrites: true)));
+    }
+
     /* #5719: Lite's instructions said "90 tools" while tools/list returned 88 with mcp_allow_writes off (the default).
        The sentence now carries the registered total, the default count and the two tools the setting adds; this pins
        them to the registered tools and the policy's write set. Lite has no bearer token, so the setting is the whole

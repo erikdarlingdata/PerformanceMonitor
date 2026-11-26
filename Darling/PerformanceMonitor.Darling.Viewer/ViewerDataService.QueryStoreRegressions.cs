@@ -135,11 +135,11 @@ public sealed partial class ViewerDataService
     /// </summary>
     /// <para><paramref name="recentFromDaily"/> (latest only, #5506): the recent window's whole days from the daily totals,
     /// $13 the days (date[]), $14 and $15 the recent arm's live <c>first_execution_time</c> bounds (#6750 put the failure arm's row-filter
-    /// start at $11 and its hours-held start at $12).</para>
+    /// start at $11 and its hours-held start at $12). #9606: $16 is the watermark of their partial last day (timestamp or NULL).</para>
     internal static string BuildQueryStoreRegressionsSql(bool wide, bool useDailyTotals, bool regularFromLatest = false, bool recentFromDaily = false) =>
         QueryStoreRegressionBaseline.Bind(
             QueryStoreRegressionBaseline.Statement(wide, useDailyTotals, regularFromLatest, recentFromDaily),
-            "$5", "$6", "$7", "$8", "50", "$9", "$10", "$11", "$12", "$13", "$14", "$15");
+            "$5", "$6", "$7", "$8", "50", "$9", "$10", "$11", "$12", "$13", "$14", "$15", "$16");
 
     /// <summary>
     /// The Query-Store regressions read — the Dashboard's <c>report.query_store_regressions(@start,@end)</c> inline TVF
@@ -409,10 +409,16 @@ public sealed partial class ViewerDataService
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.FailureHoursHeldStart ?? plan.HoursHeldStart ?? baselineStartUtc, DateTimeKind.Unspecified) });
         if (QueryStoreRegressionBaseline.ReadsRecentDays(plan))
         {
-            /* #5506: $13 to $15, only on the recent-days form, the only text that names them. */
+            /* #5506: $13 to $16, only on the recent-days form, the only text that names them. */
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Date, Value = plan.RecentDays });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentLowEnd, DateTimeKind.Unspecified) });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.RecentHighStart, DateTimeKind.Unspecified) });
+            /* #9606: the watermark of the recent days' partial last day, NULL when every recent day is a whole build. */
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                Value = plan.RecentPartialThrough is DateTime through ? DateTime.SpecifyKind(through, DateTimeKind.Unspecified) : DBNull.Value,
+            });
         }
     }
 
