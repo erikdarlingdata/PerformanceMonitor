@@ -290,6 +290,61 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
     }
 
     [Fact]
+    public async Task TheBuilderWritesUnderTheReadLock_SoAHeldReadDoesNotKeepItOut_AndAMassClosingIsOneSet()
+    {
+        /* Wide: every index of 3,000 objects changes identity at the third snapshot (the flag is null before it and false from it), so the third
+           step ends 3,000 runs and starts 3,000. */
+        const int Objects = 3000;
+        var times = new[] { ObjectUsageChainHistory.Day(3), ObjectUsageChainHistory.Day(2), ObjectUsageChainHistory.Day(1) };
+        var rows = new List<ObjectUsageChainHistory.Row>();
+        for (var step = 0; step < times.Length; step++)
+        {
+            for (var objectId = 1; objectId <= Objects; objectId++)
+            {
+                rows.Add(new ObjectUsageChainHistory.Row(
+                    times[step], ObjectUsageChainHistory.Day(60), ObjectUsageChainHistory.Node1, objectId, "T" + objectId, 1, (step + 1) * (1 + objectId % 5), 0, 0, step + 1,
+                    times[step].AddHours(-1), null, null, times[step].AddHours(-2), step < 2 ? null : false));
+            }
+        }
+
+        await SeedAsync("Wide", rows);
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now);
+
+        /* A read held on another thread for the whole build: a builder that asked for the write lock would wait out its budget. */
+        using var release = new System.Threading.ManualResetEventSlim(false);
+        using var held = new System.Threading.ManualResetEventSlim(false);
+        var holder = Task.Factory.StartNew(() =>
+        {
+            using (_duckDb.AcquireReadLock())
+            {
+                held.Set();
+                release.Wait();
+            }
+        }, TaskCreationOptions.LongRunning);
+        held.Wait();
+        try
+        {
+            Assert.Equal(3, await builder.BuildPairAsync(_serverId, "Wide", int.MaxValue, CancellationToken.None));
+            await builder.PurgeAsync(Start(2000), CancellationToken.None);
+        }
+        finally
+        {
+            release.Set();
+            await holder;
+        }
+
+        Assert.Equal(2L * Objects, await CountAsync("object_usage_runs"));
+        var secondTime = times[1].ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+        var thirdTime = times[2].ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal((long)Objects, await CountAsync("object_usage_runs WHERE last_time = TIMESTAMP '" + secondTime + "' AND first_time < TIMESTAMP '" + thirdTime + "'"));
+        Assert.Equal((long)Objects, await CountAsync("object_usage_runs WHERE last_time IS NULL AND first_time = TIMESTAMP '" + thirdTime + "'"));
+        var full = await _dataService.GetObjectUsageWindowFullAsync(_serverId, "Wide", Start(7));
+        var (persisted, reason) = await _dataService.TryReadObjectUsageChainAsync(_serverId, "Wide", Start(7));
+        Assert.Null(reason);
+        Assert.Equal(Json(full), Json(persisted!));
+    }
+
+    [Fact]
     public async Task AChainBuiltUnderOlderRules_IsDeletedAndRebuilt_AndTheFoldAnswersMeanwhile()
     {
         await SeedAsync();

@@ -508,7 +508,7 @@ public class CollectionBackgroundService : BackgroundService
             new HousekeepingStep("analysis", token => RunAnalysisIfDueAsync(token)),
         ]),
         /* #9596: the object usage chain get_object_usage reads. Its own loop, because a backfill of a large database is minutes of short
-           locked steps and must not hold archival, analysis or the evidence capture back. It reads Lite's own database only. */
+           steps and must not hold archival, analysis or the evidence capture back. It reads Lite's own database only. */
         new HousekeepingLoop("object_usage_chain",
         [
             new HousekeepingStep("object_usage_chain", token => RunObjectUsageChainIfDueAsync(token)),
@@ -936,10 +936,9 @@ public class CollectionBackgroundService : BackgroundService
     private ObjectUsageChainBuilder? _objectUsageChainBuilder;
 
     /// <summary>
-    /// #9596: builds the chain of every database that is behind (a store upgraded from v86 backfills each database from its oldest stored
+    /// #9596: builds the chain of every database that is behind (a store from an earlier version backfills each database from its oldest stored
     /// snapshot here, in the background, while <c>get_object_usage</c> folds), then purges chain rows past their horizon. Never throws: a
-    /// failed pass is logged and the next one retries, and the stamp moves only when a pass ran, so a pass that found the store busy is retried
-    /// at the next tick.
+    /// failed pass is logged and the next one retries.
     /// </summary>
     private async Task RunObjectUsageChainIfDueAsync(CancellationToken stoppingToken)
     {

@@ -26,13 +26,16 @@ namespace PerformanceMonitorLite.Services;
 /// <c>object_usage_snapshots</c>, <c>object_usage_deltas</c> and <c>object_usage_runs</c>. It never writes <c>index_object_stats</c>.
 ///
 /// <para><b>Where a pair starts.</b> A database with no chain row, or with a row built under an older <see cref="ObjectUsageChainVersion.Current"/>,
-/// has its chain rows deleted and is built from its oldest stored snapshot (the backfill that fills a store upgraded from v86, and the rebuild
+/// has its chain rows deleted and is built from its oldest stored snapshot (the backfill that fills a store from an earlier version, and the rebuild
 /// after a change of the stepper's rules). Otherwise the stepper is restored from the chain rows and the raw rows of each answering instance's
 /// last snapshot, and carries on with the snapshots after the watermark.</para>
 ///
-/// <para><b>Short lock holds.</b> One snapshot is one read (the store's read lock, released before the step) and one write transaction (the
-/// store's write lock, taken with a budget so a collector write waiting for it is never made to wait for a backfill). A pass that is stopped
-/// or fails part way leaves a chain that ends at the last whole snapshot, and the next pass carries on.</para>
+/// <para><b>Short lock holds.</b> One snapshot is one read (the store's read lock, released before the step) and one write transaction under the
+/// store's READ lock. This class is the only writer of the three chain tables and its gate keeps it to one pass at a time, so no other writer
+/// can collide with its UPDATEs and DELETEs, and the read lock keeps out what must not run beside it: archival, CHECKPOINT and a size reset.
+/// The write lock would shut every collector append and every read out for the length of a step. The runs a step ends are closed by one
+/// statement over the whole set, never one statement per index. A pass that is stopped or fails part way leaves a chain that ends at the
+/// last whole snapshot, and the next pass carries on.</para>
 ///
 /// <para><b>Who runs it.</b> The housekeeping loop of <see cref="CollectionBackgroundService"/>, never a request path. A database is listed
 /// when its newest snapshot in the hot <c>index_object_stats</c> table is newer than its chain. The newest snapshot of a database is always hot,
@@ -53,9 +56,6 @@ internal sealed class ObjectUsageChainBuilder
     /// <see cref="RetentionService.ArchiveRetentionMonths"/> horizon.
     /// </summary>
     internal static readonly int RetentionDays = RetentionService.ArchiveRetentionMonths * 31 + ObjectUsageWindowRead.BaselineReachDays + 7;
-
-    /// <summary>How long a step waits for the store's write lock before the pass stops.</summary>
-    private static readonly TimeSpan WriteLockBudget = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// The share of the hot store's reset point (<see cref="HotStoreResetLimit.Current"/>, the <c>hot_store_reset_mb</c> setting) the three chain
@@ -181,14 +181,21 @@ internal sealed class ObjectUsageChainBuilder
             ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         """;
 
-    private const string CloseRunSql = """
+    /// <summary>The connection's own scratch table for the keys of the runs one step ends.</summary>
+    private const string ClosingTable = "object_usage_closing";
+
+    private const string StageClosingSql = "CREATE TEMP TABLE " + ClosingTable + " (object_id INTEGER NOT NULL, index_id INTEGER NOT NULL)";
+
+    /// <summary>Ends every open run whose key is staged. $1 server_id, $2 database_name, $3 the last snapshot the runs were present in.</summary>
+    private const string CloseRunsSql = """
         UPDATE object_usage_runs
         SET last_time = $3
-        WHERE server_id = $1
-        AND   database_name = $2
-        AND   object_id = $4
-        AND   index_id = $5
-        AND   last_time IS NULL
+        FROM object_usage_closing AS c
+        WHERE object_usage_runs.server_id = $1
+        AND   object_usage_runs.database_name = $2
+        AND   object_usage_runs.object_id = c.object_id
+        AND   object_usage_runs.index_id = c.index_id
+        AND   object_usage_runs.last_time IS NULL
         """;
 
     private readonly DuckDbInitializer _duckDb;
@@ -225,8 +232,7 @@ internal sealed class ObjectUsageChainBuilder
 
     /// <summary>
     /// One pass: builds the chain of every listed database, up to <paramref name="maxSteps"/> snapshots and <see cref="MaxPassDuration"/>, then
-    /// purges what is past <see cref="RetentionDays"/>. Returns how many snapshots it built. A database that throws is logged and skipped, and a
-    /// store write lock that cannot be had inside its budget ends the pass.
+    /// purges what is past <see cref="RetentionDays"/>. Returns how many snapshots it built. A database that throws is logged and skipped.
     /// </summary>
     internal async Task<int> BuildPassAsync(int maxSteps, CancellationToken cancellationToken)
     {
@@ -257,11 +263,6 @@ internal sealed class ObjectUsageChainBuilder
                 try
                 {
                     built += await BuildPairCoreAsync(serverId, databaseName, maxSteps - built, started, cancellationToken);
-                }
-                catch (StoreLockTimeoutException)
-                {
-                    AppLogger.Debug("ObjectUsage", "The chain pass stopped: the store's write lock was busy. The next pass carries on.");
-                    break;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -436,7 +437,7 @@ internal sealed class ObjectUsageChainBuilder
         /* A step whose node is new to the chain writes no delta rows: every window holding it recomputes it from the raw rows. */
         var deltas = node.ComparedWith is null ? new List<ObjectUsageIndexStep>() : step.Indexes.FindAll(i => i.Moved);
 
-        using (_duckDb.AcquireWriteLock(WriteLockBudget))
+        using (_duckDb.AcquireReadLock(cancellationToken))
         using (var connection = _duckDb.CreateConnection())
         {
             await connection.OpenAsync(cancellationToken);
@@ -467,17 +468,38 @@ internal sealed class ObjectUsageChainBuilder
                     }
                 }
 
-                foreach (var key in closing)
+                if (closing.Count > 0)
                 {
-                    /* An open run was present through the snapshot before this one. */
-                    using var close = connection.CreateCommand();
-                    close.CommandText = CloseRunSql;
-                    close.Parameters.Add(new DuckDBParameter { Value = serverId });
-                    close.Parameters.Add(new DuckDBParameter { Value = databaseName });
-                    close.Parameters.Add(new DuckDBParameter { Value = Naive(previousTime ?? time) });
-                    close.Parameters.Add(new DuckDBParameter { Value = key.ObjectId });
-                    close.Parameters.Add(new DuckDBParameter { Value = key.IndexId });
-                    await close.ExecuteNonQueryAsync(cancellationToken);
+                    /* An open run was present through the snapshot before this one. The keys go in through an appender and one statement ends
+                       every run, however many indexes the snapshot changed. */
+                    using (var stage = connection.CreateCommand())
+                    {
+                        stage.CommandText = StageClosingSql;
+                        await stage.ExecuteNonQueryAsync(cancellationToken);
+                    }
+
+                    using (var appender = connection.CreateAppender(ClosingTable))
+                    {
+                        foreach (var key in closing)
+                        {
+                            appender.CreateRow().AppendValue(key.ObjectId).AppendValue(key.IndexId).EndRow();
+                        }
+                    }
+
+                    using (var close = connection.CreateCommand())
+                    {
+                        close.CommandText = CloseRunsSql;
+                        close.Parameters.Add(new DuckDBParameter { Value = serverId });
+                        close.Parameters.Add(new DuckDBParameter { Value = databaseName });
+                        close.Parameters.Add(new DuckDBParameter { Value = Naive(previousTime ?? time) });
+                        await close.ExecuteNonQueryAsync(cancellationToken);
+                    }
+
+                    using (var drop = connection.CreateCommand())
+                    {
+                        drop.CommandText = "DROP TABLE " + ClosingTable;
+                        await drop.ExecuteNonQueryAsync(cancellationToken);
+                    }
                 }
 
                 if (opening.Count > 0)
@@ -672,7 +694,7 @@ internal sealed class ObjectUsageChainBuilder
 
     private async Task DeletePairAsync(int serverId, string databaseName, CancellationToken cancellationToken)
     {
-        using var writeLock = _duckDb.AcquireWriteLock(WriteLockBudget);
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(cancellationToken);
         using var transaction = connection.BeginTransaction();
@@ -833,7 +855,7 @@ internal sealed class ObjectUsageChainBuilder
 
         try
         {
-            using var writeLock = _duckDb.AcquireWriteLock(WriteLockBudget);
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
             using var connection = _duckDb.CreateConnection();
             await connection.OpenAsync(cancellationToken);
             foreach (var statement in statements)

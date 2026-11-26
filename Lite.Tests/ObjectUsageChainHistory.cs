@@ -46,10 +46,11 @@ internal static class ObjectUsageChainHistory
         }
     }
 
-    /// <summary>One stored index row.</summary>
+    /// <summary>One stored index row. <paramref name="Node"/> is the stored <c>answering_server_name</c> and <paramref name="MemoryOptimized"/> the stored
+    /// <c>is_memory_optimized</c>, either of which a store written before the column existed holds as null.</summary>
     internal sealed record Row(
-        DateTime CollectionTime, DateTime Start, string Node, int ObjectId, string Table, int IndexId, long Seeks, long Scans, long Lookups,
-        long Updates, DateTime? LastSeek, DateTime? LastScan, DateTime? LastLookup, DateTime? LastUpdate);
+        DateTime CollectionTime, DateTime Start, string? Node, int ObjectId, string Table, int IndexId, long Seeks, long Scans, long Lookups,
+        long Updates, DateTime? LastSeek, DateTime? LastScan, DateTime? LastLookup, DateTime? LastUpdate, bool? MemoryOptimized = false);
 
     private sealed class Counters
     {
@@ -213,10 +214,10 @@ internal static class ObjectUsageChainHistory
                 (collection_id, collection_time, server_id, server_name, sqlserver_start_time, database_name, database_id,
                  schema_name, object_id, table_name, index_id, index_name, index_type_desc, user_seeks, user_scans, user_lookups, user_updates,
                  last_user_seek, last_user_scan, last_user_lookup, last_user_update, is_indexed_view, answering_server_name, is_memory_optimized)
-                VALUES ($1,$2,$3,$4,$5,$6,7,'dbo',$7,$8,$9,NULL,'CLUSTERED',$10,$11,$12,$13,$14,$15,$16,$17,false,$18,false)";
+                VALUES ($1,$2,$3,$4,$5,$6,7,'dbo',$7,$8,$9,NULL,'CLUSTERED',$10,$11,$12,$13,$14,$15,$16,$17,false,$18,$19)";
             void P(object? v) => cmd.Parameters.Add(new DuckDBParameter { Value = v ?? DBNull.Value });
             P(id--); P(row.CollectionTime); P(serverId); P(serverName); P(row.Start); P(database); P(row.ObjectId); P(row.Table); P(row.IndexId);
-            P(row.Seeks); P(row.Scans); P(row.Lookups); P(row.Updates); P(row.LastSeek); P(row.LastScan); P(row.LastLookup); P(row.LastUpdate); P(row.Node);
+            P(row.Seeks); P(row.Scans); P(row.Lookups); P(row.Updates); P(row.LastSeek); P(row.LastScan); P(row.LastLookup); P(row.LastUpdate); P(row.Node); P(row.MemoryOptimized);
             await cmd.ExecuteNonQueryAsync();
         }
 

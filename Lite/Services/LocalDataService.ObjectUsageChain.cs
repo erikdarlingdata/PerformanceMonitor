@@ -165,6 +165,15 @@ public partial class LocalDataService
 
         using var connection = await OpenConnectionAsync();
 
+        /* One snapshot of the chain tables and the raw rows for every statement below: the builder commits a step, a rebuild or a purge under the
+           same read lock, and a read that straddled one would put the facts of one state beside the deltas of another. The transaction ends
+           with the connection, having written nothing. */
+        using (var begin = connection.CreateCommand())
+        {
+            begin.CommandText = "BEGIN TRANSACTION";
+            await begin.ExecuteNonQueryAsync();
+        }
+
         using (var command = connection.CreateCommand())
         {
             command.CommandText = ObjectUsageBoundsSql;
