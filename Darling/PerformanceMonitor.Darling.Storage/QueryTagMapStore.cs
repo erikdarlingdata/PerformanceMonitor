@@ -132,7 +132,7 @@ CROSS JOIN LATERAL (
     FROM collect.query_tag_sightings AS s
     WHERE s.server_id = $1 AND s.key_kind = k.key_kind AND s.key = k.key
     UNION ALL
-    SELECT t.key_kind, t.key, t.database_name, t.object_name, NULLIF(t.application_name, ''), NULLIF(t.login_name, ''), NULLIF(t.host_name, ''), NULL::text, 1
+    SELECT t.key_kind, t.key, NULLIF(t.database_name, ''), t.object_name, NULLIF(t.application_name, ''), NULLIF(t.login_name, ''), NULLIF(t.host_name, ''), NULL::text, 1
     FROM collect.query_tag_sightings_slim AS t
     WHERE t.server_id = $1 AND t.key_kind = k.key_kind AND t.key = k.key
 ) AS u
@@ -147,7 +147,7 @@ FROM (
     FROM collect.query_tag_sightings
     WHERE server_id = $1
     UNION ALL
-    SELECT key_kind, key, database_name, object_name, NULLIF(application_name, ''), NULLIF(login_name, ''), NULLIF(host_name, ''), NULL::text, 1
+    SELECT key_kind, key, NULLIF(database_name, ''), object_name, NULLIF(application_name, ''), NULLIF(login_name, ''), NULLIF(host_name, ''), NULL::text, 1
     FROM collect.query_tag_sightings_slim
     WHERE server_id = $1
 ) AS u
