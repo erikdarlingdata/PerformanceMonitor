@@ -197,13 +197,13 @@ public static class DarlingSecretSource
         }
 
         var euid = modes.EffectiveUserId;
-        var facts = $"The service runs as {DescribeAccount(euid, modes.EffectiveUserName)}" + DescribeFile(modes, path) + ".";
+        var account = $"The service runs as {DescribeAccount(euid, modes.EffectiveUserName)}";
         if (euid == 0)
         {
-            return lead + facts;
+            return lead + account + DescribeFile(modes, path) + ".";
         }
 
-        facts = facts.TrimEnd('.') + ", which cannot read it. ";
+        var facts = account + ", which cannot read it" + DescribeFile(modes, path) + ". ";
         return path.StartsWith(ComposeSecretsMount, StringComparison.Ordinal)
             ? lead + facts + "If this install ran as root before, run these once on the host, in the compose folder: "
                 + $"{ComposeSecretsModeFix}, then {DarlingManagedRoles.ComposeVolumeOwnershipCommand(euid)}; "

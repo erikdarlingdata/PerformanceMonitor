@@ -134,9 +134,7 @@ public sealed class SecretFileReadHintTests
         {
             var message = DarlingSecretSource.CouldNotRead("mcp.network.token", McpSecret, new UnauthorizedAccessException("denied"));
 
-            Assert.Contains("runs as user 1654 (app)", message, StringComparison.Ordinal);
-            Assert.Contains("owned by user 1000", message, StringComparison.Ordinal);
-            Assert.Contains("mode is 0600", message, StringComparison.Ordinal);
+            Assert.Contains("runs as user 1654 (app), which cannot read it. The file is owned by user 1000 and its mode is 0600. ", message, StringComparison.Ordinal);
         }
     }
 
