@@ -143,7 +143,7 @@ A superuser login for the service also clears all of this, and [Security](securi
 
 The tarball ships `provision-roles.sql`. It creates the `admin`, `viewer`, `web` and `mcp` logins on a store that you bring. You can skip it while the web dashboard and MCP are both off, which is the default. With either one on and no `postgres.webConnectionString` or `postgres.mcpConnectionString` set, that surface connects as the owner and the service warns about it. When to run the script, its placeholders and what it grants are in [Security](security.md#security--least-privilege-roles).
 
-Custom alerts run on the `web` role, so they need the script and `postgres.webConnectionString`. With the setting unset, the service logs `Custom alert evaluator not started` and names the setting ([#9700](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9700)). The built-in alerts are not affected.
+Custom alerts run on the `web` role, so they need the script and `postgres.webConnectionString`. With the setting unset, the service logs `Custom alert evaluator not started` and names the setting ([#9700](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9700)). With it set, the service signs in with that login once at start. If the store refuses it, the service logs a warning that names the setting, the login and the store's error, and the evaluator stays down until the next start ([#9760](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9760)). The built-in alerts are not affected.
 
 ### Store log capture
 
