@@ -9,6 +9,8 @@
 using System;
 using System.Linq;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -97,8 +99,9 @@ public sealed class UnopenableSavedPasswordConnectTests
             server, (target, token) => DarlingServerConnector.ConnectAsync(target, NullLogger.Instance, token), gate, TestContext.Current.CancellationToken);
 
         Assert.Null(attempt.Runtime);
-        var failure = Assert.IsType<SavedSecretUnavailableException>(attempt.Failure);
-        var refusal = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _));
+        /* The process's own ring decides which type: a ring that is not loaded yet is an ordinary failure, one that refuses is the typed refusal. */
+        var failure = Assert.IsAssignableFrom<InvalidOperationException>(attempt.Failure);
+        var refusal = Assert.ThrowsAny<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _));
         Assert.Equal(refusal.Message, failure.Message);
         Assert.DoesNotContain(server.EncryptedPassword, failure.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(Plain, failure.Message, StringComparison.Ordinal);
@@ -198,6 +201,105 @@ public sealed class UnopenableSavedPasswordLogTests
         Assert.DoesNotContain("retrying", line, StringComparison.Ordinal);
     }
 
+    private const string OldFormatText = "AQIDBAUGBwgJCg==";
+
+    private static LegacyDpapi WindowsDpapi() => new(true, _ => UnopenableSavedPasswordConnectTests.Plain);
+
+    private static MonitoredServer OldFormatServer(bool pinStepWaiting)
+    {
+        var server = UnopenableSavedPasswordConnectTests.SqlAuthServer();
+        server.EncryptedPassword = OldFormatText;
+        server.SecretPinWaiting = pinStepWaiting;
+        return server;
+    }
+
+    /* #9749: while the one-time pin step waits to run (#5456) an unpinned old-format password opens once it has. The failed attempt the
+       worker handles is the real resolver's refusal, and it logs the retrying Warning with the sentence that says to wait. */
+    [Fact]
+    public async Task An_unpinned_old_format_password_while_the_pin_step_waits_is_a_retrying_warning_that_says_to_wait()
+    {
+        var server = OldFormatServer(pinStepWaiting: true);
+        var refusal = Assert.Throws<InvalidOperationException>(
+            () => DarlingSecrets.ResolvePassword(server, out _, UnopenableSavedPasswordConnectTests.AnotherKey(), WindowsDpapi()));
+        Assert.IsNotType<SavedSecretUnavailableException>(refusal);
+
+        var state = new DarlingWorker.ServerLoopState { Config = server };
+        var serviceLog = new CapturingTestLogger();
+        await UnopenableSavedPasswordConnectTests.TryConnectAsync(
+            UnopenableSavedPasswordConnectTests.NewWorker(logger: new WorkerLog(serviceLog)), state,
+            new ConnectAttempt(server, null, refusal), TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, serviceLog.CountAtLevel(LogLevel.Error));
+        Assert.Equal(1, serviceLog.CountAtLevel(LogLevel.Warning));
+        var line = Assert.Single(serviceLog.Lines, l => l.StartsWith("Warning:", StringComparison.Ordinal));
+        Assert.Contains("retrying in", line, StringComparison.Ordinal);
+        Assert.Contains("one-time pin step", line, StringComparison.Ordinal);
+        Assert.Contains("Do not enter the password again yet", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("will keep failing", line, StringComparison.Ordinal);
+        Assert.Equal(refusal.Message, state.LastConnectFailureLogged);
+        Assert.Equal(1, state.ConsecutiveConnectFailures);
+    }
+
+    [Fact]
+    public void The_same_password_opens_once_the_pins_have_landed()
+    {
+        var server = OldFormatServer(pinStepWaiting: true);
+        Assert.Throws<InvalidOperationException>(
+            () => DarlingSecrets.ResolvePassword(server, out _, UnopenableSavedPasswordConnectTests.AnotherKey(), WindowsDpapi()));
+
+        /* The step pins the value and raises the config version: the reload carries the pin, and the connect no longer fails. */
+        var reloaded = OldFormatServer(pinStepWaiting: false);
+        reloaded.SecretPin = new LegacyPin(SHA256.HashData(Encoding.UTF8.GetBytes(OldFormatText)), reloaded.SecretBinding.LegacyPinHash());
+
+        Assert.Equal(
+            UnopenableSavedPasswordConnectTests.Plain,
+            DarlingSecrets.ResolvePassword(reloaded, out _, UnopenableSavedPasswordConnectTests.AnotherKey(), WindowsDpapi()));
+    }
+
+    [Fact]
+    public void An_unpinned_old_format_password_with_no_pin_step_waiting_is_still_the_error_that_says_it_will_keep_failing()
+    {
+        var (worker, log, _, _) = NewWorker();
+        var server = OldFormatServer(pinStepWaiting: false);
+        var cause = Assert.Throws<SavedSecretUnavailableException>(
+            () => DarlingSecrets.ResolvePassword(server, out _, UnopenableSavedPasswordConnectTests.AnotherKey(), WindowsDpapi()));
+
+        worker.LogConnectFailure(NewState(), cause, 240);
+
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
+        var line = Assert.Single(log.Lines);
+        Assert.Contains("will keep failing until fixed", line, StringComparison.Ordinal);
+        Assert.Contains("is in the old format", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_key_ring_that_is_not_loaded_yet_is_a_retrying_warning_and_a_ring_that_refuses_is_an_error()
+    {
+        var (worker, log, _, _) = NewWorker();
+        var server = UnopenableSavedPasswordConnectTests.SqlAuthServer();
+        server.EncryptedPassword = UnopenableSavedPasswordConnectTests.SealedFor(server);
+
+        var notReady = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(
+            server, out _, DarlingPasswordKey.Refusing(DarlingPasswordKey.NotReadyReason), WindowsDpapi()));
+        Assert.IsNotType<SavedSecretUnavailableException>(notReady);
+        worker.LogConnectFailure(NewState(), notReady, 240);
+
+        Assert.Equal(0, log.CountAtLevel(LogLevel.Error));
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+        var line = Assert.Single(log.Lines);
+        Assert.Contains("retrying in 240s", line, StringComparison.Ordinal);
+        Assert.Contains(DarlingPasswordKey.NotReadyReason, line, StringComparison.Ordinal);
+
+        /* A ring that refuses, with any other reason, needs an operator. */
+        var refused = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(
+            server, out _, UnopenableSavedPasswordConnectTests.KeyFileMissing(), WindowsDpapi()));
+        worker.LogConnectFailure(NewState(), refused, 240);
+
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Error));
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+    }
+
     [Fact]
     public void A_network_failure_is_still_a_warning_that_says_it_is_retrying()
     {
@@ -247,6 +349,44 @@ public sealed class UnopenableSavedPasswordLogTests
 public sealed class UnopenableSavedPasswordConnectLiveTests
 {
     private const int ServerId = 97;
+
+    /// <summary>#9749: the configuration read carries the pin step's waiting state onto every server it reads, so the resolver's refusal for an unpinned old-format value says to wait.</summary>
+    [Fact]
+    public async Task The_load_carries_the_pin_step_waiting_state_to_the_resolver()
+    {
+        var cs = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live unopenable-password test.");
+        var ct = TestContext.Current.CancellationToken;
+        /* #1776 own-store: this fact mints its own scratch database through ScratchPostgres. */
+        await using var scratch = await ScratchPostgres.CreateAsync(cs!, ct);
+        var windows = new LegacyDpapi(true, _ => UnopenableSavedPasswordConnectTests.Plain);
+
+        await using (var connection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            await using (var seed = new NpgsqlCommand(
+                "INSERT INTO config.config_monitored_servers (server_id, name, host, auth, username, encrypted_password, is_enabled) VALUES ($1, 'alpha', 'alpha-host.example.test', 'sql', 'monitor', 'AQIDBAUGBwgJCg==', TRUE)", connection))
+            {
+                seed.Parameters.AddWithValue(ServerId);
+                await seed.ExecuteNonQueryAsync(ct);
+            }
+
+            var waiting = Assert.Single(await StoreConfigProvider.ReadMonitoredServersAsync(connection, new DarlingConfig(), ct, pinsWaiting: true));
+            Assert.True(waiting.SecretPinWaiting);
+            Assert.Null(waiting.SecretPin);
+            var wait = Assert.Throws<InvalidOperationException>(
+                () => DarlingSecrets.ResolvePassword(waiting, out _, UnopenableSavedPasswordConnectTests.AnotherKey(), windows));
+            Assert.Contains("Do not enter the password again yet", wait.Message, StringComparison.Ordinal);
+
+            /* Nothing waiting, and a reader with no worker behind it (--validate-config) leaves the flag false: the hard refusal. */
+            var settled = Assert.Single(await StoreConfigProvider.ReadMonitoredServersAsync(connection, new DarlingConfig(), ct));
+            Assert.False(settled.SecretPinWaiting);
+            Assert.Throws<SavedSecretUnavailableException>(
+                () => DarlingSecrets.ResolvePassword(settled, out _, UnopenableSavedPasswordConnectTests.AnotherKey(), windows));
+        }
+    }
 
     [Theory]
     [InlineData(true)]

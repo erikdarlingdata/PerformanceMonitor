@@ -126,7 +126,8 @@ public sealed class SealedSecretResolverTests
         server.EncryptedPassword = SealFor(server);
         var probe = new Probe();
 
-        var ex = Assert.Throws<SavedSecretUnavailableException>(() =>
+        /* A ring that is not loaded yet is ready a moment later, so this is the ordinary failure a connect retries, not the typed refusal (#9749). */
+        var ex = Assert.Throws<InvalidOperationException>(() =>
             DarlingSecrets.ResolvePassword(server, out _, DarlingPasswordKey.Refusing(DarlingPasswordKey.NotReadyReason), probe.AsWindows()));
 
         Assert.Equal(DarlingPasswordKey.NotReadyReason, ex.Message);
@@ -261,6 +262,88 @@ public sealed class SealedSecretResolverTests
 
         Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
         Assert.Equal(0, probe.Calls);
+    }
+
+    private const string WaitingSentence =
+        "is in the old format and waits for the one-time pin step, which has not run yet. " +
+        "The service tries it again on every sweep. Do not enter the password again yet.";
+
+    /* #9749: while the one-time pin step waits to run (#5456), an unpinned old-format value opens once it has, with nobody doing anything. */
+    [Fact]
+    public void AnUnpinnedOldFormatPasswordWhileThePinStepWaitsIsAnOrdinaryFailureThatSaysToWait()
+    {
+        var server = Server(stored: "AQIDBAUGBwgJCg==");
+        server.SecretPinWaiting = true;
+        var probe = new Probe();
+
+        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
+
+        Assert.Equal($"The saved password for server 'alpha' {WaitingSentence}", ex.Message);
+        Assert.Equal(0, probe.Calls);
+    }
+
+    [Fact]
+    public void ThePasswordOpensOnceThePinsHaveLandedWhetherOrNotTheFlagIsStale()
+    {
+        const string stored = "AQIDBAUGBwgJCg==";
+        var server = Server(stored: stored);
+        server.SecretPinWaiting = true;
+        Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, new Probe().AsWindows()));
+
+        /* The step runs and pins the value: the next configuration read carries the pin and no waiting flag. */
+        var reloaded = Server(stored: stored);
+        reloaded.SecretPin = PinFor(stored, reloaded.SecretBinding);
+        var probe = new Probe();
+        Assert.Equal(Plain, DarlingSecrets.ResolvePassword(reloaded, out _, Ring, probe.AsWindows()));
+        Assert.Equal(1, probe.Calls);
+
+        /* A server object read while the step waited and since given its pin opens too: the pin decides, not the flag. */
+        server.SecretPin = PinFor(stored, server.SecretBinding);
+        Assert.Equal(Plain, DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
+        Assert.Equal(2, probe.Calls);
+    }
+
+    [Fact]
+    public void AnOldFormatPasswordWhosePinDoesNotMatchStaysTheTypedRefusalWhileThePinStepWaits()
+    {
+        var server = Server(stored: "AQIDBAUGBwgJCg==");
+        server.SecretPin = PinFor("AAAAAAAAAAAAAA==", server.SecretBinding);
+        server.SecretPinWaiting = true;
+        var probe = new Probe();
+
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
+
+        Assert.Contains("is in the old format and was saved after this service was upgraded", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(0, probe.Calls);
+    }
+
+    [Fact]
+    public void ARemediationAndAnSmtpOldFormatPasswordWhileThePinStepWaitsSayToWaitToo()
+    {
+        const string stored = "AQIDBAUGBwgJCg==";
+        var server = Server();
+        server.RemediationEncryptedPassword = stored;
+        server.SecretPinWaiting = true;
+        var remediation = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolveRemediationPassword(server, Ring, new Probe().AsWindows()));
+        Assert.Equal($"The saved remediation password for server 'alpha' {WaitingSentence}", remediation.Message);
+
+        var smtp = new SmtpConfig { Host = "mail.example.test", Username = "mailer", EncryptedPassword = stored, SecretPinWaiting = true };
+        var mail = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolveSmtpPassword(smtp, Ring, new Probe().AsWindows()));
+        Assert.Equal($"The saved SMTP password {WaitingSentence}", mail.Message);
+
+        server.SecretPinWaiting = false;
+        smtp.SecretPinWaiting = false;
+        Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolveRemediationPassword(server, Ring, new Probe().AsWindows()));
+        Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolveSmtpPassword(smtp, Ring, new Probe().AsWindows()));
+    }
+
+    [Fact]
+    public void AnOldFormatPasswordOnAnotherPlatformIsTheTypedRefusalEvenWhileThePinStepWaits()
+    {
+        var server = Server(stored: "AQIDBAUGBwgJCg==");
+        server.SecretPinWaiting = true;
+
+        Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, new Probe().AsLinux()));
     }
 
     [Fact]
