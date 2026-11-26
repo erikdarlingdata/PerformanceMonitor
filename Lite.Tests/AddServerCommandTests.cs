@@ -62,9 +62,13 @@ public sealed class AddServerCommandTests : IDisposable
         public bool ManagerMade;
     }
 
+    /// <summary>
+    /// <paramref name="stdin"/> is what the JSON form reads as text. The flag form reads its password as bytes (#9753): the UTF-8 bytes of
+    /// <paramref name="stdin"/>, or <paramref name="stdinBytes"/> when a test sends bytes that text cannot spell, so the same run holds both.
+    /// </summary>
     private async Task<Run> RunVerbAsync(
         string[] args, string stdin, bool redirected = true, bool liteRunning = false, Func<ServerConnection, string?>? connect = null,
-        Func<bool>? liteRunningCheck = null, ICredentialStore? store = null)
+        Func<bool>? liteRunningCheck = null, ICredentialStore? store = null, byte[]? stdinBytes = null)
     {
         var run = new Run();
         var machine = new AddServerCommand.Machine(
@@ -83,7 +87,8 @@ public sealed class AddServerCommandTests : IDisposable
             Path.GetDirectoryName(HostsFile)!);
         using var output = new StringWriter();
         using var error = new StringWriter();
-        run.Exit = await AddServerCommand.RunAsync(args, new StringReader(stdin), redirected, output, error, machine);
+        using var passwordInput = new MemoryStream(stdinBytes ?? new System.Text.UTF8Encoding(false).GetBytes(stdin));
+        run.Exit = await AddServerCommand.RunAsync(args, new StringReader(stdin), redirected, output, error, machine, passwordInput);
         run.Out = output.ToString();
         run.Err = error.ToString();
         return run;
@@ -180,6 +185,90 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Equal(0, run.Exit);
         var added = Reload().GetAllServers().Single();
         Assert.Equal(("monitor", Secret), _store.GetCredential(added.Id));
+    }
+
+    private static readonly string[] SqlFlags = ["--add-server", "--host", "sql01", "--auth", "sql", "--username", "monitor"];
+
+    /// <summary>#9753: a refused piped password changes nothing: no server, no connection test, no credential, no host record.</summary>
+    private void AssertNothingChanged(Run run)
+    {
+        Assert.Equal(1, run.Exit);
+        Assert.Empty(ServerNames());
+        Assert.Empty(run.Tested);
+        Assert.Empty(StoredKeys());
+        Assert.False(File.Exists(HostsFile));
+    }
+
+    [Fact]
+    public async Task Flags_APipedPasswordWithAByteOrderMark_IsRefused_AndChangesNothing()
+    {
+        var run = await RunVerbAsync(SqlFlags, "\uFEFF" + Secret + "\r\n", stdinBytes: [0xEF, 0xBB, 0xBF, .. System.Text.Encoding.UTF8.GetBytes(Secret + "\r\n")]);
+
+        AssertNothingChanged(run);
+        Assert.Equal(StrictStdinPassword.HasByteOrderMarkText, run.Err.Trim());
+    }
+
+    [Fact]
+    public async Task Flags_APipedPasswordWithASecondNonEmptyLine_IsRefused_AndChangesNothing()
+    {
+        var run = await RunVerbAsync(SqlFlags, Secret + "\r\nsecond-line\r\n");
+
+        AssertNothingChanged(run);
+        Assert.Equal(StrictStdinPassword.HasManyLinesText, run.Err.Trim());
+        Assert.DoesNotContain("second-line", run.Err);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Flags_APipedPasswordInUtf16_IsRefused_AndChangesNothing(bool withByteOrderMark)
+    {
+        var utf16 = System.Text.Encoding.Unicode.GetBytes(Secret + "\r\n");
+        var run = await RunVerbAsync(SqlFlags, Secret, stdinBytes: withByteOrderMark ? [0xFF, 0xFE, .. utf16] : utf16);
+
+        AssertNothingChanged(run);
+        Assert.Equal(StrictStdinPassword.HasNulText, run.Err.Trim());
+    }
+
+    [Fact]
+    public async Task Flags_APipedPasswordThatIsNotUtf8_IsRefused_AndChangesNothing()
+    {
+        /* A pipe written in a console code page sends the single byte E9 for an e with an acute accent. */
+        var run = await RunVerbAsync(SqlFlags, "caf\u00e9", stdinBytes: [0x63, 0x61, 0x66, 0xE9, 0x0D, 0x0A]);
+
+        AssertNothingChanged(run);
+        Assert.Equal("The password contains characters that cannot be stored. Nothing was changed.", run.Err.Trim());
+    }
+
+    [Fact]
+    public async Task Flags_ANonAsciiPipedPassword_IsSavedExactly()
+    {
+        const string password = "p\u00e4ss w\u00f6rd \u2014 \u65e5\u672c\u8a9e \U0001F511 ";
+        var run = await RunVerbAsync(SqlFlags, password + "\r\n");
+
+        Assert.Equal(0, run.Exit);
+        Assert.Equal(("monitor", password), _store.GetCredential(Reload().GetAllServers().Single().Id));
+    }
+
+    [Theory]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    [InlineData("")]
+    public async Task Flags_OnePipedTrailingNewline_IsStripped_AndNothingElse(string ending)
+    {
+        var run = await RunVerbAsync(SqlFlags, Secret + ending);
+
+        Assert.Equal(0, run.Exit);
+        Assert.Equal(("monitor", Secret), _store.GetCredential(Reload().GetAllServers().Single().Id));
+    }
+
+    [Fact]
+    public async Task Flags_APipedPasswordOverTheLimit_IsRefusedUnread_AndChangesNothing()
+    {
+        var run = await RunVerbAsync(SqlFlags, new string('p', AddServerCommand.MaxPipedPasswordBytes + 3));
+
+        AssertNothingChanged(run);
+        Assert.Equal("The password is longer than can be stored. Nothing was changed.", run.Err.Trim());
     }
 
     [Fact]
