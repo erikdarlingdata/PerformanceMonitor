@@ -57,6 +57,15 @@ public sealed class McpToolGuideTests
         Assert.True(overLong.Count == 0, "served head(s) over the 620 target: " + string.Join(", ", overLong));
     }
 
+    /// <summary>Shared tools whose head is true for one SKU only, so the byte-identical head comparison skips them (#9639). The marker check still applies:
+    /// both SKUs carry the marker, each with its own true head. The value is why the heads differ.</summary>
+    private static readonly Dictionary<string, string> SkuSpecificHeads = new(StringComparer.Ordinal)
+    {
+        ["create_mute_rule"] = "Darling's head names the agent_action arm, the service's next collection sweep, and arguments Lite has no field for (server_id, starts_at, external_source, repeat schedule, action).",
+        ["update_mute_rule"] = "Darling's head names the agent_action arm and the service's next collection sweep, and its editable fields include ones Lite has no column for.",
+        ["set_mute_rule_enabled"] = "Darling's head names the agent_action arm and the service's next collection sweep.",
+    };
+
     /// <summary>
     /// D6, generically: for every MCP tool name registered on BOTH SKUs, if either side's description carries
     /// the marker, both must, and the served heads must be byte-identical. Tool names and marker presence are
@@ -90,6 +99,11 @@ public sealed class McpToolGuideTests
             }
 
             if (!darlingConverted)
+            {
+                continue;
+            }
+
+            if (SkuSpecificHeads.ContainsKey(tool))
             {
                 continue;
             }

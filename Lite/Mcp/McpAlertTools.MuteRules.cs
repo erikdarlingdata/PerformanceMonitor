@@ -95,9 +95,7 @@ public sealed partial class McpAlertTools
         service.GetRules().FirstOrDefault(r => string.Equals(r.Id, ruleId, StringComparison.Ordinal));
 
     [McpServerTool(Name = "create_mute_rule"), Description(
-        "Agent arm: agent_action = request's server only; else direct (guide). Creates an alert mute rule: matching alerts are still logged, just not delivered. Changes shared alert configuration the service delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert across the whole fleet. No confirm step: the rule takes effect on the running service's next collection sweep. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled." +
-        "<<GUIDE>>" +
-        "Differences in Lite: the rule takes effect at once in the running app (no collection sweep), there is no agent arm (agent_action, reason or expires_at limits), and a rule has no starts_at, repeat schedule, action, server_id or external_source, so this tool takes none of them. " +
+        "Write: creates an alert mute rule: matching alerts are still logged, just not delivered. Changes alert configuration the app delivers on. Provide any combination of scope/pattern fields; a field left out does not narrow the rule, so a rule with NO fields set matches and mutes EVERY alert on every server. No confirm step: the running app uses the rule at once. Returns the stored rule with its generated id, for delete_mute_rule or set_mute_rule_enabled. Served only when mcp_allow_writes is true.<<GUIDE>>" +
         "Write: creates an alert mute rule, the Manage Mute Rules window's Add. Matching alerts are still logged, just not delivered. Changes alert configuration the app delivers on: a field left out does not narrow the rule, so a rule with NO scope or pattern set mutes EVERY alert on every server (the window asks for confirmation here; this tool does not). " +
         "Served only when mcp_allow_writes is true. server_name and metric_name match the alert's exact values (see get_alert_history, get_mute_rules); the *_pattern fields are case-insensitive substrings, and each applies only to the metrics whose alerts carry that dimension (the window hides the other boxes), so a pattern the metric never carries is refused. " +
         "expires_at is an optional ISO-8601 UTC instant in the future after which the rule stops applying; omit it for a permanent rule. The running app uses the rule at once. " +
@@ -214,9 +212,7 @@ public sealed partial class McpAlertTools
     private static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
 
     [McpServerTool(Name = "set_mute_rule_enabled"), Description(
-        "Agent arm: agent_action = request's server only; else direct (guide). Enables or disables an existing mute rule by id, WITHOUT deleting it. Changes shared alert configuration the service delivers on. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so silencing and restoring later is one reversible change, unlike delete+create, which loses those and resets the Stale Mute Rules age clock. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found." +
-        "<<GUIDE>>" +
-        "Differences in Lite: the change takes effect at once in the running app, and there is no agent arm (agent_action or reason). " +
+        "Write: enables or disables an existing mute rule by id, WITHOUT deleting it. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so this is the reversible change, unlike delete+create. Returns updated (rule as stored), unchanged (already that value, safe to retry), or not_found. Served only when mcp_allow_writes is true.<<GUIDE>>" +
         "Write: enables or disables an existing mute rule by its id (from get_mute_rules or create_mute_rule) WITHOUT deleting it, the checkbox in Manage Mute Rules. A disabled rule suppresses nothing but keeps its id, scope, reason and creation date, so prefer this to delete_mute_rule then create_mute_rule for a reversible change. " +
         "Served only when mcp_allow_writes is true. Returns {status:\"updated\", mute_rule:{...} as stored, previous {enabled}, undo}, {status:\"unchanged\", ...} when the rule already holds that value (a retry is safe and writes nothing), {status:\"not_found\"}, or {status:\"unavailable\"} while an earlier database reset's saved-settings restore is pending. The running app uses the change at once.")]
     public static Task<string> SetMuteRuleEnabled(
@@ -329,14 +325,7 @@ public sealed partial class McpAlertTools
         ["server_name", "metric_name", "database_pattern", "query_text_pattern", "wait_type_pattern", "job_name_pattern", "client_app_pattern", "reason", "expires_at_utc"];
 
     [McpServerTool(Name = "update_mute_rule"), Description(
-        "Agent arm: agent_action = request's server only; else direct (guide). Edits an existing alert mute rule IN PLACE by its id: changes shared alert configuration. PARTIAL " +
-        "update: send only the fields to change, in the same shape get_mute_rules returns; a field you do NOT " +
-        "send stays exactly as stored, and an EXPLICIT JSON null CLEARS that field. enabled is NOT editable " +
-        "here: use set_mute_rule_enabled instead. created_at_utc never moves. Clearing " +
-        "scope fields WIDENS the rule: one left with none mutes EVERY alert. Returns updated, unchanged, " +
-        "not_found, or invalid (nothing written)." +
-        "<<GUIDE>>" +
-        "Differences in Lite: the edit takes effect at once in the running app, there is no agent arm, and only server_name, metric_name, the five patterns, reason and expires_at_utc can be edited (a rule has no starts_at, repeat schedule, action, server_id or external_source). " +
+        "Write: edits an existing alert mute rule IN PLACE by its id. PARTIAL update: send only the fields to change, in the shape get_mute_rules returns; a field you do NOT send stays as stored, and an EXPLICIT JSON null CLEARS that field. enabled is NOT editable here (use set_mute_rule_enabled); created_at_utc never moves. Clearing scope fields WIDENS the rule: one left with none mutes EVERY alert. Returns updated, unchanged, not_found, or invalid (nothing written). Served only when mcp_allow_writes is true.<<GUIDE>>" +
         "Write: edits an existing alert mute rule IN PLACE by its id, the Edit button in Manage Mute Rules. PARTIAL update: send only the fields to change, in the shape get_mute_rules returns; a field you do not send stays as stored, and an explicit JSON null CLEARS it. " +
         "Editable fields: server_name, metric_name, database_pattern, query_text_pattern, wait_type_pattern, job_name_pattern, client_app_pattern, reason, expires_at_utc (null makes the rule permanent; create_mute_rule's expires_at is accepted as an alias, send only one). " +
         "enabled is not editable here (use set_mute_rule_enabled) and created_at_utc never moves. Clearing scope fields WIDENS the rule: one left with none mutes EVERY alert. A pattern the (resulting) metric's alerts never carry is refused. " +
