@@ -70,6 +70,15 @@ public sealed class McpToolGuideTests
     /// (<see cref="DescriptionLiteral"/>) is only ever needed for Lite's side of a tool BOTH sides already agree
     /// is converted, and every converted description is hand-authored literals a caller can resolve.
     /// </summary>
+    /// <summary>Shared tool names whose served head is true for one SKU and false for the other, so the two heads are not
+    /// byte-identical on purpose. Each value is the reason. The marker check still applies to every name here (#9639).</summary>
+    private static readonly Dictionary<string, string> SkuSpecificHeads = new(StringComparer.Ordinal)
+    {
+        ["create_notification_route"] = "Darling's head names the operator token and its send_resolutions, fallback and severities arguments; Lite has no token and no field for them, and its head says the write switch that serves it.",
+        ["update_notification_route"] = "Darling's head names the operator token, the agent fields and the arguments Lite has no field for; Lite's head says what it can change and that an agent route is refused.",
+        ["set_notification_route_enabled"] = "Darling's head still says a route cannot be authored or re-pointed; on Lite create_notification_route and update_notification_route now do that.",
+    };
+
     [Fact]
     public void EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads()
     {
@@ -90,6 +99,12 @@ public sealed class McpToolGuideTests
             }
 
             if (!darlingConverted)
+            {
+                continue;
+            }
+
+            /* Both SKUs carry the marker (checked above); only the head comparison is skipped, for a head that is false on one SKU. */
+            if (SkuSpecificHeads.ContainsKey(tool))
             {
                 continue;
             }
