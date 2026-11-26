@@ -448,7 +448,7 @@ public static partial class DarlingCliCommands
             /* A file this call created and could not finish is removed, so no partial key is left behind; one it never
                created (another process got there first) is not this call's to touch. */
             var leftover = "";
-            if (created)
+            if (created && path is not null)
             {
                 try
                 {
