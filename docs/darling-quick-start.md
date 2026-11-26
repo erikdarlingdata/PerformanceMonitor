@@ -90,7 +90,21 @@ The compose file sets no TLS on the store, so this connection is not encrypted. 
 
 **systemd + bring-your-own PostgreSQL.** The tarball is framework-dependent, not self-contained. The host needs the ASP.NET Core 10 runtime and the .NET 10 runtime, from <https://dotnet.microsoft.com/download/dotnet/10.0>. The container image carries both already.
 
-Download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL, at or above the minimum version in [Prerequisites](darling/install.md#prerequisites), with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under a unit like:
+Download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL, at or above the minimum version in [Prerequisites](darling/install.md#prerequisites), with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under the unit below. Create the service user and the folders it writes first, because the unit runs as that user and it cannot create them under `/usr/share` or `/etc` itself:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin darling
+sudo mkdir -p /etc/darling/darling-keys
+sudo mkdir -p /usr/share/PerformanceMonitorDarling/logs
+sudo chown darling:darling /etc/darling/darling-keys
+sudo chown -R darling:darling /usr/share/PerformanceMonitorDarling
+sudo chmod 700 /etc/darling/darling-keys
+sudo chmod 700 /usr/share/PerformanceMonitorDarling/logs
+```
+
+`darling-keys` is where the service keeps its secret key pair (the `password-key` file) and its log-hash key (the `log-hash-key` file). It sits beside `darling.json`, so if your config is not in `/etc/darling`, create the folder next to it. The service checks that the folder is owner-only and that the user owns the files in it, and it keeps its keys there across restarts, so back it up (see [Security](darling/security.md)). The file log goes to `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`. Without that folder the service still runs, but it writes no log file and says `File logging is disabled` at start.
+
+The unit:
 
 ```ini
 [Unit]
