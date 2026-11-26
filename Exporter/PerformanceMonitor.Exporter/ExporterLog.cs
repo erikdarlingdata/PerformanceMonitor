@@ -3,8 +3,9 @@ namespace PerformanceMonitor.Exporter;
 /// <summary>
 /// The exporter's diagnostic output on stderr. A line that explains the run to its reader (a warning about a limit the
 /// login cannot set) is written once per process. A line that only helps someone debugging the exporter (the session
-/// guards applied on each connection, a stack trace) is written only when <see cref="Verbose"/> is on, which the
-/// `--verbose` flag of `export` and `run` turns on.
+/// guards applied on each connection) is written only when <see cref="Verbose"/> is on, which the `--verbose` flag of
+/// `export` and `run` turns on. A failure's stack trace is written to stdout whenever stdout is redirected, and to an
+/// interactive console only with <see cref="Verbose"/>.
 /// </summary>
 public static class ExporterLog
 {
@@ -49,12 +50,16 @@ public static class ExporterLog
     }
 
     /// <summary>
-    /// The text of a failure: each exception in the chain as its type and message, and the stack traces too only with
-    /// <see cref="Verbose"/>. The chain names the layer that raised the error without printing frames.
+    /// The text of a failure. The full exception, stack frames included, when stdout is not an interactive console (the
+    /// scheduler keeps a child's stdout in the run's log, so a bug in a scheduled run stays diagnosable) or with
+    /// <see cref="Verbose"/>. An interactive console gets each exception in the chain as its type and message alone, which
+    /// names the layer that raised the error without printing frames.
     /// </summary>
-    public static string DescribeFailure(Exception ex)
+    /// <param name="ex">The failure.</param>
+    /// <param name="stdoutIsConsole">True when stdout is an interactive console, false when it is redirected to a pipe or a file.</param>
+    public static string DescribeFailure(Exception ex, bool stdoutIsConsole)
     {
-        if (Verbose)
+        if (Verbose || !stdoutIsConsole)
         {
             return ex.ToString();
         }

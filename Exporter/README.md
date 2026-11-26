@@ -17,7 +17,7 @@ darling-export explain-gate --tables <a,b,c> --from <ISO UTC> --to <ISO UTC> [--
 ```
 
 Run `darling-export` with no verb, or `darling-export --help`, to print the usage with every `export` option.
-`--verbose` on `export` and `run` also prints the session-guard lines and full stack traces. Without it a run prints each warning once and a failure as its exception chain.
+`--verbose` on `export` and `run` also prints the session-guard lines and, on an interactive console, the full stack trace of a failure. Without it a run prints each warning once and a failure on a console as its exception chain. A failure with stdout redirected, as in a scheduled run, always prints the full exception to stdout.
 
 ### `run`
 

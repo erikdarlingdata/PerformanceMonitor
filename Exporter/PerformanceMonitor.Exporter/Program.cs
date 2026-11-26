@@ -52,11 +52,11 @@ catch (Exception ex) when (ex is ConfigException or CredentialException)
 }
 catch (Exception ex)
 {
-    // The exception chain (each type and message) goes to stdout, which the scheduler keeps in the run's log, so a failure
-    // names the layer that raised it: a bare "The operation has timed out" can come from a connection open, a read or an
-    // upload. The stack frames follow only with --verbose. stderr stays one line, because the scheduler records it as the
-    // family's last error and the stale alert quotes it, so the line only gains the exception types.
-    Console.Out.WriteLine(ExporterLog.DescribeFailure(ex));
+    // The failure goes to stdout, which the scheduler keeps in the run's log: the full exception, stack frames included, when
+    // stdout is redirected, so a bug in a scheduled run stays diagnosable. An interactive console gets the chain of types and
+    // messages alone unless --verbose is given. stderr stays one line, because the scheduler records it as the family's last
+    // error and the stale alert quotes it, so the line only gains the exception types.
+    Console.Out.WriteLine(ExporterLog.DescribeFailure(ex, stdoutIsConsole: !Console.IsOutputRedirected));
     var types = ex.GetType().Name + (ex.InnerException is { } inner ? " <- " + inner.GetType().Name : "");
     Console.Error.WriteLine($"Export failed: {ex.Message} ({types})");
     return 1;

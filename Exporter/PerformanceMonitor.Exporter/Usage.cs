@@ -41,7 +41,7 @@ public static class Usage
         new("--query-store-source", "<raw|wide|compare>", "Where the Query Store window is read from."),
         new("--query-store-lag-hours", "<1|2|3>", "How many hours behind the Query Store window runs."),
         new("--fresh-guard-minutes", "<2-15>", "Margin before now that a fresh window must stay behind."),
-        new("--verbose", null, "Also print the session-guard lines and full stack traces."),
+        new("--verbose", null, "Also print the session-guard lines, and on an interactive console the full stack trace of a failure."),
     ];
 
     /// <summary>The usage text: the verbs, then every `export` flag.</summary>

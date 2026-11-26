@@ -15,10 +15,13 @@ namespace PerformanceMonitor.Exporter.Tests;
 /// </summary>
 public sealed class OutputContractTests
 {
-    private static (int Exit, string Out, string Err) RunTool(params string[] args)
+    private static (int Exit, string Out, string Err) RunTool(params string[] args) => RunTool(new Dictionary<string, string>(), args);
+
+    private static (int Exit, string Out, string Err) RunTool(IReadOnlyDictionary<string, string> environment, params string[] args)
     {
         var dll = Path.Combine(AppContext.BaseDirectory, "darling-export.dll");
         var psi = new ProcessStartInfo("dotnet") { RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var (key, value) in environment) { psi.Environment[key] = value; }
         psi.ArgumentList.Add(dll);
         foreach (var a in args) { psi.ArgumentList.Add(a); }
         using var p = Process.Start(psi)!;
@@ -104,27 +107,81 @@ public sealed class OutputContractTests
         }
     }
 
+    private static Exception Thrown()
+    {
+        try { throw new InvalidOperationException("outer", new TimeoutException("inner")); }
+        catch (Exception ex) { return ex; }
+    }
+
     [Fact]
-    public void A_failure_prints_the_exception_chain_and_the_stack_frames_only_with_verbose()
+    public void An_interactive_console_gets_the_exception_chain_without_stack_frames()
     {
         ExporterLog.Reset();
         try
         {
-            Exception failure;
-            try { throw new InvalidOperationException("outer", new TimeoutException("inner")); }
-            catch (Exception ex) { failure = ex; }
-
-            var quiet = ExporterLog.DescribeFailure(failure);
-            Assert.Contains("InvalidOperationException: outer", quiet);
-            Assert.Contains("TimeoutException: inner", quiet);
-            Assert.DoesNotContain("   at ", quiet);
-
-            ExporterLog.Verbose = true;
-            Assert.Contains("   at ", ExporterLog.DescribeFailure(failure));
+            var text = ExporterLog.DescribeFailure(Thrown(), stdoutIsConsole: true);
+            Assert.Contains("InvalidOperationException: outer", text);
+            Assert.Contains("TimeoutException: inner", text);
+            Assert.DoesNotContain("   at ", text);
         }
         finally
         {
             ExporterLog.Reset();
+        }
+    }
+
+    [Fact]
+    public void An_interactive_console_gets_the_stack_frames_with_verbose()
+    {
+        ExporterLog.Reset();
+        try
+        {
+            ExporterLog.Verbose = true;
+            Assert.Contains("   at ", ExporterLog.DescribeFailure(Thrown(), stdoutIsConsole: true));
+        }
+        finally
+        {
+            ExporterLog.Reset();
+        }
+    }
+
+    [Fact]
+    public void A_redirected_stdout_gets_the_full_exception_without_verbose()
+    {
+        ExporterLog.Reset();
+        try
+        {
+            var text = ExporterLog.DescribeFailure(Thrown(), stdoutIsConsole: false);
+            Assert.Contains("InvalidOperationException: outer", text);
+            Assert.Contains("TimeoutException: inner", text);
+            Assert.Contains("   at ", text);
+        }
+        finally
+        {
+            ExporterLog.Reset();
+        }
+    }
+
+    [Fact]
+    public void A_failed_export_with_redirected_stdout_writes_the_stack_to_stdout_and_one_line_to_stderr()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "darling-export-fail-" + Guid.NewGuid().ToString("N")[..8]);
+        try
+        {
+            // Nothing listens on port 1, so the first store connection fails with an exception that is neither a usage nor a config error.
+            var (exit, output, err) = RunTool(
+                new Dictionary<string, string> { ["DARLING_EXPORT_PG_PASSWORD"] = "not-a-real-password" },
+                "export", "--store", "lab", "--from", "2026-10-22T11:00:00Z", "--to", "2026-10-22T12:00:00Z",
+                "--out", Path.Combine(home, "out"), "--state-dir", Path.Combine(home, "state"), "--tables", "perfmon_stats",
+                "--pg-host", "127.0.0.1", "--pg-port", "1", "--pg-database", "darling", "--pg-user", "reader");
+            Assert.Equal(1, exit);
+            Assert.Contains("   at ", output);
+            Assert.StartsWith("Export failed:", err.Trim());
+            Assert.Single(err.Trim().Split('\n'));
+        }
+        finally
+        {
+            if (Directory.Exists(home)) { Directory.Delete(home, recursive: true); }
         }
     }
 
