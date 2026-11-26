@@ -55,9 +55,9 @@ public sealed class McpHostService : BackgroundService
     public McpHostService(LocalDataService dataService, ServerManager serverManager, MuteRuleService muteRuleService, DuckDbInitializer duckDb, int port, IInvestigationRequestStore investigationStore,
         string? bearerToken, bool allowTokenlessLoopback, ScheduleManager? scheduleManager = null, bool allowWrites = false,
         bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full,
-        IPseudonymKeySource? pseudonymKeys = null)
+        IPseudonymKeySource? pseudonymKeys = null, bool allowServerAdmin = false)
     {
-        _serving = DecideServing(bearerToken, allowTokenlessLoopback, allowWrites, allowInvestigations);
+        _serving = DecideServing(bearerToken, allowTokenlessLoopback, allowWrites, allowInvestigations, allowServerAdmin);
         _currentToken = _serving.Token;
         _pseudonymKeys = pseudonymKeys;
         _dataService = dataService;
@@ -128,7 +128,7 @@ public sealed class McpHostService : BackgroundService
     /// <param name="Investigations">The investigation tools are served.</param>
     /// <param name="AskedWrites">The settings asked for the write tools.</param>
     /// <param name="AskedInvestigations">The settings asked for the investigation tools.</param>
-    internal readonly record struct McpServing(string? Token, bool Writes, bool Investigations, bool AskedWrites, bool AskedInvestigations)
+    internal readonly record struct McpServing(string? Token, bool Writes, bool Investigations, bool AskedWrites, bool AskedInvestigations, bool ServerAdmin = false)
     {
         /// <summary>The compiler-made <c>ToString</c> would print the token, so it shows only whether there is one.</summary>
         private bool PrintMembers(System.Text.StringBuilder builder)
@@ -151,7 +151,7 @@ public sealed class McpHostService : BackgroundService
     /// <paramref name="allowWrites"/> off (the writes SETTING, not whether they are served). It lives here, in the host's own
     /// constructor path, so no caller can skip it.
     /// </summary>
-    internal static McpServing DecideServing(string? bearerToken, bool allowTokenlessLoopback, bool allowWrites, bool allowInvestigations)
+    internal static McpServing DecideServing(string? bearerToken, bool allowTokenlessLoopback, bool allowWrites, bool allowInvestigations, bool allowServerAdmin = false)
     {
         if (!allowTokenlessLoopback && string.IsNullOrEmpty(bearerToken))
         {
@@ -167,7 +167,8 @@ public sealed class McpHostService : BackgroundService
             Writes: allowWrites && usable,
             Investigations: allowInvestigations && usable && !allowWrites,
             AskedWrites: allowWrites,
-            AskedInvestigations: allowInvestigations);
+            AskedInvestigations: allowInvestigations,
+            ServerAdmin: allowServerAdmin && allowWrites && usable);
     }
 
     /// <summary>
@@ -261,7 +262,7 @@ public sealed class McpHostService : BackgroundService
     /// </summary>
     internal static void RegisterMcpServer(IServiceCollection services, bool allowWrites,
         bool allowInvestigations = false, McpDataDetail dataDetail = McpDataDetail.Full, IPseudonymKeySource? pseudonymKeys = null,
-        McpServing? serving = null)
+        McpServing? serving = null, bool allowServerAdmin = false)
     {
         /* #6066: Lite's pseudonym key (Credential Manager), for the data-detail filter and the brief composer at metadataOnly. None: logins are numbered per answer. */
         if (pseudonymKeys is not null) services.AddSingleton<IPseudonymKeySource>(pseudonymKeys);
@@ -282,7 +283,7 @@ public sealed class McpHostService : BackgroundService
         /* The write switch (McpWritePolicy): once the SDK has gathered every registered tool, drop the writes
            unless mcp_allow_writes is on and stamp the annotation hints. Registered here, ahead of AddMcpServer,
            so it is a PostConfigure over the SDK's own options and sees the full tool set. */
-        services.AddMcpWritePolicy(allowWrites, serving);
+        services.AddMcpWritePolicy(allowWrites, serving, allowServerAdmin);
 
         /* Register MCP server with all tool classes */
         services
@@ -501,7 +502,7 @@ public sealed class McpHostService : BackgroundService
 
             /* The write switch and the SDK's tool registration live in RegisterMcpServer, the method the tests that
                drive tools/call also use (see there). */
-            RegisterMcpServer(builder.Services, _serving.Writes, _serving.Investigations, _dataDetail, _pseudonymKeys, _serving);
+            RegisterMcpServer(builder.Services, _serving.Writes, _serving.Investigations, _dataDetail, _pseudonymKeys, _serving, _serving.ServerAdmin);
 
             _app = builder.Build();
 

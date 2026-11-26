@@ -57,6 +57,13 @@ internal sealed class McpSettings
     public bool AllowWrites { get; set; } = false;
 
     /// <summary>
+    /// #9640: whether the server administration tools (<see cref="McpWritePolicy.ServerAdminTools"/>) are served on top of the writes.
+    /// Default OFF. Read from <c>mcp_allow_server_admin</c> (<see cref="McpWritePolicy.ServerAdminSetting"/>) at start, so a change needs a restart.
+    /// They need <see cref="AllowWrites"/> as well, the twin of Darling's <c>mcp.allowServerAdmin</c>.
+    /// </summary>
+    public bool AllowServerAdmin { get; set; } = false;
+
+    /// <summary>
     /// Whether the state-changing investigation tools (<see cref="McpInvestigationPolicy.InvestigationTools"/>, #5820; the two
     /// investigation reads are ordinary reads, #8461) are
     /// offered. Default OFF. Read from <c>mcp_allow_investigations</c> (<see cref="McpInvestigationPolicy.InvestigationsSetting"/>)
@@ -182,6 +189,16 @@ internal sealed class McpSettings
                 }
 
                 settings.AllowWrites = allowWrites.GetBoolean();
+            }
+
+            if (root.TryGetProperty(McpWritePolicy.ServerAdminSetting, out var allowServerAdmin))
+            {
+                if (allowServerAdmin.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return Lost(WrongKind(McpWritePolicy.ServerAdminSetting, allowServerAdmin, "true or false"));
+                }
+
+                settings.AllowServerAdmin = allowServerAdmin.GetBoolean();
             }
 
             if (root.TryGetProperty("mcp_allow_investigations", out var allowInvestigations))

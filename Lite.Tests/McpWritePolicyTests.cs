@@ -89,7 +89,8 @@ public sealed class McpWritePolicyTests
         Assert.True(registered.Length > 80, "the registered tool set should be the full Lite surface");
 
         var readOnly = McpToolClassification.ReadOnlyTools;
-        var writes = McpWritePolicy.WriteTools;
+        /* #9640: the server administration tools are writes too, served by their own switch as well. */
+        var writes = McpWritePolicy.WriteTools.Union(McpWritePolicy.ServerAdminTools).ToHashSet();
 
         /* #5820: claim and submit are the third set, as on Darling: they change only investigation state, so they are neither
            reads nor WriteTools (which mcp_allow_writes serves). McpInvestigationPolicy serves them by name and McpWritePolicy
@@ -213,7 +214,7 @@ public sealed class McpWritePolicyTests
         Assert.DoesNotContain("mute_analysis_finding", names);
         Assert.DoesNotContain("unmute_analysis_finding", names);
         Assert.DoesNotContain(names, McpWritePolicy.IsWrite);
-        Assert.Equal(all.Count - McpWritePolicy.WriteTools.Count, served.Count);
+        Assert.Equal(all.Count - McpWritePolicy.WriteTools.Count - McpWritePolicy.ServerAdminTools.Count, served.Count);
         Assert.Contains("list_servers", names);
         Assert.Contains("analyze_server", names);
     }
@@ -227,10 +228,10 @@ public sealed class McpWritePolicyTests
     {
         var all = RegisteredTools();
         var defaultServed = McpWritePolicy.FilterToolCollection(all, allowWrites: false);
-        var writesServed = McpWritePolicy.FilterToolCollection(all, allowWrites: true);
+        var writesServed = McpWritePolicy.FilterToolCollection(all, allowWrites: true, allowServerAdmin: true);
 
         Assert.Equal(all.Count, writesServed.Count);
-        Assert.Equal(McpWritePolicy.WriteTools.Count, all.Count - defaultServed.Count);
+        Assert.Equal(McpWritePolicy.WriteTools.Count + McpWritePolicy.ServerAdminTools.Count, all.Count - defaultServed.Count);
 
         /* #5820, #8461: the two tools that claim and report are served only by their own setting (McpInvestigationPolicy), so the default
            count leaves them out too. */
@@ -238,7 +239,7 @@ public sealed class McpWritePolicyTests
 
         var text = McpInstructions.Text;
         Assert.Contains($"{all.Count} tools ({defaultCount} by default; `{McpWritePolicy.WritesSetting}` adds ", text, StringComparison.Ordinal);
-        foreach (var name in McpWritePolicy.WriteTools)
+        foreach (var name in McpWritePolicy.WriteTools.Concat(McpWritePolicy.ServerAdminTools))
         {
             Assert.Contains($"`{name}`", text, StringComparison.Ordinal);
         }
@@ -259,7 +260,7 @@ public sealed class McpWritePolicyTests
             $"## Tools\n\n{served.Count} tools ({catalog.Count} in the catalog; `{McpWritePolicy.WritesSetting}` is off, so the " +
             $"{catalog.Count - served.Count} write tools are not served): discovery/health",
             text, StringComparison.Ordinal);
-        Assert.Equal(McpWritePolicy.WriteTools.Count, catalog.Count - served.Count);
+        Assert.Equal(McpWritePolicy.WriteTools.Count + McpWritePolicy.ServerAdminTools.Count, catalog.Count - served.Count);
         Assert.DoesNotContain($"{catalog.Count} tools (", text, StringComparison.Ordinal);
     }
 
@@ -268,11 +269,11 @@ public sealed class McpWritePolicyTests
     {
         var all = RegisteredTools();
         var catalog = McpWritePolicy.ToolNames(all);
-        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites: true));
+        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites: true, allowServerAdmin: true));
 
         var text = McpInstructions.Build(catalog, served);
         Assert.Contains(
-            $"## Tools\n\n{catalog.Count} tools (the {McpWritePolicy.WriteTools.Count} write tools included: " +
+            $"## Tools\n\n{catalog.Count} tools (the {McpWritePolicy.WriteTools.Count + McpWritePolicy.ServerAdminTools.Count} write tools included: " +
             $"`{McpWritePolicy.WritesSetting}` is on): discovery/health",
             text, StringComparison.Ordinal);
         Assert.DoesNotContain("in the catalog", text, StringComparison.Ordinal);
@@ -396,7 +397,7 @@ public sealed class McpWritePolicyTests
         var before = narrowed.Count;
         McpWritePolicy.Apply(narrowed, allowWrites: false);
 
-        Assert.Equal(before - McpWritePolicy.WriteTools.Count, narrowed.Count);
+        Assert.Equal(before - McpWritePolicy.WriteTools.Count - McpWritePolicy.ServerAdminTools.Count, narrowed.Count);
         Assert.All(narrowed, tool =>
         {
             Assert.NotNull(tool.ProtocolTool.Annotations);

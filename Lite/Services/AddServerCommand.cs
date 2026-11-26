@@ -341,10 +341,10 @@ internal static class AddServerCommand
         return JsonValueKind.Undefined;
     }
 
-    private static string EncryptRefusal(string word) =>
+    internal static string EncryptRefusal(string word) =>
         $"encrypt_mode '{word}' is not supported here. Use Optional, Mandatory or Strict.";
 
-    private static string AuthRefusal(string word) =>
+    internal static string AuthRefusal(string word) =>
         $"Authentication '{word}' is not supported here. Use windows, sql, serviceprincipal, managedidentity or entradefault. "
         + "Microsoft Entra MFA and device code need someone to sign in, which this verb does not have: add that server in the window.";
 

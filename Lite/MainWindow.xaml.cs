@@ -1049,7 +1049,7 @@ public partial class MainWindow : Window
                     $"To serve without a token as before, set {McpSettings.AllowTokenlessLoopbackSetting} to true in settings.json.");
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, mcpToken, mcpSettings.AllowTokenlessLoopback, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys);
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, mcpToken, mcpSettings.AllowTokenlessLoopback, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys, mcpSettings.AllowServerAdmin);
             _mcpDataDetail = mcpSettings.DataDetail;
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }
