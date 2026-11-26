@@ -68,11 +68,14 @@ Only with `web.allowTokenlessLoopback` on does a loopback-only dashboard skip th
 
 The **Availability Groups** link stays hidden until the store holds AG data. The `#/ag` route works regardless.
 
-To check from a script, sign in first. `/api/ping` is behind the same sign-in as every other `/api` route, on every listener of the dashboard, loopback included. A call with no session cookie answers HTTP 401 with `{"error":"session expired","login":"/"}`. A script signs in with a form POST of the token to `/auth/login` and then presents the session cookie it gets back. For a check that needs no sign-in, use the [health port](network-endpoints.md#the-health-port) (`/livez` and `/readyz`). It is off by default, and on Docker Compose it also needs a `ports:` entry for its port in `docker-compose.yml`.
+To check from a script, sign in first. `/api/ping` is behind the same sign-in as every other `/api` route, on every listener of the dashboard, loopback included, unless `web.allowTokenlessLoopback` is on. A call with no session cookie answers HTTP 401 with `{"error":"session expired","login":"/"}`. A script signs in with a form POST of the token, in a field named `token`, to `/auth/login`, and then presents the session cookie it gets back. For a check that needs no sign-in, use the [health port](network-endpoints.md#the-health-port) (`/livez` and `/readyz`). It is off by default, and on Docker Compose it also needs a `ports:` entry for its port in `docker-compose.yml`.
 
-With the session cookie held in a web session (`$session` here), the call is:
+On the service host, run this from an elevated PowerShell. It reads the token with `--print-web-token` and keeps the session cookie in `$session`:
 
 ```powershell
+$token = (& "C:\Program Files\PerformanceMonitorDarling\PerformanceMonitor.Darling.Service.exe" --print-web-token).Trim()
+$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+Invoke-WebRequest http://localhost:5153/auth/login -Method Post -Body @{ token = $token } -WebSession $session | Out-Null
 Invoke-RestMethod http://localhost:5153/api/ping -WebSession $session
 ```
 

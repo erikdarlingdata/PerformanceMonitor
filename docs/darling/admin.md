@@ -301,6 +301,7 @@ A background copy then moves the older rows into the new table. It starts a few 
 While the copy runs, the store needs about as much free disk space as the old table, because both tables exist. The old table is dropped when the copy ends and the space comes back.
 
 To see the progress, read the one row in `collect.attention_events_legacy_copy`. `next_page` is the next page of the old table to copy and `last_page` is the page count of the old table when the copy began. The copy is done when the row is gone and `collect.attention_events_legacy` no longer exists. A restart resumes at `next_page` and copies no row twice. If the final drop cannot get its lock in 5 seconds, the copy leaves the row and the old table in place and tries the drop again later.
+
 ### Compose upgrade
 
 A compose upgrade replaces the folder you run `docker compose` from, and keeps the two volumes. The archive of each release carries its own `docker-compose.yml`, and the file changes between releases. From v3.13.0 to 3.14 it changes the store image tag (`latest-pg17` to a pinned `2.32.1-pg17`), the flags on the store's command line, the `POSTGRES_INITDB_ARGS` line and the `darling` image tag. `POSTGRES_INITDB_ARGS` applies to a new volume only, so an existing store keeps its collation. The release's archive also carries a new `setup.sh` and `secrets/README.md`. An upgrade that keeps the old `docker-compose.yml` runs the old images and the old store flags.
