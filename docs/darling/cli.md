@@ -151,7 +151,7 @@ PerformanceMonitor.Darling.Service.exe --set-login-password --username monitor -
 PerformanceMonitor.Darling.Service.exe --set-login-password --username monitor
 ```
 
-The password is read from stdin, as one line. Pipe it in from a password manager, or type it at the prompt, where it is not shown. It is never an argument or an environment variable, and it is never printed or logged. An argument that is not one of the flags is refused and is not repeated in the message. `--username` is compared exactly, capitals included.
+The password is read from stdin, as one line. Pipe it in from a password manager, or type it at the prompt, where it is not shown. It is never an argument or an environment variable, and it is never printed or logged. A value that is not one of the flags is refused and is not repeated in the message. An unknown option that starts with `--` is refused and named in the message, so never put the password after the verb. `--username` is compared exactly, capitals included.
 
 The verb prints one line for each server that uses the login: the server, the login, and what it does.
 
