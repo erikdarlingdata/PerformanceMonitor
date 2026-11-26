@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +19,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Notifications;
 using Xunit;
 using Edit = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools;
 
@@ -195,6 +197,144 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal(0, store.Writes);
     }
 
+    /* #9635: the MCP tool's parse allows the two per-server settings the Viewer's dialog sets. The web route's parse (the default) does not. */
+    private static async Task<(string Answer, FakeStore Store)> RunSettings(string changes, Edit.ServerEditRow? row = null)
+    {
+        var store = new FakeStore { Row = row ?? SqlRow() };
+        var (parsed, error) = Edit.ParseEditChanges(changes, allowSettings: true);
+        if (error is not null)
+        {
+            return (JsonSerializer.Serialize(new { status = "invalid", message = error }), store);
+        }
+
+        var answer = await Edit.EditServerCoreAsync(store, 41, parsed!, ThrowingProbe, TestKeyRings.Healthy, null, CancellationToken.None);
+        return (answer, store);
+    }
+
+    [Theory]
+    [InlineData("{\"capture_plans\":true}", "capture_plans", true)]
+    [InlineData("{\"capture_plans\":false}", "capture_plans", false)]
+    [InlineData("{\"alert_delivery_mode_override\":\"PerEvent\"}", "alert_delivery_mode_override", "PerEvent")]
+    [InlineData("{\"alert_delivery_mode_override\":\"summary\"}", "alert_delivery_mode_override", "Summary")]
+    public async Task ThePerServerSettings_AreWrittenWithTheValuesTheViewerStores_WithNoProbe(string changes, string column, object expected)
+    {
+        var (answer, store) = await RunSettings(changes);
+
+        Assert.Equal("updated", Status(answer));
+        var set = Assert.Single(store.LastSets);
+        Assert.Equal(column, set.Column);
+        Assert.Equal(expected, set.Value);
+        Assert.Contains(column, JsonNode.Parse(answer)!["changed"]!.AsArray().Select(n => n!.GetValue<string>()));
+        Assert.False(JsonNode.Parse(answer)!["reconnects"]!.GetValue<bool>());
+        Assert.False(JsonNode.Parse(answer)!["tested"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task ANullSetting_ClearsTheOverride_AndThePreviousValuesAreReturned()
+    {
+        var (text, store) = await RunSettings(
+            "{\"capture_plans\":null,\"alert_delivery_mode_override\":null}",
+            SqlRow() with { CapturePlans = true, AlertDeliveryModeOverride = "PerEvent" });
+        var answer = JsonNode.Parse(text)!;
+
+        Assert.Equal("updated", answer["status"]!.GetValue<string>());
+        Assert.Equal(2, store.LastSets.Count);
+        Assert.All(store.LastSets, set => Assert.Null(set.Value));
+        Assert.True(answer["previous"]!["capture_plans"]!.GetValue<bool>());
+        Assert.Equal("PerEvent", answer["previous"]!["alert_delivery_mode_override"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task ASettingEqualToTheStoredValue_IsUnchanged_AndNothingIsWritten()
+    {
+        var (answer, store) = await RunSettings(
+            "{\"capture_plans\":false,\"alert_delivery_mode_override\":\"Summary\"}",
+            SqlRow() with { CapturePlans = false, AlertDeliveryModeOverride = "Summary" });
+
+        Assert.Equal("unchanged", Status(answer));
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Theory]
+    [InlineData("{\"capture_plans\":\"yes\"}", "capture_plans must be true, false, or null")]
+    [InlineData("{\"capture_plans\":1}", "capture_plans must be true, false, or null")]
+    [InlineData("{\"alert_delivery_mode_override\":\"Bogus\"}", "alert_delivery_mode_override must be")]
+    [InlineData("{\"alert_delivery_mode_override\":\"1\"}", "alert_delivery_mode_override must be")]
+    [InlineData("{\"alert_delivery_mode_override\":true}", "alert_delivery_mode_override must be")]
+    public async Task AnInvalidSettingValue_IsRefusedWithAClearMessage_AndNothingIsWritten(string changes, string message)
+    {
+        var (answer, store) = await RunSettings(changes);
+
+        Assert.Equal("invalid", Status(answer));
+        Assert.Contains(message, answer, StringComparison.Ordinal);
+        Assert.Equal(0, store.Writes);
+    }
+
+    /* #9635: add_servers takes the same two settings, with the values and the refusals edit_server gives. */
+    [Theory]
+    [InlineData("\"capture_plans\":true", true, null)]
+    [InlineData("\"capture_plans\":false", false, null)]
+    [InlineData("\"capture_plans\":null", null, null)]
+    [InlineData("\"alert_delivery_mode_override\":\"PerEvent\"", null, AlertNotificationMode.PerEvent)]
+    [InlineData("\"alert_delivery_mode_override\":\" summary \"", null, AlertNotificationMode.Summary)]
+    [InlineData("\"alert_delivery_mode_override\":null", null, null)]
+    [InlineData("\"unrelated\":1", null, null)]
+    public void AnAddedEntry_CarriesTheTwoSettingsToTheInsert_AndNullWhenItNamesNone(string keys, bool? capture, AlertNotificationMode? delivery)
+    {
+        var (entries, invalid, whole) = Edit.ParseRequest("[{\"host\":\"sql01\"," + keys + "}]");
+
+        Assert.Null(whole);
+        Assert.Empty(invalid);
+        var config = Assert.Single(entries).ProbeConfig;
+        Assert.Equal(capture, config.CapturePlans);
+        Assert.Equal(delivery, config.AlertDeliveryModeOverride);
+    }
+
+    [Theory]
+    [InlineData("\"capture_plans\":\"yes\"", "capture_plans must be true, false, or null")]
+    [InlineData("\"capture_plans\":1", "capture_plans must be true, false, or null")]
+    [InlineData("\"alert_delivery_mode_override\":\"Bogus\"", "alert_delivery_mode_override must be")]
+    [InlineData("\"alert_delivery_mode_override\":\"1\"", "alert_delivery_mode_override must be")]
+    [InlineData("\"alert_delivery_mode_override\":true", "alert_delivery_mode_override must be")]
+    public void AnAddedEntryWithAnInvalidSetting_IsRefusedWithTheMessageEditServerGives(string keys, string message)
+    {
+        var (entries, invalid, whole) = Edit.ParseRequest("[{\"host\":\"sql01\"," + keys + "}]");
+
+        Assert.Null(whole);
+        Assert.Empty(entries);
+        var refused = Assert.Single(invalid);
+        Assert.Equal("invalid", refused.Status);
+        Assert.StartsWith(message, refused.Detail, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("excluded_databases")]
+    [InlineData("is_enabled")]
+    [InlineData("plan_force_bot_enabled")]
+    public async Task AKeyStillOnTheRefusedList_StillRefuses_BesideAllowedSettings(string key)
+    {
+        var (answer, store) = await RunSettings("{\"capture_plans\":true,\"" + key + "\":1}");
+
+        Assert.Equal("invalid", Status(answer));
+        Assert.Contains(key, answer, StringComparison.Ordinal);
+        Assert.Contains("cannot be changed here", answer, StringComparison.Ordinal);
+        Assert.Equal(0, store.Writes);
+    }
+
+    [Fact]
+    public void TheSettingColumns_AreLeftOutOfTheFunctionsColumnList()
+    {
+        var parameters = Edit.BuildEditFunctionParameters(
+            41, Stamp,
+            [
+                new Edit.EditColumnValue("display_name", "name", NpgsqlDbType.Text, "x"),
+                new Edit.EditColumnValue("capture_plans", "capture_plans", NpgsqlDbType.Boolean, true),
+            ]);
+
+        Assert.Equal(new[] { "name" }, (string[])parameters[2].Value!);
+        Assert.Equal(18, parameters.Count);
+    }
+
     [Fact]
     public void AnUnknownKey_IsRefused_NamingTheEditableKeys_AndNeverEchoingAValue()
     {
@@ -268,12 +408,12 @@ public sealed class ServerEditCoreTests : IDisposable
     {
         var forbidden = new[]
         {
-            "server_id", "engine", "is_enabled", "excluded_databases", "capture_plans", "alert_delivery_mode_override",
+            "server_id", "engine", "is_enabled", "excluded_databases",
             "plan_force_bot_enabled", "remediation_username", "remediation_encrypted_password", "created_at",
         };
 
         Assert.Empty(Edit.EditColumnOfField.Values.Intersect(forbidden));
-        Assert.Equal(15, Edit.EditColumnOfField.Count);
+        Assert.Equal(17, Edit.EditColumnOfField.Count);
     }
 
     [Fact]
@@ -295,7 +435,7 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal(DBNull.Value, parameters[4].Value);
         Assert.DoesNotContain("encrypted_password", Edit.EditFunctionSql, StringComparison.Ordinal);
         Assert.Equal(
-            Edit.EditColumnOfField.Values.Order(StringComparer.Ordinal).ToArray(),
+            Edit.EditColumnOfField.Values.Except(["capture_plans", "alert_delivery_mode_override"]).Order(StringComparer.Ordinal).ToArray(),
             Edit.EditFunctionColumns.Select(c => c.Column).Order(StringComparer.Ordinal).ToArray());
     }
 

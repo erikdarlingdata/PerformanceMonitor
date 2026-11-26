@@ -9,9 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using PerformanceMonitor.Common;
 
-namespace PerformanceMonitor.Darling.Service.Mcp;
+namespace PerformanceMonitor.Common;
 
 /// <summary>One <c>collect.object_usage_snapshots</c> row, reduced to what the window replay reads (#9349).</summary>
 /// <param name="CollectionTime">The snapshot's collection time, exactly as stored.</param>
