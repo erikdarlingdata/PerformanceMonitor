@@ -18,8 +18,8 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class RemoteCollectorService
 {
-    /* #9743: which servers the blocked process threshold bootstrap was tried on, so a refusal is logged once and not on every run. */
-    private readonly BlockedProcessThresholdBootstrap _blockedProcessThresholdBootstrap = new();
+    /* #9743: which servers refused the blocked process threshold bootstrap, so a refusal is logged once and not on every run. */
+    internal BlockedProcessThresholdBootstrap BlockedProcessThresholdBootstrap { get; } = new();
 
     /* The session name lives in the shared definition so the ring-buffer reader and this
        lifecycle code can never disagree on it. */
@@ -105,12 +105,13 @@ ALTER EVENT SESSION [{BlockedProcessXeSessionName}] ON SERVER STATE = START;";
     /// </summary>
     private async Task EnsureBlockedProcessXeSessionOnPremAsync(SqlConnection connection, ServerConnection server, CancellationToken cancellationToken)
     {
-        /* Check blocked process threshold and configure if needed. Once per server per process, and once more after the server's
-           connection settings change (#9743): a server that refuses it (AWS RDS has no sp_configure for it, or the login lacks
-           ALTER SETTINGS) refused it again on every run and was logged every minute. A refusal is tolerated, logged once with
-           the platform's remedy, and not repeated. */
+        /* Check blocked process threshold and configure if needed. A server that answers is read on every run, so one that
+           fails over to a replica with a threshold of 0 behind the same connection string is configured on the next run
+           (#9743). A server that refuses it (AWS RDS has no sp_configure for it, or the login lacks ALTER SETTINGS) is asked
+           once, and once more after its connection settings change. A refusal is tolerated, logged once with the platform's
+           remedy, and not repeated. */
         var thresholdChanged = false;
-        var bootstrap = await _blockedProcessThresholdBootstrap.RunAsync(GetServerId(server), connection.ConnectionString, async () =>
+        var bootstrap = await BlockedProcessThresholdBootstrap.RunAsync(GetServerId(server), connection.ConnectionString, async () =>
         {
             using var thresholdCmd = new SqlCommand(@"
 DECLARE

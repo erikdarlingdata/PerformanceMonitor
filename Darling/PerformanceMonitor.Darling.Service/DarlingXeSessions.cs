@@ -783,9 +783,11 @@ ALTER EVENT SESSION [{BlockedProcessReportCollector.XeSessionName}] ON SERVER ST
     private static async Task<bool> EnsureBlockedProcessOnPremAsync(
         SqlConnection connection, ServerRuntime server, DarlingCollectorRunner runner, int ringBufferMaxEvents, ILogger? logger, CancellationToken cancellationToken)
     {
-        /* Blocked process threshold bootstrap, once per server per process and once more after the server's connection settings change
-           (#9743): sp_configure is unavailable on AWS RDS (parameter groups there), and a login without ALTER SETTINGS is refused too.
-           The refusal is tolerated, logged once with the platform's remedy, and not repeated (mirrors Lite). */
+        /* Blocked process threshold bootstrap. A server that answers is read on every ensure, so one that fails over to a replica
+           with a threshold of 0 behind the same connection string is configured on the next ensure (#9743). A server that refuses it
+           is asked once per process and once more after its connection settings change: sp_configure is unavailable on AWS RDS
+           (parameter groups there), and a login without ALTER SETTINGS is refused too. The refusal is tolerated, logged once with
+           the platform's remedy, and not repeated (mirrors Lite). */
         var bootstrap = await runner.BlockedProcessThresholdBootstrap.RunAsync(server.ServerId, server.ConnectionString, async () =>
         {
             using var thresholdCmd = new SqlCommand(@"

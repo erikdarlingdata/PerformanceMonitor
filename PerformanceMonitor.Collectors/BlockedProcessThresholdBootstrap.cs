@@ -18,8 +18,8 @@ namespace PerformanceMonitor.Collectors;
 /// <summary>What <see cref="BlockedProcessThresholdBootstrap.RunAsync"/> did for one ensure of the blocked-process session (#9743).</summary>
 public enum BlockedProcessThresholdOutcome
 {
-    /// <summary>This server was already tried under these connection settings in this process. Nothing was sent to it.</summary>
-    AlreadyTried,
+    /// <summary>This server already refused the batch under these connection settings in this process. Nothing was sent to it.</summary>
+    AlreadyRefused,
 
     /// <summary>The server read 0 and the batch set the threshold to 5 seconds.</summary>
     Configured,
@@ -27,7 +27,7 @@ public enum BlockedProcessThresholdOutcome
     /// <summary>The server already had a threshold. The batch changed nothing.</summary>
     AlreadySet,
 
-    /// <summary>The server refused the batch (the login lacks ALTER SETTINGS, or the platform has no sp_configure for it). It is not asked again.</summary>
+    /// <summary>The server refused the batch (the login lacks ALTER SETTINGS, or the platform has no sp_configure for it). It is not asked again under these connection settings.</summary>
     Refused,
 
     /// <summary>The batch failed on a timeout or a dropped connection, which says nothing about the server. It is asked again on the next ensure.</summary>
@@ -38,41 +38,43 @@ public enum BlockedProcessThresholdOutcome
 public readonly record struct BlockedProcessThresholdResult(BlockedProcessThresholdOutcome Outcome, DbException? Refusal = null);
 
 /// <summary>
-/// The once-per-server decision behind the blocked process threshold bootstrap, shared by Lite and Darling (#9743). Both products
+/// The refusal memory behind the blocked process threshold bootstrap, shared by Lite and Darling (#9743). Both products
 /// ensure the blocked-process session on every run of its collector (Lite) or on every connect and hourly sweep (Darling), and the
 /// ensure sends <c>sp_configure 'blocked process threshold (s)'</c> to a server that reads 0. A server that refuses it (AWS RDS, or a
-/// login without ALTER SETTINGS) refused it again on every run and was logged each time. A server is now tried once per process and
-/// once more after its connection settings change, and the one failure carries the remedy for its platform.
+/// login without ALTER SETTINGS) is asked and logged once per process, and once more after its connection settings change, and the
+/// one failure carries the remedy for its platform. A server that did not refuse is read on every run: the read is one row of
+/// sys.configurations, and the server behind an unchanged connection string can change under it (an availability group listener
+/// that fails over to a replica whose threshold is 0), so the threshold is checked each time.
 /// </summary>
 public sealed class BlockedProcessThresholdBootstrap
 {
-    private readonly ConcurrentDictionary<int, string> _triedSettings = new();
+    private readonly ConcurrentDictionary<int, string> _refusedSettings = new();
 
     /// <summary>
-    /// Sends the bootstrap batch to the server unless it was already tried with these connection settings. <paramref name="sendBatch"/>
-    /// returns the threshold the server read before the batch ran: 0 means the batch set it to 5 seconds. A SQL Server error that is
-    /// not a timeout or a dropped connection (<paramref name="isTransient"/> says which each host's own classifier reads that way) counts
-    /// as the server's answer: it is returned as <see cref="BlockedProcessThresholdOutcome.Refused"/> with the error, and the server is
-    /// not asked again. Anything else (a cancellation, a non-SQL fault) propagates and leaves the server untried.
+    /// Sends the bootstrap batch to the server unless it already refused it with these connection settings. <paramref name="sendBatch"/>
+    /// returns the threshold the server read before the batch ran: 0 means the batch set it to 5 seconds. A server that answers is
+    /// not recorded, so the next run reads its threshold again. A SQL Server error that is not a timeout or a dropped connection
+    /// (<paramref name="isTransient"/> says which each host's own classifier reads that way) counts as the server's refusal: it is
+    /// returned as <see cref="BlockedProcessThresholdOutcome.Refused"/> with the error, and the server is not asked again. Anything
+    /// else (a cancellation, a non-SQL fault) propagates and records nothing.
     /// </summary>
     public async Task<BlockedProcessThresholdResult> RunAsync(
         int serverId, string connectionSettings, Func<Task<int>> sendBatch, Func<DbException, bool> isTransient)
     {
         var settingsKey = KeyOf(connectionSettings);
-        if (_triedSettings.TryGetValue(serverId, out var tried) && string.Equals(tried, settingsKey, StringComparison.Ordinal))
+        if (_refusedSettings.TryGetValue(serverId, out var refused) && string.Equals(refused, settingsKey, StringComparison.Ordinal))
         {
-            return new(BlockedProcessThresholdOutcome.AlreadyTried);
+            return new(BlockedProcessThresholdOutcome.AlreadyRefused);
         }
 
         try
         {
             var threshold = await sendBatch();
-            _triedSettings[serverId] = settingsKey;
             return new(threshold == 0 ? BlockedProcessThresholdOutcome.Configured : BlockedProcessThresholdOutcome.AlreadySet);
         }
         catch (DbException ex) when (!isTransient(ex))
         {
-            _triedSettings[serverId] = settingsKey;
+            _refusedSettings[serverId] = settingsKey;
             return new(BlockedProcessThresholdOutcome.Refused, ex);
         }
         catch (DbException)
@@ -81,8 +83,8 @@ public sealed class BlockedProcessThresholdBootstrap
         }
     }
 
-    /// <summary>Forgets what was tried for a server, so its next ensure sends the batch again.</summary>
-    public void Forget(int serverId) => _triedSettings.TryRemove(serverId, out _);
+    /// <summary>Forgets a server's refusal, so its next ensure sends the batch again. Called when the server is removed, so a re-added server is tried again.</summary>
+    public void Forget(int serverId) => _refusedSettings.TryRemove(serverId, out _);
 
     /// <summary>
     /// The one line logged when a server refuses the bootstrap: what failed, then the remedy for the platform. AWS RDS has no

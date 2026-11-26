@@ -10,14 +10,15 @@ using System;
 using System.Data.Common;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #9743: the once-per-server decision behind the blocked process threshold bootstrap that Lite and Darling share. A server that
-/// refuses the batch is asked and reported once, a server that answered is not asked again, a timeout or dropped connection is
-/// asked again, and a change to the connection settings asks again.
+/// #9743: the refusal memory behind the blocked process threshold bootstrap that Lite and Darling share. A server that refuses the
+/// batch is asked and reported once, a server that answered is read again on the next run, a timeout or dropped connection is
+/// asked again, a change to the connection settings asks again, and a removed server is asked again.
 /// </summary>
 public sealed class BlockedProcessThresholdBootstrapTests
 {
@@ -62,7 +63,7 @@ public sealed class BlockedProcessThresholdBootstrapTests
         for (var run = 0; run < 9; run++)
         {
             var later = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
-            Assert.Equal(BlockedProcessThresholdOutcome.AlreadyTried, later.Outcome);
+            Assert.Equal(BlockedProcessThresholdOutcome.AlreadyRefused, later.Outcome);
             refusals += later.Refusal is null ? 0 : 1;
         }
 
@@ -72,31 +73,47 @@ public sealed class BlockedProcessThresholdBootstrapTests
     }
 
     [Fact]
-    public async Task A_server_that_set_the_threshold_is_not_asked_again()
+    public async Task A_server_that_set_the_threshold_is_read_again_on_the_next_run()
     {
         var bootstrap = new BlockedProcessThresholdBootstrap();
-        var batch = Answers(0);
+        var batch = new Batch(attempt => Task.FromResult(attempt == 1 ? 0 : 5));
 
         var first = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
         var second = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
 
         Assert.Equal(BlockedProcessThresholdOutcome.Configured, first.Outcome);
-        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyTried, second.Outcome);
-        Assert.Equal(1, batch.Sent);
+        Assert.Equal(BlockedProcessThresholdOutcome.AlreadySet, second.Outcome);
+        Assert.Equal(2, batch.Sent);
     }
 
     [Fact]
-    public async Task A_server_that_already_had_a_threshold_is_not_asked_again()
+    public async Task A_server_that_already_had_a_threshold_is_read_again_on_every_run()
     {
         var bootstrap = new BlockedProcessThresholdBootstrap();
         var batch = Answers(5);
 
-        var first = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
-        var second = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
+        for (var run = 0; run < 3; run++)
+        {
+            var result = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
+            Assert.Equal(BlockedProcessThresholdOutcome.AlreadySet, result.Outcome);
+        }
 
-        Assert.Equal(BlockedProcessThresholdOutcome.AlreadySet, first.Outcome);
-        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyTried, second.Outcome);
-        Assert.Equal(1, batch.Sent);
+        Assert.Equal(3, batch.Sent);
+    }
+
+    /// <summary>An availability group listener fails over to a replica whose threshold is 0: the connection string is the same, and the next run sets it.</summary>
+    [Fact]
+    public async Task A_server_that_fails_over_to_a_replica_with_no_threshold_is_configured_on_the_next_run()
+    {
+        var bootstrap = new BlockedProcessThresholdBootstrap();
+        var batch = new Batch(attempt => Task.FromResult(attempt == 1 ? 5 : 0));
+
+        var primary = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
+        var replica = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
+
+        Assert.Equal(BlockedProcessThresholdOutcome.AlreadySet, primary.Outcome);
+        Assert.Equal(BlockedProcessThresholdOutcome.Configured, replica.Outcome);
+        Assert.Equal(2, batch.Sent);
     }
 
     [Fact]
@@ -108,9 +125,12 @@ public sealed class BlockedProcessThresholdBootstrapTests
 
         await bootstrap.RunAsync(1, Settings, refusing.SendAsync, IsTransient);
         var other = await bootstrap.RunAsync(2, Settings, accepting.SendAsync, IsTransient);
+        var refusedAgain = await bootstrap.RunAsync(1, Settings, refusing.SendAsync, IsTransient);
 
         Assert.Equal(BlockedProcessThresholdOutcome.Configured, other.Outcome);
         Assert.Equal(1, accepting.Sent);
+        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyRefused, refusedAgain.Outcome);
+        Assert.Equal(1, refusing.Sent);
     }
 
     [Fact]
@@ -124,9 +144,9 @@ public sealed class BlockedProcessThresholdBootstrapTests
         var changed = await bootstrap.RunAsync(1, "Data Source=one;User ID=another-login", batch.SendAsync, IsTransient);
         var changedAgain = await bootstrap.RunAsync(1, "Data Source=one;User ID=another-login", batch.SendAsync, IsTransient);
 
-        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyTried, unchanged.Outcome);
+        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyRefused, unchanged.Outcome);
         Assert.Equal(BlockedProcessThresholdOutcome.Refused, changed.Outcome);
-        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyTried, changedAgain.Outcome);
+        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyRefused, changedAgain.Outcome);
         Assert.Equal(2, batch.Sent);
     }
 
@@ -135,13 +155,38 @@ public sealed class BlockedProcessThresholdBootstrapTests
     {
         var bootstrap = new BlockedProcessThresholdBootstrap();
         var batch = Throws(Refusal());
+        var other = Throws(Refusal());
 
         await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
+        await bootstrap.RunAsync(2, Settings, other.SendAsync, IsTransient);
         bootstrap.Forget(1);
         var again = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
+        var untouched = await bootstrap.RunAsync(2, Settings, other.SendAsync, IsTransient);
 
         Assert.Equal(BlockedProcessThresholdOutcome.Refused, again.Outcome);
         Assert.Equal(2, batch.Sent);
+        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyRefused, untouched.Outcome);
+        Assert.Equal(1, other.Sent);
+    }
+
+    /// <summary>Removing a server in Lite clears its collector health, and its refusal goes with it, so the same server added again is asked again.</summary>
+    [Fact]
+    public async Task A_removed_servers_refusal_is_forgotten_in_lite()
+    {
+        var service = new RemoteCollectorService(duckDb: null!, serverManager: null!, scheduleManager: null!);
+        var batch = Throws(Refusal());
+        var other = Throws(Refusal());
+
+        await service.BlockedProcessThresholdBootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
+        await service.BlockedProcessThresholdBootstrap.RunAsync(2, Settings, other.SendAsync, IsTransient);
+        service.ClearHealthForServer(1);
+        var again = await service.BlockedProcessThresholdBootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
+        var untouched = await service.BlockedProcessThresholdBootstrap.RunAsync(2, Settings, other.SendAsync, IsTransient);
+
+        Assert.Equal(BlockedProcessThresholdOutcome.Refused, again.Outcome);
+        Assert.Equal(2, batch.Sent);
+        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyRefused, untouched.Outcome);
+        Assert.Equal(1, other.Sent);
     }
 
     [Fact]
@@ -154,12 +199,10 @@ public sealed class BlockedProcessThresholdBootstrapTests
 
         var timedOut = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
         var retried = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
-        var settled = await bootstrap.RunAsync(1, Settings, batch.SendAsync, IsTransient);
 
         Assert.Equal(BlockedProcessThresholdOutcome.Transient, timedOut.Outcome);
         Assert.Null(timedOut.Refusal);
         Assert.Equal(BlockedProcessThresholdOutcome.Configured, retried.Outcome);
-        Assert.Equal(BlockedProcessThresholdOutcome.AlreadyTried, settled.Outcome);
         Assert.Equal(2, batch.Sent);
     }
 

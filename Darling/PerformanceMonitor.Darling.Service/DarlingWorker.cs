@@ -952,6 +952,12 @@ public sealed partial class DarlingWorker : BackgroundService
         set => _selfAlerts = value;
     }
 
+    /// <summary>#9743: lets a test give the reconcile the runner ExecuteAsync builds, so a removed server's blocked process threshold refusal is dropped on it.</summary>
+    internal DarlingCollectorRunner? RunnerForTests
+    {
+        set => _runner = value;
+    }
+
     /// <summary>#5378: lets a live test give a worker the store ExecuteAsync would, so a run's row can be read back.</summary>
     internal NpgsqlDataSource? StoreForTests
     {

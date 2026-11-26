@@ -1606,6 +1606,8 @@ public sealed partial class DarlingWorker
                 _deltas?.ClearServer(id);
                 /* The RDS endpoint verdict and fresh login held for this id go with the server: a re-add checks again. */
                 _runner?.ForgetRdsVerdicts(id);
+                /* #9743: and its blocked process threshold refusal, so a re-add is asked again. */
+                _runner?.BlockedProcessThresholdBootstrap.Forget(id);
                 /* #5518: and the backfill's cached database list and the fence's database names for it. */
                 _queryStoreBackfill?.ForgetServer(id);
                 /* #4999: and its single-flight slots. The id is the registration's, so a re-add carries the same one, and a
