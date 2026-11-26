@@ -30,8 +30,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>built_version</c> with the <c>rules_version</c> it read at the start, so a rule written mid-rebuild leaves the map
 /// stale and the next pass rebuilds again. Otherwise the pass extends: it resolves only the keys whose sightings changed
 /// since this server's cursor, at most <see cref="MapKeysPerServerPerPass"/> a pass, and the remainder waits for the
-/// next one. A key with no sightings left (retention removed them) leaves the map at the next rebuild; the extend path
-/// never deletes.</para>
+/// next one. A rebuild also reads <c>collect.query_tag_sightings_slim</c> (#9705), where the retention purge keeps a sighting's key and
+/// short match fields until the key's usage rows age out, so a key leaves the map at the first rebuild after both are gone; the
+/// extend path never deletes. A slim row has no text sample, so a text rule tags a key only while it has a sighting.</para>
 ///
 /// <para><b>The cursor is in memory, and a copy is stored (#9308).</b> A server with no in-memory cursor (a fresh process,
 /// a newly listed server) first looks for the cursor the last process stored, and extends from it when the map it

@@ -979,15 +979,37 @@ public static class DarlingRetention
                tags, assignments and rules are configuration and the map is rebuilt from them, so retention never touches
                them. The cutoff is bound like the external alert purge below (the store's sessions are pinned to UTC).
                Failure-isolated like every sibling. */
+            /* #9705: the statement that deletes a slice of sightings also writes their slim rows (QueryTagSlimSightings.MoveExpiredSql), one
+               INSERT ... SELECT per slice over the rows the DELETE returned, so the move has the purge's slices, pacing and time budget and no
+               sighting is deleted without its slim row. */
+            var sightingsRetentionDays = QueryTagSightingsRetentionDays(widestFactRetentionDays, retentionDaysFor);
             var sightingsDeleted = await PurgeOneAsync(
                 postgres, "collect.query_tag_sightings",
-                TimeSlicedDeleteSql("collect.query_tag_sightings", "last_seen"),
-                utcNow.AddDays(-QueryTagSightingsRetentionDays(widestFactRetentionDays, retentionDaysFor)), logger, cancellationToken,
+                QueryTagSlimSightings.MoveExpiredSql(TimeSlicedDeleteSql("collect.query_tag_sightings", "last_seen")),
+                utcNow.AddDays(-sightingsRetentionDays), logger, cancellationToken,
                 pacer: walPacer);
             if (sightingsDeleted is not null)
             {
                 tablesPurged++;
                 totalRowsDeleted += sightingsDeleted.Value;
+            }
+            else
+            {
+                tablesFailed++;
+            }
+
+            /* collect.query_tag_sightings_slim (#9705): a slim row goes when no usage row its key could tag is left
+               (QueryTagSlimSightingsRetentionDays). It runs after the move above, so a row moved in this pass that is already past the
+               slim horizon goes in this pass too. Failure-isolated like every sibling. */
+            var slimSightingsDeleted = await PurgeOneAsync(
+                postgres, QueryTagSlimSightings.Table,
+                TimeSlicedDeleteSql(QueryTagSlimSightings.Table, "last_seen"),
+                utcNow.AddDays(-QueryTagSlimSightingsRetentionDays(sightingsRetentionDays)), logger, cancellationToken,
+                pacer: walPacer);
+            if (slimSightingsDeleted is not null)
+            {
+                tablesPurged++;
+                totalRowsDeleted += slimSightingsDeleted.Value;
             }
             else
             {
@@ -2719,6 +2741,19 @@ WHERE NOT EXISTS
     /// </summary>
     internal static int QueryTagSightingsRetentionDays(int widestFactRetentionDays, Func<string, int>? retentionDaysFor) =>
         Math.Max(widestFactRetentionDays, WidestEffectiveRetentionDays(QueryTagSightingFeeders(), retentionDaysFor));
+
+    /// <summary>
+    /// The days the purge keeps a <c>collect.query_tag_sightings_slim</c> row after its <c>last_seen</c> (#9705): as long as the
+    /// longest-kept usage row a tag read joins the key to. Those are the raw rows of the collectors that write sightings, and the
+    /// Query Store hash hourly and daily tables, which share the <c>query_store</c> collector's horizon
+    /// (<paramref name="sightingsRetentionDays"/>, from <see cref="QueryTagSightingsRetentionDays"/>, covers both), and the hourly IO
+    /// tiers of <c>query_stats</c> and <c>procedure_stats</c>, which keep <see cref="TimescaleSupport.HourlyRetentionSpan"/>. On top
+    /// comes <see cref="TimescaleSupport.ChunkIntervalDays"/>, because a chunk is dropped only when all of it is past its horizon, and
+    /// one day for a Query Store day that straddles its floor and for the sighting's own refresh lag. At the shipped defaults that
+    /// is 90 days plus the margin. Pure, so a test can drive it.
+    /// </summary>
+    internal static int QueryTagSlimSightingsRetentionDays(int sightingsRetentionDays) =>
+        Math.Max(sightingsRetentionDays, (int)Math.Ceiling(TimescaleSupport.HourlyRetentionSpan.TotalDays)) + TimescaleSupport.ChunkIntervalDays + 1;
 
     /// <summary>
     /// The widest horizon the purge applies to any of <paramref name="collectorNames"/>: each one's resolved retention,

@@ -1050,6 +1050,9 @@ ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS held_w
             END $fn$;
             DROP FUNCTION IF EXISTS config.set_web_access_advanced(boolean,text,boolean);
             """),
+        // V320 (#9705): the slim query-tag sightings table. It is the probe's newest sentinel. The rewind drops it, so a re-run of V320 makes it again, empty. Safe on a
+        // store that never had it.
+        new(320, "hasQueryTagSlimSightings", "DROP TABLE IF EXISTS collect.query_tag_sightings_slim;"),
     ];
 
     /// <summary>

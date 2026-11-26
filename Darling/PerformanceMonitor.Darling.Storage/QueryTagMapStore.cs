@@ -117,24 +117,41 @@ LIMIT $5
 """;
 
     /// <summary>
-    /// The sighting rows of the listed keys. $1 server_id, $2 kinds, $3 keys (parallel arrays). The order is total (key, then
+    /// The sighting rows of the listed keys, from the sightings table and from the slim table (#9705: a key's older callers stay
+    /// in <c>collect.query_tag_sightings_slim</c> after their sighting ages out, and an extend must resolve a key from the same rows
+    /// a rebuild does, or the weekly rebuild would change its tag). A slim row has no text sample and sorts after a sighting with the
+    /// same caller. $1 server_id, $2 kinds, $3 keys (parallel arrays). The order is total (key, then
     /// database, application, login, host, as the unique index reads them) because the resolver takes the first matching
     /// sighting: a tie broken by whatever order the planner returned would let a rebuild change a key's tag (#5985).
     /// </summary>
     internal const string SightingsOfKeysSql = """
-SELECT s.key_kind, s.key, s.database_name, s.object_name, s.application_name, s.login_name, s.host_name, s.text_sample
-FROM collect.query_tag_sightings AS s
-JOIN unnest($2::text[], $3::text[]) AS k(key_kind, key) ON k.key_kind = s.key_kind AND k.key = s.key
-WHERE s.server_id = $1
-ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.application_name, ''), COALESCE(s.login_name, ''), COALESCE(s.host_name, '')
+SELECT u.key_kind, u.key, u.database_name, u.object_name, u.application_name, u.login_name, u.host_name, u.text_sample
+FROM unnest($2::text[], $3::text[]) AS k(key_kind, key)
+CROSS JOIN LATERAL (
+    SELECT s.key_kind, s.key, s.database_name, s.object_name, s.application_name, s.login_name, s.host_name, s.text_sample, 0 AS tier
+    FROM collect.query_tag_sightings AS s
+    WHERE s.server_id = $1 AND s.key_kind = k.key_kind AND s.key = k.key
+    UNION ALL
+    SELECT t.key_kind, t.key, t.database_name, t.object_name, NULLIF(t.application_name, ''), NULLIF(t.login_name, ''), NULLIF(t.host_name, ''), NULL::text, 1
+    FROM collect.query_tag_sightings_slim AS t
+    WHERE t.server_id = $1 AND t.key_kind = k.key_kind AND t.key = k.key
+) AS u
+ORDER BY u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.application_name, ''), COALESCE(u.login_name, ''), COALESCE(u.host_name, ''), u.tier
 """;
 
-    /// <summary>Every sighting row of one server, in the same total order as <see cref="SightingsOfKeysSql"/> so a reader can resolve one key at a time. $1 server_id.</summary>
+    /// <summary>Every sighting row of one server and every slim row (#9705), so a rebuild tags a key for as long as its usage rows are kept, in the same total order as <see cref="SightingsOfKeysSql"/> so a reader can resolve one key at a time. $1 server_id.</summary>
     internal const string AllSightingsSql = """
-SELECT key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample
-FROM collect.query_tag_sightings
-WHERE server_id = $1
-ORDER BY key_kind, key, COALESCE(database_name, ''), COALESCE(application_name, ''), COALESCE(login_name, ''), COALESCE(host_name, '')
+SELECT u.key_kind, u.key, u.database_name, u.object_name, u.application_name, u.login_name, u.host_name, u.text_sample
+FROM (
+    SELECT key_kind, key, database_name, object_name, application_name, login_name, host_name, text_sample, 0 AS tier
+    FROM collect.query_tag_sightings
+    WHERE server_id = $1
+    UNION ALL
+    SELECT key_kind, key, database_name, object_name, NULLIF(application_name, ''), NULLIF(login_name, ''), NULLIF(host_name, ''), NULL::text, 1
+    FROM collect.query_tag_sightings_slim
+    WHERE server_id = $1
+) AS u
+ORDER BY u.key_kind, u.key, COALESCE(u.database_name, ''), COALESCE(u.application_name, ''), COALESCE(u.login_name, ''), COALESCE(u.host_name, ''), u.tier
 """;
 
     internal const string DeleteServerMapSql = "DELETE FROM config.query_tag_map WHERE server_id = $1";

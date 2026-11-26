@@ -4141,6 +4141,10 @@ END $$;";
            replaced one argument function with the same signature and result, and a replaced hardening function. No table, column or row changes. An older build
            still calls the one argument function, which behaves as it did, so it ignores the new form. */
         new Migration(WebAccessAdvancedActor.Version, "web-access-advanced-actor", WebAccessAdvancedActor.CreateSql),
+        /* V320 (#9705): the slim query-tag sightings table (collect.query_tag_sightings_slim), which keeps a sighting's key and short match fields after the
+           sighting ages out, so the tag map rebuild still tags usage rows kept longer than the sightings. One plain table created empty: no data moves, and the
+           retention purge fills it. An older build ignores it. */
+        new Migration(QueryTagSlimSightings.Version, "query-tag-sightings-slim", QueryTagSlimSightings.CreateSql),
     };
 
     /// <summary>
