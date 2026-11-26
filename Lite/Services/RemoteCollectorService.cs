@@ -446,10 +446,12 @@ public partial class RemoteCollectorService
 
     /// <summary>
     /// Clears collector health entries for a server that has been removed.
-    /// Prevents stale error counts from showing in the status bar.
+    /// Prevents stale error counts from showing in the status bar. The server's blocked process threshold refusal goes with
+    /// it (#9743), so a server removed and added again is asked again.
     /// </summary>
     public void ClearHealthForServer(int serverId)
     {
+        BlockedProcessThresholdBootstrap.Forget(serverId);
         lock (_healthLock)
         {
             var keys = _collectorHealth.Keys.Where(k => k.ServerId == serverId).ToList();

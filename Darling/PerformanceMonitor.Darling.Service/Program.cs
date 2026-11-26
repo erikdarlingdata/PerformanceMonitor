@@ -336,7 +336,8 @@ if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
     }
 
     return await DarlingCliCommands.AddServerAsync(
-        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None, addServerFlags);
+        addServerConfigPath, Console.In, Console.Out, Console.Error, CancellationToken.None, addServerFlags,
+        passwordInput: addServerFlags.Any ? Console.OpenStandardInput() : null);
 }
 
 /* CLI verbs: --add-alert-source / --rotate-alert-source / --remove-alert-source <name> and --list-alert-sources, each with an

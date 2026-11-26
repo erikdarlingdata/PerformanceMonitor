@@ -69,6 +69,9 @@ public sealed partial class DarlingCollectorRunner
     /// </summary>
     internal Func<ServerRuntime, CancellationToken, Task>? XeEnsureOverrideForTests { get; set; }
 
+    /// <summary>Which servers refused the blocked process threshold bootstrap in this process, so a server that refuses it is asked and logged once (#9743).</summary>
+    internal BlockedProcessThresholdBootstrap BlockedProcessThresholdBootstrap { get; } = new();
+
     /// <summary>Replaces the engine target provider resolved for a run. Null in production.</summary>
     internal Func<CollectorTargetInfo, ITargetProvider>? TargetProviderOverrideForTests { get; set; }
 
