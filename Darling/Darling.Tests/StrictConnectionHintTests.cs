@@ -169,6 +169,28 @@ public sealed class StrictConnectionHintTests : IDisposable
         Assert.DoesNotContain(StrictEncryptionHint.Text, answer, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A Strict entry whose env: secret is unset fails inside the probe, before any connection is made. TLS did not cause it, so
+    /// neither the add reply nor the test reply tells the operator to drop to Mandatory.
+    /// </summary>
+    [Fact]
+    public async Task StrictEntryWithAnUnsetEnvSecret_FailsBeforeConnecting_AndGetsNoLine()
+    {
+        const string variable = "UNSET_VAR_9674";
+        Environment.SetEnvironmentVariable(variable, null);
+        var server = new MonitoredServer
+        {
+            Name = "unset-secret", Host = "127.0.0.1," + ClosedLocalPort(), Auth = "sql", Username = "monitor", Password = "env:" + variable, EncryptMode = "Strict",
+        };
+
+        var probe = await DarlingServerConnector.ProbeAsync(server, null, CancellationToken.None);
+
+        Assert.False(probe.Success);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(server, probe, null, true), StringComparison.Ordinal);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, Core.ConnectFailureReply(server, probe, null, false), StringComparison.Ordinal);
+        Assert.DoesNotContain(StrictEncryptionHint.Text, DarlingCommandExecutor.MapProbeResult(probe, server).ResultJson, StringComparison.Ordinal);
+    }
+
     private static MonitoredServer ClosedPortServer(string mode) => new()
     {
         Name = "closed-port", Host = "127.0.0.1," + ClosedLocalPort(), Auth = "sql", Username = "monitor", Password = "Synth-Strict-Pw-1", EncryptMode = mode,
