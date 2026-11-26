@@ -98,7 +98,8 @@ public static class ServerCertificateTrustFailure
     {
         var untrusted = false;
         var nameMismatch = false;
-        var rejected = false;
+        var chainFailed = false;
+        var callbackRejected = false;
         foreach (var message in MessagesIn(exception))
         {
             var mentionsCertificate = message.Contains("certificate", StringComparison.OrdinalIgnoreCase);
@@ -119,10 +120,16 @@ public static class ServerCertificateTrustFailure
             }
 
             if (message.Contains(ChainValidationFailed, StringComparison.Ordinal)
-                || message.Contains(RemoteCertificateInvalid, StringComparison.Ordinal)
-                || message.Contains(RemoteCertificateRejected, StringComparison.Ordinal))
+                || message.Contains(RemoteCertificateInvalid, StringComparison.Ordinal))
             {
-                rejected = true;
+                chainFailed = true;
+            }
+
+            /* The .NET TLS stack's wording whenever the validation callback says no, whatever the reason, so it names a
+               rejection only when nothing more specific does. */
+            if (message.Contains(RemoteCertificateRejected, StringComparison.Ordinal))
+            {
+                callbackRejected = true;
             }
         }
 
@@ -131,12 +138,17 @@ public static class ServerCertificateTrustFailure
             return nameMismatch ? Verdict.UntrustedChainAndNameMismatch : Verdict.UntrustedChain;
         }
 
-        if (nameMismatch && !rejected)
+        if (chainFailed)
+        {
+            return Verdict.Rejected;
+        }
+
+        if (nameMismatch)
         {
             return Verdict.NameMismatch;
         }
 
-        return nameMismatch || rejected ? Verdict.Rejected : Verdict.None;
+        return callbackRejected ? Verdict.Rejected : Verdict.None;
     }
 
     /// <summary>

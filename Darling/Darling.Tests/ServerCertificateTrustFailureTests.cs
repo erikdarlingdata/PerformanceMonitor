@@ -86,6 +86,22 @@ public sealed class ServerCertificateTrustFailureTests
     }
 
     [Fact]
+    public void TheCallbackRejectionWording_YieldsToANameMismatch_AndStandsAloneAsARejection()
+    {
+        const string callbackRejected = "The remote certificate was rejected by the provided RemoteCertificateValidationCallback.";
+        var withName = new InvalidOperationException(Handshake, new AuthenticationException(callbackRejected, new AuthenticationException(NameOnly)));
+
+        var nameDescription = ServerCertificateTrustFailure.Describe(withName);
+        var aloneDescription = ServerCertificateTrustFailure.Describe(ConnectFailure(callbackRejected));
+
+        Assert.NotNull(nameDescription);
+        Assert.Contains("not issued to the name used to connect", nameDescription, StringComparison.Ordinal);
+        Assert.DoesNotContain("check that it is current", nameDescription, StringComparison.Ordinal);
+        Assert.NotNull(aloneDescription);
+        Assert.Contains("rejected the server's certificate", aloneDescription, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AChainFailureThatIsNotAboutTrust_DoesNotSendTheOperatorToTheTrustStoreAsTheOnlyCause()
     {
         var expired = ConnectFailure("Certificate failed chain validation. Error(s): 'The certificate has expired., [Status: NotTimeValid]\n'.");
