@@ -67,6 +67,11 @@ public class ArchivableTableBareReadSweepTests
         [("LocalDataService.AvailabilityGroups.cs", "ag_replica_states")] = 2,
         [("LocalDataService.AvailabilityGroups.cs", "ag_database_replica_states")] = 2,
 
+        /* #9596: the object usage chain's pending-database listing: the newest hot snapshot of each database against its chain. A database's
+           newest snapshot is always hot, because archival moves only rows older than a week, so the hot table answers "is there a snapshot the
+           chain has not folded" without opening the archive. The builder's raw reads of the snapshots themselves go through v_index_object_stats. */
+        [("ObjectUsageChainBuilder.cs", "index_object_stats")] = 1,
+
         /* Not a table read: "deadlocks" there is a CTE over v_deadlocks. */
         [("LocalDataService.DailySummary.cs", "deadlocks")] = 2,
 
