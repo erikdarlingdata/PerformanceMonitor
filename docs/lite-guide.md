@@ -233,7 +233,7 @@ The **About** button needs a window, so a headless Lite does not update itself. 
    ```
 
 4. Run the scheduled task that starts Lite with `--headless`.
-5. Check which build runs. The start line in the log, `Starting PerformanceMonitorLite v3.14.0.0`, holds only the numeric version, so two nightlies of one version read alike. The product version of the exe holds the whole stamp:
+5. Check which build runs. The start line in the log, `Starting PerformanceMonitorLite v<version>`, holds the whole version of the build. A build from before that change wrote only the numeric version, such as `v3.14.0.0`, so two nightlies of one version read alike. The product version of the exe holds the whole version too:
 
    ```powershell
    (Get-Item '<folder>\PerformanceMonitorLite.exe').VersionInfo.ProductVersion
