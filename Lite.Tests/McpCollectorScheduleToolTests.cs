@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using Lite.Tests;
 using ModelContextProtocol.Server;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
