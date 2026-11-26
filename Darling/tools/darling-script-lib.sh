@@ -10,11 +10,12 @@ FAILED_ROOT=/opt/darling.failed
 STAGING_ROOT=/opt/darling.staging
 STAGED_BUILD=/opt/darling.staging/build
 STAGED_TARBALL=/opt/darling.staging/source.tar.gz
-# The copy of the installed build that becomes the rollback copy, the installed build once it is replaced, and the
-# copy of the rollback copy that a rollback puts back.
+# The copy of the installed build that becomes the rollback copy, the installed build once it is replaced, the
+# copy of the rollback copy that a rollback puts back, and the rollback copy of an earlier upgrade on its way out.
 STAGED_PREVIOUS=/opt/darling.staging/previous
 STAGED_REPLACED=/opt/darling.staging/replaced
 STAGED_RESTORE=/opt/darling.staging/restore
+STAGED_REMOVED=/opt/darling.staging/removed
 CONFIG_DIR=/etc/darling
 CONFIG_FILE=/etc/darling/darling.json
 KEY_DIR=/etc/darling/darling-keys
@@ -35,18 +36,22 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 # goes through this before root's terminal shows it: every byte that is not printable ASCII becomes "?", so no escape
 # sequence reaches the terminal.
 printable() { LC_ALL=C tr -c '\040-\176\n' '?'; }
+# The same for a file name that another account chose. A name is one line, so a line end in it becomes "?" too, and
+# the name cannot start a line of its own on root's terminal (#9688).
+printable_name() { LC_ALL=C tr -c '\040-\176' '?'; }
 # The same for the lines a build prints for the operator to read, a line at a time. The pre-flight prints UTF-8 text
 # (an em dash in every result line). Where root's locale is UTF-8, a whole UTF-8 character stays and the rest goes:
 # NUL, the C0 control characters apart from tab, DEL, every byte that is not part of a whole UTF-8 character, and then
-# the C1 control characters in their UTF-8 form and the marks that change the direction of the text (U+200E, U+200F,
-# U+202A to U+202E, U+2066 to U+2069), which can show a line in another order than it was written. One pass takes
-# them all: what is left by then is whole UTF-8 characters, and the first byte of one is never a byte inside another.
+# the C1 control characters in their UTF-8 form and the marks that change the direction of the text (U+061C, U+200E,
+# U+200F, U+202A to U+202E, U+2066 to U+2069), which can show a line in another order than it was written. One pass
+# takes them all: what is left by then is whole UTF-8 characters, and the first byte of one is never a byte inside
+# another.
 # In any other locale the terminal may read one byte at a time, where the second byte of a UTF-8 character can be a
 # C1 control character itself, so only printable ASCII and tab stay there (#9688).
 UTF8_CHARACTER='[\xc2-\xdf][\x80-\xbf]\|\xe0[\xa0-\xbf][\x80-\xbf]\|[\xe1-\xef][\x80-\xbf][\x80-\xbf]\|\xf0[\x90-\xbf][\x80-\xbf][\x80-\xbf]\|[\xf1-\xf4][\x80-\xbf][\x80-\xbf][\x80-\xbf]'
 printable_lines() {
     case "$(locale charmap 2>/dev/null || true)" in
-        UTF-8) LC_ALL=C sed -u -e 's/\x00\|[\x01-\x08\x0b-\x1f\x7f]//g' -e "s/\\(${UTF8_CHARACTER}\\)\\|[\\x80-\\xff]/\\1/g" -e 's/\xc2[\x80-\x9f]\|\xe2\x80[\x8e\x8f\xaa-\xae]\|\xe2\x81[\xa6-\xa9]//g' ;;
+        UTF-8) LC_ALL=C sed -u -e 's/\x00\|[\x01-\x08\x0b-\x1f\x7f]//g' -e "s/\\(${UTF8_CHARACTER}\\)\\|[\\x80-\\xff]/\\1/g" -e 's/\xc2[\x80-\x9f]\|\xd8\x9c\|\xe2\x80[\x8e\x8f\xaa-\xae]\|\xe2\x81[\xa6-\xa9]//g' ;;
         *) LC_ALL=C sed -u -e "s/${UTF8_CHARACTER}/?/g" -e 's/[^\x20-\x7e\t]/?/g' ;;
     esac
 }
@@ -67,6 +72,8 @@ as_service_user() {
 # Sets UNIT_ENVIRONMENT to the NAME=value pairs that systemd holds for the unit, from its Environment= lines and its
 # drop-ins, and to nothing while no unit is installed. systemctl prints them on one line with a space between two
 # pairs, and puts a pair that holds a space or a quote inside double quotes, with a backslash before " \ ` and $.
+# Inside the quotes it writes a control character as a backslash with a letter (\n for a line end, \t for a tab) or
+# with three octal digits, and each becomes the character again here, so the command gets the value the service gets.
 # PATH is left out, so the commands the scripts name are found the same way on every host. The values can be secrets
 # and are never printed.
 UNIT_ENVIRONMENT=()
@@ -78,7 +85,12 @@ unit_environment() {
         char="${text:i:1}"
         if [ "${quoted}" = 1 ] && [ "${char}" = '\' ]; then
             i=$((i + 1))
-            pair+="${text:i:1}"
+            char="${text:i:1}"
+            case "${char}" in
+                a) char=$'\a' ;; b) char=$'\b' ;; f) char=$'\f' ;; n) char=$'\n' ;; r) char=$'\r' ;; t) char=$'\t' ;; v) char=$'\v' ;;
+                [0-3]) printf -v char '%b' "\\0${text:i:3}"; i=$((i + 2)) ;;
+            esac
+            pair+="${char}"
         elif [ "${char}" = '"' ]; then
             quoted=$((1 - quoted))
         elif [ "${quoted}" = 0 ] && [ "${char}" = ' ' ]; then
@@ -123,25 +135,31 @@ fresh_copy() {
     COPY_REFUSED="the copy itself failed"
     ensure_staging
     rm -rf "${to}"
-    if ! { chown -hR root:root "${from}/." && chmod -R go-w "${from}/."; }; then
+    if ! chown -hR root:root "${from}/."; then
         COPY_REFUSED="root could not take every file in it"
         return 1
     fi
-    entry="$(find "${from}/." \( ! -user 0 -o \( ! -type l -perm /022 \) \) -print -quit)"
+    # The write bits of group and other users go from the top down, one entry at a time. chown changes a folder after
+    # what it holds, so until then the old owner can still add a folder that chown never lists. find stops at the
+    # first entry that root does not own, without going into it, and it closes a folder before it reads what the
+    # folder holds. Every entry whose mode root changes is then in a folder that only root can write, where no other
+    # account can put a link in its place, so root changes the mode of no file outside the tree (#9688).
+    entry="$(find "${from}/." ! -user 0 -prune -print -quit -o ! -type l -perm /022 -exec chmod go-w {} \;)"
+    [ -n "${entry}" ] || entry="$(find "${from}/." \( ! -user 0 -o \( ! -type l -perm /022 \) \) -print -quit)"
     if [ -n "${entry}" ]; then
-        COPY_REFUSED="'$(printf '%s' "${entry#"${from}"/./}" | printable)' still belongs to another account, or its group or other users can write it"
+        COPY_REFUSED="'$(printf '%s' "${entry#"${from}"/./}" | printable_name)' still belongs to another account, or its group or other users can write it"
         return 1
     fi
     mkdir -m 755 "${to}" || return 1
     cp -R "${from}/." "${to}/" || return 1
     entry="$(find "${to}" ! -type f ! -type d ! -type l -print -quit)"
     if [ -n "${entry}" ]; then
-        COPY_REFUSED="'$(printf '%s' "${entry#"${to}"/}" | printable)' is not a file, a folder or a link"
+        COPY_REFUSED="'$(printf '%s' "${entry#"${to}"/}" | printable_name)' is not a file, a folder or a link"
         return 1
     fi
     entry="$(find "${to}" -type l \( -lname '/*' -o -lname '*..*' \) -print -quit)"
     if [ -n "${entry}" ]; then
-        COPY_REFUSED="'$(printf '%s' "${entry#"${to}"/}" | printable)' is a link to a path outside the folder"
+        COPY_REFUSED="'$(printf '%s' "${entry#"${to}"/}" | printable_name)' is a link to a path outside the folder"
         return 1
     fi
     chown -R root:root "${to}" && chmod -R go-w "${to}"
@@ -162,7 +180,7 @@ ensure_staging() {
     rm -rf "${STAGING_ROOT}"
     mkdir -m 700 "${STAGING_ROOT}"
     staging_made=1
-    trap 'rm -rf "${STAGING_ROOT}"' EXIT
+    trap 'rm -rf "${STAGING_ROOT}" || warn "Could not remove ${STAGING_ROOT}. Remove it by hand: the next run of this script needs it gone."' EXIT
 }
 
 # What every run needs before it changes anything: root, a host that systemd runs, the tools the steps call and the runtime host.
@@ -176,9 +194,13 @@ require_host() {
     [ -x "${DOTNET}" ] || die "${DOTNET} is missing. Install the .NET 10 runtime and the ASP.NET Core 10 runtime (docs/darling/linux.md, step 2). The unit starts the service with ${DOTNET}, so a dotnet in another folder needs a link there."
     # The folders the fixed paths are in. An account that can write one of them can swap the staging folder, or the
     # unit file, while the run works on it, and root would install its file as a root unit (#9688).
-    local folder
+    # The folder can be a link, as /opt is on some hosts. Then the folders above the folder it names count as well: an
+    # account that can write one of those can put another folder in its place.
+    local folder real
     for folder in "$(dirname "${INSTALL_ROOT}")" "$(dirname "${UNIT_PATH}")"; do
-        root_only_path "${folder}" || die "${folder}, or a folder above it, is not owned by root, or its group or other users can write it. This script puts the build and the unit there as root, and an account that can write the folder could swap them during the run. Make root its owner, take away the write bit of its group and of other users (chown root:root, chmod go-w), then run this script again."
+        for real in "${folder}" "$(readlink -f "${folder}")"; do
+            root_only_path "${real}" || die "${real}, or a folder above it, is not owned by root, or its group or other users can write it. This script puts the build and the unit there as root, and an account that can write the folder could swap them during the run. Make root its owner, take away the write bit of its group and of other users (chown root:root, chmod go-w), then run this script again."
+        done
     done
 }
 
@@ -195,7 +217,7 @@ resolve_source() {
         root_only_path "${SOURCE_PATH}" || die "The source folder '${SOURCE_PATH}' or a folder above it is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner --no-same-permissions), or pass --source with the tarball."
         # The same for what the folder holds. A link has no mode of its own, and the folder that holds it is checked.
         open_entry="$(find "${SOURCE_PATH}" \( ! -user 0 -o -perm /022 \) ! -type l -print -quit)"
-        [ -z "${open_entry}" ] || die "'$(printf '%s' "${open_entry}" | printable)' in the source folder is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner --no-same-permissions), or pass --source with the tarball."
+        [ -z "${open_entry}" ] || die "'$(printf '%s' "${open_entry}" | printable_name)' in the source folder is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner --no-same-permissions), or pass --source with the tarball."
     else
         SOURCE_KIND=tarball
     fi
@@ -257,7 +279,7 @@ stage_source() {
         cp -R "${SOURCE_PATH}/." "${STAGED_BUILD}/" || die "Could not copy ${SOURCE_PATH}."
     fi
     odd="$(find "${STAGED_BUILD}" ! -type f ! -type d ! -type l -print -quit)"
-    [ -z "${odd}" ] || die "The source holds '$(printf '%s' "${odd#"${STAGED_BUILD}"/}" | printable)', which is not a file, a folder or a link (a device node, a FIFO or a socket). A Darling tarball holds none, so the source was refused and nothing was installed."
+    [ -z "${odd}" ] || die "The source holds '$(printf '%s' "${odd#"${STAGED_BUILD}"/}" | printable_name)', which is not a file, a folder or a link (a device node, a FIFO or a socket). A Darling tarball holds none, so the source was refused and nothing was installed."
     chown -R root:root "${STAGED_BUILD}"
     chmod -R u+rwX,go+rX,go-w "${STAGED_BUILD}"
     [ -f "${STAGED_BUILD}/${SERVICE_DLL}" ] || die "The source holds no ${SERVICE_DLL}, so it is not a Darling linux-x64 tarball."

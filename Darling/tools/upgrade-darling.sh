@@ -283,7 +283,12 @@ RUN_STOP_CHECK=clear
 # holds one of them open. The old files go into the staging folder, which goes when the script ends. The copy is made
 # before the rollback copy of an earlier upgrade is removed, so a copy that fails leaves that one as it is.
 fresh_copy "${INSTALL_ROOT}" "${STAGED_PREVIOUS}" || die_recorded "Could not copy ${INSTALL_ROOT} onto new files for the rollback copy (${COPY_REFUSED}), so nothing was replaced or removed. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
-rm -rf "${PREVIOUS_ROOT}" || die_recorded "Could not remove the old rollback copy ${PREVIOUS_ROOT}, which may now be incomplete, so the build in ${INSTALL_ROOT} was not replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+# The rollback copy of an earlier upgrade leaves with one rename into the staging folder, so ${PREVIOUS_ROOT} holds
+# the whole of it or none of it. A removal in place that stops half way would leave a part of a build there, and a
+# later --rollback would put that part back (#9688).
+if [ -e "${PREVIOUS_ROOT}" ] || [ -L "${PREVIOUS_ROOT}" ]; then
+    mv -T "${PREVIOUS_ROOT}" "${STAGED_REMOVED}" || die_recorded "Could not move the old rollback copy ${PREVIOUS_ROOT} out of the way, so it is as it was and the build in ${INSTALL_ROOT} was not replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+fi
 mv -T "${STAGED_PREVIOUS}" "${PREVIOUS_ROOT}" || die_recorded "Could not move the new rollback copy to ${PREVIOUS_ROOT}, so the build in ${INSTALL_ROOT} was not replaced, and there is no rollback copy now. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
 RUN_ROLLBACK_FOLDER="${PREVIOUS_ROOT}"
 # The new build starts with the record of this run in its folder, so its first read stores the run as in_progress.
@@ -332,6 +337,9 @@ note "Rolling back to ${old_version}..."
 if restore_previous; then
     die_recorded "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT} and is healthy. The new build is in ${FAILED_ROOT} for a look. Migrations the new build applied stay applied in the store."
 fi
-[ "${RESTORED}" = 1 ] || die_recorded "The upgrade to ${STAGED_VERSION} failed (${failure}), and the rollback did NOT finish: ${HEALTH_REASON}. The service is STOPPED and ${old_version} is still in ${PREVIOUS_ROOT}. Fix what stopped the move, then run this script with --rollback. Migrations the new build applied stay applied in the store."
+# --rollback moves the build and leaves the unit file as it is, so a run that replaced the unit names that step too.
+unit_step=""
+[ "${unit_replaced}" = 0 ] || unit_step=" This run replaced ${UNIT_PATH}, and --rollback does not put the old one back: before it, copy ${UNIT_PATH}.previous over ${UNIT_PATH} and run 'systemctl daemon-reload'."
+[ "${RESTORED}" = 1 ] || die_recorded "The upgrade to ${STAGED_VERSION} failed (${failure}), and the rollback did NOT finish: ${HEALTH_REASON}. The service is STOPPED and ${old_version} is still in ${PREVIOUS_ROOT}. Fix what stopped the move, then run this script with --rollback.${unit_step} Migrations the new build applied stay applied in the store."
 [ "${UNIT_PUT_BACK}" = 1 ] || die_recorded "The upgrade to ${STAGED_VERSION} failed (${failure}), and the rollback did NOT finish: ${old_version} is back in ${INSTALL_ROOT}, but the script ${HEALTH_REASON}, so the old build was not started under the new build's unit. The service is STOPPED. Copy ${UNIT_PATH}.previous over ${UNIT_PATH}, run 'systemctl daemon-reload', then start it with 'systemctl start darling'. The new build is in ${FAILED_ROOT}. Migrations the new build applied stay applied in the store."
 die_recorded "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT}, and its own health check failed too: ${HEALTH_REASON}. So the cause is probably not the new build: read 'journalctl -u darling' and the file log in ${LOG_DIR}. The new build is in ${FAILED_ROOT}."
