@@ -240,6 +240,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `list_query_tags` | `config.query_tags`<br>`config.query_tag_assignments`<br>`config.query_tag_rules`<br>`config.query_tag_state`<br>`collect.servers` |
 | `list_servers` | `collect.servers`<br>`config.config_monitored_servers`<br>`collect.collection_log`<br>`collect.v_collection_log` |
 | `measure_store_table` | `collect.store_metrics`<br>TimescaleDB's `timescaledb_information.hypertables` and `timescaledb_information.chunks`, measured with `pgstattuple` |
+| `self_check_password_key` | None. It makes temporary files on the service's machine, reads the test vector file it is given, and removes them. |
 | `validate_custom_alert_rule` | None. It checks the definition that you pass in. |
 | `validate_custom_view` | None. It checks the definition that you pass in. |
 | `wait_for_investigation_requests` | `config.investigation_journal`<br>`config.investigation_requests`<br>`config.investigation_request_alerts`<br>`collect.servers` |
@@ -288,6 +289,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `kill_session` | `collect.server_properties`<br>`collect.dmv_blocking_snapshots` (through the view `collect.v_dmv_blocking_snapshots`)<br>`collect.blocked_process_reports` |
 | `merge_deadlock_signatures` | `config.investigation_signature_merges`<br>`config.investigation_signature_days` |
 | `mute_analysis_finding` | `config.analysis_muted`<br>`collect.analysis_findings` |
+| `new_password_key` | None. It writes a key file on the service's machine and answers with the key's fingerprint. |
 | `pause_collection` | `config.config_command`<br>`config.config_service` |
 | `post_investigation_message` | `config.investigation_requests` (claim check)<br>`config.investigation_journal` (insert) |
 | `purge_expired_mute_rules` | `config.config_mute_rules` |
@@ -299,6 +301,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `remove_server` | `config.config_monitored_servers` (delete)<br>`config.server_tag_map` (delete)<br>`config.query_tag_assignments` (delete)<br>`config.query_tag_rules` (delete)<br>`config.query_tag_map` (delete)<br>`config.config_collector_schedules` (delete)<br>`config.config_collector_run_times` (delete) |
 | `remove_webhook_signing_key` | `config.config_notification`<br>`config.config_notification_routes` |
 | `reset_collector_schedules` | `config.config_collector_schedules`<br>`config.config_collector_run_times` |
+| `reset_password_key` | `config.password_key` (update)<br>`config.config_monitored_servers` (read, to count the sealed passwords)<br>`config.config_notification` (read) |
 | `restore_alert_history` | `config.config_alert_log` |
 | `resume_collection` | `config.config_command`<br>`config.config_service` |
 | `run_collectors_now` | `config.config_command` |

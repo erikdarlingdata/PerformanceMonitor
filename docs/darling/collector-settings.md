@@ -104,6 +104,18 @@ It changes the store only, as the store owner, and never touches a key file. It 
 
 With [`passwordKey`](configuration.md#passwordkey-string-optional) set in `darling.json`, the service never makes a key, so the verb ends with `Put a new password key in the passwordKey source (make one with --new-password-key), then restart the service.` and the number of saved passwords to enter again. Until the new key is in that source, a start with the old key gives the state `reset_pending` and publishes no key.
 
+### The same from MCP (#9644)
+
+With `mcp.allowWrites` and `mcp.allowServerAdmin` both on (and a token), three tools do the same. Each calls the code the verb calls, so the numbers and the words are the verb's.
+
+| Tool | The verb it matches | What it does |
+|---|---|---|
+| `reset_password_key` | `--reset-password-key` | Marks the current key replaced. Every saved password sealed to it must be entered again, and the answer says how many. Restart the service afterwards. It asks for `confirm: true` and changes nothing without it. |
+| `new_password_key` | `--new-password-key` | Writes a new key to an absolute path where nothing exists, on the service's machine, and returns only its fingerprint. A relative path is refused. |
+| `self_check_password_key` | `--self-check-password-key` | A read. It runs the build check on Linux or macOS and is refused on Windows. It needs the test vector file kept in the repository, so a normal install has nothing to give it. |
+
+There is no tool for the one-time pin step of the old-format passwords. It has no verb. The service runs it at start and again on every sweep while it waits.
+
 ## Set the time of day a daily collector runs (`--set-collector-run-at`)
 
 A collector that runs once a day or less often, such as `index_object_stats`, can start at a time you choose. The verb writes the same row as the Viewer's Collector Schedules window. It takes a collector name and one of three values:
