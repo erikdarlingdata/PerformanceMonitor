@@ -76,6 +76,88 @@ public class ExternalAlertDetailBreaksTests
         Assert.DoesNotContain(AllStrings(payload), text => text.Contains("first\n\nsecond", StringComparison.Ordinal));
     }
 
+    private static string TeamsDetails(string detailText, AlertContext? context)
+    {
+        var payload = WebhookAlertService.BuildTeamsPayload(
+            Metric, "SRV1", "7", "", Branding, context: context, detailText: detailText, displayName: "Report");
+
+        using var document = JsonDocument.Parse(payload);
+        var section = document.RootElement.GetProperty("sections").EnumerateArray()
+            .Single(item => item.TryGetProperty("activityTitle", out var title) && title.GetString() == "Details");
+        return section.GetProperty("text").GetString()!;
+    }
+
+    [Fact]
+    public void Teams_AnExternalDetailLineThatStartsWithAMarker_KeepsTheMarkerAsText()
+    {
+        var details = TeamsDetails("# a\n- b\n+ c\n1. d\n--- e", External());
+
+        Assert.Equal("\\# a\n\n\\- b\n\n\\+ c\n\n1\\. d\n\n\\-\\-\\- e", details);
+    }
+
+    [Fact]
+    public void Teams_AMarkerAfterIndentation_IsEscapedAfterTheIndentation()
+    {
+        var details = TeamsDetails("Report\n  - one\n  ## two\n    + three\n  2) four\n==== five\n-\n#", External());
+
+        Assert.Equal(
+            "Report\n\n  \\- one\n\n  \\#\\# two\n\n    \\+ three\n\n  2\\) four\n\n\\=\\=\\=\\= five\n\n\\-\n\n\\#",
+            details);
+    }
+
+    [Fact]
+    public void Teams_AMarkerOnlyCountsAtTheStartOfALine()
+    {
+        const string detail = "a - b\nx # y\n3.5\n#1 priority\n-5 degrees\n+1 added\n--x\n1.5 GB\n2 items\n== done";
+
+        var details = TeamsDetails(detail, External());
+
+        Assert.Equal(detail.Replace("\n", "\n\n", StringComparison.Ordinal), details);
+    }
+
+    [Fact]
+    public void Teams_AMarkerIsEscapedAfterTheTextIsEscaped_SoTheOtherEscapesStillApply()
+    {
+        var details = TeamsDetails("- a <b> & [c]\n# *d*", External());
+
+        Assert.Equal("\\- a &lt;b&gt; &amp; \\[c\\]\n\n\\# \\*d\\*", details);
+    }
+
+    [Fact]
+    public void Teams_ABuiltInAlertsProseWithMarkerLines_IsLeftExactlyAsItWas()
+    {
+        const string prose = "# a\n- b\n+ c\n1. d\n--- e";
+
+        Assert.Equal(prose, TeamsDetails(prose, context: null));
+    }
+
+    [Fact]
+    public void Teams_FiftyExternalMarkerLines_StayUnderTheProseCeilingWithEveryMarkerKept()
+    {
+        var detail = string.Join("\n", Enumerable.Range(1, 50).Select(index => $"{(index % 2 == 0 ? "-" : "#")} row {index}"));
+
+        var details = TeamsDetails(detail, External());
+
+        var paragraphs = details.Split("\n\n");
+        Assert.Equal(50, paragraphs.Length);
+        Assert.All(paragraphs, paragraph => Assert.Matches(@"^\\[-#] row \d+$", paragraph));
+        Assert.True(JsonEncodedText.Encode(details).EncodedUtf8Bytes.Length <= WebhookAlertService.TeamsProseMaxBytes);
+    }
+
+    [Fact]
+    public void Teams_ALongExternalDetailOfMarkerLines_IsCutWithinTheCeilingWithTheMarkerOfEveryKeptLineIntact()
+    {
+        var detail = string.Join("\n", Enumerable.Range(1, 50).Select(index => $"- {new string('x', 450)} {index}"));
+
+        var details = TeamsDetails(detail, External());
+
+        Assert.True(JsonEncodedText.Encode(details).EncodedUtf8Bytes.Length <= WebhookAlertService.TeamsProseMaxBytes);
+        Assert.EndsWith("_The rest of this detail is cut to fit the Teams size limit._", details, StringComparison.Ordinal);
+        var kept = details.Split("\n\n").SkipLast(1).ToList();
+        Assert.NotEmpty(kept);
+        Assert.All(kept, paragraph => Assert.StartsWith("\\-", paragraph, StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Email_AnExternalDetailWithBreaks_BecomesBreakTagsAfterTheTextIsEncoded()
     {
@@ -99,13 +181,94 @@ public class ExternalAlertDetailBreaksTests
     }
 
     [Fact]
-    public void Email_PlainText_KeepsTheLineFeeds()
+    public void Email_PlainText_KeepsTheLineFeeds_AndIndentsEveryLine()
     {
         var (_, plain) = EmailTemplateBuilder.BuildAlertEmail(
             Metric, "SRV1", "7", "", 15, Branding,
             context: External(), detailText: "Report\nrow one\nrow two", displayName: "Report");
 
-        Assert.Contains("Report\nrow one\nrow two", plain, StringComparison.Ordinal);
+        Assert.Contains("\r\n  Report\n  row one\n  row two\r\n", plain, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Email_PlainText_AnExternalDetailKeepsItsOwnSpacesBehindTheIndent_ParagraphByParagraph()
+    {
+        var (_, plain) = EmailTemplateBuilder.BuildAlertEmail(
+            Metric, "SRV1", "7", "", 15, Branding,
+            context: External(), detailText: "Report\n  indented   gap\n    deeper\n\nNotes:\n- retry queue is 14", displayName: "Report");
+
+        Assert.Contains("\r\n  Report\n    indented   gap\n      deeper\r\n", plain, StringComparison.Ordinal);
+        Assert.Contains("\r\n  Notes:\n  - retry queue is 14\r\n", plain, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Email_PlainText_AOneLineExternalDetail_ReadsAsItDid()
+    {
+        var (_, plain) = EmailTemplateBuilder.BuildAlertEmail(
+            Metric, "SRV1", "7", "", 15, Branding,
+            context: External(), detailText: "Report - 93 percent used", displayName: "Report");
+
+        Assert.Contains("\r\n  Report - 93 percent used\r\n", plain, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Email_PlainText_ABuiltInAlertsProse_KeepsItsFirstLineIndentOnly()
+    {
+        var (_, plain) = EmailTemplateBuilder.BuildAlertEmail(
+            "Server Unreachable", "SRV1", "down", "", 15, Branding, detailText: "first\n  second");
+
+        Assert.Contains("\r\n  first\n  second\r\n", plain, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n    second", plain, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Email_AnExternalDetailsLeadingSpacesAndSpaceRuns_BecomeNonBreakingSpaces_AfterTheTextIsEncoded()
+    {
+        var (html, _) = EmailTemplateBuilder.BuildAlertEmail(
+            Metric, "SRV1", "7", "", 15, Branding,
+            context: External(), detailText: "Report\n  indented   gap", displayName: "Report");
+
+        Assert.Contains("Report<br>&nbsp;&nbsp;indented&nbsp;&nbsp;&nbsp;gap</p>", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Email_ASingleSpaceBetweenWords_StaysAPlainSpace_AndMarkupInTheDetailIsStillEncoded()
+    {
+        var (html, _) = EmailTemplateBuilder.BuildAlertEmail(
+            Metric, "SRV1", "7", "", 15, Branding,
+            context: External(), detailText: "Report\n one <b>x</b> & y  z\nrow two", displayName: "Report");
+
+        Assert.Contains("Report<br>&nbsp;one &lt;b&gt;x&lt;/b&gt; &amp; y&nbsp;&nbsp;z<br>row two</p>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<b>x</b>", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Email_AnExternalDetailParagraphThatStartsWithSpaces_StartsWithNonBreakingSpaces()
+    {
+        var (html, _) = EmailTemplateBuilder.BuildAlertEmail(
+            Metric, "SRV1", "7", "", 15, Branding,
+            context: External(), detailText: "Report\n\n    column  one\n    column  two", displayName: "Report");
+
+        Assert.Contains(">&nbsp;&nbsp;&nbsp;&nbsp;column&nbsp;&nbsp;one<br>&nbsp;&nbsp;&nbsp;&nbsp;column&nbsp;&nbsp;two</p>", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Email_AOneLineExternalDetail_ReadsAsItDid()
+    {
+        var (html, _) = EmailTemplateBuilder.BuildAlertEmail(
+            Metric, "SRV1", "7", "", 15, Branding,
+            context: External(), detailText: "Report - 93 percent used", displayName: "Report");
+
+        Assert.Contains(">Report - 93 percent used</p>", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Email_ABuiltInAlertsProseWithSpaceRuns_GetsNoNonBreakingSpaces()
+    {
+        var (html, _) = EmailTemplateBuilder.BuildAlertEmail(
+            "Server Unreachable", "SRV1", "down", "", 15, Branding, detailText: "first  second\n  third");
+
+        Assert.Contains(">first  second\n  third</p>", html, StringComparison.Ordinal);
     }
 
     [Fact]

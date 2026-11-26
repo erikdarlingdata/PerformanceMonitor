@@ -86,6 +86,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **`get_store_connections` shows the store's connection pressure** ([#9502])
 - **`get_store_lock_waits` lists the store's slow lock waits** ([#9510])
 - **The Collector Schedules editor has an Off preset** ([#9570])
+- **Lite `--add-server` sets encryption, certificate trust, read-only intent and multi-subnet failover** ([#9589])
 
 ### Changed
 
@@ -203,6 +204,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **The blocked process report collector skips its session when the threshold is 0** ([#9559])
 - **Drill-down plan analysis fetches a bad actor's own statement plan** ([#9561])
 - **The clutter plan summary tables get the insert autovacuum setting** ([#9483])
+- **`find_tools` says a tool the client cannot call needs a reconnect** ([#9592])
 
 ### Fixed
 
@@ -245,6 +247,12 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **`query_stats` and `procedure_stats` no longer lose a run's plans to one plan behind a schema lock** ([#9555])
 - **A bring-your-own install with only a token no longer logs a false network warning** ([#9572])
 - **The MCP service answers `store_not_ready` until the store is migrated** ([#9579])
+- **The Instance Restarted alert shows as a warning, not a resolution** ([#9586])
+- **An external alert's detail keeps its line breaks in Slack, Teams and email** ([#9590])
+- **`get_store_metrics` summary lists leave retired objects out** ([#9594])
+- **`DB_CONFIG` leaves the Amazon RDS `rdsadmin` database out** ([#9595])
+- **`get_collector_readiness` counts set-time collectors apart from not-yet-due ones** ([#9598])
+- **`/version` and `get_service_starts` name the build's commit on nightly and release builds** ([#9599])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8412,3 +8420,11 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9572]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9572
 [#9578]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9578
 [#9579]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9579
+[#9586]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9586
+[#9589]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9589
+[#9590]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9590
+[#9592]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9592
+[#9594]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9594
+[#9595]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9595
+[#9598]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9598
+[#9599]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9599

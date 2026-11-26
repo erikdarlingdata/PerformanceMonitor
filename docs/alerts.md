@@ -43,7 +43,7 @@ All thresholds are configurable in Settings, on the **Alert rules** tab.
 
 - **System tray** — balloon notifications with a configurable per-metric cooldown (default: 5 minutes)
 - **Email (SMTP)** — styled HTML emails with a configurable per-metric cooldown (default: 15 minutes), plus configurable SMTP settings (server, port, SSL, authentication, recipients)
-- **Microsoft Teams** — styled card messages with color-coded severity indicators sent to Teams channels via incoming webhooks
+- **Microsoft Teams** — styled card messages with color-coded severity indicators sent to Teams channels via incoming webhooks. Microsoft retired the Office 365 connectors in Teams, so make the webhook with Workflows. A Workflows webhook shows the card's text but not its buttons, so Darling's link button to the triage page does not show in Teams.
 - **Slack** — styled messages with color-coded severity indicators sent to Slack channels via incoming webhooks
 - **PagerDuty** — native Events API v2 integration that triggers PagerDuty incidents with proper severity mapping (critical/error/warning/info) and automatic incident correlation via dedup_key. Supports both US and EU data centers
 - **Generic webhook** — HTTP POST to any configurable endpoint for integration with other alerting systems (Opsgenie, n8n, custom automation, etc.). Darling can sign these posts: see [Signed webhooks](signed-webhooks.md).

@@ -152,7 +152,7 @@ public static class RunConfigMapping
                 return (prefix.Length == 0 ? $"s3://{s3.Bucket}" : $"s3://{s3.Bucket}/{prefix}", string.IsNullOrWhiteSpace(s3.Region) ? null : s3.Region);
             case Upload.UploadSettings.Local local:
                 if (local.HiveStoreFolder) throw new ConfigException("destination.hive_store_folder: run does not support it for now");
-                var path = local.Prefix.Length == 0 ? local.Path : Path.Combine(local.Path, local.Prefix.Replace('/', Path.DirectorySeparatorChar));
+                var path = LocalRoot(local);
                 if (string.IsNullOrWhiteSpace(path)) throw new ConfigException("destination.path: must not be empty");
                 return (path, null);
             default:
@@ -160,12 +160,44 @@ public static class RunConfigMapping
         }
     }
 
+    private static string LocalRoot(Upload.UploadSettings.Local local) =>
+        local.Prefix.Length == 0 ? local.Path : Path.Combine(local.Path, local.Prefix.Replace('/', Path.DirectorySeparatorChar));
+
+    /// <summary>
+    /// The local folder `run` uploads to, with the config key that names it: the destination's path (joined with its
+    /// prefix), or the default `landing` folder next to paths.out when there is no destination. Null for every other
+    /// destination, which has no folder to check.
+    /// </summary>
+    public static (string Root, string Key)? LocalUploadRoot(ExporterConfig config)
+    {
+        if (config.Destination is not { } d)
+        {
+            var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(config.Paths.Out)) ?? config.Paths.Out;
+            return (Path.Combine(parent, "landing"), "paths.out");
+        }
+
+        try
+        {
+            return Upload.UploadSettings.FromJson(d) is Upload.UploadSettings.Local local && LocalRoot(local) is { Length: > 0 } root
+                ? (root, "destination.path")
+                : null;
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Loads and maps a config file. Every failure is a <see cref="ConfigException"/>.</summary>
-    public static RunSettings Load(string configPath, bool? isWindows = null)
+    public static RunSettings Load(string configPath, bool? isWindows = null) => LoadWithConfig(configPath, isWindows).Settings;
+
+    /// <summary>Loads a config file and maps it, returning both. Every failure is a <see cref="ConfigException"/>.</summary>
+    public static (RunSettings Settings, ExporterConfig Config) LoadWithConfig(string configPath, bool? isWindows = null)
     {
         try
         {
-            return ToRunSettings(ConfigLoader.Load(configPath, isWindows), configPath);
+            var config = ConfigLoader.Load(configPath, isWindows);
+            return (ToRunSettings(config, configPath), config);
         }
         catch (JsonException ex)
         {
