@@ -19,6 +19,7 @@ using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Notifications;
 using Xunit;
 using Edit = PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools;
 

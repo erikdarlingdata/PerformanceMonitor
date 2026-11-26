@@ -21,6 +21,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Notifications;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
