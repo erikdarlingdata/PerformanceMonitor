@@ -199,6 +199,48 @@ public sealed class DarlingPasswordKeyStoreLiveTests
         }
     }
 
+    /// <summary>#9734: a refusal about the key folder carries the sentence that says why the folder was chosen. A refusal about the
+    /// key tables' triggers is not about the folder, so it does not.</summary>
+    [Fact]
+    public async Task AFolderRefusal_CarriesTheFolderNote_AndATriggerRefusalDoesNot()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        const string note = "DOTNET_RUNNING_IN_CONTAINER is true, so the service uses the compose folder.";
+        try
+        {
+            // A file where the folder should be: the start cannot write its key there.
+            System.IO.Directory.Delete(store.Directory, recursive: true);
+            File.WriteAllText(store.Directory, "not a folder");
+            try
+            {
+                var withNote = await store.StartAsync(folderNote: note);
+                Assert.Equal("refused", withNote.State);
+                Assert.EndsWith(note, withNote.Ring.Status.Reason, StringComparison.Ordinal);
+                Assert.EndsWith(note, (await store.ReadStateAsync("example-host")).Note, StringComparison.Ordinal);
+
+                var without = await store.StartAsync();
+                Assert.Equal("refused", without.State);
+                Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", without.Ring.Status.Reason, StringComparison.Ordinal);
+            }
+            finally
+            {
+                File.Delete(store.Directory);
+                System.IO.Directory.CreateDirectory(store.Directory);
+            }
+
+            await store.ExecAsync("ALTER TABLE config.password_key DISABLE TRIGGER trg_password_key_owner_only_row;");
+            var trigger = await store.StartAsync(folderNote: note);
+            Assert.Equal("refused", trigger.State);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", trigger.Ring.Status.Reason, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
     [Fact]
     public async Task ADisabledOrExtraTrigger_MakesTheStartRefuse_AndNoKeyIsPublished()
     {
@@ -1223,7 +1265,7 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
 
         public Task<DarlingPasswordKeyRuntime> StartAsync(
             bool isWindows = false, Func<string, bool>? canOpen = null, Func<PasswordPrivateKey, PublishedKey, bool>? selfTest = null,
-            ILogger? logger = null, string serviceHost = "example-host", string? keySetting = null) =>
+            ILogger? logger = null, string serviceHost = "example-host", string? keySetting = null, string? folderNote = null) =>
             DarlingPasswordKeyRuntime.StartAsync(
                 Directory, Source, logger ?? new ListLogger(), TestContext.Current.CancellationToken,
                 new PasswordKeyStartOptions
@@ -1234,6 +1276,7 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
                     SetRing = ring => LastRing = ring,
                     ServiceHost = serviceHost,
                     KeySetting = keySetting,
+                    FolderNote = folderNote,
                 });
 
         public async Task ExecAsync(string sql, params (string Name, object Value)[] parameters)

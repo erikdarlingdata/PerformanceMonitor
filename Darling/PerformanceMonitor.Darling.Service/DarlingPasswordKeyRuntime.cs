@@ -43,6 +43,10 @@ internal sealed record PasswordKeyStartOptions
     /// <summary>The <c>passwordKey</c> reference (#8006) the key is loaded from instead of the key file. Null means the key
     /// file in the credentials directory.</summary>
     public string? KeySetting { get; init; }
+
+    /// <summary>The sentence <see cref="DarlingLogHashKeyFile.ContainerFolderNote"/> gives when the directory was chosen because
+    /// <c>DOTNET_RUNNING_IN_CONTAINER</c> is true (#9734). A refused start carries it at the end of its reason. Null adds nothing.</summary>
+    public string? FolderNote { get; init; }
 }
 
 /// <summary>
@@ -133,6 +137,12 @@ internal sealed class DarlingPasswordKeyRuntime
         var options = string.IsNullOrWhiteSpace(config.PasswordKey)
             ? null
             : new PasswordKeyStartOptions { KeySetting = config.PasswordKey };
+        var folderNote = DarlingLogHashKeyFile.ContainerFolderNote(config);
+        if (folderNote is not null)
+        {
+            options = (options ?? new PasswordKeyStartOptions()) with { FolderNote = folderNote };
+        }
+
         return await StartAsync(directory, postgres, logger, ct, options).ConfigureAwait(false);
     }
 
@@ -158,6 +168,12 @@ internal sealed class DarlingPasswordKeyRuntime
         try
         {
             var outcome = await DecideAndActAsync(directory, postgres, logger, selfTest, host, options.KeySetting, ct).ConfigureAwait(false);
+            if (options.FolderNote is not null && outcome.State == "refused" && outcome.TriggersOk)
+            {
+                /* #9734: a refusal that is not the key tables' triggers is about the key folder, so it names why that folder was chosen. */
+                outcome = outcome with { Note = $"{outcome.Note} {options.FolderNote}" };
+            }
+
             held = outcome.Key;
             IPasswordKeyRing ring;
             if (held is not null && outcome.State == "ok")
