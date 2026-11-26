@@ -619,7 +619,7 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
 
         Assert.Contains("status:\"ambiguous\"", description, StringComparison.Ordinal);
         Assert.Contains("NOTHING is deleted", description, StringComparison.Ordinal);
-        Assert.Contains("ONLY when exactly one", description, StringComparison.Ordinal);
+        Assert.Contains("status:\"partial_match\"", description, StringComparison.Ordinal);
         Assert.DoesNotContain("resolved the same way the read tools resolve", description, StringComparison.Ordinal);
 
         /* #3653 A15/A16: the description says WHICH table the name is resolved against (the definitions the DELETE
