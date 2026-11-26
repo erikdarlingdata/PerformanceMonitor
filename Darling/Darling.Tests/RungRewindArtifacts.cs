@@ -1032,9 +1032,24 @@ ALTER TABLE collect.read_latency DROP COLUMN IF EXISTS reply_bytes_count;"),
         new(318, "hasInvestigationChangeWindows", @"DROP TABLE IF EXISTS config.investigation_change_windows;
 DROP INDEX IF EXISTS config.ix_investigation_requests_held_window;
 ALTER TABLE IF EXISTS config.investigation_requests DROP COLUMN IF EXISTS held_window_id, DROP COLUMN IF EXISTS hold_released_at;"),
-        // V319 (#9662): the three argument advanced web access setter. It is the probe's newest sentinel. The rewind drops it, so a re-run of V319 makes it again. The one argument
-        // setter and the hardening function the rung replaced keep working without it. Safe on a store that never had it.
-        new(319, "hasWebAccessAdvancedActor", "DROP FUNCTION IF EXISTS config.set_web_access_advanced(boolean,text,boolean);"),
+        // V319 (#9662): the three argument advanced web access setter. It is the probe's newest sentinel. The one argument setter V319 replaced calls the three argument one,
+        // so the rewind puts the V262 one argument body back before it drops the three argument form, and a rewound store keeps a working setter. A re-run of V319 makes both again.
+        // Safe on a store that never had it.
+        new(319, "hasWebAccessAdvancedActor", """
+            CREATE OR REPLACE FUNCTION config.set_web_access_advanced(p_enabled boolean) RETURNS void
+            LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $fn$
+            DECLARE prior boolean;
+            BEGIN
+                SELECT enabled INTO prior FROM config.web_access_advanced WHERE id=1 FOR UPDATE;
+                IF NOT FOUND OR prior IS NOT DISTINCT FROM p_enabled THEN RETURN; END IF;
+                UPDATE config.web_access_advanced SET enabled=p_enabled,session_epoch=gen_random_uuid() WHERE id=1;
+                INSERT INTO config.web_access_group_events(group_id,event,actor,before_state,after_state)
+                    VALUES('ffffffff-ffff-ffff-ffff-ffffffffffff',
+                        CASE WHEN p_enabled THEN 'advanced_enabled' ELSE 'advanced_disabled' END,
+                        session_user,jsonb_build_object('enabled',prior),jsonb_build_object('enabled',p_enabled));
+            END $fn$;
+            DROP FUNCTION IF EXISTS config.set_web_access_advanced(boolean,text,boolean);
+            """),
     ];
 
     /// <summary>

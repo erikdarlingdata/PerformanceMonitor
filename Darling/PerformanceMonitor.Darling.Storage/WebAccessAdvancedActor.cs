@@ -29,7 +29,7 @@ CREATE OR REPLACE FUNCTION config.set_web_access_advanced(p_enabled boolean, p_a
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $fn$
 DECLARE prior boolean;
 BEGIN
-    IF p_enabled IS NULL OR p_confirmed IS NULL OR (p_actor IS NOT NULL AND (length(btrim(p_actor)) = 0 OR length(p_actor) > 256)) THEN
+    IF p_enabled IS NULL OR p_confirmed IS NULL OR (p_actor IS NOT NULL AND (length(btrim(p_actor)) = 0 OR length(p_actor) > 256 OR p_actor ~ '[[:cntrl:]\u202A-\u202E\u2066-\u2069]')) THEN
         RAISE EXCEPTION USING ERRCODE='WG400', MESSAGE='Invalid advanced web access operation.';
     END IF;
     SELECT enabled INTO prior FROM config.web_access_advanced WHERE id=1 FOR UPDATE;
@@ -49,7 +49,8 @@ BEGIN
     PERFORM config.set_web_access_advanced(p_enabled, NULL::text, true);
 END $fn$;
 -- Replayed after provisioning's blanket/default grants, and during the migration. It walks the setters in the schema instead of naming one
--- signature, so every form is revoked from everyone and granted to admin alone.
+-- signature, so every form is revoked from everyone. Admin gets the one argument form only: it is SECURITY DEFINER and calls the three
+-- argument form as the store owner, so only the store owner can name a different actor.
 CREATE OR REPLACE FUNCTION config.harden_web_access_advanced() RETURNS void
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $fn$
 DECLARE r text; c text; f text;

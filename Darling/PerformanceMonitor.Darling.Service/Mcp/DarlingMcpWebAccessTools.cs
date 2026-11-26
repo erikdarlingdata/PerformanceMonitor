@@ -136,7 +136,9 @@ public sealed partial class DarlingMcpWebAccessTools
             var store = new WebAccessGroupStore(owner);
             /* The store decides the confirm under its row lock and returns the value it held then (#9662). Reading the switch here first would let a
                switch turned off in between be turned back on with no confirm, and the answer would say unchanged with no undo. */
-            var before = await store.SetAdvancedEnabledAsync(enabled, actor, confirm, ct);
+            var prior = await store.SetAdvancedEnabledAsync(enabled, actor, confirm, ct);
+            /* No switch row: the store changed nothing, so the answer must not read as a flip and must not offer an undo. */
+            if (prior is not { } before) return Refuse("switch_missing", "The advanced web access switch row is missing from the store, so nothing was changed.");
             if (enabled && !before && !confirm)
             {
                 /* The store changed nothing. Turning the switch on is what lets a group sign in: every enabled group starts again, so the answer names them. */

@@ -503,6 +503,46 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
         });
     }
 
+    /// <summary>An actor with a control character is refused like a blank one: a tab, a newline, a bell and the bidirectional marks that
+    /// reorder text (U+202E) would otherwise reach the journal as a name that reads differently from what it holds.</summary>
+    [Fact]
+    public async Task AnActorWithAControlCharacter_IsRefusedByTheStore_AndChangesNothing()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var store = new WebAccessGroupStore(owner);
+            foreach (var actor in new[] { "mcp:\t\n", "mcp:a\tb", "mcp:a\nb", "mcp:a\ab", "mcp:rtl\u202Egnp", "mcp:\u2066x\u2069" })
+            {
+                var failure = await Assert.ThrowsAsync<PostgresException>(() => store.SetAdvancedEnabledAsync(true, actor, true, ct));
+                Assert.Equal("WG400", failure.SqlState);
+            }
+
+            Assert.Null(await store.ReadAdvancedSessionEpochAsync(ct));
+            Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct));
+            Assert.True(await store.SetAdvancedEnabledAsync(true, "mcp:plain-name", true, ct) is false);
+        });
+    }
+
+    /// <summary>A store with no switch row changed nothing, so the tool refuses and says so: no flip answer, no undo hint and no warning line.</summary>
+    [Fact]
+    public async Task AMissingSwitchRow_IsRefusedByTheTool_WithNoUndoAndNoLogLine()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            await ScalarAsync(owner, "DELETE FROM config.web_access_advanced", ct);
+            var store = new WebAccessGroupStore(owner);
+            Assert.Null(await store.SetAdvancedEnabledAsync(true, Actor, true, ct));
+
+            var logger = new CapturingTestLogger();
+            var refused = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, true, Actor, logger, ct))!;
+            Assert.Equal("switch_missing", (string)refused["code"]!);
+            Assert.Null(refused["status"]);
+            Assert.Null(refused["undo"]);
+            Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+            Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events", ct));
+        });
+    }
+
     /// <summary>Through a built server, the journal row of a flip names the token's identity, not the store owner.</summary>
     [Fact]
     public async Task AFlipThroughTheServer_JournalsTheCallersTokenIdentity()
