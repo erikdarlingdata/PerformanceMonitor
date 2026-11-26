@@ -125,8 +125,11 @@ public sealed class DarlingMcpPasswordKeyToolsTests
             var runtime = await DarlingPasswordKeyRuntime.StartAsync(
                 directory, source, logger, ct,
                 new PasswordKeyStartOptions { IsWindows = false, CanOpen = static _ => false, SetRing = static _ => { }, ServiceHost = "example-host" });
+            Assert.True(runtime.State == "ok", $"The key start answered {runtime.State}: {runtime.Note}");
             var keyId = runtime.Ring.Status.KeyId!;
-            var keyFileText = File.ReadAllText(Path.Combine(directory, DarlingPasswordKeyFile.FileName)).Trim();
+            var keyFile = Path.Combine(directory, DarlingPasswordKeyFile.FileName);
+            var keyFileBytes = File.ReadAllBytes(keyFile);
+            var keyFileText = Convert.ToBase64String(keyFileBytes);
             await using (var seed = await source.OpenConnectionAsync(ct))
             await using (var command = new NpgsqlCommand(@"
 INSERT INTO config.config_notification (id, smtp_host, smtp_port, smtp_use_ssl, smtp_username, smtp_encrypted_password)
@@ -150,7 +153,7 @@ ON CONFLICT (id) DO UPDATE SET smtp_encrypted_password = EXCLUDED.smtp_encrypted
             var after = await ReadStateAsync(source, ct);
             Assert.Null(after.CurrentKeyId);
             Assert.Equal(("replaced", "reset"), (after.OldState, after.OldReason));
-            Assert.Equal(keyFileText, File.ReadAllText(Path.Combine(directory, DarlingPasswordKeyFile.FileName)).Trim());
+            Assert.Equal(keyFileBytes, File.ReadAllBytes(keyFile));
 
             // A second reset finds no current key.
             var again = await DarlingMcpPasswordKeyTools.ResetPasswordKeyAsync(true, source, fromSetting: false, logger, ct);
