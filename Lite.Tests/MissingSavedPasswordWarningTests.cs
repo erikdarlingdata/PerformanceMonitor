@@ -43,6 +43,37 @@ public sealed class MissingSavedPasswordWarningTests
         AzureClientId = "client-id"
     };
 
+    private const string UnreadableText = "exists but Windows refused to read it under this Windows logon (Windows returned error 5)";
+
+    /// <summary>A store whose read of the given keys fails as Unreadable (the entry exists, Windows refuses it), as a remote-session entry can.</summary>
+    private sealed class UnreadableStore(InMemoryCredentialStore inner, params string[] unreadableKeys) : ICredentialStore
+    {
+        public bool SaveCredential(string serverId, string user, string password) => inner.SaveCredential(serverId, user, password);
+        public CredentialSaveResult TrySaveCredential(string serverId, string user, string password) => inner.TrySaveCredential(serverId, user, password);
+        public CredentialSaveResult TryDeleteCredential(string serverId) => inner.TryDeleteCredential(serverId);
+        public (string Username, string Password)? GetCredential(string serverId)
+            => unreadableKeys.Contains(serverId) ? null : inner.GetCredential(serverId);
+        public CredentialReadOutcome TryReadCredential(string serverId, out (string Username, string Password)? credential, out string? failure)
+        {
+            if (unreadableKeys.Contains(serverId))
+            {
+                credential = null;
+                failure = "Windows returned error 5";
+                return CredentialReadOutcome.Unreadable;
+            }
+
+            return inner.TryReadCredential(serverId, out credential, out failure);
+        }
+        public bool DeleteCredential(string serverId) => inner.DeleteCredential(serverId);
+        public bool CredentialExists(string serverId) => inner.CredentialExists(serverId);
+        public bool UpdateCredential(string serverId, string user, string password) => inner.UpdateCredential(serverId, user, password);
+        public IReadOnlyList<string> ListKeys(string keyPrefix) => inner.ListKeys(keyPrefix);
+    }
+
+    private static List<string> UnreadableWarningsFor(List<string> lines, string name) =>
+        lines.Where(l => l.Contains(UnreadableText, StringComparison.Ordinal)
+            && l.Contains($"'{name}'", StringComparison.Ordinal)).ToList();
+
     private static List<string> WarningsFor(string name) =>
         AppLogger.DrainBufferedLines().Where(l => l.Contains(FirstSentence, StringComparison.Ordinal)
             && l.Contains($"'{name}'", StringComparison.Ordinal)).ToList();
@@ -140,5 +171,47 @@ public sealed class MissingSavedPasswordWarningTests
         ServerConnection.ResolveConnectionString(server, cs, lookup);
 
         Assert.Empty(WarningsFor(profile.Name));
+    }
+
+    [Fact]
+    public void SqlServerWhoseSavedPasswordIsUnreadable_ResolvedTwice_WarnsOnceWithTheUnreadableText()
+    {
+        var server = NewServer(AuthenticationTypes.SqlServer);
+        var cs = new CredentialService(new UnreadableStore(new InMemoryCredentialStore(), server.Id));
+        AppLogger.DrainBufferedLines();
+
+        ServerConnection.ResolveConnectionString(server, cs, null);
+        ServerConnection.ResolveConnectionString(server, cs, null);
+
+        var lines = AppLogger.DrainBufferedLines().ToList();
+        Assert.Single(UnreadableWarningsFor(lines, server.DisplayName));
+        Assert.DoesNotContain(lines, l => l.Contains(FirstSentence, StringComparison.Ordinal)
+            && l.Contains($"'{server.DisplayName}'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ProfileWhoseSavedSecretIsUnreadable_UsedByTwoServers_WarnsOnceWithTheUnreadableText()
+    {
+        var profile = new CredentialProfile
+        {
+            Name = "prof-" + Guid.NewGuid().ToString("N")[..8],
+            AuthType = AuthenticationTypes.SqlServer
+        };
+        var lookup = new Lookup();
+        lookup.Add(profile);
+        var first = NewServer(AuthenticationTypes.SqlServer);
+        first.CredentialProfileId = profile.Id;
+        var second = NewServer(AuthenticationTypes.SqlServer);
+        second.CredentialProfileId = profile.Id;
+        var cs = new CredentialService(new UnreadableStore(new InMemoryCredentialStore(), ProfileManager.ProfileCredentialId(profile.Id)));
+        AppLogger.DrainBufferedLines();
+
+        ServerConnection.ResolveConnectionString(first, cs, lookup);
+        ServerConnection.ResolveConnectionString(second, cs, lookup);
+
+        var lines = AppLogger.DrainBufferedLines().ToList();
+        Assert.Single(UnreadableWarningsFor(lines, profile.Name));
+        Assert.DoesNotContain(lines, l => l.Contains(FirstSentence, StringComparison.Ordinal)
+            && l.Contains($"'{profile.Name}'", StringComparison.Ordinal));
     }
 }
