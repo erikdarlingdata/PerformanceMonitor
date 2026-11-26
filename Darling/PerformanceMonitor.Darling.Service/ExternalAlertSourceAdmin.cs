@@ -202,7 +202,7 @@ internal static class ExternalAlertSourceAdmin
                 await ExecAsync(owner, transaction, $"COMMENT ON ROLE {Quote(role)} IS '{DarlingManagedRoles.AlertSourceRoleMarker}'", ct);
                 await ExecAsync(owner, transaction, $"INSERT INTO {Schema}.external_alert_source (source_name, role_name) VALUES ($1, $2)", ct, name, role);
                 await ExecAsync(owner, transaction, DarlingManagedRoles.BuildExternalAlertSourceRolesSql(Schema), ct);
-                await transaction.CommitAsync(ct);
+                await transaction.CommitAsync(CancellationToken.None);
                 return new Result(Outcome.Done, role, password, ServerLogSettingsOn: loggingOn);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
@@ -215,7 +215,7 @@ internal static class ExternalAlertSourceAdmin
         await ExecAsync(owner, transaction, $"INSERT INTO {Schema}.external_alert_source (source_name, role_name) VALUES ($1, $2)", ct, name, role);
         /* The statements are built before the commit, so nothing after it can fail and lose the password. */
         var addSql = BuildAddSqlForDba(role, verifier, database, owner.PostgreSqlVersion.Major);
-        await transaction.CommitAsync(ct);
+        await transaction.CommitAsync(CancellationToken.None);
         return new Result(Outcome.NeedsDbaSql, role, password, addSql, DbaReason: reason);
     }
 
@@ -277,12 +277,13 @@ internal static class ExternalAlertSourceAdmin
                 return new Result(Outcome.NeedsDbaSql, registered, password, dbaSql, DbaReason: ex.MessageText);
             }
 
-            await transaction.CommitAsync(ct);
+            await transaction.CommitAsync(CancellationToken.None);
         }
 
         /* #5654: a new password governs new connections only, so the sessions the login already holds are ended once the new
            password is committed (ending them first would let a client log straight back in with the old one before the commit). */
-        var (ended, endSql, failure) = await EndSessionsAfterCommitAsync(owner, "a.usename = $1", registered, BuildEndSessionsSqlForDba(registered), registered, ct);
+        /* #9641: on CancellationToken.None, so a cancel after the commit cannot lose the new password the login already has. */
+        var (ended, endSql, failure) = await EndSessionsAfterCommitAsync(owner, "a.usename = $1", registered, BuildEndSessionsSqlForDba(registered), registered, CancellationToken.None);
         return new Result(Outcome.Done, registered, password,
             SessionsEnded: ended, EndSessionsSqlForDba: endSql, ServerLogSettingsOn: loggingOn, FollowUpFailure: failure);
     }
@@ -351,7 +352,7 @@ internal static class ExternalAlertSourceAdmin
             dbaSql = BuildRemoveSqlForDba(registered, await DatabaseNameAsync(owner, ct));
         }
 
-        await transaction.CommitAsync(ct);
+        await transaction.CommitAsync(CancellationToken.None);
 
         /* #5654: DROP ROLE leaves the dropped login's open sessions running, so they are ended once the drop is committed (found
            by the login's oid, which pg_stat_activity still carries after the name is gone). Ending them before the commit would
@@ -362,7 +363,7 @@ internal static class ExternalAlertSourceAdmin
         if (dropped)
         {
             (ended, endSql, failure) = await EndSessionsAfterCommitAsync(owner, "a.usesysid = $1::pg_catalog.oid", (long)loginOid,
-                $"SELECT pg_catalog.pg_terminate_backend(a.pid) FROM pg_catalog.pg_stat_activity AS a WHERE a.usesysid = {loginOid};", registered, ct);
+                $"SELECT pg_catalog.pg_terminate_backend(a.pid) FROM pg_catalog.pg_stat_activity AS a WHERE a.usesysid = {loginOid};", registered, CancellationToken.None);
         }
 
         return new Result(dbaSql is null ? Outcome.Done : Outcome.NeedsDbaSql, registered, DbaSql: dbaSql,
@@ -396,6 +397,17 @@ ORDER BY s.source_id", owner);
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// How many sessions a source's login holds open at the moment of the call (#9641): what a rotate or a remove would end, told to the caller
+    /// before it confirms. The login name column of pg_stat_activity is readable to every role.
+    /// </summary>
+    public static async Task<long> CountOpenSessionsAsync(NpgsqlConnection owner, string role, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity AS a WHERE a.usename = $1", owner);
+        command.Parameters.Add(new NpgsqlParameter { Value = role });
+        return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 
     /// <summary>

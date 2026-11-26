@@ -232,6 +232,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_store_setting_changes` | `collect.store_setting_changes`<br>`collect.store_setting_state` |
 | `get_store_table_health` | `collect.store_metrics`<br>`collect.store_log_events`<br>PostgreSQL's own `pg_stat_all_tables`, `pg_stat_all_indexes`, `pg_stat_database` and `pg_stat_activity`<br>TimescaleDB's `timescaledb_information` views |
 | `get_tool_guide` | None. The guides are built into the service. |
+| `list_alert_sources` | `config.external_alert_source`<br>`config.external_alert_pending` |
 | `list_custom_alert_rules` | `config.custom_alert_rules`<br>`config.config_alert_log` |
 | `list_custom_alert_templates` | None. The templates are built into the service. |
 | `list_custom_views` | `config.custom_views` |
@@ -248,6 +249,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 
 | Tool | Store objects |
 |---|---|
+| `add_alert_source` | `config.external_alert_source` (insert, as the store owner)<br>a database login (create, as the store owner) |
 | `add_servers` | `config.config_monitored_servers` (insert) |
 | `analyze_now` | `config.config_command`<br>`config.request_mcp_command` |
 | `approve_investigation_note` | `config.investigation_notes` (update)<br>`config.investigation_journal` (insert) |
@@ -296,8 +298,10 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `record_investigation_feedback` | `config.investigation_feedback` (insert)<br>`config.investigation_reports` (exists check)<br>`config.investigation_requests` |
 | `reject_investigation_note` | `config.investigation_notes` (update)<br>`config.investigation_journal` (insert) |
 | `reload_config` | `config.config_service` |
+| `remove_alert_source` | `config.external_alert_source` (delete, as the store owner)<br>`config.external_alert_pending` (delete, as the store owner) |
 | `remove_server` | `config.config_monitored_servers` (delete)<br>`config.server_tag_map` (delete)<br>`config.query_tag_assignments` (delete)<br>`config.query_tag_rules` (delete)<br>`config.query_tag_map` (delete)<br>`config.config_collector_schedules` (delete)<br>`config.config_collector_run_times` (delete) |
 | `remove_webhook_signing_key` | `config.config_notification`<br>`config.config_notification_routes` |
+| `rotate_alert_source` | `config.external_alert_source` (read, as the store owner)<br>a database login (new password, as the store owner) |
 | `reset_collector_schedules` | `config.config_collector_schedules`<br>`config.config_collector_run_times` |
 | `restore_alert_history` | `config.config_alert_log` |
 | `resume_collection` | `config.config_command`<br>`config.config_service` |
