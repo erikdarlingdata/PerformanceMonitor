@@ -523,6 +523,48 @@ public sealed partial class ServerEditLiveTests : IDisposable
         }
     }
 
+    /// <summary>#9693: the <c>--edit-server</c> verb runs the edit as the store owner. The refusal of a change to how a row with a
+    /// remediation login connects is in the store's edit function, not in a role's trigger, so the owner meets it too: the verb
+    /// answers with the same sentence the other surfaces give, exits 1 and writes nothing, whether or not the row keeps a password.</summary>
+    [Fact]
+    public async Task AsTheStoreOwner_TheEditServerVerb_RefusesAnAddressEditOnARowWithARemediationLogin_WithTheSameSentence_AndWritesNothing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5194, "alpha-94", "alpha-94.example.test", "integrated", null, null, ct, remediationBlob: "rem-blob");
+            var before = await RowSignatureAsync(rig.Owner, 5194, ct);
+            var hostBefore = await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5194", ct);
+            var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
+
+            Task<string> OwnerEdit(string changesJson) =>
+                Edit.EditServerByNameAsync(rig.Owner, "alpha-94.example.test", changesJson, Reachable, TestKeyRings.Healthy, null, ct);
+            Task<string> NeverEnabled(string server, bool enable) => throw new InvalidOperationException("enabled must not be touched when the edit is refused.");
+
+            Assert.True(DarlingCliCommands.TryParseEditServerArgs(["alpha-94.example.test", "--set", "host=alpha-99.example.test"], out var moveRequest, out _));
+            var (moveLines, moveExit) = await DarlingCliCommands.RunEditServerAsync(moveRequest!, OwnerEdit, NeverEnabled, _ => null);
+            Assert.Equal(1, moveExit);
+            Assert.Contains(Edit.EditRemediationKeptText, string.Join('\n', moveLines), StringComparison.Ordinal);
+            Assert.Equal(hostBefore, await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5194", ct));
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5194, ct));
+            Assert.Equal(versionBefore, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
+
+            Assert.True(DarlingCliCommands.TryParseEditServerArgs(["alpha-94.example.test", "--set", "name=Renamed-94"], out var renameRequest, out _));
+            var (renameLines, renameExit) = await DarlingCliCommands.RunEditServerAsync(renameRequest!, OwnerEdit, NeverEnabled, _ => null);
+            Assert.Equal(0, renameExit);
+            Assert.Contains("Changed Renamed-94", string.Join('\n', renameLines), StringComparison.Ordinal);
+            Assert.Equal("Renamed-94", await ScalarAsync<string>(rig.Owner, "SELECT name FROM config_monitored_servers WHERE server_id = 5194", ct));
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5194, ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
     [Fact]
     public async Task AsTheMcpRole_RoleAndExternalIdEditsGoThroughTheEditFunction_AndEveryOtherColumnStaysUpdatable()
     {
