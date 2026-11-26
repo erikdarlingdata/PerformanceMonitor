@@ -57,6 +57,13 @@ public sealed class McpToolGuideTests
         Assert.True(overLong.Count == 0, "served head(s) over the 620 target: " + string.Join(", ", overLong));
     }
 
+    /// <summary>Shared tool names whose served head cannot be byte-identical because Darling's head is false for Lite. The value is the reason.</summary>
+    private static readonly Dictionary<string, string> SkuSpecificHeads = new(StringComparer.Ordinal)
+    {
+        ["add_servers"] = "#9640: Darling's head describes the service and the shared central store, mcp.allowServerAdmin, and per-entry results with PostgreSQL targets. Lite saves all entries or none through --add-server's code, is served by mcp_allow_server_admin, and monitors SQL Server only.",
+        ["remove_server"] = "#9640: Darling's head describes the central store's definitions and a sweep of the service. Lite removes through Manage Servers' own removal, is served by mcp_allow_server_admin, and matches the server list.",
+    };
+
     /// <summary>
     /// D6, generically: for every MCP tool name registered on BOTH SKUs, if either side's description carries
     /// the marker, both must, and the served heads must be byte-identical. Tool names and marker presence are
@@ -90,6 +97,12 @@ public sealed class McpToolGuideTests
             }
 
             if (!darlingConverted)
+            {
+                continue;
+            }
+
+            /* The marker check above still applies to a name here: only the head comparison is skipped. */
+            if (SkuSpecificHeads.ContainsKey(tool))
             {
                 continue;
             }
