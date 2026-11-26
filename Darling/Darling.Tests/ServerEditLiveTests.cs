@@ -255,7 +255,7 @@ public sealed partial class ServerEditLiveTests : IDisposable
             Assert.Equal("updated", set["status"]!.GetValue<string>());
             Assert.False(set["tested"]!.GetValue<bool>());
             Assert.False(set["reconnects"]!.GetValue<bool>());
-            Assert.Equal("False|Summary", await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', capture_plans, alert_delivery_mode_override) FROM config_monitored_servers WHERE server_id = 5191", ct));
+            Assert.Equal("f|Summary", await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', capture_plans, alert_delivery_mode_override) FROM config_monitored_servers WHERE server_id = 5191", ct));
             Assert.True(await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct) > versionBefore);
 
             /* The answer's token is the row's own modified_at, so the next edit that sends it as expected_modified_at is not a conflict. */
@@ -269,18 +269,18 @@ public sealed partial class ServerEditLiveTests : IDisposable
             Assert.Equal("updated", again["status"]!.GetValue<string>());
             var cost = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01", "{\"monthly_cost_usd\":9}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("updated", cost["status"]!.GetValue<string>());
-            Assert.Equal("True|PerEvent", await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', capture_plans, alert_delivery_mode_override) FROM config_monitored_servers WHERE server_id = 5191", ct));
+            Assert.Equal("t|PerEvent", await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', capture_plans, alert_delivery_mode_override) FROM config_monitored_servers WHERE server_id = 5191", ct));
 
             /* A stale token is a conflict and the settings are not written. */
             var stale = Parse(await Edit.EditServerByNameAsync(rig.Mcp, "gamma-01",
                 "{\"capture_plans\":false,\"expected_modified_at\":\"" + set["modified_at"]!.GetValue<string>() + "\"}", Reachable, TestKeyRings.Healthy, null, ct));
             Assert.Equal("conflict", stale["status"]!.GetValue<string>());
-            Assert.Equal("True", await ScalarAsync<string>(rig.Owner, "SELECT capture_plans::text FROM config_monitored_servers WHERE server_id = 5191", ct));
+            Assert.Equal("true", await ScalarAsync<string>(rig.Owner, "SELECT capture_plans::text FROM config_monitored_servers WHERE server_id = 5191", ct));
 
             /* The web route's role cannot write the two columns, so its parse still refuses them. */
             var web = Parse(await Edit.EditServerByIdAsync(rig.Mcp, 5191, "{\"capture_plans\":false}", null, ct));
             Assert.Equal("invalid", web["status"]!.GetValue<string>());
-            Assert.Equal("True", await ScalarAsync<string>(rig.Owner, "SELECT capture_plans::text FROM config_monitored_servers WHERE server_id = 5191", ct));
+            Assert.Equal("true", await ScalarAsync<string>(rig.Owner, "SELECT capture_plans::text FROM config_monitored_servers WHERE server_id = 5191", ct));
             ok = true;
         }
         finally

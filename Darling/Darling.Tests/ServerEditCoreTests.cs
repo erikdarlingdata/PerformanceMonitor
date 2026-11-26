@@ -397,7 +397,7 @@ public sealed class ServerEditCoreTests : IDisposable
         Assert.Equal(DBNull.Value, parameters[4].Value);
         Assert.DoesNotContain("encrypted_password", Edit.EditFunctionSql, StringComparison.Ordinal);
         Assert.Equal(
-            Edit.EditColumnOfField.Values.Order(StringComparer.Ordinal).ToArray(),
+            Edit.EditColumnOfField.Values.Except(["capture_plans", "alert_delivery_mode_override"]).Order(StringComparer.Ordinal).ToArray(),
             Edit.EditFunctionColumns.Select(c => c.Column).Order(StringComparer.Ordinal).ToArray());
     }
 
