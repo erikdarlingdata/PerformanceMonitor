@@ -135,7 +135,6 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
         var upgraded = CopyStore(v81, Path.Combine(_root, "upgraded"));
         var upgradedLog = new List<(LogLevel Level, string Message)>();
         using var upgradedDb = new DuckDbInitializer(upgraded.DbPath, new CapturingLogger<DuckDbInitializer>(upgradedLog));
-        var climbClock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await upgradedDb.InitializeAsync();
@@ -145,7 +144,7 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
             run.Climb.Add($"InitializeAsync threw {ex.GetType().Name}: {ex.Message}");
             return run;
         }
-        run.Details.AppendLine($"climb: v{upgradedDb.StartupSchemaBefore} -> v{upgradedDb.StartupSchemaAfter} in {climbClock.ElapsedMilliseconds} ms (migration steps {upgradedDb.StartupMigrationMs} ms)");
+        run.Details.AppendLine($"climb: v{upgradedDb.StartupSchemaBefore} -> v{upgradedDb.StartupSchemaAfter} (migration steps {upgradedDb.StartupMigrationMs} ms)");
         foreach (var (level, message) in upgradedLog.Where(l => l.Level >= LogLevel.Information && l.Message.Contains("migration", StringComparison.OrdinalIgnoreCase)))
             run.Details.AppendLine($"  log {level}: {message}");
 
