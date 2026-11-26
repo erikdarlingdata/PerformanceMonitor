@@ -4,6 +4,8 @@ Audience: operators.
 
 This page takes you from a downloaded tarball to a service that collects data. It is for a Linux host that runs systemd, with a PostgreSQL server that you run yourself as the store. Follow it from top to bottom. The Docker Compose shape is in the [Darling quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804). The Helm chart is in [Run Darling on Kubernetes](kubernetes.md). The Windows install is in [Install Darling](install.md).
 
+This page describes a host install under systemd. It does not describe the tarball inside a container. For a container, use the compose distribution in the [Darling quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804). A container base image such as `mcr.microsoft.com/dotnet/aspnet` sets `DOTNET_RUNNING_IN_CONTAINER=true`, and with that set the service keeps its keys in `/var/lib/darling/credentials`, not in `darling-keys` beside `darling.json`.
+
 The steps were run on Ubuntu 24.04 with PostgreSQL 18 and TimescaleDB 2.32 on the same host as the service. On another distribution the package names and the PostgreSQL paths differ, and the rest is the same.
 
 Every step ends with a proof point. If a proof point does not appear, stop at that step. The next step will not fix it.
@@ -367,7 +369,7 @@ Work the formula with those two numbers and the host's RAM. For host RAM, use th
 ## Logs
 
 - **The file log is the one to read.** It is `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, one file for each day, kept 14 days, one line for each event.
-- **The journal is the noisy one.** `journalctl -u darling` shows the same events in the console format, which puts the source on one line and the message on the next. Use the journal for what systemd itself reports: starts, stops and a process that exits.
+- **The journal is the noisy one.** `journalctl -u darling` shows one line for each event, as `source[event id] message`, and the log level goes to the journal priority. To list only warnings and errors, run `journalctl -u darling -p warning`. Use the journal for what systemd itself reports: starts, stops and a process that exits.
 - **The log files are mode `644` inside a `700` folder.** The service creates each file with the process umask. The folder's mode is what keeps other users out, so this is harmless. To make the files owner-only as well, add `UMask=0077` to the unit's `[Service]` section and restart the service.
 - **The log level** is set with a standard .NET logging source. In the unit, that is a line such as `Environment=Logging__LogLevel__PerformanceMonitor.Darling.Service=Debug`. See [Logs](operations.md#logs).
 - There is no Windows event log on Linux. The file log and the journal are the two surfaces.
@@ -431,18 +433,24 @@ There is no upgrade script for Linux ([#9688](https://github.com/erikdarlingdata
 1. Read the release notes, and [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) for anything that an older build reads differently.
 2. Back up the store. See [Back up, restore and move the store](../darling-store-backup.md).
 3. Download and verify the new tarball, as in step 4.
-4. Replace the service files and keep the old ones:
+4. Replace the service files and keep the old ones. The service stays stopped until step 5:
 
    ```bash
    sudo systemctl stop darling
    sudo mv /opt/darling /opt/darling.previous
    sudo mkdir -p /opt/darling
    sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling --no-same-owner
+   ```
+
+5. Compare `/etc/systemd/system/darling.service` with the unit in step 8, because a release can change it. For example, 3.14.0 adds `Type=notify`, `postgresql.service` in `After=` and `Wants=network-online.target`. If the files differ, save the unit from step 8 over yours. Then reload systemd and start the service:
+
+   ```bash
+   sudo systemctl daemon-reload
    sudo systemctl start darling
    ```
 
-5. Check the proof lines of step 9. `Postgres store ready (schema v<version>, <count> migration(s) applied)` shows the store's new schema version.
-6. Read the worker counts again, as in [Size the workers after the first start](#size-the-workers-after-the-first-start).
+6. Check the proof lines of step 9. `Postgres store ready (schema v<version>, <count> migration(s) applied)` shows the store's new schema version.
+7. Read the worker counts again, as in [Size the workers after the first start](#size-the-workers-after-the-first-start).
 
 Nothing checks that the old process is gone or rolls back for you. To go back, stop the unit, move `/opt/darling.previous` back to `/opt/darling` and start the unit. The store's migrations stay applied, so read the rollback list first. Remove `/opt/darling.previous` when you no longer need it.
 
