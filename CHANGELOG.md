@@ -306,6 +306,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Lite says in the log when a server's saved password is missing or unreadable under its Windows logon** ([#9731])
 - **Lite and the Viewer come back from the tray, or a second launch, in the state they had before they were minimized** ([#9737])
 - **The Lite guide and the missing-password warning say a Do not store password task reads saved passwords only while its user is signed in** ([#9739])
+- **The Linux docs cover the unit check on upgrade, journal levels and the pg_dump warning, and a key folder failure names the container variable** ([#9738])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8537,4 +8538,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9731]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9731
 [#9736]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9736
 [#9737]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9737
+[#9738]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9738
 [#9739]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9739
