@@ -355,7 +355,8 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
     /// <summary>
     /// The MCP statement for <paramref name="plan"/> (<see cref="DarlingQueryStoreRegressionReader.TableSqlFor"/>) run by hand,
     /// every column of every row in order, each value in a round-trip text form, so two forms compare byte for byte. The recent
-    /// days' three parameters ($11 to $13) are bound only on the form that names them.
+    /// days' four parameters ($14 to $17, the last the partial day's watermark or NULL) are bound only on the form that names
+    /// them.
     /// </summary>
     internal static async Task<List<string>> RunFullAsync(
         NpgsqlConnection connection, int serverId, string database, DateTime start, DateTime end, DateTime baselineStart,
@@ -383,6 +384,7 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
             command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Date, Value = plan.RecentDays });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.RecentLowEnd });
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = plan.RecentHighStart });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = plan.RecentPartialThrough is DateTime through ? through : DBNull.Value });
         }
 
         var rows = new List<string>();
