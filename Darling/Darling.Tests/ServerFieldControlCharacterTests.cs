@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -173,6 +174,98 @@ public sealed class ServerFieldControlCharacterTests
 
         Assert.DoesNotContain("\n", refused.Message, StringComparison.Ordinal);
         Assert.Contains(property == nameof(MonitoredServerRow.Name) ? "display_name" : property.ToLowerInvariant(), refused.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>The Add dialog, the bulk add and both registry imports write through AddMonitoredServerAsync, which refuses a control
+    /// character in any of the four fields before it connects.</summary>
+    [Theory]
+    [InlineData(nameof(MonitoredServerRow.Name))]
+    [InlineData(nameof(MonitoredServerRow.Host))]
+    [InlineData(nameof(MonitoredServerRow.Database))]
+    [InlineData(nameof(MonitoredServerRow.Username))]
+    public async Task TheViewerAdd_RefusesAControlCharacterInTheField_BeforeItConnects(string property)
+    {
+        var row = new MonitoredServerRow { Name = "alpha", Host = "sql01.example.test" };
+        typeof(MonitoredServerRow).GetProperty(property)!.SetValue(row, "x\u202Ey");
+        await using var viewer = new ViewerDataService(DeadStore);
+
+        var refused = await Assert.ThrowsAsync<MonitoredServerFieldRefusedException>(() => viewer.AddMonitoredServerAsync(row));
+
+        Assert.DoesNotContain("\u202E", refused.Message, StringComparison.Ordinal);
+        Assert.Contains(property == nameof(MonitoredServerRow.Name) ? "display_name" : property.ToLowerInvariant(), refused.Message, StringComparison.Ordinal);
+    }
+
+    private static (ViewerServerStore Servers, ViewerProfileStore Profiles) NewRegistry(string directory)
+    {
+        var secrets = new NoSecretStore();
+        var servers = new ViewerServerStore(Path.Combine(directory, "servers.json"), secrets);
+        var profiles = new ViewerProfileStore(servers, Path.Combine(directory, "profiles.json"), secrets);
+        return (servers, profiles);
+    }
+
+    private static ViewerServerEntry RegistryEntry(string host, string displayName) => new()
+    {
+        ServerName = host,
+        DisplayName = displayName,
+        AuthenticationType = AuthenticationTypes.Windows,
+    };
+
+    /// <summary>Integrated-auth entries carry no secret, so nothing here touches the real vault.</summary>
+    private sealed class NoSecretStore : IViewerServerSecretStore
+    {
+        public void Save(string id, string username, string password) { }
+        public (string Username, string Password)? Find(string id) => null;
+        public void Delete(string id) { }
+    }
+
+    /// <summary>Import Settings skips a registry entry whose name holds a control character, counts it as refused, and never opens the
+    /// store for it: the store here is one that cannot be reached.</summary>
+    [Fact]
+    public async Task ImportSettings_SkipsAndCountsAnEntryHoldingAControlCharacter_WithoutConnecting()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The import reads the viewer's Windows-only stores.");
+        var directory = Directory.CreateTempSubdirectory("darling-import-fieldrule-").FullName;
+        try
+        {
+            var (source, profiles) = NewRegistry(directory);
+            source.AddServer(RegistryEntry("sql01.example.test", "prod\nFAKE"), null, null);
+            await using var viewer = new ViewerDataService(DeadStore);
+
+            var result = await ViewerServerMigration.ImportFromStoreAsync(source, profiles, viewer, TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, result.Imported);
+            Assert.Equal(1, result.Refused);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>The once-only migrate-in of the old registry counts an entry saved before the rule as refused, goes on past it, and
+    /// still writes the marker, so the next run does not retry an entry that will be refused again.</summary>
+    [Fact]
+    public async Task TheMigrateIn_SkipsAndCountsAnEntryHoldingAnOverride_AndStillWritesTheMarker()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The migration reads the viewer's Windows-only stores.");
+        var directory = Directory.CreateTempSubdirectory("darling-migrate-fieldrule-").FullName;
+        try
+        {
+            var (registry, profiles) = NewRegistry(directory);
+            registry.AddServer(RegistryEntry("sql01.example.test", "prod\u202Efake"), null, null);
+            var migration = new ViewerServerMigration(registry, profiles, Path.Combine(directory, "migrated.marker"));
+            await using var viewer = new ViewerDataService(DeadStore);
+
+            var result = await migration.MigrateCoreAsync(viewer, TestContext.Current.CancellationToken);
+
+            Assert.Equal(0, result.Imported);
+            Assert.Equal(1, result.Refused);
+            Assert.True(migration.AlreadyMigrated);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); } catch { /* best-effort */ }
+        }
     }
 
     [Fact]

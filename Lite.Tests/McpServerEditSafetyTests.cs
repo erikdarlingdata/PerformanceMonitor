@@ -210,4 +210,59 @@ public sealed class McpServerEditSafetyTests : IDisposable
             Assert.DoesNotContain(value, string.Join('\n', lines), StringComparison.Ordinal);
         }
     }
+
+    /// <summary>#9787: edit_server holds the four text fields to the same rule as every other writer. Each field with a line feed, a
+    /// right-to-left override and an invisible tag character is refused as invalid by field name, the answer never repeats the value,
+    /// the connection test never runs, and the stored server is unchanged.</summary>
+    [Theory]
+    [InlineData("display_name", "\n")]
+    [InlineData("display_name", "\u202E")]
+    [InlineData("display_name", "\U000E0041")]
+    [InlineData("host", "\n")]
+    [InlineData("host", "\u202E")]
+    [InlineData("host", "\U000E0041")]
+    [InlineData("database", "\n")]
+    [InlineData("database", "\u202E")]
+    [InlineData("database", "\U000E0041")]
+    [InlineData("username", "\n")]
+    [InlineData("username", "\u202E")]
+    [InlineData("username", "\U000E0041")]
+    public async Task Edit_AFieldHoldingAControlCharacter_IsRefusedByName_WithoutTheValue_AndChangesNothing(string field, string character)
+    {
+        var manager = Seeded();
+        var before = Reread();
+        var tests = 0;
+        var changes = System.Text.Json.JsonSerializer.Serialize(new System.Collections.Generic.Dictionary<string, string> { [field] = "x" + character + "leakcheck" });
+
+        var answer = await Edit(manager, changes, (_, _, _, _) => { tests++; return Task.FromResult<string?>(null); });
+
+        Assert.Equal("invalid", Status(answer));
+        Assert.Equal(field, Parse(answer)["hints"]!["parameter"]!.GetValue<string>());
+        Assert.Contains($"{field} holds a control character", Parse(answer)["message"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.DoesNotContain("leakcheck", answer, StringComparison.Ordinal);
+        Assert.Equal(0, tests);
+
+        foreach (var server in new[] { manager.GetAllServers().Single(), Reread() })
+        {
+            Assert.Equal(before.ServerName, server.ServerName);
+            Assert.Equal(before.DisplayName, server.DisplayName);
+            Assert.Equal(before.DatabaseName, server.DatabaseName);
+        }
+
+        Assert.Equal(("collector", Secret), new CredentialService(_store).GetCredential(before.Id)!.Value);
+    }
+
+    /// <summary>#9787: a zero-width non-joiner is part of an ordinary Persian word, so a database holding one is saved.</summary>
+    [Fact]
+    public async Task Edit_ADatabaseHoldingAZeroWidthNonJoiner_IsSaved()
+    {
+        var manager = Seeded();
+        var database = "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645";
+
+        /* A changed database is a changed address, so the call carries the password, as the Edit Server window's own question asks for. */
+        var answer = await Edit(manager, System.Text.Json.JsonSerializer.Serialize(new { database, password = NewSecret }));
+
+        Assert.True(Status(answer) == "updated", answer);
+        Assert.Equal(database, Reread().DatabaseName);
+    }
 }

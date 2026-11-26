@@ -272,6 +272,34 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Empty(ServerNames());
     }
 
+    /// <summary>#9787: ServerManager.UpdateServer holds a CHANGED display name, host, database or login to the rule, so every caller
+    /// is covered. A field that keeps its saved text is not checked, so a row saved before the rule stays editable on its other fields.</summary>
+    [Fact]
+    public void UpdateServer_RefusesAChangedDisplayNameHoldingAnOverride_AndAcceptsAnEditToAnotherFieldOfALegacyRow()
+    {
+        var manager = Reload();
+        var server = new ServerConnection { ServerName = "sql01", DisplayName = "Orders", AuthenticationType = AuthenticationTypes.Windows };
+        manager.AddServer(server);
+
+        /* A row saved before the rule: the name is written without the rule, as an older build did. */
+        server.DisplayName = "Or\u202Eders";
+        manager.UpdateServerSettings(server);
+        var legacy = Reload();
+        var row = legacy.GetAllServers().Single();
+        Assert.Equal("Or\u202Eders", row.DisplayName);
+
+        row.Description = "an edit to another field";
+        legacy.UpdateServer(row);
+        Assert.Equal("an edit to another field", Reload().GetAllServers().Single().Description);
+        Assert.Equal("Or\u202Eders", Reload().GetAllServers().Single().DisplayName);
+
+        row.DisplayName = "Pay\u202Eroll";
+        var refused = Assert.Throws<InvalidOperationException>(() => legacy.UpdateServer(row));
+        Assert.Contains("display_name holds a control character", refused.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Pay", refused.Message, StringComparison.Ordinal);
+        Assert.Equal("Or\u202Eders", Reload().GetAllServers().Single().DisplayName);
+    }
+
     [Theory]
     [InlineData("""[{"host":"np:sql01","auth":"windows"}]""")]
     [InlineData("""[{"host":"sql01","auth":"sql","password":"p"}]""")]

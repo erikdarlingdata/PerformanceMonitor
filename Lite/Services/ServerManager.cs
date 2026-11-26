@@ -41,6 +41,12 @@ public class ServerManager
     /* #6254: the Query Store replica each server had when it was last loaded or saved, as _savedHosts does for the host: an edit that
        keeps its replica is not held to the replica rule, so a server saved before the rule stays editable. */
     private readonly Dictionary<string, string> _savedReplicas = new();
+
+    /* #9787: the display name and database each server had when it was last loaded or saved, as _savedHosts does for the host. The
+       edit dialog and edit_server change the live list object before they call UpdateServer, so only a copy says what was saved: a
+       field that keeps its saved text is not held to the control-character rule, and a row saved before the rule stays editable. */
+    private readonly Dictionary<string, string> _savedDisplayNames = new();
+    private readonly Dictionary<string, string> _savedDatabases = new();
     private readonly ConcurrentDictionary<string, ServerConnectionStatus> _connectionStatuses;
 
     /// <summary>
@@ -439,6 +445,7 @@ public class ServerManager
             _servers.Add(server);
             SaveServers();
             _savedHosts[server.Id] = server.ServerName;
+            RememberSavedText(server);
             _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             NotificationRouteCache.Invalidate();
         }
@@ -484,6 +491,38 @@ public class ServerManager
         _logger?.LogInformation("Added server '{DisplayName}' ({ServerName})", server.DisplayName, server.ServerName);
     }
 
+    /* Caller holds _serversLock. */
+    private void RememberSavedText(ServerConnection server)
+    {
+        _savedDisplayNames[server.Id] = server.DisplayName ?? "";
+        _savedDatabases[server.Id] = server.DatabaseName ?? "";
+    }
+
+    /// <summary>
+    /// The sentence to refuse an edit with when a text field the edit CHANGES holds a character the save rule refuses (#9787), or null.
+    /// A field that keeps its saved text is not checked, so a row saved before the rule stays editable on its other fields. The
+    /// user name is judged against the one in the credential store, and only when it holds a refused character, so the store is
+    /// not read for an ordinary edit. Caller holds <c>_serversLock</c>.
+    /// </summary>
+    private string? ChangedFieldRefusal(ServerConnection server, string? username)
+    {
+        if (!_savedDisplayNames.TryGetValue(server.Id, out var savedDisplayName)) savedDisplayName = null;
+        if (!_savedDatabases.TryGetValue(server.Id, out var savedDatabase)) savedDatabase = null;
+        _savedHosts.TryGetValue(server.Id, out var savedHost);
+
+        string? Changed(string field, string? now, string? saved) =>
+            string.Equals(now ?? "", saved ?? "", StringComparison.Ordinal) ? null : ServerFieldText.Refusal(field, now);
+
+        var storedUsername = ServerFieldText.HasRefusedCharacter(username)
+            ? _credentialService.GetCredential(server.Id)?.Username
+            : null;
+
+        return Changed("host", server.ServerName, savedHost)
+            ?? Changed("display_name", server.DisplayName, savedDisplayName)
+            ?? Changed("database", server.DatabaseName, savedDatabase)
+            ?? Changed("username", username, storedUsername);
+    }
+
     /// <summary>
     /// Updates an existing server.
     /// </summary>
@@ -497,6 +536,12 @@ public class ServerManager
             if (existing == null)
             {
                 throw new InvalidOperationException($"Server with ID {server.Id} not found");
+            }
+
+            /* #9787: a changed display name, host, database or login holds no control character; a kept one is not checked. */
+            if (ChangedFieldRefusal(server, username) is { } fieldRefusal)
+            {
+                throw new InvalidOperationException(fieldRefusal);
             }
 
             /* #6352: a changed host is held to the add rule; an unchanged one is not (existing rows keep working). */
@@ -524,6 +569,7 @@ public class ServerManager
             _servers[index] = server;
             SaveServers();
             _savedHosts[server.Id] = server.ServerName;
+            RememberSavedText(server);
             _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             NotificationRouteCache.Invalidate();
         }
@@ -616,6 +662,8 @@ public class ServerManager
             {
                 _servers.Remove(server);
                 _savedHosts.Remove(id);
+                _savedDisplayNames.Remove(id);
+                _savedDatabases.Remove(id);
                 _savedReplicas.Remove(id);
                 SaveServers();
                 NotificationRouteCache.Invalidate();
@@ -1028,6 +1076,7 @@ public class ServerManager
             {
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                 _savedHosts[server.Id] = server.ServerName;
+                RememberSavedText(server);
                 _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
             }
 
@@ -1056,6 +1105,7 @@ public class ServerManager
                     {
                         _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                         _savedHosts[server.Id] = server.ServerName;
+                        RememberSavedText(server);
                         _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
                     }
 
@@ -1170,6 +1220,7 @@ public class ServerManager
                 /* Import Settings is this user's own choice of file, so its hosts are confirmed for them. */
                 _hostBindings.Confirm(server);
                 _savedHosts[server.Id] = server.ServerName;
+                RememberSavedText(server);
                 _savedReplicas[server.Id] = server.QueryStoreReplica ?? "";
                 _connectionStatuses[server.Id] = new ServerConnectionStatus { ServerId = server.Id };
                 imported++;
