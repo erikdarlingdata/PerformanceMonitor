@@ -175,9 +175,9 @@ public sealed class DarlingMcpAlertSourceTools
         try
         {
             await using var connection = await ownerSource.OpenConnectionAsync(cancellationToken);
-            if (!confirm && verb != "--add-alert-source" && await ConfirmRequiredAsync(verb, connection, name!, cancellationToken) is { } required)
+            if (!confirm && verb != "--add-alert-source")
             {
-                return required;
+                return await ConfirmRequiredAsync(verb, connection, name!, cancellationToken);
             }
 
             /* The commit is the point of no return, and the new password exists only in the answer. Every step after it runs to its end
@@ -215,16 +215,17 @@ public sealed class DarlingMcpAlertSourceTools
     }
 
     /// <summary>
-    /// What a rotate or a remove would do, as the <c>confirm_required</c> answer, or null when the source is not registered (the change
-    /// itself then refuses with the usual text, and nothing is changed either way). Reads only.
+    /// What a rotate or a remove would do, as the <c>confirm_required</c> answer, or the <c>not_registered</c> refusal when the source is not
+    /// registered. An unconfirmed call ends here either way and never reaches the change, so a source added under that name a moment later
+    /// is not rotated or removed without a confirm. Reads only.
     /// </summary>
-    private static async Task<string?> ConfirmRequiredAsync(string verb, NpgsqlConnection connection, string name, CancellationToken cancellationToken)
+    private static async Task<string> ConfirmRequiredAsync(string verb, NpgsqlConnection connection, string name, CancellationToken cancellationToken)
     {
         var sources = await ExternalAlertSourceAdmin.ListAsync(connection, cancellationToken);
         var source = sources?.FirstOrDefault(row => string.Equals(row.Name, name, StringComparison.Ordinal));
         if (source is null)
         {
-            return null;
+            return Refused("not_registered", $"No source named '{name}'. list_alert_sources shows the sources there are. Nothing was changed.");
         }
 
         var sessions = await ExternalAlertSourceAdmin.CountOpenSessionsAsync(connection, source.RoleName, cancellationToken);

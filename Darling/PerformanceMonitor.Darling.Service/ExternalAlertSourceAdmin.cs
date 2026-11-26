@@ -202,7 +202,7 @@ internal static class ExternalAlertSourceAdmin
                 await ExecAsync(owner, transaction, $"COMMENT ON ROLE {Quote(role)} IS '{DarlingManagedRoles.AlertSourceRoleMarker}'", ct);
                 await ExecAsync(owner, transaction, $"INSERT INTO {Schema}.external_alert_source (source_name, role_name) VALUES ($1, $2)", ct, name, role);
                 await ExecAsync(owner, transaction, DarlingManagedRoles.BuildExternalAlertSourceRolesSql(Schema), ct);
-                await transaction.CommitAsync(ct);
+                await transaction.CommitAsync(CancellationToken.None);
                 return new Result(Outcome.Done, role, password, ServerLogSettingsOn: loggingOn);
             }
             catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.InsufficientPrivilege)
@@ -215,7 +215,7 @@ internal static class ExternalAlertSourceAdmin
         await ExecAsync(owner, transaction, $"INSERT INTO {Schema}.external_alert_source (source_name, role_name) VALUES ($1, $2)", ct, name, role);
         /* The statements are built before the commit, so nothing after it can fail and lose the password. */
         var addSql = BuildAddSqlForDba(role, verifier, database, owner.PostgreSqlVersion.Major);
-        await transaction.CommitAsync(ct);
+        await transaction.CommitAsync(CancellationToken.None);
         return new Result(Outcome.NeedsDbaSql, role, password, addSql, DbaReason: reason);
     }
 
@@ -277,7 +277,7 @@ internal static class ExternalAlertSourceAdmin
                 return new Result(Outcome.NeedsDbaSql, registered, password, dbaSql, DbaReason: ex.MessageText);
             }
 
-            await transaction.CommitAsync(ct);
+            await transaction.CommitAsync(CancellationToken.None);
         }
 
         /* #5654: a new password governs new connections only, so the sessions the login already holds are ended once the new
@@ -352,7 +352,7 @@ internal static class ExternalAlertSourceAdmin
             dbaSql = BuildRemoveSqlForDba(registered, await DatabaseNameAsync(owner, ct));
         }
 
-        await transaction.CommitAsync(ct);
+        await transaction.CommitAsync(CancellationToken.None);
 
         /* #5654: DROP ROLE leaves the dropped login's open sessions running, so they are ended once the drop is committed (found
            by the login's oid, which pg_stat_activity still carries after the name is gone). Ending them before the commit would
