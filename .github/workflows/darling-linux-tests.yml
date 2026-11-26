@@ -42,7 +42,7 @@ jobs:
   linux-suite:
     name: Darling suite on Linux
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 170
     continue-on-error: true
 
     steps:
@@ -112,15 +112,16 @@ jobs:
         run: dotnet build Darling/Darling.Tests/Darling.Tests.csproj -c Release -p:DarlingTestsWithoutViewer=true -v m -nologo
 
       # The suite starts a few hundred web hosts in one process, and a host that watches its configuration files holds an
-      # inotify instance. Ubuntu's default is 128 for one user. A lab run of the whole suite held more than 250 at once, and at
+      # inotify instance. Ubuntu's default is 128 for one user. A lab run of the whole suite held 713 at once, and at
       # 128 every later host failed to start with "The configured user limit (128) on the number of inotify instances has been
       # reached", which failed several hundred tests that have nothing wrong with them.
       - name: Raise the inotify instance limit
         run: sudo sysctl -q -w fs.inotify.max_user_instances=8192
 
       # The whole suite in one test host. Only the failures and the summary are printed; the full output is in the artifact.
+      # A lab run took 60 minutes on 8 cores, so the limit leaves room for a runner with fewer.
       - name: Run the suite
-        timeout-minutes: 80
+        timeout-minutes: 120
         shell: bash
         env:
           DARLING_TEST_PG: Host=127.0.0.1;Port=5541;Username=darling;Database=darlingtest
