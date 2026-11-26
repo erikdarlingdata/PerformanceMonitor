@@ -117,7 +117,7 @@ public sealed partial class DarlingMcpPlanForceTools
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "kill_session"), Description(
-        "Agent arm: kills ONE session on the monitored SQL Server or PostgreSQL server, after checking in the same batch or statement that it is still the session you named. Dry run by default: returns what the server says about the session and kills nothing; a write needs dry_run=false. Needs agent_action at Level 3, that server's kill_session switch (ships off) and a remediation login with kill rights (grants in the guide). Refuses Darling's own sessions, session_gone and session_reused. " +
+        "Agent arm: kills ONE session on the monitored SQL Server or PostgreSQL server, after checking in the same batch or statement that it is still the session you named. Dry run by default: returns what the server says about the session and kills nothing (on SQL Server and Azure SQL Database it also returns the exact KILL statement a write would run, in statement); a write needs dry_run=false. Needs agent_action at Level 3, that server's kill_session switch (ships off) and a remediation login with kill rights (grants in the guide). Refuses Darling's own sessions, session_gone and session_reused. " +
         "<<GUIDE>>" +
         "Grants the remediation login needs. SQL Server: ALTER ANY CONNECTION, which can kill any session on that server, and VIEW SERVER PERFORMANCE STATE (SQL Server 2022 and later) or VIEW SERVER STATE (earlier versions), which the session and transaction views need. Azure SQL Database: a user in each database it may kill in, with VIEW DATABASE STATE and KILL DATABASE CONNECTION. PostgreSQL: pg_signal_backend and pg_read_all_stats. " +
         "SQL Server: take session_id and login_time from get_blocking (blocking_session_id and blocking_login_time, UTC, pass it back unchanged). SQL Server reuses a session id after a disconnect, so a kill without the login_time check could hit a new, unrelated session. The check and the KILL run in one batch but are not atomic: a session can end and its id be reused between them. " +
@@ -602,7 +602,7 @@ public sealed partial class DarlingMcpPlanForceTools
             var before = prepared.Before;
             var warnings = prepared.Warnings;
             if (dry_run)
-                return Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, session = before, warnings });
+                return KillDryRunAnswer(dry, before, warnings);
 
             /* #7109: the action needs a person's approval. The prepare step ran the dry batch; store a proposal with its facts and kill nothing. */
             if (decision.NeedsApproval)
@@ -870,6 +870,10 @@ public sealed partial class DarlingMcpPlanForceTools
         utc = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
         return true;
     }
+
+    /// <summary>The SQL Server and Azure SQL Database kill's dry run answer (#9786): the session's facts and, under <c>statement</c> as every other action's dry run carries it, the exact <c>KILL</c> a write would run.</summary>
+    internal static string KillDryRunAnswer(RemediationResult dry, object? before, object? warnings) =>
+        Answer("dry_run", null, dry.Message + " There is no undo.", new { dry_run = true, statement = dry.Statement, session = before, warnings });
 
     /// <summary>A refusal or a failure of the kill batch. A reused id answers nothing about the session that has it now: not its login time, not its facts.</summary>
     private static string KillNotDone(RemediationResult result, ServerClock clock, bool dryRun)

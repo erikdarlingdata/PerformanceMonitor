@@ -576,8 +576,8 @@ SELECT outcome = @outcome, found = @found, login_time_actual = @login_time_actua
             KillOutcomes.PermissionDenied => RemediationResult.Refused(name, dryRun, RemediationResult.Reasons.KillPermissionDenied,
                 "The remediation login does not hold ALTER ANY CONNECTION on this server, which killing a session needs. A person can grant it. Nothing was run."),
             KillOutcomes.DryOk => RemediationResult.Done(name, dryRun, wrote: false,
-                $"Dry run: session {sessionId} is still the session that was named and would be killed. Nothing was run."),
-            KillOutcomes.Killed => RemediationResult.Done(name, dryRun, wrote: true, $"Session {sessionId} was killed."),
+                $"Dry run: session {sessionId} is still the session that was named and would be killed. Nothing was run.") with { Statement = KillStatement.For(sessionId) },
+            KillOutcomes.Killed => RemediationResult.Done(name, dryRun, wrote: true, $"Session {sessionId} was killed.") with { Statement = KillStatement.For(sessionId) },
             _ => RemediationResult.Failed(name, dryRun, "The server returned an answer to the session check that this code does not know. Nothing is known to have run."),
         };
 
@@ -827,6 +827,16 @@ public sealed record PlanStateRead(RemediationOutcome Outcome, string? Reason, s
 {
     internal static PlanStateRead From(RemediationResult result, PlanForceState? state) =>
         new(result.Outcome, result.Reason, result.Message, result.Outcome == RemediationOutcome.Done ? state : null);
+}
+
+/// <summary>
+/// The statement a session kill runs, or would run on a dry run (#9786): the <c>KILL</c> both kill batches build, the SQL Server one on the server and the
+/// Azure SQL Database one in the session's own database. The id is a plain number, so the text holds nothing a caller typed.
+/// </summary>
+public static class KillStatement
+{
+    /// <summary>The kill of one session id, as the kill batches build it.</summary>
+    public static string For(int sessionId) => string.Create(CultureInfo.InvariantCulture, $"KILL {sessionId};");
 }
 
 /// <summary>The exact statement a force or an unforce runs, for a dry run to show (#5632, step 7).</summary>
