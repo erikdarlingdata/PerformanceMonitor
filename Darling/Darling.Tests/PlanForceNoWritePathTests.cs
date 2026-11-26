@@ -269,6 +269,7 @@ public sealed class PlanForceNoWritePathTests
                     || code.Contains("Darling.Remediation", StringComparison.Ordinal);
             })
             .Select(Path.GetFileName)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         /* #7109: ActionProposalPress.cs is the approval path, which runs the plan tool class's prepare and write steps. */
         Assert.Equal(new[] { "ActionProposalPress.cs", "DarlingMcpPlanForceTools.cs", "DarlingMcpPlanForceTools.Kill.cs", "DarlingMcpPlanForceTools.PlanGuide.cs", "DarlingMcpPlanForceTools.PrepareWrite.cs", "DarlingMcpPlanForceTools.Proposal.cs", "DarlingMcpPlanForceTools.RecompileModule.cs" }, naming);

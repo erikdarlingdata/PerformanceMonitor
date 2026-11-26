@@ -160,7 +160,7 @@ internal static class InvestigationToolCore
     /// Every problem with a report, as <c>field: sentence</c>, in parameter order: an empty list is a valid report. Lists
     /// them all at once, so an agent fixes the report in one round. Any action proposal is refused at Level 1.
     /// <paramref name="requireBasis"/> (#6004) makes each evidence item carry a <c>basis</c> of verified or inferred: Darling's
-    /// submit passes true; Lite's, advise-only, keeps the older shape until its own slice (#6011). <paramref name="serverActionTools"/>
+    /// submit and Lite's both pass true. <paramref name="serverActionTools"/>
     /// (#7109, Darling) makes the <c>action_proposals</c> refusal name the action tools: a server action is proposed through its own tool,
     /// so it passes the gate and a dry run, never through the report.
     /// </summary>
