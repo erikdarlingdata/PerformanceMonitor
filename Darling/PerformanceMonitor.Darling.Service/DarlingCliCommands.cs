@@ -542,15 +542,9 @@ public static partial class DarlingCliCommands
         await using var dataSource = created;
         try
         {
-            await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-            var sealedPasswords = await DarlingPasswordKeyStore.CountSealedPasswordsAsync(connection, cancellationToken);
-            var replaced = await DarlingPasswordKeyStore.MarkCurrentResetAsync(connection, cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            var outcome = await ResetPasswordKeyInStoreAsync(dataSource, fromSetting, cancellationToken);
             output.WriteLine();
-            output.WriteLine(replaced is null
-                ? "The store publishes no password key, so there is nothing to reset."
-                : ResetPasswordKeyRestartSentence(sealedPasswords, fromSetting));
+            output.WriteLine(outcome.Text);
             output.WriteLine();
             return CollectorToggleExitCode.Success;
         }
@@ -559,6 +553,33 @@ public static partial class DarlingCliCommands
             error.WriteLine($"Could not reset the password key in the store: {ex.Message}");
             return CollectorToggleExitCode.StoreUnavailable;
         }
+    }
+
+    /// <summary>What <see cref="ResetPasswordKeyInStoreAsync"/> did: <see cref="Replaced"/> is false when the store published no
+    /// current key, <see cref="SealedPasswords"/> is how many saved passwords were sealed to it, and <see cref="Text"/> is the
+    /// sentence the CLI prints and the MCP <c>reset_password_key</c> tool returns.</summary>
+    internal sealed record PasswordKeyResetOutcome(bool Replaced, int SealedPasswords, string Text);
+
+    /// <summary>
+    /// The one place a password key reset is made (#9644): on a connection with the store owner's rights, in one transaction,
+    /// counts the saved passwords sealed to the current key and marks that key <c>replaced</c> with the reason <c>reset</c>.
+    /// <c>--reset-password-key</c> and the MCP <c>reset_password_key</c> tool both call it, so the count, the mark and the words
+    /// are the same. Key files are never touched. Throws what the store throws.
+    /// </summary>
+    internal static async Task<PasswordKeyResetOutcome> ResetPasswordKeyInStoreAsync(
+        NpgsqlDataSource dataSource, bool fromSetting, CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var sealedPasswords = await DarlingPasswordKeyStore.CountSealedPasswordsAsync(connection, cancellationToken);
+        var replaced = await DarlingPasswordKeyStore.MarkCurrentResetAsync(connection, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new PasswordKeyResetOutcome(
+            replaced is not null,
+            sealedPasswords,
+            replaced is null
+                ? "The store publishes no password key, so there is nothing to reset."
+                : ResetPasswordKeyRestartSentence(sealedPasswords, fromSetting));
     }
 
     /// <summary>The verb <see cref="SetCollectorRunAtAsync"/> handles: set, stop or clear the time of day a collector that runs once

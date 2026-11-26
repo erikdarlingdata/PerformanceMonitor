@@ -58,6 +58,8 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "new_password_key",
+        "reset_password_key",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
@@ -160,6 +162,8 @@ internal static class DarlingMcpWritePolicy
         "set_collector_databases",
         "reset_collector_schedules",
         "update_service_flags",
+        "new_password_key",
+        "reset_password_key",
         "declare_change_window",
         "clear_change_window",
     };
@@ -264,6 +268,8 @@ internal static class DarlingMcpWritePolicy
         "set_collector_databases",
         "reset_collector_schedules",
         "update_service_flags",
+        "new_password_key",
+        "reset_password_key",
         "add_servers",
         "remove_server",
         "edit_server",
