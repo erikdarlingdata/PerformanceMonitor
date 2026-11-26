@@ -21,10 +21,6 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
-### Changed
-
-- **The exporter can send 20 more store tables, among them `query_snapshots`, `waiting_tasks`, `object_usage_snapshots` and the query tag tables** ([#9736])
-
 ## [3.14.0] - 2026-11-27
 
 Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
@@ -241,6 +237,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **The hourly Query Store clutter rollup keeps only the hours raw Query Store data holds** ([#9708])
 - **A new install's logs no longer read like a store in trouble** ([#9715])
 - **Self-hosted PostgreSQL log readers ask for EXECUTE on the read functions, not `pg_read_server_files`** ([#9727])
+- **The exporter can send 20 more store tables, among them `query_snapshots`, `waiting_tasks`, `object_usage_snapshots` and the query tag tables** ([#9736])
 
 ### Fixed
 
@@ -306,6 +303,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **The `object_inventory` purge keeps each database's newest object list** ([#9716])
 - **Retention adopts missing liveness rows in keyset slices under a per-table budget** ([#9669])
 - **A store owned by a login that is not a superuser builds every continuous aggregate, and the service names any right that login lacks** ([#9722])
+- **Lite says in the log when a server's saved password is missing or unreadable under its Windows logon** ([#9731])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8472,7 +8470,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9570]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9570
 [#9572]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9572
 [#9578]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9578
-[#9736]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9736
 [#9579]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9579
 [#9586]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9586
 [#9589]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9589
@@ -8535,3 +8532,5 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9726]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9726
 [#9727]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9727
 [#9729]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9729
+[#9731]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9731
+[#9736]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9736
