@@ -31,7 +31,9 @@ namespace Darling.Tests;
 /// budget and the next going on from that key;</item>
 /// <item>a slice that runs into its command timeout halves the next slice and fails no table;</item>
 /// <item>the cursor goes back to the first key after the end, and a later pass adopts a row that lost its stamp row behind
-/// the cursor.</item>
+/// the cursor;</item>
+/// <item>a cursor kept in the store carries over to a new state, as after a restart, and one that does not fit starts the
+/// table at its first key.</item>
 /// </list>
 /// The clock is the test's: it advances one second each time it is read, and a slice reads it twice, so every slice takes
 /// one second and a budget is a count of slices. The timeout is forced by a lock the test holds and releases when the
@@ -211,6 +213,95 @@ public sealed class LivenessAdoptSliceLiveTests
         /* The fourth pass covers keys one to five again, and adopts the row. */
         await PassAsync();
         Assert.Empty(await MissingAsync(connection, dimTable, ct));
+    }
+
+    [Fact]
+    public async Task ACursorKeptInTheStore_CarriesOverToANewState_AndOneThatDoesNotFitStartsAtTheFirstKey()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = await OpenAsync(scratch, ct);
+        const string dimTable = PayloadDimensions.QueryPlanDimTable;
+        var seenTable = PayloadDimensionSeen.TableName(dimTable);
+
+        await InsertRowsAsync(connection, dimTable, first: 1, last: 12, WholeSecondNow().AddHours(-1), ct);
+        var keys = await DigestsInKeyOrderAsync(connection, $"SELECT digest FROM collect.{dimTable} ORDER BY digest", ct);
+        Assert.Equal(12, keys.Count);
+        await using var postgres = DataSource(scratch);
+
+        /* Five keys a slice and one slice a pass, each state as a service that has just started. */
+        LivenessAdoptState NewState() => new(
+            sliceKeys: 5, sliceKeysFloor: 1, budget: TimeSpan.FromSeconds(1), sliceTimeoutSeconds: 30, secondsClock: TickingClock(),
+            keepsCursorInStore: true);
+
+        /* The first pass covers keys one to five and writes its cursor to the store. */
+        var first = NewState();
+        await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, logger: null, ct, retentionDaysFor: _ => 30, livenessAdopt: first);
+        Assert.Equal(Hex(keys[4]), Hex((byte[])Assert.Single(first.CursorOf(seenTable)!)));
+        Assert.Equal(LivenessAdoptState.EncodeCursor(new object[] { keys[4] }), await StoredCursorAsync(connection, seenTable, ct));
+
+        /* The second key, behind the cursor, and the eighth, ahead of it, lose their stamp rows. A new state reads the cursor
+           back and covers keys six to ten: the row ahead gets its stamp row, the one behind does not. */
+        var behind = keys[1];
+        var ahead = keys[7];
+        await ExecuteAsync(connection, $"DELETE FROM {seenTable} WHERE digest = $1 OR digest = $2", ct, Bytea(behind), Bytea(ahead));
+        var second = NewState();
+        await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, logger: null, ct, retentionDaysFor: _ => 30, livenessAdopt: second);
+        Assert.Equal(new[] { Hex(behind) }, (await MissingAsync(connection, dimTable, ct)).Select(Hex).ToArray());
+        Assert.Equal(Hex(keys[9]), Hex((byte[])Assert.Single(second.CursorOf(seenTable)!)));
+        Assert.Equal(LivenessAdoptState.EncodeCursor(new object[] { keys[9] }), await StoredCursorAsync(connection, seenTable, ct));
+
+        /* A stored cursor that is not a cursor starts the table at its first key and fails nothing: the row behind is adopted. */
+        await ExecuteAsync(
+            connection,
+            "UPDATE collect.collector_state SET state_value = 'not a cursor' WHERE server_id = 0 AND collector_name = $1 AND state_key = $2",
+            ct, LivenessAdoptState.CursorStateCollectorName, seenTable);
+        var third = NewState();
+        var log = new CapturingTestLogger();
+        await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: false, log, ct, retentionDaysFor: _ => 30, livenessAdopt: third);
+        Assert.True(0 == (await MissingAsync(connection, dimTable, ct)).Count, log.Joined);
+        Assert.Equal(Hex(keys[4]), Hex((byte[])Assert.Single(third.CursorOf(seenTable)!)));
+        Assert.True("SUCCESS" == await LastRunStatusAsync(connection, ct), log.Joined);
+        Assert.DoesNotContain(log.Lines, line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains(seenTable, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TheCursorTextForm_RoundTripsEveryKeyType_AndReadsWhatDoesNotFitAsNoCursor()
+    {
+        var digest = new byte[] { 0x00, 0x7F, 0x80, 0xFF };
+        var digestText = LivenessAdoptState.EncodeCursor(new object[] { digest });
+        Assert.Equal(Convert.ToHexString(digest), Convert.ToHexString((byte[])Assert.Single(LivenessAdoptState.DecodeCursor(digestText, 1)!)));
+
+        /* The Query Store text key: an integer, a text with the form's own separator in it, and a bigint. */
+        var textKey = LivenessAdoptState.DecodeCursor(LivenessAdoptState.EncodeCursor(new object[] { -7, "db:\"x\" \u00e9", long.MaxValue }), 3)!;
+        Assert.Equal(new object[] { -7, "db:\"x\" \u00e9", long.MaxValue }, textKey);
+
+        /* No cursor both ways. */
+        Assert.Equal(string.Empty, LivenessAdoptState.EncodeCursor(null));
+        Assert.Null(LivenessAdoptState.DecodeCursor(string.Empty, 1));
+        Assert.Null(LivenessAdoptState.DecodeCursor(null, 1));
+
+        /* A value type the form does not hold is not written. */
+        Assert.Null(LivenessAdoptState.EncodeCursor(new object[] { Guid.Empty }));
+
+        /* Text that is not the form, or a cursor of another key's width, is no cursor. */
+        Assert.Null(LivenessAdoptState.DecodeCursor("not a cursor", 1));
+        Assert.Null(LivenessAdoptState.DecodeCursor(digestText, 3));
+        Assert.Null(LivenessAdoptState.DecodeCursor("[\"q:1\"]", 1));
+        Assert.Null(LivenessAdoptState.DecodeCursor("[\"x:zz\"]", 1));
+        Assert.Null(LivenessAdoptState.DecodeCursor("[\"i:12x\"]", 1));
+        Assert.Null(LivenessAdoptState.DecodeCursor("[null]", 1));
+    }
+
+    /// <summary>The adopt cursor the store holds for <paramref name="livenessTable"/>, or null when it holds none.</summary>
+    private static async Task<string?> StoredCursorAsync(NpgsqlConnection connection, string livenessTable, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT state_value FROM collect.collector_state WHERE server_id = 0 AND collector_name = $1 AND state_key = $2", connection);
+        command.Parameters.AddWithValue(LivenessAdoptState.CursorStateCollectorName);
+        command.Parameters.AddWithValue(livenessTable);
+        return await command.ExecuteScalarAsync(ct) as string;
     }
 
     /// <summary>A clock that reads one second later each time. A slice reads it at its start and at its end, so it takes one second.</summary>

@@ -9,6 +9,8 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
+using System.Text.Json;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -19,9 +21,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// leaves its cursor here, and the next pass goes on from it, so the whole key is covered over several passes. A pass that
 /// reaches the end of the keys clears the cursor, and the next one starts at the first key again.
 ///
-/// <para>It is held in the service's memory: the worker owns one and hands it to every pass. A restart forgets the
-/// cursors, so the first pass after it starts at the first key of every table. The adopt step is a backstop for rows
-/// written with the insert trigger off, so starting over costs only the time until the cursor is back where it was.</para>
+/// <para>The worker owns one and hands it to every pass. Its cursors are also kept in the store, in
+/// <c>collect.collector_state</c> under the fleet server id (<see cref="CursorStateCollectorName"/>, state key the liveness
+/// table), so a restart goes on from the key the last pass stopped at. On a large store one pass covers a small part of the
+/// key, and the service restarts at every install, so a cursor kept in memory alone would start over at the first key each
+/// time and never reach the end. A cursor that cannot be read back, or that does not fit the table's key, starts that table
+/// at its first key, and a cursor that cannot be written is tried again by the next pass. Neither fails the table.</para>
 ///
 /// <para>A slice that runs into its command timeout halves the next slice of that table, down to
 /// <see cref="SliceKeysFloor"/>, and a slice that finishes in under a quarter of the timeout doubles it, up to
@@ -48,21 +53,26 @@ public sealed class LivenessAdoptState
     /// <summary>The command timeout of each statement of a slice, in seconds: a third of <see cref="DefaultBudget"/>.</summary>
     internal const int DefaultSliceTimeoutSeconds = 20;
 
+    /// <summary>The <c>collector_name</c> of the cursor rows in <c>collect.collector_state</c>, whose state key is the liveness table.</summary>
+    internal const string CursorStateCollectorName = "retention_liveness_adopt";
+
     private readonly object _gate = new();
     private readonly Dictionary<string, TableState> _tables = new(StringComparer.Ordinal);
     private readonly Func<double> _secondsClock;
 
     public LivenessAdoptState()
-        : this(DefaultSliceKeys, DefaultSliceKeysFloor, DefaultBudget, DefaultSliceTimeoutSeconds)
+        : this(DefaultSliceKeys, DefaultSliceKeysFloor, DefaultBudget, DefaultSliceTimeoutSeconds, keepsCursorInStore: true)
     {
     }
 
     /// <summary>
     /// The sizes and the clock are a test's to set, so a live test covers several passes and a shrunk slice with a table of
-    /// a few rows. Every caller in the product uses the parameterless constructor.
+    /// a few rows. The worker uses the parameterless constructor, which keeps its cursors in the store. Any other state keeps
+    /// them in memory only unless <paramref name="keepsCursorInStore"/> says otherwise.
     /// </summary>
     internal LivenessAdoptState(
-        int sliceKeys, int sliceKeysFloor, TimeSpan budget, int sliceTimeoutSeconds, Func<double>? secondsClock = null)
+        int sliceKeys, int sliceKeysFloor, TimeSpan budget, int sliceTimeoutSeconds, Func<double>? secondsClock = null,
+        bool keepsCursorInStore = false)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(sliceKeysFloor, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(sliceKeys, sliceKeysFloor);
@@ -71,6 +81,7 @@ public sealed class LivenessAdoptState
         SliceKeysFloor = sliceKeysFloor;
         Budget = budget;
         SliceTimeoutSeconds = sliceTimeoutSeconds;
+        KeepsCursorInStore = keepsCursorInStore;
         _secondsClock = secondsClock ?? (() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency);
     }
 
@@ -85,6 +96,135 @@ public sealed class LivenessAdoptState
 
     /// <summary>The command timeout of each statement of a slice, in seconds.</summary>
     internal int SliceTimeoutSeconds { get; }
+
+    /// <summary>Whether the cursors are read from and written to <c>collect.collector_state</c> as well as held here.</summary>
+    internal bool KeepsCursorInStore { get; }
+
+    /// <summary>Whether the table's cursor has been read back from the store since this state was made.</summary>
+    internal bool CursorLoaded(string livenessTable)
+    {
+        lock (_gate)
+        {
+            return _tables.TryGetValue(livenessTable, out var table) && table.Loaded;
+        }
+    }
+
+    /// <summary>Records the cursor read back from the store (null: start at the first key), once per table.</summary>
+    internal void NoteCursorLoaded(string livenessTable, IReadOnlyList<object>? cursor)
+    {
+        lock (_gate)
+        {
+            var table = TableOf(livenessTable);
+            if (!table.Loaded)
+            {
+                table.Loaded = true;
+                table.Cursor = cursor;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The cursor's text form for <c>collect.collector_state</c>: a JSON array with one tagged string per key column
+    /// (<c>x:</c> hex bytes, <c>i:</c> integer, <c>l:</c> bigint, <c>s:</c> text). An empty string is no cursor. Null when a
+    /// key value has a type this form does not hold, and then the cursor is not written.
+    /// </summary>
+    internal static string? EncodeCursor(IReadOnlyList<object>? cursor)
+    {
+        if (cursor is null)
+        {
+            return string.Empty;
+        }
+
+        var parts = new string[cursor.Count];
+        for (var i = 0; i < cursor.Count; i++)
+        {
+            switch (cursor[i])
+            {
+                case byte[] bytes:
+                    parts[i] = "x:" + Convert.ToHexString(bytes);
+                    break;
+                case int number:
+                    parts[i] = "i:" + number.ToString(CultureInfo.InvariantCulture);
+                    break;
+                case long number:
+                    parts[i] = "l:" + number.ToString(CultureInfo.InvariantCulture);
+                    break;
+                case string text:
+                    parts[i] = "s:" + text;
+                    break;
+                default:
+                    return null;
+            }
+        }
+
+        return JsonSerializer.Serialize(parts);
+    }
+
+    /// <summary>
+    /// The cursor <see cref="EncodeCursor"/> wrote, or null (start at the first key) for no cursor, text that is not that
+    /// form, or a cursor whose column count is not <paramref name="keyColumnCount"/>.
+    /// </summary>
+    internal static IReadOnlyList<object>? DecodeCursor(string? text, int keyColumnCount)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return null;
+        }
+
+        string[]? parts;
+        try
+        {
+            parts = JsonSerializer.Deserialize<string[]>(text);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        if (parts is null || parts.Length != keyColumnCount)
+        {
+            return null;
+        }
+
+        var key = new object[parts.Length];
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var part = parts[i];
+            if (part is null || part.Length < 2 || part[1] != ':')
+            {
+                return null;
+            }
+
+            var value = part[2..];
+            switch (part[0])
+            {
+                case 'x':
+                    try
+                    {
+                        key[i] = Convert.FromHexString(value);
+                    }
+                    catch (FormatException)
+                    {
+                        return null;
+                    }
+
+                    break;
+                case 'i' when int.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var number):
+                    key[i] = number;
+                    break;
+                case 'l' when long.TryParse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var number):
+                    key[i] = number;
+                    break;
+                case 's':
+                    key[i] = value;
+                    break;
+                default:
+                    return null;
+            }
+        }
+
+        return key;
+    }
 
     /// <summary>The clock a slice's run time is measured on, in seconds.</summary>
     internal double NowSeconds => _secondsClock();
@@ -166,6 +306,8 @@ public sealed class LivenessAdoptState
     private sealed class TableState
     {
         public IReadOnlyList<object>? Cursor { get; set; }
+
+        public bool Loaded { get; set; }
 
         public int SliceKeys { get; set; }
     }

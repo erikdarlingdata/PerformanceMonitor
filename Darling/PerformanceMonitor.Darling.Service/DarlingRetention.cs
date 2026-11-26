@@ -448,7 +448,8 @@ public static class DarlingRetention
     /// </param>
     /// <param name="livenessAdopt">
     /// Where the adopt step is in each liveness table (<see cref="LivenessAdoptState"/>). The worker hands in its own, so
-    /// a pass goes on from the key the pass before it stopped at. Null starts every table at its first key.
+    /// a pass goes on from the key the pass before it stopped at, after a restart too. Null starts every table at its first
+    /// key and keeps no cursor in the store.
     /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
@@ -484,7 +485,10 @@ public static class DarlingRetention
         int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null,
         string? runLabel = null, QueryTextPruneGate? queryTextPruneGate = null, LivenessAdoptState? livenessAdopt = null)
     {
-        livenessAdopt ??= new LivenessAdoptState();
+        /* No state handed in: one for this pass alone, from the first key of every table, kept in memory only. */
+        livenessAdopt ??= new LivenessAdoptState(
+            LivenessAdoptState.DefaultSliceKeys, LivenessAdoptState.DefaultSliceKeysFloor, LivenessAdoptState.DefaultBudget,
+            LivenessAdoptState.DefaultSliceTimeoutSeconds);
 
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
@@ -3083,7 +3087,8 @@ $do$";
     /// <para><b>How far one pass goes.</b> Slices run until the end of the keys or until their own run time reaches
     /// <see cref="LivenessAdoptState.Budget"/>. A pass that stops on the budget leaves the cursor where it is and the next
     /// pass goes on from it. A pass that reaches the end clears the cursor, so the next one starts at the first key. The
-    /// cursor is in the service's memory, so a restart starts at the first key too.</para>
+    /// worker's state also keeps the cursor in <c>collect.collector_state</c>, read once after a restart and written after
+    /// every pass whose slices moved it, so a restart goes on from where the last pass stopped.</para>
     ///
     /// <para><b>A slice that times out.</b> Each statement of a slice has <see cref="LivenessAdoptState.SliceTimeoutSeconds"/>
     /// as its command timeout. A slice that runs into it is not a failure: the cursor stays, the next slice is half the
@@ -3117,6 +3122,11 @@ $do$";
         var reachedEnd = false;
         var sliceSeconds = 0.0;
         NpgsqlConnection? connection = null;
+        if (state.KeepsCursorInStore && !state.CursorLoaded(tableName))
+        {
+            state.NoteCursorLoaded(tableName, await ReadAdoptCursorAsync(postgres, slice, logger, cancellationToken));
+        }
+
         try
         {
             var adopted = await DrainBatchesAsync(
@@ -3189,6 +3199,90 @@ $do$";
             {
                 await connection.DisposeAsync();
             }
+
+            /* A slice that ran moved the cursor, a pass that failed part way included. */
+            if (state.KeepsCursorInStore && slices > 0)
+            {
+                await WriteAdoptCursorAsync(postgres, tableName, state.CursorOf(tableName), logger, cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>The command timeout of the cursor's read and write in <c>collect.collector_state</c>, in seconds.</summary>
+    private const int AdoptCursorTimeoutSeconds = 10;
+
+    /// <summary>
+    /// Reads the table's adopt cursor back from <c>collect.collector_state</c> (<see cref="LivenessAdoptState.DecodeCursor"/>).
+    /// Null, so the table starts at its first key, when there is none, it does not fit the key, or the read fails: a lost
+    /// cursor costs a pass over keys already adopted, never the table.
+    /// </summary>
+    private static async Task<IReadOnlyList<object>?> ReadAdoptCursorAsync(
+        NpgsqlDataSource postgres, LivenessAdoptSlice slice, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
+            await using var command = new NpgsqlCommand(
+                "SELECT state_value FROM collect.collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3",
+                connection) { CommandTimeout = AdoptCursorTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DarlingObservability.FleetServerId });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = LivenessAdoptState.CursorStateCollectorName });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = slice.LivenessTable });
+            var text = await command.ExecuteScalarAsync(cancellationToken) as string;
+            var cursor = LivenessAdoptState.DecodeCursor(text, slice.KeyColumnCount);
+            if (cursor is null && !string.IsNullOrEmpty(text))
+            {
+                logger?.LogDebug("Retention's adopt cursor of {Table} in the store does not fit its key; the adopt starts at the first key", slice.LivenessTable);
+            }
+
+            return cursor;
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger?.LogDebug(
+                "Retention could not read the adopt cursor of {Table} from the store ({Failure}); the adopt starts at the first key",
+                slice.LivenessTable, DescribePurgeFailure(ex));
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Writes the table's adopt cursor to <c>collect.collector_state</c> (an empty value when the pass reached the end of the
+    /// keys). A failed write is logged and left: this state still holds the cursor, and the next pass writes it again.
+    /// </summary>
+    private static async Task WriteAdoptCursorAsync(
+        NpgsqlDataSource postgres, string tableName, IReadOnlyList<object>? cursor, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested || LivenessAdoptState.EncodeCursor(cursor) is not { } text)
+        {
+            return;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(StoreSessionNames.RetentionPurge, cancellationToken);
+            await using var command = new NpgsqlCommand(
+                @"INSERT INTO collect.collector_state (server_id, collector_name, state_key, state_value, updated_at)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (server_id, collector_name, state_key)
+DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at",
+                connection) { CommandTimeout = AdoptCursorTimeoutSeconds };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = DarlingObservability.FleetServerId });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = LivenessAdoptState.CursorStateCollectorName });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = tableName });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = text });
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Timestamp,
+                Value = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+            });
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger?.LogDebug(
+                "Retention could not write the adopt cursor of {Table} to the store ({Failure}); the next pass writes it again",
+                tableName, DescribePurgeFailure(ex));
         }
     }
 
