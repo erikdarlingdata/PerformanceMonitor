@@ -304,6 +304,7 @@ public sealed class McpHostService : BackgroundService
                the subset Gemini/Antigravity accepts — collapsing nullable type unions and
                dropping the default keyword. The companion to stateless transport for issue #1074. */
             .WithGeminiCompatibleTools<McpDiscoveryTools>()
+            .WithGeminiCompatibleTools<McpServerAdminTools>()
             .WithGeminiCompatibleTools<McpHealthTools>()
             /* #8788: get_store_health, the health of Lite's own DuckDB store. */
             .WithGeminiCompatibleTools<McpStoreHealthTools>()
