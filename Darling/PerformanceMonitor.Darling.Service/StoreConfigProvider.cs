@@ -3048,14 +3048,98 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
             }
         }
 
-        /* #5750: a scoped route that is never expanded matches nothing, so every route this loader returns goes through the
-           expander. A store with no scoped route skips the three extra reads: the fleet-wide routes come back as they are. */
+        return await ExpandIfScopedAsync(connection, routes, logger, ct);
+    }
+
+    /// <summary>
+    /// #5750: a scoped route that is never expanded matches nothing, so every route a loader returns goes through the expander.
+    /// A store with no scoped route skips the three extra reads: the fleet-wide routes come back as they are.
+    /// </summary>
+    private static async Task<IReadOnlyList<NotificationRoute>> ExpandIfScopedAsync(
+        NpgsqlConnection connection, List<NotificationRoute> routes, ILogger? logger, CancellationToken ct)
+    {
         if (!routes.Exists(r => r.IsScoped))
         {
             return routes;
         }
 
         return ExpandRoutes(routes, await ReadRouteScopeInputsAsync(connection, logger, ct));
+    }
+
+    /// <summary>
+    /// The columns of <c>config_notification_routes</c> the agent action gate reads (#9728): match, scope, enabled, the agent channel's level, limits,
+    /// lease and expiry, and the route's severities, approval and fallback settings. Every one is a column the managed <c>mcp</c> role may SELECT:
+    /// the destination and signing key columns are bearer secrets that role is refused on purpose (#6231, #6394), so the gate must not name one.
+    /// A test holds this list against <see cref="DarlingManagedRoles.ViewerRestrictedConfigTables"/>.
+    /// </summary>
+    public static readonly IReadOnlyList<string> NotificationRoutesAgentColumns = new[]
+    {
+        "route_id", "metric_match", "smtp_recipients", "enabled", "scope_server_id", "scope_tag_id",
+        "agent_level", "agent_max_per_hour", "agent_max_per_day", "agent_lease_minutes", "agent_expiry_minutes",
+        "send_resolutions", "fallback_route_id", "severities", "report_notice", "action_approval", "approval_single_person",
+        "slack_bot_channel", "slack_bot_channel_set_at",
+    };
+
+    /// <summary>The select over <see cref="NotificationRoutesAgentColumns"/>, ordered by <c>route_id</c> like <see cref="NotificationRoutesSelectSql"/>.</summary>
+    public static readonly string NotificationRoutesAgentSelectSql =
+        "SELECT " + string.Join(", ", NotificationRoutesAgentColumns) + " FROM config_notification_routes ORDER BY route_id";
+
+    /// <summary>
+    /// The routes as the agent action gate needs them (#9728): <see cref="ReadNotificationRoutesAsync"/> without the destination and signing
+    /// key columns, which the <c>mcp</c> role (the gate's connection) cannot read. The destination fields of a returned route are empty and
+    /// it holds no signing keys, so the routes are for <see cref="NotificationRouter.ResolveAgent"/> and the gate's reads of a route's agent
+    /// settings, never for delivery. Scope is expanded the same way.
+    /// </summary>
+    internal static async Task<IReadOnlyList<NotificationRoute>> ReadNotificationRoutesForAgentAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken ct)
+    {
+        var routes = new List<NotificationRoute>();
+        using (var command = new NpgsqlCommand(NotificationRoutesAgentSelectSql, connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds })
+        using (var reader = await command.ExecuteReaderAsync(ct))
+        {
+            var id = reader.GetOrdinal("route_id");
+            var metric = reader.GetOrdinal("metric_match");
+            var smtp = reader.GetOrdinal("smtp_recipients");
+            var enabled = reader.GetOrdinal("enabled");
+            var scopeServer = reader.GetOrdinal("scope_server_id");
+            var scopeTag = reader.GetOrdinal("scope_tag_id");
+            var level = reader.GetOrdinal("agent_level");
+            var perHour = reader.GetOrdinal("agent_max_per_hour");
+            var perDay = reader.GetOrdinal("agent_max_per_day");
+            var lease = reader.GetOrdinal("agent_lease_minutes");
+            var expiry = reader.GetOrdinal("agent_expiry_minutes");
+            var resolutions = reader.GetOrdinal("send_resolutions");
+            var fallback = reader.GetOrdinal("fallback_route_id");
+            var severities = reader.GetOrdinal("severities");
+            var notice = reader.GetOrdinal("report_notice");
+            var approval = reader.GetOrdinal("action_approval");
+            var singlePerson = reader.GetOrdinal("approval_single_person");
+            var botChannel = reader.GetOrdinal("slack_bot_channel");
+            var botChannelSetAt = reader.GetOrdinal("slack_bot_channel_set_at");
+            while (await reader.ReadAsync(ct))
+            {
+                routes.Add(new NotificationRoute(
+                    reader.GetInt32(id), reader.GetString(metric), "", "", "", "", reader.GetString(smtp), reader.GetBoolean(enabled))
+                {
+                    ScopeServerId = reader.IsDBNull(scopeServer) ? null : reader.GetInt32(scopeServer),
+                    ScopeTagId = reader.IsDBNull(scopeTag) ? null : reader.GetInt32(scopeTag),
+                    AgentLevel = reader.IsDBNull(level) ? null : reader.GetInt16(level),
+                    AgentMaxPerHour = reader.GetInt32(perHour),
+                    AgentMaxPerDay = reader.GetInt32(perDay),
+                    AgentLeaseMinutes = reader.GetInt32(lease),
+                    AgentExpiryMinutes = reader.GetInt32(expiry),
+                    SendResolutions = reader.IsDBNull(resolutions) ? null : reader.GetBoolean(resolutions),
+                    FallbackRouteId = reader.IsDBNull(fallback) ? null : reader.GetInt32(fallback),
+                    Severities = NotificationRouteKinds.NormalizeSeverities(reader.GetString(severities)),
+                    ReportNotice = NotificationRouteKinds.NormalizeReportNotice(reader.GetString(notice)),
+                    ActionApproval = NotificationRouteKinds.NormalizeActionApproval(reader.GetString(approval)),
+                    ApprovalSinglePerson = reader.GetBoolean(singlePerson),
+                    SlackBotChannel = reader.GetString(botChannel),
+                    SlackBotChannelSetAt = reader.IsDBNull(botChannelSetAt) ? null : DateTime.SpecifyKind(reader.GetFieldValue<DateTime>(botChannelSetAt), DateTimeKind.Utc),
+                });
+            }
+        }
+
+        return await ExpandIfScopedAsync(connection, routes, logger, ct);
     }
 
     /// <summary>
