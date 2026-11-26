@@ -1173,6 +1173,66 @@ public sealed class DarlingStoreLoginsTests
     }
 
     [Fact]
+    public async Task ConfiguredCustomAlertLoginAsync_WhenTheStoreCannotBeSignedInTo_IsNull_AndTheWarningNamesTheSettingAndLoginNotThePassword()
+    {
+        // #9760: nothing listens on the port, so the sign-in fails the way a store that refuses the login does. The evaluator opens
+        // a connection only when a rule is due, so without this sign-in the first sign of the problem is a rule that never fires.
+        var logger = new CapturingTestLogger();
+        var postgres = new PostgresConfig
+        {
+            ConnectionString = Owner,
+            WebConnectionString = $"Host=127.0.0.1;Port={DarlingManagedPostgresTests.FindFreeTcpPort()};Username=web;Password=SignInSecretQ9;Database=darling;Timeout=5",
+        };
+
+        Assert.Null(await DarlingStoreLogins.ResolveConfiguredCustomAlertLoginAsync(postgres, logger, CancellationToken.None));
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+        Assert.Contains("postgres.webConnectionString", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("web login", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("127.0.0.1", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("provision-roles.sql", logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("SignInSecretQ9", logger.Joined, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ConfiguredCustomAlertLoginAsync_WhenTheServiceIsStopping_IsNull_AndSaysNothing()
+    {
+        // A start that is being cancelled is not a refusal: the store did not say no.
+        var logger = new CapturingTestLogger();
+        var postgres = new PostgresConfig
+        {
+            ConnectionString = Owner,
+            WebConnectionString = $"Host=127.0.0.1;Port={DarlingManagedPostgresTests.FindFreeTcpPort()};Username=web;Password=StopSecretQ9;Database=darling;Timeout=5",
+        };
+        using var stopping = new CancellationTokenSource();
+        await stopping.CancelAsync();
+
+        Assert.Null(await DarlingStoreLogins.ResolveConfiguredCustomAlertLoginAsync(postgres, logger, stopping.Token));
+
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(0, logger.CountAtLevel(LogLevel.Error));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheEvaluatorReadyLine_NamesTheLogin_TheInterval_AndNeverThePassword(bool fromWebConnectionString)
+    {
+        // #9760: an operator reading the line must learn which login the evaluator runs as, not the code's name for its pool.
+        var logger = new CapturingTestLogger();
+
+        DarlingStoreLogins.LogCustomAlertEvaluatorReady(
+            logger, "Host=store;Port=5432;Username=rules_web;Password=ReadySecretQ9;Database=darling", 60, fromWebConnectionString);
+
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Information));
+        Assert.Contains("rules_web login", logger.Joined, StringComparison.Ordinal);
+        Assert.Contains("60s", logger.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("ReadySecretQ9", logger.Joined, StringComparison.Ordinal);
+        Assert.Equal(fromWebConnectionString, logger.Joined.Contains("postgres.webConnectionString", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task CustomAlertViewer_WithNoVerdictPublished_IsNull()
     {
         DarlingStoreLogins.ResetComposeStoreVerdictForTests();
