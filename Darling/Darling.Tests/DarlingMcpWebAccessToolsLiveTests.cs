@@ -377,7 +377,7 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
             };
             using var server = await BuildServerAsync(mcp, ownerSource, logger);
 
-            DarlingMcpWebAccessTools.RingForTests.Value = TestKeyRings.Healthy;
+            DarlingMcpWebAccessTools.RingForTests = TestKeyRings.Healthy;
             try
             {
                 var (_, body) = await DarlingMcpWritePolicyTests.ToolsCallAsync(
@@ -399,7 +399,7 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
             }
             finally
             {
-                DarlingMcpWebAccessTools.RingForTests.Value = null;
+                DarlingMcpWebAccessTools.RingForTests = null;
             }
         });
     }

@@ -32,10 +32,10 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed partial class DarlingMcpWebAccessTools
 {
-    /// <summary>A test's own ring for the calls made on its async flow. Production never sets it, so every call seals with the service's ring.</summary>
-    internal static readonly AsyncLocal<IPasswordKeyRing?> RingForTests = new();
+    /// <summary>A test's own ring, for the one test that calls these tools through a built server. Production never sets it, so every call seals with the service's ring.</summary>
+    internal static volatile IPasswordKeyRing? RingForTests;
 
-    private static IPasswordKeyRing Ring() => RingForTests.Value ?? DarlingPasswordKey.Current;
+    private static IPasswordKeyRing Ring() => RingForTests ?? DarlingPasswordKey.Current;
 
     /// <summary>The journal actor of an MCP change: <c>mcp:</c> plus the caller the request filter worked out.</summary>
     internal static string ActorOf() => DarlingMcpServerActionTools.ActorOf();
