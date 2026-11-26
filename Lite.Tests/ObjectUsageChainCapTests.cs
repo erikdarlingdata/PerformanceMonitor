@@ -26,7 +26,8 @@ namespace PerformanceMonitorLite.Tests;
 /// #9596: the three chain tables stay under a share of the hot store's reset point. A small reset point is injected into the builder so the history of
 /// <see cref="ObjectUsageChainHistory"/> reaches the cap: the chain never passes it, a trim keeps the newest snapshots and the builder carries on from its
 /// watermark, a window inside the kept chain reads from it and a window outside folds, and every answer is the full fold's. A cap that the newest week does
-/// not fit under drops the chain and leaves the fold.
+/// not fit under drops the chain and leaves the fold. With two databases a pass that starts over the cap drops only the one that does not fit, and the same
+/// builder rebuilds it once it fits.
 /// </summary>
 public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
