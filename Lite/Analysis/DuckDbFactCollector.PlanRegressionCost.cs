@@ -17,7 +17,24 @@ namespace PerformanceMonitorLite.Analysis;
 public partial class DuckDbFactCollector
 {
     internal static readonly string PlanRegressionCostSql = @"
-WITH deduped AS
+-- #9681: a query yields a regression row only when its rows hold two distinct non-NULL plan hashes, because `compared` needs
+-- l.query_plan_hash <> b.query_plan_hash. So the per-interval dedup below, the largest share of the statement's CPU, only needs those
+-- queries' rows. A query that passes here keeps all its rows, NULL-hash rows included, so every later step sees what it saw before.
+-- min and max skip NULL, so they differ exactly when there are two non-NULL hashes.
+WITH multi_plan AS
+(
+    SELECT database_name, query_id, replica_role
+    FROM v_query_store_stats
+    WHERE server_id = $1
+    AND   execution_type_desc = 'Regular'
+    AND   last_execution_time >= $2
+    AND   collection_time <= $3
+    /*SEC*/
+    /*DB*/
+    GROUP BY database_name, query_id, replica_role
+    HAVING min(query_plan_hash) <> max(query_plan_hash)
+),
+deduped AS
 (
     -- Collapse incremental re-collections of the same open runtime-stats interval:
     -- keep only the latest collection_time row per logical interval.
@@ -75,7 +92,11 @@ WITH deduped AS
                 'is_forced_plan': is_forced_plan,
                 'force_failure_count': force_failure_count
             }) AS w
-        FROM v_query_store_stats
+        FROM v_query_store_stats AS q
+        SEMI JOIN multi_plan AS m
+            ON  m.database_name = q.database_name
+            AND m.query_id = q.query_id
+            AND m.replica_role IS NOT DISTINCT FROM q.replica_role
         WHERE server_id = $1
         AND   execution_type_desc = 'Regular'
         AND   last_execution_time >= $2

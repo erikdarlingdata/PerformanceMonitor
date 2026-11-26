@@ -93,7 +93,7 @@ public sealed class PlanRegressionReadEquivalenceTests : IDisposable
 
     /// <summary>One Query Store snapshot row. The text is stored inline, or behind a digest in the text table when
     /// <paramref name="digest"/> is set (what the collector writes now).</summary>
-    private string Row(long query, long plan, string hash, long interval, DateTime collected, DateTime lastExec, long? execs, double cpu,
+    private string Row(long query, long plan, string? hash, long interval, DateTime collected, DateTime lastExec, long? execs, double cpu,
         double? rows = 10, string? role = null, bool forced = false, long failures = 0, string? text = null, bool digest = false,
         string execType = "Regular", string database = "Db1")
     {
@@ -223,6 +223,91 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
 
         /* Ordered by key: two queries whose lost CPU and factor tie are in either order. */
         Assert.Equal(reference.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId), shipped.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId));
+    }
+
+    /// <summary>One plan of a query for the pre-filter tests: two intervals, two snapshots each, all of the given plan hash (NULL for none).</summary>
+    private void PlanGroup(long q, long plan, string? hash, double cpu, DateTime lastExec, long firstInterval, string database = "Db1", long? execs = 60)
+    {
+        for (var interval = 0; interval < 2; interval++)
+        {
+            var last = lastExec.AddMinutes(interval * 10);
+            _statements.Add(Row(q, plan, hash, firstInterval + interval, last.AddMinutes(1), last, 30, cpu, database: database));
+            _statements.Add(Row(q, plan, hash, firstInterval + interval, last.AddMinutes(2), last, execs, cpu, database: database));
+        }
+    }
+
+    private async Task<List<DuckDbFactCollector.RankedPlanRegression>> ReadRankedAsync(string sql, IReadOnlyList<string>? databases, IReadOnlySet<string>? secondaries)
+    {
+        var context = Context();
+        context.SecondaryReplicaDatabases = secondaries;
+        var token = TestContext.Current.CancellationToken;
+        var plan = await _duckDb.PlanArchiveReadAsync("query_store_stats", "last_execution_time", context.TimeRangeStart.AddDays(-14), token);
+        using var readLock = _duckDb.AcquireReadLock(token);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(token);
+        return await DuckDbFactCollector.ReadRankedPlanRegressionCandidatesAsync(connection, context, plan, sql, databases);
+    }
+
+    /// <summary>
+    /// #9681: the statement reads the dedup of a query's rows only when the query has two distinct non-NULL plan hashes. A query whose
+    /// newest plan group has a NULL hash, beside two non-NULL groups, keeps all its rows (the NULL ones too), so the newest group is still
+    /// the NULL one and `compared` finds no candidate, as before. A read that dropped the NULL-hash rows would see the costly group as the
+    /// newest and report the query.
+    /// </summary>
+    [Fact]
+    public async Task AQueryWhoseNewestPlanGroupHasNoHash_StaysNoCandidate_BesideARegressedOne()
+    {
+        PlanGroup(20, 201, "0xCHEAP201", 20_000, Old, 1);
+        PlanGroup(20, 202, "0xCOSTLY202", 300_000, Recent.AddMinutes(-60), 11);
+        PlanGroup(20, 203, null, 300_000, Recent.AddMinutes(-30), 21);
+        Query(21, null, "SELECT 21", 300_000);
+        await SeedAsync();
+
+        var reference = await ReadAsync(ReferenceSql);
+        var shipped = await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql);
+
+        Assert.DoesNotContain(reference, c => c.QueryId == 20);
+        Assert.Contains(shipped, c => c.QueryId == 21);
+        Assert.DoesNotContain(shipped, c => c.QueryId == 20);
+        Assert.Equal(reference.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId), shipped.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId));
+    }
+
+    /// <summary>#9681: a heavy query with one plan is left out of the dedup and gives nothing, and the regressed query beside it is found with the values it had.</summary>
+    [Fact]
+    public async Task AHeavySinglePlanQuery_GivesNothing_AndTheRegressedOneBesideItKeepsItsValues()
+    {
+        PlanGroup(30, 301, "0xONLY301", 900_000, Old, 1);
+        PlanGroup(30, 301, "0xONLY301", 950_000, Recent.AddMinutes(-30), 11);
+        Query(31, null, "SELECT 31", 400_000);
+        await SeedAsync();
+
+        var reference = await ReadAsync(ReferenceSql);
+        var shipped = await ReadAsync(DuckDbFactCollector.PlanRegressionCostSql);
+
+        Assert.DoesNotContain(shipped, c => c.QueryId == 30);
+        var regressed = Assert.Single(shipped, c => c.QueryId == 31);
+        Assert.Equal(reference.Single(c => c.QueryId == 31), regressed);
+        Assert.Equal(reference.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId), shipped.OrderBy(c => c.DatabaseName).ThenBy(c => c.QueryId));
+    }
+
+    /// <summary>#9681: the statement holds the database and secondary-database markers twice (once in the pre-filter, once in the dedup). Both replacements must run, so a database list and a secondary database give the rows the one-database reads expect.</summary>
+    [Fact]
+    public async Task TheDatabaseListAndTheSecondaryDatabase_ReachBothPartsOfTheStatement()
+    {
+        await SeedAsync();
+        var all = (await ReadRankedAsync(DuckDbFactCollector.PlanRegressionCostSql, null, null)).Select(r => r.Candidate).ToList();
+        Assert.Contains(all, c => c.DatabaseName == "Db1");
+        Assert.Contains(all, c => c.DatabaseName == "Db2");
+
+        var db2Only = (await ReadRankedAsync(DuckDbFactCollector.PlanRegressionCostSql, ["Db2"], null)).Select(r => r.Candidate).ToList();
+        Assert.Equal(all.Where(c => c.DatabaseName == "Db2").ToList(), db2Only);
+        Assert.NotEmpty(db2Only);
+
+        var withoutSecondary = (await ReadRankedAsync(DuckDbFactCollector.PlanRegressionCostSql, null, new HashSet<string> { "Db2" })).Select(r => r.Candidate).ToList();
+        Assert.Equal(all.Where(c => c.DatabaseName != "Db2").ToList(), withoutSecondary);
+
+        var both = await ReadRankedAsync(DuckDbFactCollector.PlanRegressionCostSql, ["Db1", "Db2"], new HashSet<string> { "Db2" });
+        Assert.Equal(withoutSecondary, both.Select(r => r.Candidate).ToList());
     }
 
     /// <summary>
