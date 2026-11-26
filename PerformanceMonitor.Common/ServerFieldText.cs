@@ -26,19 +26,28 @@ namespace PerformanceMonitor.Common;
 public static class ServerFieldText
 {
     /// <summary>True for a character the rule refuses: a C0 or C1 control character (tab and DEL included), U+2028,
-    /// U+2029, or a Unicode format character.</summary>
+    /// U+2029, or a Unicode format character. A surrogate half is not refused here, because <see cref="IsControl(Rune)"/>
+    /// judges the pair it belongs to.</summary>
     public static bool IsControl(char c) =>
         char.IsControl(c)
         || c == '\u2028'
         || c == '\u2029'
         || CharUnicodeInfo.GetUnicodeCategory(c) == UnicodeCategory.Format;
 
-    /// <summary>True when <paramref name="value"/> holds a character <see cref="IsControl"/> refuses.</summary>
+    /// <summary>The same rule over a whole code point, so a format character outside the Basic Multilingual Plane (the
+    /// invisible tag characters U+E0000 to U+E007F among them) is refused like one inside it.</summary>
+    public static bool IsControl(Rune rune) =>
+        Rune.IsControl(rune)
+        || rune.Value is 0x2028 or 0x2029
+        || Rune.GetUnicodeCategory(rune) == UnicodeCategory.Format;
+
+    /// <summary>True when <paramref name="value"/> holds a character <see cref="IsControl(Rune)"/> refuses.</summary>
     public static bool HasControlCharacter(string? value)
     {
-        foreach (var c in value ?? string.Empty)
+        var text = value ?? string.Empty;
+        for (var i = 0; i < text.Length; i += Width(text, i))
         {
-            if (IsControl(c))
+            if (Refused(text, i))
             {
                 return true;
             }
@@ -67,9 +76,9 @@ public static class ServerFieldText
         ?? Refusal("username", username);
 
     /// <summary>
-    /// <paramref name="value"/> as text that is safe on one log or printed line: every character <see cref="IsControl"/>
-    /// refuses is written as <c>\uXXXX</c>, and every other character, a lone surrogate included, is left as it is.
-    /// Null is the empty string.
+    /// <paramref name="value"/> as text that is safe on one log or printed line: every character <see cref="IsControl(Rune)"/>
+    /// refuses is written as <c>\uXXXX</c>, or <c>\UXXXXXXXX</c> outside the Basic Multilingual Plane, and every other
+    /// character, a lone surrogate included, is left as it is. Null is the empty string.
     /// </summary>
     public static string Escape(string? value)
     {
@@ -78,19 +87,36 @@ public static class ServerFieldText
             return value ?? string.Empty;
         }
 
-        var builder = new StringBuilder(value!.Length + 8);
-        foreach (var c in value)
+        var text = value!;
+        var builder = new StringBuilder(text.Length + 8);
+        for (var i = 0; i < text.Length;)
         {
-            if (IsControl(c))
+            var width = Width(text, i);
+            if (!Refused(text, i))
             {
-                builder.Append("\\u").Append(((int)c).ToString("X4", CultureInfo.InvariantCulture));
+                builder.Append(text, i, width);
+            }
+            else if (width == 1)
+            {
+                builder.Append("\\u").Append(((int)text[i]).ToString("X4", CultureInfo.InvariantCulture));
             }
             else
             {
-                builder.Append(c);
+                builder.Append("\\U").Append(char.ConvertToUtf32(text[i], text[i + 1]).ToString("X8", CultureInfo.InvariantCulture));
             }
+
+            i += width;
         }
 
         return builder.ToString();
     }
+
+    /* Two for a surrogate pair, one for any other char, a lone surrogate included. */
+    private static int Width(string text, int index) =>
+        index + 1 < text.Length && char.IsSurrogatePair(text[index], text[index + 1]) ? 2 : 1;
+
+    private static bool Refused(string text, int index) =>
+        Width(text, index) == 2
+            ? IsControl(new Rune(text[index], text[index + 1]))
+            : IsControl(text[index]);
 }

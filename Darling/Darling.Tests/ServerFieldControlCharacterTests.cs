@@ -35,14 +35,14 @@ public sealed class ServerFieldControlCharacterTests
     private static readonly Edit.ServerProbe ThrowingProbe =
         (_, _) => throw new InvalidOperationException("the probe must not run for a refused request");
 
-    /// <summary>One of each class: line feed, carriage return, tab, DEL, a C1 control (NEL), the two Unicode separators and
-    /// a right-to-left override.</summary>
+    /// <summary>One of each class: line feed, carriage return, tab, DEL, a C1 control (NEL), the two Unicode separators,
+    /// a right-to-left override and an invisible tag character from outside the Basic Multilingual Plane.</summary>
     public static TheoryData<string, string> FieldsAndCharacters()
     {
         var data = new TheoryData<string, string>();
         foreach (var field in new[] { "display_name", "host", "database", "username" })
         {
-            foreach (var character in new[] { "\n", "\r", "\t", "\u007F", "\u0085", "\u2028", "\u2029", "\u202E" })
+            foreach (var character in new[] { "\n", "\r", "\t", "\u007F", "\u0085", "\u2028", "\u2029", "\u202E", "\U000E0041" })
             {
                 data.Add(field, character);
             }
@@ -207,5 +207,17 @@ public sealed class ServerFieldControlCharacterTests
         Assert.Equal("Z\u00FCrich \u2713 \U0001F680", ServerFieldText.Escape("Z\u00FCrich \u2713 \U0001F680"));
         Assert.Equal(string.Empty, ServerFieldText.Escape(null));
         Assert.DoesNotContain(ServerFieldText.Escape("line\nbreak"), ServerFieldText.IsControl);
+    }
+
+    [Fact]
+    public void TheRule_JudgesWholeCodePoints_SoATagCharacterIsRefused_AndASurrogateIsLeftAlone()
+    {
+        Assert.True(ServerFieldText.HasControlCharacter("ab\U000E0041\U000E007Fc"));
+        Assert.NotNull(ServerFieldText.Refusal("display_name", "prod\U000E0001"));
+        Assert.Equal("ab\\U000E0041\\U000E007Fc", ServerFieldText.Escape("ab\U000E0041\U000E007Fc"));
+
+        Assert.False(ServerFieldText.HasControlCharacter("rocket \U0001F680"));
+        Assert.False(ServerFieldText.HasControlCharacter("lone \uD800 half"));
+        Assert.Equal("lone \uD800 half \\u000A", ServerFieldText.Escape("lone \uD800 half \n"));
     }
 }

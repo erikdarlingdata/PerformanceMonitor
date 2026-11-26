@@ -226,6 +226,39 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Empty(run.Tested);
     }
 
+    /// <summary>#9787: the same rule as Darling's writers. Each of the four text fields with a line feed, a line separator or an
+    /// invisible tag character is refused by field name, the error lines carry no control character, and nothing changes.</summary>
+    [Theory]
+    [InlineData("display_name", "\n")]
+    [InlineData("host", "\u2028")]
+    [InlineData("database", "\u202E")]
+    [InlineData("username", "\U000E0041")]
+    public async Task AFieldHoldingAControlCharacter_IsRefusedByName_AndChangesNothing(string field, string character)
+    {
+        var entry = new Dictionary<string, object> { ["host"] = "sql01", ["auth"] = "windows", [field] = "x" + character + "y" };
+        var run = await RunVerbAsync(["--add-server"], JsonSerializer.Serialize(new[] { entry }));
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains($"{field} holds a control character", run.Err, StringComparison.Ordinal);
+        Assert.All(run.Err.Split('\n'), line => Assert.DoesNotContain(line.TrimEnd('\r'), ServerFieldText.IsControl));
+        Assert.Empty(ServerNames());
+        Assert.Empty(run.Tested);
+        Assert.Empty(StoredKeys());
+    }
+
+    [Fact]
+    public void ServerManagerAddServer_RefusesAControlCharacterInTheDisplayName_AndWritesNothing()
+    {
+        var manager = Reload();
+
+        var refused = Assert.Throws<InvalidOperationException>(
+            () => manager.AddServer(new ServerConnection { ServerName = "sql01", DisplayName = "a\u2028b" }));
+
+        Assert.Contains("display_name holds a control character", refused.Message, StringComparison.Ordinal);
+        Assert.Empty(manager.GetAllServers());
+        Assert.Empty(ServerNames());
+    }
+
     [Theory]
     [InlineData("""[{"host":"np:sql01","auth":"windows"}]""")]
     [InlineData("""[{"host":"sql01","auth":"sql","password":"p"}]""")]

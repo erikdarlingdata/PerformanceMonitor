@@ -405,6 +405,12 @@ public class ServerManager
     /// </summary>
     public void AddServer(ServerConnection server, string? username = null, string? password = null)
     {
+        /* #9787: a new row holds no control character in its display name, host, database or login. */
+        if (ServerFieldText.FirstRefusal(server.DisplayName, server.ServerName, server.DatabaseName, username) is { } fieldRefusal)
+        {
+            throw new InvalidOperationException(fieldRefusal);
+        }
+
         if (HostRefusal(server.ServerName, null) is { } hostRefusal)
         {
             throw new InvalidOperationException(hostRefusal);
