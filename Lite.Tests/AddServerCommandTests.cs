@@ -230,7 +230,7 @@ public sealed class AddServerCommandTests : IDisposable
     [InlineData("""[{"host":"np:sql01","auth":"windows"}]""")]
     [InlineData("""[{"host":"sql01","auth":"sql","password":"p"}]""")]
     [InlineData("""[{"host":"sql01","auth":"entramfa"}]""")]
-    [InlineData("""[{"host":"sql01","auth":"windows"},{"host":"sql01","auth":"windows"}]""")]
+    [InlineData("""[{"host":"np:sql01","auth":"windows"},{"host":"np:sql02","auth":"windows"}]""")]
     public async Task ARefusalThatNeedsNoServerList_NeverOpensOrCreatesServersJson(string stdin)
     {
         var run = await RunVerbAsync(["--add-server"], stdin);
@@ -265,6 +265,70 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Equal(1, run.Exit);
         Assert.Empty(ServerNames());
         Assert.False(File.Exists(HostsFile));
+    }
+
+    [Fact]
+    public async Task EveryEntryOfABatchIsTested_AndEveryFailureIsReportedWithItsNumberAndHost()
+    {
+        var run = await RunVerbAsync(
+            ["--add-server"], """[{"host":"sql01","auth":"windows"},{"host":"sql02","auth":"windows"},{"host":"sql03","auth":"windows"}]""",
+            connect: _ => "The certificate chain was issued by an authority that is not trusted.");
+
+        Assert.Equal(1, run.Exit);
+        Assert.Equal(["sql01", "sql02", "sql03"], run.Tested);
+        Assert.Contains("Entry 1 (sql01)", run.Err);
+        Assert.Contains("Entry 2 (sql02)", run.Err);
+        Assert.Contains("Entry 3 (sql03)", run.Err);
+        Assert.EndsWith(AddServerCommand.RefusedSummary(3, 3), run.Err.TrimEnd());
+        Assert.Empty(ServerNames());
+        Assert.False(File.Exists(HostsFile));
+    }
+
+    [Fact]
+    public async Task APassingEntryBesideARefusedOne_IsNotAdded_AndTheRunSaysSo()
+    {
+        var run = await RunVerbAsync(
+            ["--add-server"], """[{"host":"sql01","auth":"windows"},{"host":"sql02","auth":"windows"},{"host":"sql03","auth":"windows"}]""",
+            connect: server => server.ServerName == "sql02" ? "Login failed." : null);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Equal(["sql01", "sql02", "sql03"], run.Tested);
+        Assert.Contains("Entry 2 (sql02)", run.Err);
+        Assert.DoesNotContain("Entry 1", run.Err);
+        Assert.DoesNotContain("Entry 3", run.Err);
+        Assert.EndsWith(AddServerCommand.RefusedSummary(1, 3), run.Err.TrimEnd());
+        Assert.Empty(ServerNames());
+        Assert.Empty(StoredKeys());
+        Assert.False(File.Exists(HostsFile));
+    }
+
+    [Fact]
+    public async Task ARuleRefusalAndAFailedConnectionTest_AreBothReportedInOneRun()
+    {
+        var run = await RunVerbAsync(
+            ["--add-server"], """[{"host":"np:sql01","auth":"windows"},{"host":"sql02","auth":"windows"},{"host":"sql03","auth":"windows"}]""",
+            connect: server => server.ServerName == "sql03" ? "Login failed." : null);
+
+        Assert.Equal(1, run.Exit);
+        Assert.Equal(["sql02", "sql03"], run.Tested);
+        Assert.Contains("Entry 1 (np:sql01)", run.Err);
+        Assert.Contains("Entry 3 (sql03)", run.Err);
+        Assert.DoesNotContain("Entry 2", run.Err);
+        Assert.EndsWith(AddServerCommand.RefusedSummary(2, 3), run.Err.TrimEnd());
+        Assert.Empty(ServerNames());
+    }
+
+    [Fact]
+    public async Task ADuplicateOfARefusedEntry_IsReportedInTheSameRun()
+    {
+        var run = await RunVerbAsync(
+            ["--add-server"], """[{"host":"sql01","auth":"sql","username":"monitor"},{"host":"sql01","auth":"windows"}]""");
+
+        Assert.Equal(1, run.Exit);
+        Assert.Contains("Entry 1 (sql01)", run.Err);
+        Assert.Contains("Entry 2 (sql01): the same server is listed twice", run.Err);
+        Assert.False(run.ManagerMade);
+        Assert.Empty(run.Tested);
     }
 
     [Fact]
