@@ -100,6 +100,12 @@ On Windows, a source that gives its text to `psql` through environment variables
 
 The host in the printed string is the address this service uses for its store. If the store's owner cannot create logins (a bring-your-own store whose owner lacks CREATEROLE), the verb changes the registry and prints the statements a database administrator runs to make, re-key or drop the login. Those statements end with the login's membership in `darling_alert_sources` (below); `tools/provision-roles.sql` makes that group.
 
+### The same four verbs over MCP
+
+An MCP client manages the sources with `add_alert_source`, `rotate_alert_source`, `remove_alert_source` and `list_alert_sources`. They run the command line's own steps and answer with the command line's own text, in `report`. The three that change a source create, change or drop a database login, so they are served only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on, as `add_servers` is. They run as the store's owner, on the connection the service already holds. `list_alert_sources` is a read and has no password in it.
+
+The answers of `add_alert_source` and `rotate_alert_source` hold the new password once, in the connection strings of `report`. Darling keeps no copy, and no log line, error message or store row has it. Whoever reads the answer holds the password, including the MCP client and any transcript it keeps, so treat the answer as a secret. A lost password is replaced with `rotate_alert_source`.
+
 ### Alert sources on another machine
 
 Every source login is a member of `darling_alert_sources`, a NOLOGIN group role that holds no privilege on anything. The service creates it, marks it, and on every start makes the registered source logins its only members (on PostgreSQL 16 and later the membership is granted `WITH INHERIT FALSE, SET FALSE`). A role of that name that Darling did not create stops provisioning; it is never taken over.

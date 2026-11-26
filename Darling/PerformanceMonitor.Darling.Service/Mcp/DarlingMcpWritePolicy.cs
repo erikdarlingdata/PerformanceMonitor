@@ -58,6 +58,10 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        /* #9641: they create, change and drop a database login, so they sit behind the same switch. */
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
@@ -78,6 +82,9 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
         "mute_analysis_finding",
         "unmute_analysis_finding",
         "create_mute_rule",
