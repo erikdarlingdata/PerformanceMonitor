@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// instance that shares the store. The refresh (<see cref="PayloadDimensions.TouchSql"/>) updates the stamp, and inserts
 /// one for a referenced digest that has none. The foreign key cascades, so every delete of a dimension row removes its
 /// stamp row. The dimension GC (<see cref="PayloadDimensions.CursoredDeleteSql"/>) first gives every dimension row with no
-/// stamp one (<see cref="AdoptMissingSql"/>).</para>
+/// stamp one (<see cref="AdoptSlice"/>).</para>
 ///
 /// <para><b>What an older build sees.</b> It keeps stamping and pruning on the dimension row's own <c>last_seen</c>, and
 /// never reads this table. Its prune has no index to order by after the rung, so it scans the dimension. To keep that
@@ -190,25 +190,14 @@ WHERE NOT EXISTS (SELECT 1 FROM {TableName(dimTable)} AS s WHERE s.digest = t.di
     public static string DropWideIndexSql(string dimTable) => $"DROP INDEX IF EXISTS collect.{WideIndexName(dimTable)};";
 
     /// <summary>
-    /// The GC's first statement: gives every dimension row with no stamp row one, stamped with its own <c>last_seen</c>, so the
-    /// GC that follows judges it by that stamp. A dimension row is without one only when it was written with the trigger off (a
+    /// The GC's first step: gives every dimension row with no stamp row one, stamped with its own <c>last_seen</c>, so the GC
+    /// that follows judges it by that stamp. A dimension row is without one only when it was written with the trigger off (a
     /// restore that disables triggers, a session in replica mode), and a GC that reads the stamp table alone would keep such a
-    /// row for good. The keys are compared first, key against key, and only a missing key reads its dimension row. <c>$1</c>
-    /// is the retention pass's cutoff, which every purge statement is bound with, named only so the bind matches the statement.
+    /// row for good. It runs in keyset slices of the digest (<see cref="LivenessAdoptSlice"/>), so no statement reads either
+    /// primary key from end to end.
     /// </summary>
-    public static string AdoptMissingSql(string dimTable) => $@"
-INSERT INTO {TableName(dimTable)} (digest, last_seen)
-SELECT t.digest, t.last_seen
-FROM (
-    SELECT k.digest
-    FROM collect.{dimTable} AS k
-    WHERE $1::timestamp IS NOT NULL
-    AND   NOT EXISTS (SELECT 1 FROM {TableName(dimTable)} AS s WHERE s.digest = k.digest)
-    OFFSET 0
-) AS missing
-JOIN collect.{dimTable} AS t ON t.digest = missing.digest
-ORDER BY t.digest
-ON CONFLICT (digest) DO NOTHING";
+    public static LivenessAdoptSlice AdoptSlice(string dimTable) =>
+        new("collect." + dimTable, TableName(dimTable), new[] { PayloadDimensions.DigestColumn }, PayloadDimensions.LastSeenColumn);
 
     /// <summary>The whole rung (V298), in its one transaction, for every dimension table. Order: the lock timeout, then per
     /// table the empty stamp table, the trigger, the backfill, the key, the foreign key and the index, and last the drop of
