@@ -153,3 +153,68 @@ jobs:
           path: ${{ runner.temp }}/darling-linux-suite
           if-no-files-found: warn
           retention-days: 7
+
+  # #9686: the linux-x64 tarball installed under systemd the way docs/darling/linux.md says: the `darling` user, the folders
+  # of Step 5, darling.json with file: secrets, the pre-flight, the unit of Step 8, then stop, start and the Uninstall
+  # section. Every other Linux job runs the container image, so nothing else runs the tarball or the unit. The publish and
+  # the pack are the ones nightly.yml's linux job runs. It reports without blocking (continue-on-error) while it is new.
+  linux-systemd:
+    name: Darling under systemd (linux-x64 tarball)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      # The exact SDK version from global.json, not its feature band. Given a band, setup-dotnet resolves the newest
+      # patch through aka.ms links, and on 2026-10-25 those links sent every run to a download that failed with HTTP 409.
+      # With an exact version the install script downloads from the release feed and never asks aka.ms.
+      - name: Read the SDK version from global.json
+        id: globaljson_sdk
+        shell: pwsh
+        run: |
+          $version = (Get-Content -Raw (Join-Path $env:GITHUB_WORKSPACE 'global.json') | ConvertFrom-Json).sdk.version
+          if (-not $version) { throw 'global.json names no sdk.version' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10.0
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ steps.globaljson_sdk.outputs.version }}
+
+      - name: Publish service (linux-x64)
+        timeout-minutes: 8
+        run: dotnet publish Darling/PerformanceMonitor.Darling.Service/PerformanceMonitor.Darling.Service.csproj -c Release -r linux-x64 --self-contained false -o publish/DarlingService-linux
+
+      - name: Pack the tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p releases
+          # #9701: owned by root, so a root extract does not leave the build machine's uid on every file.
+          tar --owner=0 --group=0 --numeric-owner -C publish/DarlingService-linux -czf releases/PerformanceMonitorDarling-linux-x64-ci.tar.gz .
+
+      # The script needs root (useradd, /etc, systemctl). sudo drops the environment, so the two names it reads are kept:
+      # GITHUB_ACTIONS turns on the masking of its throwaway store passwords, and DOTNET_ROOT is where setup-dotnet put dotnet.
+      - name: Install, start, stop and uninstall under systemd
+        timeout-minutes: 10
+        shell: bash
+        run: sudo --preserve-env=GITHUB_ACTIONS,DOTNET_ROOT bash .github/scripts/darling-linux-systemd-leg.sh releases/PerformanceMonitorDarling-linux-x64-ci.tar.gz
+
+      # The script prints both tails itself when a check fails, before its cleanup removes the log folder. The file log is
+      # still on disk only when the script was stopped before its cleanup ran. The journal outlives the unit.
+      - name: Show the journal and the file log
+        if: failure()
+        shell: bash
+        run: |
+          echo "::group::journalctl -u darling"
+          sudo journalctl -u darling --no-pager -n 200 || true
+          echo "::endgroup::"
+          echo "::group::file log"
+          sudo sh -c 'tail -n 200 /usr/share/PerformanceMonitorDarling/logs/darling-service_*.log' || true
+          echo "::endgroup::"
