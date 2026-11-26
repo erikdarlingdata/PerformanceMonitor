@@ -111,7 +111,7 @@ public sealed class DarlingManagedRolesTests
     /// A bring-your-own store gets the web login from the script, so the script must give <c>web</c> every write and EXECUTE the
     /// managed batch gives it, give <c>viewer</c> none, and take from <c>viewer</c> each write an earlier version of the script
     /// granted it. The batch revokes in one statement per kind; the script revokes per table, so one table a store has not
-    /// migrated to yet cannot skip the others. The record_custom_alert_resolution function is the one the script does not create.
+    /// migrated to yet cannot skip the others.
     /// </summary>
     [Fact]
     public void TheByoScript_GivesTheWebRoleTheBatchsWrites_AndViewerNone()
