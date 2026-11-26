@@ -273,6 +273,19 @@ public class AnalysisContext
     public IReadOnlyList<PlanRegressionOffender>? PlanRegressionOffenders { get; set; }
 
     /// <summary>
+    /// Darling only (#8570): the plan XML the MISSING_INDEX / PLAN_WARNING fact read summarized this pass, as the store
+    /// returned it (text, or gzip bytes decoded), before any statement is withheld. Stamped by the fact collector once
+    /// that read finishes. Null until then, when the read failed, and on a drill-down run without a fact pass. Empty when
+    /// the read found no plan.
+    ///
+    /// <para>The plan-advisory drill-down renders the specific indexes and warnings from the same top plans the fact
+    /// counted. It reads them from here when this is set, and withholds each statement as it always has, so the
+    /// drill-down analyzes the rows the fact analyzed without a second read of the window. It runs its own read when this
+    /// is null.</para>
+    /// </summary>
+    public IReadOnlyList<string>? PlanAdvisoryPlanXmls { get; set; }
+
+    /// <summary>
     /// The queries whose timeouts (Aborted runs) or errors (Exception runs) rose, as the PLAN_REGRESSION fact read them
     /// this pass (#6267), stamped by the fact collector after that read. Null until then, and null when the read failed.
     /// The regressed-queries drill-down lists them next to the cost offenders. A pass with failures and no cost offender

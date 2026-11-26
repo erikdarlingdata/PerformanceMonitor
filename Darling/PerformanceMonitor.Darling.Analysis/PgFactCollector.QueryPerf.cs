@@ -1891,6 +1891,10 @@ ORDER BY r.delta_worker_time DESC";
                 }
             }
 
+            /* #8570: the plan-advisory drill-down of this pass renders its indexes and warnings from these rows instead of
+               reading the window a second time. */
+            context.PlanAdvisoryPlanXmls = planXmls;
+
             // Connection released above; parse off the store (CPU-only, no DB).
             if (planXmls.Count == 0)
                 return;
