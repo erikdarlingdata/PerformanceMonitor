@@ -137,7 +137,7 @@ public sealed class FindQueriesByTextNewestFirstLiveTests
         var planCache = await PlanCacheAsync(scratch.ConnectionString, "dbo.Common", 3, Budget(null, n => statements = n), ct);
 
         Assert.Equal("ok", planCache.GetProperty("status").GetString());
-        Assert.Equal("join", planCache.GetProperty("sample_read").GetString());
+        Assert.Equal("lookup", planCache.GetProperty("sample_read").GetString());
         Assert.Equal([Hash(0), Hash(1), Hash(2)], Hashes(planCache));
         Assert.True(planCache.GetProperty("truncated").GetBoolean());
         Assert.True(planCache.GetProperty("searched").GetProperty("complete").GetBoolean());
@@ -164,7 +164,7 @@ public sealed class FindQueriesByTextNewestFirstLiveTests
         await using var c = await data.OpenConnectionAsync(ct);
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
-        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingMcpFindQueriesByTextTools.AllServersJoinSql(0), c);
+        await using var explain = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + DarlingMcpFindQueriesByTextTools.PlanCacheAllServersLookupSpanSql, c);
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = DarlingMcpFindQueriesByTextTools.EscapeLike("dbo.Common") });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = 4 });
         explain.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = now - TimeSpan.FromSeconds(SpanRows * 5) });
@@ -200,8 +200,8 @@ public sealed class FindQueriesByTextNewestFirstLiveTests
         Assert.Equal(coveredFrom, searched.GetProperty("searched_from").GetDateTime().ToUniversalTime());
     }
 
-    /// <summary>A rare pattern with room in the budget finishes with the rows of the whole-window join, in its order, over spans cut by row count and
-    /// spans cut by time.</summary>
+    /// <summary>A rare pattern with room in the budget finishes with the rows of the whole-window join, in its order, over spans cut by a row count
+    /// and a last one that takes what is left of the window.</summary>
     [Fact]
     public async Task AFinishedSearch_ListsWhatTheWholeWindowJoinLists()
     {
@@ -306,7 +306,7 @@ public sealed class FindQueriesByTextNewestFirstLiveTests
         var planCache = JsonDocument.Parse(reply).RootElement.GetProperty("sources").GetProperty("plan_cache");
 
         Assert.Equal("ok", planCache.GetProperty("status").GetString());
-        Assert.Equal("join", planCache.GetProperty("sample_read").GetString());
+        Assert.Equal("lookup", planCache.GetProperty("sample_read").GetString());
         Assert.Equal(["0xA0000", "0xH0001", "0xH0002"], Hashes(planCache));
         Assert.True(planCache.GetProperty("truncated").GetBoolean());
         Assert.True(planCache.GetProperty("searched").GetProperty("complete").GetBoolean());
