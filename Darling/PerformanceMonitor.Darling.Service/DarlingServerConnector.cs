@@ -898,8 +898,10 @@ FROM pg_catalog.pg_control_system() AS s";
                 IsAwsRds: false,
                 HasMsdbAccess: false,
                 /* #6183: SqlClient's native library failing to load reads "The type initializer for ... TdsParser
-                   threw an exception" and says nothing about why. One shared explanation, for every caller. */
-                Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message,
+                   threw an exception" and says nothing about why. One shared explanation, for every caller.
+                   #9692: a server certificate this machine rejects reads "error occurred during the pre-login handshake", so
+                   the shared sentence that says so follows the driver's text. */
+                Error: SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex),
                 SqlClientNativeLoadFailed: SqlClientNativeLoadFailure.IsMatch(ex),
                 TransportFailure: IsTransportFailure(ex));
         }
@@ -1077,7 +1079,7 @@ FROM pg_catalog.pg_control_system() AS s";
         }
         catch (Exception ex)
         {
-            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message);
+            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex));
         }
     }
 

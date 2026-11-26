@@ -123,7 +123,8 @@ internal static class ServerEntryRules
     /// </summary>
     internal static string FailureText(Exception ex, string? encryptMode)
     {
-        var text = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message;
+        /* #9692: a server certificate this machine rejects gets the shared sentence that says so after the driver's text. */
+        var text = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex);
         /* A native-library load failure is not a Strict problem: no SQL Server connection can work from this install. */
         if (ex is OperationCanceledException || SqlClientNativeLoadFailure.IsMatch(ex))
         {

@@ -890,7 +890,7 @@ public class ServerManager
         catch (SqlException ex)
         {
             status.IsOnline = false;
-            status.ErrorMessage = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message;
+            status.ErrorMessage = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex);
 
             // Detect MFA cancellation (error code 0 with specific message patterns)
             if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))
@@ -915,7 +915,7 @@ public class ServerManager
                ("The type initializer for 'TdsParser' threw an exception"), which does not say why. The shared
                explanation replaces it in the status the connection test and the UI show. */
             var nativeLoadFailure = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory);
-            status.ErrorMessage = nativeLoadFailure ?? ex.Message;
+            status.ErrorMessage = nativeLoadFailure ?? ServerCertificateTrustFailure.Append(ex.Message, ex);
 
             // Detect MFA cancellation from generic exceptions
             if (server.AuthenticationType == AuthenticationTypes.EntraMFA && MfaAuthenticationHelper.IsMfaCancelledException(ex))

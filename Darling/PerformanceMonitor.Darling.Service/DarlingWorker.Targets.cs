@@ -645,7 +645,8 @@ public sealed partial class DarlingWorker
            explanation replaces the raw text, and it is logged once for the whole process (it is the same cause
            for every server), not once per server with a retry line. The retry loop itself is unchanged. */
         var nativeLoadFailure = SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory);
-        var failure = nativeLoadFailure ?? ex.Message;
+        /* #9692: a server certificate this machine rejects gets the shared sentence that says so after the driver's text. */
+        var failure = nativeLoadFailure ?? ServerCertificateTrustFailure.Append(ex.Message, ex);
         if (nativeLoadFailure is not null)
         {
             server.LastConnectFailureLogged = failure;

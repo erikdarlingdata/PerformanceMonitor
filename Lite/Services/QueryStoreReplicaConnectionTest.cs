@@ -59,7 +59,7 @@ internal static class QueryStoreReplicaConnectionTest
         }
         catch (Exception ex)
         {
-            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ex.Message);
+            return (host, SqlClientNativeLoadFailure.Describe(ex, AppContext.BaseDirectory) ?? ServerCertificateTrustFailure.Append(ex.Message, ex));
         }
     }
 
