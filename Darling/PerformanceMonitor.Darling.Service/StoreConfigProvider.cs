@@ -2209,8 +2209,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     /// <summary>The V75 plan-content horizon clamps (#2316) — 0 (and any negative) means DISABLED
     /// (the fact-coupled dimension horizon stands alone); an enabled value clamps to [7,365], because a
     /// sub-week horizon would age plan XML out from under the viewer's default history windows.</summary>
-    internal const int MinPlanContentRetentionDays = 7;
-    internal const int MaxPlanContentRetentionDays = 365;
+    internal const int MinPlanContentRetentionDays = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.PlanContentRetentionDaysMin;
+    internal const int MaxPlanContentRetentionDays = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.PlanContentRetentionDaysMax;
 
     internal static int ClampPlanContentRetentionDays(int value) =>
         value <= 0 ? 0 : Math.Clamp(value, MinPlanContentRetentionDays, MaxPlanContentRetentionDays);
@@ -2225,8 +2225,8 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal static int ClampQueryStoreFetchTopN(int value) =>
         value <= 0 ? 0 : Math.Min(value, QueryStoreFetchSelection.MaxTopN);
 
-    internal const int MinComposeStatementTimeoutSeconds = 5;
-    internal const int MaxComposeStatementTimeoutSeconds = 600;
+    internal const int MinComposeStatementTimeoutSeconds = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ComposeStatementTimeoutSecondsMin;
+    internal const int MaxComposeStatementTimeoutSeconds = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ComposeStatementTimeoutSecondsMax;
 
     internal static int ClampComposeStatementTimeoutSeconds(int value) =>
         Math.Clamp(value <= 0 ? 60 : value, MinComposeStatementTimeoutSeconds, MaxComposeStatementTimeoutSeconds);
