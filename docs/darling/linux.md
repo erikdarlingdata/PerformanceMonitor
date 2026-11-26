@@ -191,6 +191,22 @@ The tarball ships `provision-roles.sql`. It creates the `admin`, `viewer`, `web`
 
 Custom alerts run on the `web` role, so they need the script and `postgres.webConnectionString`. With the setting unset, the service logs `Custom alert evaluator not started` and names the setting ([#9700](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9700)). The built-in alerts are not affected.
 
+Run the script on the store host as the `postgres` OS user. The `darling` owner from the step above is not a superuser and has no `CREATEROLE`, so the script stops at its guard (`is not a superuser and does not have CREATEROLE`) and changes nothing. Work on a copy, so that the four passwords never sit under `/opt/darling`, where the next [upgrade by hand](#upgrade-by-hand) moves them to `/opt/darling.previous`. The run needs all four placeholders replaced, `web` and `mcp` included, even when only the custom alert evaluator's `web` login is used. Make the copy in a folder that only you can read:
+
+```bash
+work=$(mktemp -d)
+install -m 600 /opt/darling/provision-roles.sql "$work/provision-roles.sql"
+```
+
+Open the copy in an editor and replace every occurrence of `CHANGE_ME_ADMIN_PASSWORD`, `CHANGE_ME_VIEWER_PASSWORD`, `CHANGE_ME_WEB_PASSWORD` and `CHANGE_ME_MCP_PASSWORD` with a long random password. Each one sits in a check and in its `ALTER ROLE` line, so use a find-and-replace. Keep the `web` and `mcp` passwords in the files that `postgres.webConnectionString` and `postgres.mcpConnectionString` read as `file:` references, such as `file:/etc/darling/store_web` in the [Security example](security.md#security--least-privilege-roles). Then run the copy and delete it. The copy goes in on standard input, because the `postgres` user cannot read a file that only you can read. `-q` leaves out the command tags (`DO`, `SET`, `GRANT`), so the run prints only warnings and errors, and each line is worth reading.
+
+```bash
+sudo -u postgres psql -X -q -d darling -f - < "$work/provision-roles.sql"
+rm -rf "$work"
+```
+
+**Proof:** `sudo -u postgres psql -X -d darling -At -c "SELECT rolname FROM pg_roles WHERE rolname IN ('admin', 'viewer', 'web', 'mcp') ORDER BY rolname"` lists all four. Then set `postgres.webConnectionString` in `darling.json`, and `postgres.mcpConnectionString` when MCP is on.
+
 ### Store log capture
 
 The service reads the store's own PostgreSQL log into the store. A Debian or Ubuntu package logs to `/var/log/postgresql` with `logging_collector = off`, which is a healthy setup, and the service cannot read that. It logs one of these two warnings once, and repeats the same cause only at Debug until the cause changes:
@@ -480,8 +496,14 @@ The `network` block of each surface (`listen`, `allowFrom`, `token`) is read fro
 
 1. Read the release notes, and [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) for anything that an older build reads differently.
 2. Back up the store. See [Back up, restore and move the store](../darling-store-backup.md).
-3. Download and verify the new tarball, as in step 4.
-4. Replace the service files and keep the old ones. The service stays stopped until step 5:
+3. Compare the store settings with the block in [Settings](#settings), because a release can add a setting. The file is `/etc/postgresql/18/main/conf.d/darling.conf` on a Debian or Ubuntu package install. A store set up from an earlier quick start can lack `pg_stat_statements.track_utility = off` and `timescaledb.telemetry_level = off`, and the service then warns about `track_utility` at every start. Add what is missing and reload PostgreSQL. A reload is enough for these two. A change to the preload list or the worker settings needs a restart, as [Settings](#settings) says.
+
+   ```bash
+   sudo systemctl reload postgresql@18-main
+   ```
+
+4. Download and verify the new tarball, as in [step 4](#step-4-download-and-verify).
+5. Replace the service files and keep the old ones. The service stays stopped until step 6:
 
    ```bash
    sudo systemctl stop darling
@@ -490,15 +512,15 @@ The `network` block of each surface (`listen`, `allowFrom`, `token`) is read fro
    sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling --no-same-owner
    ```
 
-5. Compare `/etc/systemd/system/darling.service` with the unit in step 8, because a release can change it. For example, 3.14.0 adds `Type=notify`, `postgresql.service` in `After=` and `Wants=network-online.target`. If the files differ, save the unit from step 8 over yours. Then reload systemd and start the service:
+6. Compare `/etc/systemd/system/darling.service` with the unit in step 8, because a release can change it. For example, 3.14.0 adds `Type=notify`, `postgresql.service` in `After=` and `Wants=network-online.target`. If the files differ, save the unit from step 8 over yours. Then reload systemd and start the service:
 
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl start darling
    ```
 
-6. Check the proof lines of step 9. `Postgres store ready (schema v<version>, <count> migration(s) applied)` shows the store's new schema version.
-7. Read the worker counts again, as in [Size the workers after the first start](#size-the-workers-after-the-first-start).
+7. Check the proof lines of step 9. `Postgres store ready (schema v<version>, <count> migration(s) applied)` shows the store's new schema version.
+8. Read the worker counts again, as in [Size the workers after the first start](#size-the-workers-after-the-first-start).
 
 Nothing checks that the old process is gone or rolls back for you. To go back, stop the unit, move `/opt/darling.previous` back to `/opt/darling` and start the unit. The store's migrations stay applied, so read the rollback list first. Remove `/opt/darling.previous` when you no longer need it.
 

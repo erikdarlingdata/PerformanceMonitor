@@ -91,7 +91,7 @@ A headless Lite does these things as usual:
 - It sends alerts by email, Slack, Teams and webhook.
 - It runs retention and archiving.
 - It runs the MCP server, if you turned it on. See [Use MCP on a headless Lite](#use-mcp-on-a-headless-lite).
-- It checks for updates. It writes the result to the log. It cannot show a balloon.
+- It checks for updates a few seconds after it starts, and writes one line to the log for the result: no update, an update with its version, or a failed check with the reason. The `check_for_updates_on_startup` setting turns the check off, and Lite then logs one line that says so. It cannot show a balloon.
 
 A headless Lite does not show a window, a tray icon, a balloon or a dialog. Each headless start writes these two lines to the log, at Information level:
 
