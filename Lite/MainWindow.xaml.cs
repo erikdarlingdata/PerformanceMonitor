@@ -238,6 +238,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _windowState.Attach(this);
         LoadOverviewSortMode();
         /* #8221: a card's band brushes are read from the theme when it is bound, so a theme change binds the cards again. */
         ThemeManager.ThemeChanged += _ => ApplyOverviewView();
@@ -351,9 +352,15 @@ public partial class MainWindow : Window
     {
         Show();
         ShowInTaskbar = true;
-        WindowState = WindowState.Normal;
+        /* #9735: a minimized window goes back to the state it had before it was minimized (Maximized by default),
+           because forcing Normal brings a maximized window back at its declared 1200x700, past the edge of a small
+           screen. A window that is not minimized keeps its state. */
+        WindowState = _windowState.RestoreTarget(WindowState);
         Activate();
     }
+
+    /// <summary>The last non-minimized window state, which <see cref="RestoreFromTray"/> restores to (#9735).</summary>
+    private readonly WindowStateMemory _windowState = new();
 
     /// <summary>
     /// The server_name values in this user's collector tables: the storage name (host, database and read-only intent) each
