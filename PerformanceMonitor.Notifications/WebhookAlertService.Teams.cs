@@ -355,6 +355,53 @@ public partial class WebhookAlertService
         return block;
     }
 
+    /// <summary>How the lines of an external alert's detail are set in the card's <c>Details</c> section.</summary>
+    internal enum TeamsDetailLines
+    {
+        /// <summary>One <c>TextBlock</c> whose lines are joined by a doubled line feed, the break Teams documents for a new line
+        /// in a TextBlock outside a list. A TextBlock's markdown shows a lone line feed as a space, and a blank line shows the
+        /// same gap as one break.</summary>
+        DoubledLineFeed,
+
+        /// <summary>One <c>TextBlock</c> per line, which does not depend on how Teams reads a line feed in markdown. A blank line
+        /// sends no block.</summary>
+        BlockPerLine,
+    }
+
+    /// <summary>The form the card sends. This is the one place that chooses it.</summary>
+    internal const TeamsDetailLines TeamsExternalDetailLines = TeamsDetailLines.DoubledLineFeed;
+
+    /// <summary>
+    /// The blocks under the <c>Details</c> heading for already-escaped prose, cut by <see cref="CapTeamsProse"/>. An engine
+    /// alert's prose is one <c>TextBlock</c> as it is. An external alert's detail has its line-start markers escaped
+    /// (<see cref="TeamsEscapeLineStarts"/>) and its lines set in <paramref name="form"/>. Markdown drops a line's leading spaces
+    /// and shows a run of spaces as one in either form.
+    /// </summary>
+    internal static List<object> TeamsDetailBlocks(string escapedProse, bool external, TeamsDetailLines form)
+    {
+        if (!external)
+        {
+            return [TeamsTextBlock(CapTeamsProse(escapedProse), spacing: "Small")];
+        }
+
+        var lines = TeamsEscapeLineStarts(escapedProse);
+        if (form == TeamsDetailLines.DoubledLineFeed)
+        {
+            return [TeamsTextBlock(CapTeamsProse(lines.Replace("\n", "\n\n", StringComparison.Ordinal)), spacing: "Small")];
+        }
+
+        var blocks = new List<object>();
+        foreach (var line in CapTeamsProse(lines).Split('\n'))
+        {
+            if (line.Length > 0)
+            {
+                blocks.Add(TeamsTextBlock(line, spacing: blocks.Count == 0 ? "Small" : "None"));
+            }
+        }
+
+        return blocks;
+    }
+
     /// <summary>One section of the card: a <c>Container</c> under a separator line.</summary>
     private static object TeamsSection(List<object> items) => new { type = "Container", separator = true, items };
 
@@ -439,19 +486,12 @@ public partial class WebhookAlertService
         /* #3297: ahead of the per-incident sections — it is the actionable half of the alert. */
         if (prose is not null)
         {
-            /* #9576: an external alert's detail keeps its line breaks, and a TextBlock's markdown shows a lone line feed as a
-               space, so each one becomes a blank-line paragraph break (the doubled line feed Teams documents for a new line in
-               a TextBlock). Only the text a source sent carries breaks this way: an engine alert's prose is left exactly as it
-               is. Each line is then a paragraph of its own, so a line that opens with a heading, list or rule marker keeps the
-               marker as text (#9607). Markdown also drops a line's leading spaces and shows a run of spaces as one, and a blank
-               line shows the same gap as one break. */
-            var escapedProse = TeamsEscape(prose);
-            if (context?.External is not null)
-            {
-                escapedProse = TeamsEscapeLineStarts(escapedProse).Replace("\n", "\n\n", StringComparison.Ordinal);
-            }
-
-            itemSections.Add(TeamsSection([TeamsTextBlock("Details", bold: true), TeamsTextBlock(CapTeamsProse(escapedProse), spacing: "Small")]));
+            /* #9576: an external alert's detail keeps its line breaks, in the form TeamsExternalDetailLines names. Only the text a
+               source sent carries breaks this way: an engine alert's prose is left exactly as it is. Each line starts a paragraph
+               of its own, so a line that opens with a heading, list or rule marker keeps the marker as text (#9607). */
+            var detailBlocks = new List<object> { TeamsTextBlock("Details", bold: true) };
+            detailBlocks.AddRange(TeamsDetailBlocks(TeamsEscape(prose), context?.External is not null, TeamsExternalDetailLines));
+            itemSections.Add(TeamsSection(detailBlocks));
         }
 
         if (context?.Details != null)

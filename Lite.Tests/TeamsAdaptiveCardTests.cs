@@ -261,6 +261,43 @@ public class TeamsAdaptiveCardTests
             card.Section("Details").Texts);
     }
 
+    [Fact]
+    public void TheDetailLineForm_TheCardSends_IsTheDoubledLineFeedInOneTextBlock()
+    {
+        var blocks = WebhookAlertService.TeamsDetailBlocks("Report\n- 3 failed", external: true, WebhookAlertService.TeamsExternalDetailLines);
+
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(blocks));
+        Assert.Equal("Report\n\n\\- 3 failed", Assert.Single(document.RootElement.EnumerateArray().ToList()).GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void TheDetailLineForm_BlockPerLine_SendsOneWrappedTextBlockPerLine_WithTheMarkerEscapeKept()
+    {
+        var blocks = WebhookAlertService.TeamsDetailBlocks(
+            "Report\n  rows: 120\n\n- 3 failed", external: true, WebhookAlertService.TeamsDetailLines.BlockPerLine);
+
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(blocks));
+        var sent = document.RootElement.EnumerateArray().ToList();
+        Assert.Equal(["Report", "  rows: 120", "\\- 3 failed"], sent.Select(block => block.GetProperty("text").GetString()));
+        Assert.All(sent, block =>
+        {
+            Assert.Equal("TextBlock", block.GetProperty("type").GetString());
+            Assert.True(block.GetProperty("wrap").GetBoolean());
+        });
+    }
+
+    [Fact]
+    public void TheDetailLineForm_LeavesAnEngineAlertsProseAsOneBlockInEitherForm()
+    {
+        foreach (var form in new[] { WebhookAlertService.TeamsDetailLines.DoubledLineFeed, WebhookAlertService.TeamsDetailLines.BlockPerLine })
+        {
+            var blocks = WebhookAlertService.TeamsDetailBlocks("first\n- second", external: false, form);
+
+            using var document = JsonDocument.Parse(JsonSerializer.Serialize(blocks));
+            Assert.Equal("first\n- second", Assert.Single(document.RootElement.EnumerateArray().ToList()).GetProperty("text").GetString());
+        }
+    }
+
     /* ---------------- incident sections and records ---------------- */
 
     [Fact]
