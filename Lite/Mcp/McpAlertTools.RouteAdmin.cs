@@ -450,8 +450,9 @@ public sealed partial class McpAlertTools
     private static object DestinationsPayload(List<(string Argument, string Channel, string Typed)> changed, NotificationRoute now, NotificationRoute? previous) => new
     {
         changed = changed.Select(c => c.Argument).ToList(),
-        now = changed.ToDictionary(c => c.Channel, c => DescribeDestination(c.Channel, now)),
-        previous = previous is null ? null : changed.ToDictionary(c => c.Channel, c => DescribeDestination(c.Channel, previous)),
+        /* Darling's keys: teams, slack, generic, pagerduty, email. */
+        now = changed.ToDictionary(c => c.Channel.ToLowerInvariant(), c => DescribeDestination(c.Channel, now)),
+        previous = previous is null ? null : changed.ToDictionary(c => c.Channel.ToLowerInvariant(), c => DescribeDestination(c.Channel, previous)),
         note = "A webhook URL or key is kept in Windows Credential Manager and never shown: the answer says saved or none. The recipient list is shown in full.",
     };
 
