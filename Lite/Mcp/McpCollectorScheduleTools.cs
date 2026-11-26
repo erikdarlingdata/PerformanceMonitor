@@ -137,16 +137,9 @@ public sealed class McpCollectorScheduleTools
             canonical = shipped.FirstOrDefault(s => string.Equals(s.Name, collectorName.Trim(), StringComparison.OrdinalIgnoreCase))?.Name;
             if (canonical is null)
             {
-                /* #9640: Darling's twin answers this with status refused and reason unknown_collector, so a client that handles one handles both. */
-                return new JsonObject
-                {
-                    ["status"] = "refused",
-                    ["tool"] = "get_collector_schedules",
-                    ["reason"] = "unknown_collector",
-                    ["message"] = $"'{collectorName.Trim()}' is not a collector Lite knows. Nothing was changed. Names are the ones get_collection_health reports: " +
-                        string.Join(", ", shipped.Select(s => s.Name).OrderBy(n => n, StringComparer.Ordinal)) + ".",
-                    ["changed"] = false,
-                }.ToJsonString();
+                return McpHelpers.Refusal("collector_name",
+                    $"'{collectorName.Trim()}' is not a collector Lite knows. Names are the ones get_collection_health reports: " +
+                    string.Join(", ", shipped.Select(s => s.Name).OrderBy(n => n, StringComparer.Ordinal)) + ".");
             }
         }
 
