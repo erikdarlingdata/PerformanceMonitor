@@ -213,4 +213,84 @@ public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal(expected7, await ToolAsync(7));
         Assert.Equal(expected90, await ToolAsync(90));
     }
+
+    private const string SmallDatabase = "Tiny";
+
+    private Task<string> ToolAsync(string database, int daysBack) =>
+        McpObjectUsageTools.GetObjectUsage(_dataService, _serverManager, ServerName, database, daysBack, 500, 0, Now);
+
+    private Task<long> PairRowsAsync(string database) => ScalarAsync(
+        $"SELECT (SELECT count(*) FROM object_usage_deltas WHERE database_name = '{database}') "
+        + $"+ (SELECT count(*) FROM object_usage_snapshots WHERE database_name = '{database}') "
+        + $"+ (SELECT count(*) FROM object_usage_runs WHERE database_name = '{database}')");
+
+    [Fact]
+    public async Task APassThatStartsOverTheCap_DropsOnlyTheDatabaseThatDoesNotFit_AndItComesBackOnceItFits_WithNoRestart()
+    {
+        /* Two databases on one server: the full history in Sales, and one index of it in Tiny. One builder, never restarted, with a cap the test moves. */
+        var history = ObjectUsageChainHistory.Generate();
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, Database, history);
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, SmallDatabase, history.Where(r => r.ObjectId == 2), firstId: -5_000_000, logRuns: false);
+        var expected = new Dictionary<(string, int), string>();
+        foreach (var database in new[] { Database, SmallDatabase })
+        {
+            foreach (var daysBack in new[] { 7, 90 })
+            {
+                expected[(database, daysBack)] = await ToolAsync(database, daysBack);
+            }
+        }
+
+        long capRows = long.MaxValue / 1024;
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now,
+            () => capRows * (double)ObjectUsageChainBuilder.EstimatedBytesPerRow / (1048576.0 * ObjectUsageChainBuilder.CapShareOfResetPoint));
+        var snapshots = ObjectUsageChainHistory.SnapshotDays().Count();
+        Assert.True(await builder.BuildPassAsync(int.MaxValue, CancellationToken.None) > snapshots);
+        var tinyRows = await PairRowsAsync(SmallDatabase);
+        var salesRows = await PairRowsAsync(Database);
+        Assert.True(salesRows > tinyRows, $"Sales holds {salesRows} chain rows and Tiny {tinyRows}");
+
+        /* The reset point is lowered: Tiny's whole chain fits under the trim target, Sales beside it does not, and the next pass starts over the cap. */
+        capRows = (long)Math.Ceiling(tinyRows / ObjectUsageChainBuilder.TrimTargetShare) + 2;
+        Assert.True(tinyRows + salesRows > capRows);
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(tinyRows, await PairRowsAsync(SmallDatabase));
+        Assert.Equal(0L, await PairRowsAsync(Database));
+        Assert.True(await ChainRowsAsync() <= capRows);
+
+        foreach (var daysBack in new[] { 7, 90 })
+        {
+            var tiny = await _dataService.TryReadObjectUsageChainAsync(_serverId, SmallDatabase, Start(daysBack));
+            Assert.NotNull(tiny.Result);
+            Assert.Equal(Json(await _dataService.GetObjectUsageWindowFullAsync(_serverId, SmallDatabase, Start(daysBack))), Json(tiny.Result));
+            var (sales, reason) = await _dataService.TryReadObjectUsageChainAsync(_serverId, Database, Start(daysBack));
+            Assert.Null(sales);
+            Assert.False(string.IsNullOrEmpty(reason));
+            Assert.Equal(expected[(Database, daysBack)], await ToolAsync(Database, daysBack));
+            Assert.Equal(expected[(SmallDatabase, daysBack)], await ToolAsync(SmallDatabase, daysBack));
+        }
+
+        /* While the cap stays where it is, Sales is neither rebuilt nor dropped again, pass after pass, and Tiny keeps its chain. */
+        for (var pass = 0; pass < 3; pass++)
+        {
+            Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+            Assert.Equal(0L, await PairRowsAsync(Database));
+            Assert.Equal(tinyRows, await PairRowsAsync(SmallDatabase));
+        }
+
+        /* The reset point goes back up: the same builder rebuilds Sales whole on its next pass, and both databases read from the chain. */
+        capRows = long.MaxValue / 1024;
+        Assert.Equal(snapshots, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(salesRows, await PairRowsAsync(Database));
+        Assert.Equal(tinyRows, await PairRowsAsync(SmallDatabase));
+        foreach (var database in new[] { Database, SmallDatabase })
+        {
+            foreach (var daysBack in new[] { 7, 90 })
+            {
+                var persisted = await _dataService.TryReadObjectUsageChainAsync(_serverId, database, Start(daysBack));
+                Assert.NotNull(persisted.Result);
+                Assert.Equal(Json(await _dataService.GetObjectUsageWindowFullAsync(_serverId, database, Start(daysBack))), Json(persisted.Result));
+                Assert.Equal(expected[(database, daysBack)], await ToolAsync(database, daysBack));
+            }
+        }
+    }
 }

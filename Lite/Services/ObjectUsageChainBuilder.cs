@@ -209,8 +209,13 @@ internal sealed class ObjectUsageChainBuilder
     /// <summary>The hot store's reset point in MB, read at each check. The setting the reset itself uses, except in a test that needs a small one.</summary>
     private readonly Func<double> _resetPointMb;
 
-    /// <summary>Databases whose newest <see cref="MinKeptDays"/> did not fit under the cap. They are not extended again until the next start.</summary>
-    private readonly HashSet<(int ServerId, string DatabaseName)> _stopped = [];
+    /// <summary>
+    /// Databases whose chain was dropped because the newest <see cref="MinKeptDays"/> did not fit under the cap, each with the rows its newest week
+    /// held when it was dropped (the most of every drop). A pass skips one until the chain's rows plus that many fit under <see cref="TrimTargetShare"/>
+    /// of the cap, which is the condition the drop broke, so it comes back once the cap is raised or a trim, a purge or the size reset frees room, and
+    /// is not built and dropped again on every pass while that condition holds.
+    /// </summary>
+    private readonly Dictionary<(int ServerId, string DatabaseName), long> _stopped = [];
 
     /// <summary>The database being extended when the chain reached the cap, for the pass to deal with at its end.</summary>
     private (int ServerId, string DatabaseName)? _capHit;
@@ -259,9 +264,15 @@ internal sealed class ObjectUsageChainBuilder
                     break;
                 }
 
-                if (_stopped.Contains((serverId, databaseName)))
+                if (_stopped.TryGetValue((serverId, databaseName), out var need))
                 {
-                    continue;
+                    var (deltas, other) = await CountChainRowsAsync(cancellationToken);
+                    if (deltas + other + need > (long)(CapRows * TrimTargetShare))
+                    {
+                        continue;
+                    }
+
+                    _stopped.Remove((serverId, databaseName));
                 }
 
                 try
@@ -638,21 +649,34 @@ internal sealed class ObjectUsageChainBuilder
         return times;
     }
 
-    /// <summary>The end of the newest <c>index_object_stats</c> collection run of a server that the log knows, plus a second of slack, or null when it has none.</summary>
+    /// <summary>
+    /// The end of the newest <c>index_object_stats</c> collection run of a server that the log knows, plus a second of slack, or null when it has none.
+    /// The hot <c>collection_log</c> answers when it holds a run of the server: archival moves only rows older than its cutoff, so the newest run is
+    /// among the hot rows whenever any is hot, and the archived months are not read. <c>v_collection_log</c> answers only when the hot table holds
+    /// none, as just after the size reset.
+    /// </summary>
     private async Task<DateTime?> ReadRunHorizonAsync(int serverId, CancellationToken cancellationToken)
     {
         using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(cancellationToken);
-        using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT max(collection_time + to_milliseconds(COALESCE(duration_ms, 0) + 1000))
-            FROM v_collection_log
-            WHERE server_id = $1
-            AND   collector_name = 'index_object_stats'
-            """;
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        return await command.ExecuteScalarAsync(cancellationToken) as DateTime?;
+        foreach (var relation in new[] { "collection_log", "v_collection_log" })
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $"""
+                SELECT max(collection_time + to_milliseconds(COALESCE(duration_ms, 0) + 1000))
+                FROM {relation}
+                WHERE server_id = $1
+                AND   collector_name = 'index_object_stats'
+                """;
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            if (await command.ExecuteScalarAsync(cancellationToken) is DateTime horizon)
+            {
+                return horizon;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -782,86 +806,167 @@ internal sealed class ObjectUsageChainBuilder
     /// <summary>
     /// Keeps the three chain tables under <see cref="CapRows"/>. Over it, the oldest days of snapshots go through <see cref="PurgeAsync"/> with a later
     /// cutoff until the rest is under <see cref="TrimTargetShare"/> of the cap, so the newest windows keep the chain and a longer window folds (the
-    /// reader needs the chain's facts at the window's baseline). If the newest <see cref="MinKeptDays"/> days do not fit, the chain of the database being
-    /// extended (every database when none was) is dropped and not extended again until the next start. Returns the sentence for the pass's one warning,
-    /// or null when the chain was under the cap.
+    /// reader needs the chain's facts at the window's baseline). If the newest <see cref="MinKeptDays"/> days do not fit, one database's chain is
+    /// dropped and the check runs again: the database being extended when the cap was reached, else the one whose newest week holds the most rows.
+    /// So only the databases that do not fit lose their chain, and the rest keep theirs, trimmed when they still need it. A dropped database waits in
+    /// <see cref="_stopped"/> until it fits. Returns the sentence for the pass's one warning, or null when the chain was under the cap.
     /// </summary>
     private async Task<string?> EnforceCapAsync(CancellationToken cancellationToken)
     {
         var capRows = CapRows;
-        var (deltas, other) = await CountChainRowsAsync(cancellationToken);
-        if (deltas + other <= capRows)
+        var preferred = _capHit;
+        var dropped = new List<(int ServerId, string DatabaseName)>();
+        DateTime? trimmedFrom = null;
+        while (true)
         {
-            return null;
-        }
-
-        var days = new List<(DateTime Day, long Rows)>();
-        using (var readLock = _duckDb.AcquireReadLock(cancellationToken))
-        using (var connection = _duckDb.CreateConnection())
-        {
-            await connection.OpenAsync(cancellationToken);
-            using var command = connection.CreateCommand();
-            command.CommandText = """
-                SELECT
-                    CAST(CAST(collection_time AS DATE) AS TIMESTAMP),
-                    count(*)
-                FROM object_usage_deltas
-                GROUP BY CAST(collection_time AS DATE)
-                ORDER BY 1 DESC
-                """;
-            using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                days.Add((reader.GetDateTime(0), Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture)));
-            }
-        }
-
-        var budget = (long)(capRows * TrimTargetShare) - other;
-        long kept = 0;
-        DateTime? cutoff = null;
-        foreach (var (day, rows) in days)
-        {
-            if (kept + rows > budget)
+            var (deltas, other) = await CountChainRowsAsync(cancellationToken);
+            if (deltas + other <= capRows)
             {
                 break;
             }
 
-            kept += rows;
-            cutoff = day;
+            var days = await ReadDeltaDaysAsync(cancellationToken);
+            var budget = (long)(capRows * TrimTargetShare) - other;
+            long kept = 0;
+            DateTime? cutoff = null;
+            foreach (var (day, rows) in days)
+            {
+                if (kept + rows > budget)
+                {
+                    break;
+                }
+
+                kept += rows;
+                cutoff = day;
+            }
+
+            if (cutoff is { } from && days.Count > 0 && (days[0].Day - from).TotalDays >= MinKeptDays - 1)
+            {
+                await PurgeAsync(from, cancellationToken);
+                trimmedFrom = from;
+                break;
+            }
+
+            var weeks = await ReadNewestWeekRowsAsync(cancellationToken);
+            if (weeks.Count == 0)
+            {
+                break;
+            }
+
+            var victim = weeks.FindIndex(w => preferred is { } hit && w.Pair == hit) is var at and >= 0 ? weeks[at] : weeks[0];
+            preferred = null;
+            await DeletePairAsync(victim.Pair.ServerId, victim.Pair.DatabaseName, cancellationToken);
+            _stopped[victim.Pair] = Math.Max(victim.Rows, _stopped.GetValueOrDefault(victim.Pair));
+            dropped.Add(victim.Pair);
         }
 
-        var capText = $"The object usage chain is over its cap of {capRows * EstimatedBytesPerRow / 1048576.0:F1} MB ({CapShareOfResetPoint:P0} of the hot store reset point, hot_store_reset_mb).";
-        if (cutoff is { } from && days.Count > 0 && (days[0].Day - from).TotalDays >= MinKeptDays - 1)
+        if (trimmedFrom is null && dropped.Count == 0)
         {
-            await PurgeAsync(from, cancellationToken);
-            return $"{capText} Snapshots before {from:yyyy-MM-dd} were trimmed, so longer windows fold.";
+            return null;
         }
 
-        var victims = _capHit is { } hit ? [hit] : await ReadChainPairsAsync(cancellationToken);
-        foreach (var victim in victims)
+        var note = new StringBuilder(
+            $"The object usage chain is over its cap of {capRows * EstimatedBytesPerRow / 1048576.0:F1} MB ({CapShareOfResetPoint:P0} of the hot store reset point, hot_store_reset_mb).");
+        if (dropped.Count > 0)
         {
-            await DeletePairAsync(victim.ServerId, victim.DatabaseName, cancellationToken);
-            _stopped.Add(victim);
+            note.Append(CultureInfo.InvariantCulture,
+                $" The newest {MinKeptDays} days of {dropped.Count} database(s) do not fit beside the others, so their chain was dropped and is rebuilt once it fits. Their reads fold.");
         }
 
-        return $"{capText} The newest {MinKeptDays} days do not fit, so the chain of {victims.Count} database(s) was dropped and is not extended until the next start. Reads fold.";
+        if (trimmedFrom is { } trimmed)
+        {
+            note.Append(CultureInfo.InvariantCulture, $" Snapshots before {trimmed:yyyy-MM-dd} were trimmed, so longer windows fold.");
+        }
+
+        return note.ToString();
     }
 
-    private async Task<List<(int ServerId, string DatabaseName)>> ReadChainPairsAsync(CancellationToken cancellationToken)
+    /// <summary>The delta rows of the chain by day, newest day first.</summary>
+    private async Task<List<(DateTime Day, long Rows)>> ReadDeltaDaysAsync(CancellationToken cancellationToken)
     {
-        var pairs = new List<(int, string)>();
+        var days = new List<(DateTime Day, long Rows)>();
         using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(cancellationToken);
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT DISTINCT server_id, database_name FROM object_usage_snapshots";
+        command.CommandText = """
+            SELECT
+                CAST(CAST(collection_time AS DATE) AS TIMESTAMP),
+                count(*)
+            FROM object_usage_deltas
+            GROUP BY CAST(collection_time AS DATE)
+            ORDER BY 1 DESC
+            """;
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            pairs.Add((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), reader.GetString(1)));
+            days.Add((reader.GetDateTime(0), Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture)));
         }
 
-        return pairs;
+        return days;
+    }
+
+    /// <summary>
+    /// Each database with a chain and the rows a trim to its newest <see cref="MinKeptDays"/> days would leave it: the delta and snapshot rows of those
+    /// days and all its runs. The most rows first. $1 is <see cref="MinKeptDays"/> less one, the days before the newest day that the span holds.
+    /// </summary>
+    private async Task<List<((int ServerId, string DatabaseName) Pair, long Rows)>> ReadNewestWeekRowsAsync(CancellationToken cancellationToken)
+    {
+        var weeks = new List<((int, string), long)>();
+        using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            WITH newest AS
+            (
+                SELECT
+                    server_id,
+                    database_name,
+                    CAST(CAST(max(collection_time) AS DATE) AS TIMESTAMP) - to_days(CAST($1 AS INTEGER)) AS since
+                FROM object_usage_snapshots
+                GROUP BY
+                    server_id,
+                    database_name
+            )
+            SELECT
+                n.server_id,
+                n.database_name,
+                (
+                    SELECT count(*)
+                    FROM object_usage_deltas AS d
+                    WHERE d.server_id = n.server_id
+                    AND   d.database_name = n.database_name
+                    AND   d.collection_time >= n.since
+                )
+              + (
+                    SELECT count(*)
+                    FROM object_usage_snapshots AS s
+                    WHERE s.server_id = n.server_id
+                    AND   s.database_name = n.database_name
+                    AND   s.collection_time >= n.since
+                )
+              + (
+                    SELECT count(*)
+                    FROM object_usage_runs AS r
+                    WHERE r.server_id = n.server_id
+                    AND   r.database_name = n.database_name
+                ) AS week_rows
+            FROM newest AS n
+            ORDER BY
+                week_rows DESC,
+                n.server_id,
+                n.database_name
+            """;
+        command.Parameters.Add(new DuckDBParameter { Value = MinKeptDays - 1 });
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            weeks.Add(((Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture), reader.GetString(1)),
+                Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture)));
+        }
+
+        return weeks;
     }
 
     /// <summary>

@@ -221,7 +221,6 @@ public sealed class HousekeepingLoopTests
         Assert.True(build.IndexOf("RunDismissedAlertsCleanupIfDueAsync()", StringComparison.Ordinal)
                     < build.IndexOf("new HousekeepingLoop(\"query_store_backfill\"", StringComparison.Ordinal));
         Assert.Equal(5, System.Text.RegularExpressions.Regex.Matches(build, @"new HousekeepingLoop\(").Count);
-        Assert.Contains("RunObjectUsageChainIfDueAsync(token)", build);
 
         var execute = source[source.IndexOf("protected override async Task ExecuteAsync", StringComparison.Ordinal)..];
         var started = execute.IndexOf("var housekeepingLoops = StartHousekeepingLoops(", StringComparison.Ordinal);

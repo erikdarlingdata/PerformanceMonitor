@@ -170,4 +170,74 @@ public sealed class ObjectUsageChainResetTests : IDisposable
             Assert.Equal(Json(full), Json(persisted));
         }
     }
+
+    /// <summary>The horizon the whole log gives, read the way the builder read it before it took the hot table first: every archived month included.</summary>
+    private async Task<DateTime?> WholeLogHorizonAsync()
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"""
+            SELECT max(collection_time + to_milliseconds(COALESCE(duration_ms, 0) + 1000))
+            FROM v_collection_log
+            WHERE server_id = {ServerId}
+            AND   collector_name = 'index_object_stats'
+            """;
+        return await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken) as DateTime?;
+    }
+
+    private async Task<DateTime?> NewestBuiltAsync()
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        using var connection = _duckDb.CreateConnection();
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT max(collection_time) FROM object_usage_snapshots";
+        return await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken) as DateTime?;
+    }
+
+    [Fact]
+    public async Task TheRunHorizon_ComesFromTheArchiveWhenTheHotLogHoldsNoRun_AndFromTheHotLogWhenItDoes_AsTheWholeLogsMaximumDoes()
+    {
+        await _duckDb.InitializeFromTemplateAsync();
+        var rows = ObjectUsageChainHistory.Generate();
+        var beforeNewest = rows.Where(r => r.CollectionTime < Now).ToList();
+        var newest = rows.Where(r => r.CollectionTime >= Now).ToList();
+        var newestTime = DateTime.SpecifyKind(Now, DateTimeKind.Unspecified);
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, ServerId, "ResetSrv", Database, beforeNewest);
+        Assert.True(await new ArchiveService(_duckDb, _archiveDir, NullLogger<ArchiveService>.Instance).ArchiveAllAndResetAsync());
+        Assert.Equal(0L, await CountAsync("collection_log"));
+        Assert.True(await CountAsync("v_collection_log") > 0);
+
+        /* The newest snapshot is hot and its run is not logged yet. The hot log holds no run, so the archived runs answer: every archived snapshot
+           is folded and the newest is not, as under the whole log's maximum. */
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, ServerId, "ResetSrv", Database, newest, firstId: -1_000_000, logRuns: false);
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now);
+        var snapshotsBefore = ObjectUsageChainHistory.SnapshotDays().Count() - 1;
+        Assert.True(await WholeLogHorizonAsync() < newestTime);
+        Assert.Equal(snapshotsBefore, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(ObjectUsageChainHistory.Day(1), await NewestBuiltAsync());
+
+        /* A hot run that ends a millisecond short of the newest snapshot, with the slack: the hot log answers and the snapshot is still not whole. */
+        await ObjectUsageChainHistory.SeedLogAsync(_duckDb, ServerId, "ResetSrv", [newestTime.AddMilliseconds(-3001)]);
+        Assert.Equal(newestTime.AddMilliseconds(-1), await WholeLogHorizonAsync());
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(ObjectUsageChainHistory.Day(1), await NewestBuiltAsync());
+
+        /* A hot run that ends exactly at it: the snapshot is whole and the next pass folds it. */
+        await ObjectUsageChainHistory.SeedLogAsync(_duckDb, ServerId, "ResetSrv", [newestTime.AddMilliseconds(-3000)]);
+        Assert.Equal(newestTime, await WholeLogHorizonAsync());
+        Assert.Equal(1, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(newestTime, await NewestBuiltAsync());
+
+        var service = new LocalDataService(_duckDb);
+        foreach (var daysBack in new[] { 7, 90 })
+        {
+            var (persisted, reason) = await service.TryReadObjectUsageChainAsync(ServerId, Database, Start(daysBack));
+            Assert.Null(reason);
+            Assert.NotNull(persisted);
+            Assert.Equal(Json(await service.GetObjectUsageWindowFullAsync(ServerId, Database, Start(daysBack))), Json(persisted));
+        }
+    }
 }
