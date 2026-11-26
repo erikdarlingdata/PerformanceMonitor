@@ -232,6 +232,29 @@ public sealed class McpServerRegistryToolsTests : IDisposable
     }
 
     [Fact]
+    public async Task AddServers_WhenOnlyTheHostRecordWriteFails_SaysEveryEntryStaysSaved_NotThatOneFailed()
+    {
+        var manager = NewManager();
+        /* A folder where the record file goes: the write fails the way a locked or read-only file does, after every entry has saved. */
+        Directory.CreateDirectory(HostsFile);
+
+        var answer = await McpServerRegistryTools.AddServersCore(manager, null,
+            "[{\"host\":\"sql01\",\"display_name\":\"First\",\"auth\":\"windows\"},{\"host\":\"sql02\",\"display_name\":\"Second\",\"auth\":\"windows\"}]",
+            Reachable);
+
+        var root = Parse(answer);
+        Assert.Equal("refused", root.GetProperty("status").GetString());
+        Assert.Equal(2, root.GetProperty("added").GetInt32());
+        Assert.Equal(2, manager.GetAllServers().Count);
+        var message = root.GetProperty("message").GetString()!;
+        Assert.Contains("Every entry stays saved", message, StringComparison.Ordinal);
+        Assert.Contains("First (sql01)", message, StringComparison.Ordinal);
+        Assert.Contains("Second (sql02)", message, StringComparison.Ordinal);
+        Assert.Contains("host record could not be written", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("before this one", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RemoveServer_RunsTheWindowsRemoval_DropsTheLogin_AndAnswersWithAnUndoThatHoldsNoPassword()
     {
         var manager = NewManager();
