@@ -82,11 +82,12 @@ public sealed class AgentActionGateMcpRoleLiveTests
         {
             await SeedRoutesAsync(owner, ct);
 
-            var store = new InvestigationRequestStore(asMcp, 30);
-            var opened = await store.OpenOrJoinAsync(
+            /* The service opens the request on its own connection. The agent claims and acts through the mcp tools, so on the mcp connection. */
+            var opened = await new InvestigationRequestStore(owner, 30).OpenOrJoinAsync(
                 new InvestigationAlert(1, 7, "srv-7", "blocking", "Blocking", DateTime.UtcNow, Array.Empty<string>(), null, 20, 100, LeaseMinutes: 15, ExpiryMinutes: 240)
                 { AutonomyLevel = 2 }, ct);
             var request = opened.RequestId!.Value;
+            var store = new InvestigationRequestStore(asMcp, 30);
             var claim = (await store.ClaimAsync(request, "agent-a", ct)).ClaimId!.Value;
 
             var writes = 0;
