@@ -289,7 +289,7 @@ public sealed class ViewerSmtpSealLiveTests
 
             var changed = await viewer.GetNotificationAsync(ct);
             Assert.Equal("other-mail.example.test", changed!.SmtpHost);
-            var ex = Assert.Throws<InvalidOperationException>(
+            var ex = Assert.Throws<SavedSecretUnavailableException>(
                 () => DarlingSecrets.ResolveSmtpPassword(ServiceReadOf(changed), ring, LegacyDpapi.Current));
             Assert.DoesNotContain(Plain, ex.Message, StringComparison.Ordinal);
 

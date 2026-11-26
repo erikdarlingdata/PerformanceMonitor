@@ -659,9 +659,11 @@ public sealed partial class DarlingWorker
         {
             server.LastConnectFailureLogged = failure;
             server.LastConnectFailureLineUtc = now;
-            if (ex is InvalidOperationException && failure.Contains("DPAPI-decrypt", StringComparison.Ordinal))
+            if (ex is SavedSecretUnavailableException)
             {
-                /* Error, not Warning: nothing about this clears on its own, so it needs an operator. */
+                /* Error, not Warning: a saved password this host cannot open (the key file gone, a different key held, the connection
+                   changed, a DPAPI blob from another machine, #9749) does not clear on its own, so it needs an operator. The type, not
+                   the sentence, says so. */
                 _logger.LogError("[{Server}] Connect failed and will keep failing until fixed: {Message}",
                     server.Config.DisplayName, failure);
             }

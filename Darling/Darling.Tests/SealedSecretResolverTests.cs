@@ -80,7 +80,7 @@ public sealed class SealedSecretResolverTests
         var copy = Server(host: "beta-host.example.test", stored: sealedText);
         var probe = new Probe();
 
-        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(copy, out _, Ring, probe.AsWindows()));
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(copy, out _, Ring, probe.AsWindows()));
 
         Assert.Equal(
             "The saved password for server 'alpha' was saved for a different connection, or was changed. Enter the password again.",
@@ -96,7 +96,7 @@ public sealed class SealedSecretResolverTests
         server.EncryptedPassword = SealFor(server, s_otherKey.Value);
         var probe = new Probe();
 
-        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
 
         var expectedId = PasswordSeal.DisplayKeyId(s_otherKey.Value.PublicKey.KeyId);
         Assert.Equal(
@@ -113,7 +113,7 @@ public sealed class SealedSecretResolverTests
         server.EncryptedPasswordDeclaredByFile = true;
         var probe = new Probe();
 
-        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
 
         Assert.Equal("The saved password for server 'alpha' was saved by a newer version of Darling.", ex.Message);
         Assert.Equal(0, probe.Calls);
@@ -126,7 +126,7 @@ public sealed class SealedSecretResolverTests
         server.EncryptedPassword = SealFor(server);
         var probe = new Probe();
 
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() =>
             DarlingSecrets.ResolvePassword(server, out _, DarlingPasswordKey.Refusing(DarlingPasswordKey.NotReadyReason), probe.AsWindows()));
 
         Assert.Equal(DarlingPasswordKey.NotReadyReason, ex.Message);
@@ -140,7 +140,7 @@ public sealed class SealedSecretResolverTests
         server.EncryptedPassword = SealFor(server);
         const string reason = "The password key is missing from the credentials directory.";
 
-        var ex = Assert.Throws<InvalidOperationException>(() =>
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() =>
             DarlingSecrets.ResolvePassword(server, out _, DarlingPasswordKey.Refusing(reason), new Probe().AsWindows()));
 
         Assert.Equal(reason, ex.Message);
@@ -152,7 +152,7 @@ public sealed class SealedSecretResolverTests
         var saved = Server();
         var server = Server(host: "alpha\ud800.example.test", stored: SealFor(saved));
 
-        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, new Probe().AsWindows()));
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, new Probe().AsWindows()));
 
         Assert.Contains("saved for a different connection, or was changed", ex.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("\ud800", ex.Message, StringComparison.Ordinal);
@@ -188,7 +188,7 @@ public sealed class SealedSecretResolverTests
         Assert.Equal(Plain, DarlingSecrets.ResolveRemediationPassword(server, Ring, new Probe().AsWindows()));
 
         server.RemediationUsername = "another-login";
-        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolveRemediationPassword(server, Ring, new Probe().AsWindows()));
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolveRemediationPassword(server, Ring, new Probe().AsWindows()));
         Assert.Equal(
             "The saved remediation password for server 'alpha' was saved for a different connection, or was changed. Enter the password again.",
             ex.Message);
@@ -202,7 +202,7 @@ public sealed class SealedSecretResolverTests
         Assert.Equal(Plain, DarlingSecrets.ResolveSmtpPassword(smtp, Ring, new Probe().AsLinux()));
 
         smtp.Host = "other-mail.example.test";
-        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolveSmtpPassword(smtp, Ring, new Probe().AsLinux()));
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolveSmtpPassword(smtp, Ring, new Probe().AsLinux()));
         Assert.Equal(
             "The saved SMTP password was saved for a different connection, or was changed. Enter the password again.", ex.Message);
     }
@@ -215,7 +215,7 @@ public sealed class SealedSecretResolverTests
         var server = Server(stored: "AQIDBAUGBwgJCg==");
         var probe = new Probe();
 
-        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
 
         Assert.Equal(
             "The saved password for server 'alpha' is in the old format and was saved after this service was upgraded, or its connection changed. " +
@@ -246,7 +246,7 @@ public sealed class SealedSecretResolverTests
         server.Host = "beta-host.example.test";
         var probe = new Probe();
 
-        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
 
         Assert.Contains("is in the old format", ex.Message, StringComparison.Ordinal);
         Assert.Equal(0, probe.Calls);
@@ -259,7 +259,7 @@ public sealed class SealedSecretResolverTests
         server.SecretPin = PinFor("AAAAAAAAAAAAAA==", server.SecretBinding);
         var probe = new Probe();
 
-        Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
+        Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsWindows()));
         Assert.Equal(0, probe.Calls);
     }
 
@@ -283,7 +283,7 @@ public sealed class SealedSecretResolverTests
         server.SecretPin = PinFor(stored, server.SecretBinding);
         var probe = new Probe();
 
-        var ex = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsLinux()));
+        var ex = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, Ring, probe.AsLinux()));
 
         Assert.Equal(
             "The saved password for server 'alpha' was saved with Windows DPAPI on another machine and cannot be read here. Enter it again.",
@@ -299,7 +299,7 @@ public sealed class SealedSecretResolverTests
         server.RemediationEncryptedPassword = stored;
         var probe = new Probe();
 
-        Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolveRemediationPassword(server, Ring, probe.AsWindows()));
+        Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolveRemediationPassword(server, Ring, probe.AsWindows()));
         Assert.Equal(0, probe.Calls);
 
         server.RemediationPin = PinFor(stored, server.RemediationBinding);
@@ -314,7 +314,7 @@ public sealed class SealedSecretResolverTests
         var smtp = new SmtpConfig { Host = "mail.example.test", Username = "mailer", EncryptedPassword = stored };
         var probe = new Probe();
 
-        Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolveSmtpPassword(smtp, Ring, probe.AsWindows()));
+        Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolveSmtpPassword(smtp, Ring, probe.AsWindows()));
         Assert.Equal(0, probe.Calls);
 
         smtp.SecretPin = PinFor(stored, smtp.SecretBinding);

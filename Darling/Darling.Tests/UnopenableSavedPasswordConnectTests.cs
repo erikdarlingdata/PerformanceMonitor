@@ -7,10 +7,12 @@
  */
 
 using System;
+using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -59,9 +61,9 @@ public sealed class UnopenableSavedPasswordConnectTests
     /// <summary>The ring of a service that holds a different key from the one the password was sealed to (a reset key, another credentials volume).</summary>
     internal static IPasswordKeyRing AnotherKey() => DarlingPasswordKey.FromPrivateKey(s_heldNow.Value);
 
-    internal static DarlingWorker NewWorker(NpgsqlDataSource? store = null) =>
+    internal static DarlingWorker NewWorker(NpgsqlDataSource? store = null, ILogger<DarlingWorker>? logger = null) =>
         new(
-            NullLogger<DarlingWorker>.Instance,
+            logger ?? NullLogger<DarlingWorker>.Instance,
             NullLoggerFactory.Instance,
             new McpRuntimeState(),
             new WebRuntimeState(),
@@ -95,8 +97,8 @@ public sealed class UnopenableSavedPasswordConnectTests
             server, (target, token) => DarlingServerConnector.ConnectAsync(target, NullLogger.Instance, token), gate, TestContext.Current.CancellationToken);
 
         Assert.Null(attempt.Runtime);
-        var failure = Assert.IsType<InvalidOperationException>(attempt.Failure);
-        var refusal = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _));
+        var failure = Assert.IsType<SavedSecretUnavailableException>(attempt.Failure);
+        var refusal = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _));
         Assert.Equal(refusal.Message, failure.Message);
         Assert.DoesNotContain(server.EncryptedPassword, failure.Message, StringComparison.Ordinal);
         Assert.DoesNotContain(Plain, failure.Message, StringComparison.Ordinal);
@@ -109,13 +111,23 @@ public sealed class UnopenableSavedPasswordConnectTests
     {
         var server = SqlAuthServer();
         server.EncryptedPassword = SealedFor(server);
-        var refusal = Assert.Throws<InvalidOperationException>(
+        var refusal = Assert.Throws<SavedSecretUnavailableException>(
             () => DarlingSecrets.ResolvePassword(server, out _, keyFileMissing ? KeyFileMissing() : AnotherKey()));
 
         /* No store: the registry write is failure-isolated, so the failure path still runs to its end. */
         var state = new DarlingWorker.ServerLoopState { Config = server };
         var before = DateTime.UtcNow;
-        await TryConnectAsync(NewWorker(), state, new ConnectAttempt(server, null, refusal), TestContext.Current.CancellationToken);
+        var serviceLog = new CapturingTestLogger();
+        await TryConnectAsync(NewWorker(logger: new WorkerLog(serviceLog)), state, new ConnectAttempt(server, null, refusal), TestContext.Current.CancellationToken);
+
+        /* The service log says it will not clear on its own, once, with the resolver's sentence and without a retry promise. */
+        Assert.Equal(1, serviceLog.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, serviceLog.CountAtLevel(LogLevel.Warning));
+        var errorLine = Assert.Single(serviceLog.Lines, line => line.StartsWith("Error:", StringComparison.Ordinal));
+        Assert.Contains("will keep failing until fixed", errorLine, StringComparison.Ordinal);
+        Assert.Contains(refusal.Message, errorLine, StringComparison.Ordinal);
+        Assert.DoesNotContain(server.EncryptedPassword, errorLine, StringComparison.Ordinal);
+        Assert.DoesNotContain(Plain, errorLine, StringComparison.Ordinal);
 
         Assert.Null(state.Runtime);
         Assert.Equal(1, state.ConsecutiveConnectFailures);
@@ -123,6 +135,106 @@ public sealed class UnopenableSavedPasswordConnectTests
         Assert.Equal(refusal.Message, state.LastConnectFailureLogged);
         Assert.DoesNotContain(server.EncryptedPassword, state.LastConnectFailureLogged, StringComparison.Ordinal);
         Assert.DoesNotContain(Plain, state.LastConnectFailureLogged, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>The worker's typed logger over a <see cref="CapturingTestLogger"/>.</summary>
+internal sealed class WorkerLog(CapturingTestLogger inner) : ILogger<DarlingWorker>
+{
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => inner.BeginScope(state);
+
+    public bool IsEnabled(LogLevel logLevel) => inner.IsEnabled(logLevel);
+
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+        inner.Log(logLevel, eventId, state, exception, formatter);
+}
+
+/// <summary>
+/// #9749: the service log line for a failed connect. A saved password this host cannot open does not clear on its own, so it is an Error
+/// that says so, written once per cause with the hourly reminder after it. A network failure is still a Warning that says it retries.
+/// </summary>
+public sealed class UnopenableSavedPasswordLogTests
+{
+    private static readonly DateTime T0 = new(2026, 11, 26, 0, 0, 0, DateTimeKind.Utc);
+
+    private static (DarlingWorker Worker, CapturingTestLogger Log, Func<DateTime> Now, Action<TimeSpan> Advance) NewWorker()
+    {
+        var log = new CapturingTestLogger();
+        var worker = UnopenableSavedPasswordConnectTests.NewWorker(logger: new WorkerLog(log));
+        var now = T0;
+        worker.RepeatLog.Clock = () => now;
+        return (worker, log, () => now, by => now = T0 + by);
+    }
+
+    private static DarlingWorker.ServerLoopState NewState() => new()
+    {
+        Config = UnopenableSavedPasswordConnectTests.SqlAuthServer(),
+    };
+
+    private static SavedSecretUnavailableException Refusal(bool keyFileMissing)
+    {
+        var server = UnopenableSavedPasswordConnectTests.SqlAuthServer();
+        server.EncryptedPassword = UnopenableSavedPasswordConnectTests.SealedFor(server);
+        return Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(
+            server, out _, keyFileMissing ? UnopenableSavedPasswordConnectTests.KeyFileMissing() : UnopenableSavedPasswordConnectTests.AnotherKey()));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_password_this_host_cannot_open_is_one_error_that_says_it_will_keep_failing(bool keyFileMissing)
+    {
+        var (worker, log, _, _) = NewWorker();
+        var cause = Refusal(keyFileMissing);
+
+        var kept = worker.LogConnectFailure(NewState(), cause, 240);
+
+        Assert.Equal(cause.Message, kept);
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Error));
+        Assert.Equal(0, log.CountAtLevel(LogLevel.Warning));
+        var line = Assert.Single(log.Lines);
+        Assert.Contains("will keep failing until fixed", line, StringComparison.Ordinal);
+        Assert.Contains(cause.Message, line, StringComparison.Ordinal);
+        Assert.DoesNotContain("retrying", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_network_failure_is_still_a_warning_that_says_it_is_retrying()
+    {
+        var (worker, log, _, _) = NewWorker();
+
+        worker.LogConnectFailure(NewState(), new InvalidOperationException("connection refused"), 240);
+
+        Assert.Equal(0, log.CountAtLevel(LogLevel.Error));
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Warning));
+        var line = Assert.Single(log.Lines);
+        Assert.Contains("retrying in 240s", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("will keep failing", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_unopenable_cause_logs_once_then_an_hourly_reminder_and_a_changed_cause_logs_at_once()
+    {
+        var (worker, log, _, advance) = NewWorker();
+        var state = NewState();
+        var keyFileMissing = Refusal(keyFileMissing: true);
+
+        for (var minute = 0; minute <= 3 * 60; minute += 5)
+        {
+            advance(TimeSpan.FromMinutes(minute));
+            worker.LogConnectFailure(state, keyFileMissing, 240);
+        }
+
+        /* One Error for the cause, then the reminder each hour: at 1, 2 and 3 hours. */
+        Assert.Equal(1, log.CountAtLevel(LogLevel.Error));
+        Assert.Equal(3, log.CountAtLevel(LogLevel.Warning));
+        Assert.Equal(3, log.Lines.Where(line => line.Contains("Connect still failing", StringComparison.Ordinal)).Count());
+
+        /* The key file comes back as a different key: a new cause, so a new Error at once, inside the hour. */
+        advance(TimeSpan.FromMinutes(3 * 60 + 5));
+        worker.LogConnectFailure(state, Refusal(keyFileMissing: false), 240);
+
+        Assert.Equal(2, log.CountAtLevel(LogLevel.Error));
     }
 }
 
@@ -180,7 +292,7 @@ public sealed class UnopenableSavedPasswordConnectLiveTests
         Assert.Equal(sealedText, loaded.EncryptedPassword);
         Assert.True(loaded.RequiresResolvedSecret);
 
-        var refusal = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(
+        var refusal = Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(
             loaded, out _, keyFileMissing ? UnopenableSavedPasswordConnectTests.KeyFileMissing() : UnopenableSavedPasswordConnectTests.AnotherKey()));
 
         var state = new DarlingWorker.ServerLoopState { Config = loaded };

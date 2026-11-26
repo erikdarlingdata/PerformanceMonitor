@@ -451,7 +451,7 @@ public static class DarlingSecrets
                report an unknown key, which is not what is wrong. */
             if (!ring.Status.CanSeal)
             {
-                throw new InvalidOperationException(ring.Status.Reason ?? DarlingPasswordKey.NotReadyReason);
+                throw new SavedSecretUnavailableException(ring.Status.Reason ?? DarlingPasswordKey.NotReadyReason);
             }
 
             try
@@ -460,24 +460,24 @@ public static class DarlingSecrets
             }
             catch (PasswordSealException ex)
             {
-                throw new InvalidOperationException(SealFailureText(subject, ex));
+                throw new SavedSecretUnavailableException(SealFailureText(subject, ex));
             }
             catch (ArgumentException)
             {
                 /* A connection field that is not valid text: the value cannot be opened for this connection. */
-                throw new InvalidOperationException(BindingText(subject));
+                throw new SavedSecretUnavailableException(BindingText(subject));
             }
         }
 
         if (!dpapi.IsWindows)
         {
-            throw new InvalidOperationException(
+            throw new SavedSecretUnavailableException(
                 $"{subject} was saved with Windows DPAPI on another machine and cannot be read here. Enter it again.");
         }
 
         if (!LegacyValueUsable(stored, declaredByFile, pin, bindingFor, dpapi))
         {
-            throw new InvalidOperationException(
+            throw new SavedSecretUnavailableException(
                 $"{subject} is in the old format and was saved after this service was upgraded, or its connection changed. " +
                 "Update the Darling Viewer, then enter the password again.");
         }
@@ -488,7 +488,7 @@ public static class DarlingSecrets
         }
         catch (CryptographicException ex)
         {
-            throw new InvalidOperationException(DescribeDecryptFailure(decryptWhat), ex);
+            throw new SavedSecretUnavailableException(DescribeDecryptFailure(decryptWhat), ex);
         }
     }
 
@@ -507,6 +507,26 @@ public static class DarlingSecrets
     private static bool PinMatches(LegacyPin pin, string stored, PasswordBinding binding) =>
         CryptographicOperations.FixedTimeEquals(pin.ValueSha256, SHA256.HashData(Encoding.UTF8.GetBytes(stored)))
         && CryptographicOperations.FixedTimeEquals(pin.BindingSha256, binding.LegacyPinHash());
+}
+
+/// <summary>
+/// #9749: a saved secret this host cannot open (a sealed value whose key is not held or whose connection changed, an old-format value that
+/// is not usable here, a DPAPI blob that will not decrypt, or a key ring that refuses). Nothing about it clears on its own: the operator
+/// restores the key or enters the secret again. It is an <see cref="InvalidOperationException"/> so every existing catch still sees it, and
+/// it carries the same sentence the operator reads. The worker's connect failure log tests the type, so a cause like this reads as
+/// "will keep failing until fixed" rather than as a retry the server may recover from.
+/// </summary>
+internal sealed class SavedSecretUnavailableException : InvalidOperationException
+{
+    public SavedSecretUnavailableException(string message)
+        : base(message)
+    {
+    }
+
+    public SavedSecretUnavailableException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
 }
 
 /// <summary>A legacy DPAPI value's pin as read from <c>config.legacy_secret_pin</c>: the hash of the stored text and the hash of the

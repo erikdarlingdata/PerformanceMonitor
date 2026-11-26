@@ -118,7 +118,7 @@ public sealed class DarlingSecretsDecryptFailureTests
             EncryptedPasswordDeclaredByFile = true,
         };
 
-        var ex = Assert.Throws<InvalidOperationException>(
+        var ex = Assert.Throws<SavedSecretUnavailableException>(
             () => DarlingSecrets.ResolvePassword(server, out _));
 
         Assert.Contains("DPAPI-decrypt", ex.Message, StringComparison.Ordinal);
