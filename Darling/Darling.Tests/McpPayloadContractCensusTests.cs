@@ -1429,6 +1429,8 @@ public sealed class McpPayloadContractCensusTests
     public static readonly string[] GeneralTimestampParsesWithUtcStyles =
     [
         "DarlingMcpAlertTools.cs BuildMuteRuleUpdate",
+        /* #9639: Lite's create_mute_rule and update_mute_rule parse their expiry here, under the same invariant UTC styles. */
+        "McpAlertTools.MuteRules.cs TryParseUtc",
         /* #6400: save_environment_profile's expected_modified_at, parsed under invariant UTC styles like the web profile route's. */
         "DarlingMcpInvestigationFeedbackTools.cs SaveEnvironmentProfile",
         /* #4734: create_mute_rule's body moved into CreateMuteRuleOver (the tool hands it the Postgres-backed

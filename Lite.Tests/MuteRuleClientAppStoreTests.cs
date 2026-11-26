@@ -83,15 +83,10 @@ public class MuteRuleClientAppStoreTests : IDisposable
     [Fact]
     public void LiteEditorAndMcpMuteRuleOutput_CarryTheClientAppField()
     {
-        var mcp = File.ReadAllText(Path.Combine(FindRepoRoot(), "Lite", "Mcp", "McpAlertTools.cs"));
-        Assert.Contains("client_app_pattern = r.ClientAppPattern,", mcp, StringComparison.Ordinal);
-    }
-
-    private static string FindRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.sln")))
-            dir = dir.Parent;
-        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
+        /* The wire shape of a rule (get_mute_rules and the write tools' echo) names the client application pattern. */
+        var json = System.Text.Json.JsonSerializer.Serialize(
+            PerformanceMonitorLite.Mcp.McpAlertTools.MutePayload(new MuteRule { ClientAppPattern = "OrdersApi" }));
+        using var doc = System.Text.Json.JsonDocument.Parse(json);
+        Assert.Equal("OrdersApi", doc.RootElement.GetProperty("client_app_pattern").GetString());
     }
 }

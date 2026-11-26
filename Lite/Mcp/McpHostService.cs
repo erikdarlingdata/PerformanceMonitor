@@ -326,6 +326,7 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpTempDbTools>()
             .WithGeminiCompatibleTools<McpPerfmonTools>()
             .WithGeminiCompatibleTools<McpAlertTools>()
+            .WithGeminiCompatibleTools<McpAlertSettingsWriteTools>()
             /* #5820: the Level 1 investigation tools, served only by the mcp_allow_investigations gate (McpInvestigationPolicy). */
             .WithGeminiCompatibleTools<McpInvestigationTools>()
             .WithGeminiCompatibleTools<McpJobTools>()

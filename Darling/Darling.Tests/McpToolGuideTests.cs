@@ -57,6 +57,19 @@ public sealed class McpToolGuideTests
         Assert.True(overLong.Count == 0, "served head(s) over the 620 target: " + string.Join(", ", overLong));
     }
 
+    /// <summary>Shared tool names whose served head is true for one SKU only. The marker check still applies to each; only the
+    /// byte-identical head comparison is skipped. The value says why the heads differ.</summary>
+    private static readonly Dictionary<string, string> SkuSpecificHeads = new(StringComparer.Ordinal)
+    {
+        ["create_mute_rule"] = "Darling's head names the agent_action arm, the service's next collection sweep, and arguments Lite has no field for (server_id, starts_at, external_source, repeat schedule, action).",
+        ["update_mute_rule"] = "Darling's head names the agent_action arm and the service's next collection sweep, and its editable fields include ones Lite has no column for.",
+        ["set_mute_rule_enabled"] = "Darling's head names the agent_action arm and the service's next collection sweep.",
+        ["update_alert_settings"] = "Darling's head names the service's single settings row, retired poison_wait.threshold_ms and the health_bands and fleet_sweep groups, none of which Lite has; Lite's head says it is a write served by mcp_allow_writes and takes effect in the running app (#9639).",
+        ["create_notification_route"] = "Darling's head names the operator token and its send_resolutions, fallback and severities arguments; Lite has no token and no field for them, and its head says the write switch that serves it.",
+        ["update_notification_route"] = "Darling's head names the operator token, the agent fields and the arguments Lite has no field for; Lite's head says what it can change and that an agent route is refused.",
+        ["set_notification_route_enabled"] = "Darling's head still says a route cannot be authored or re-pointed; on Lite create_notification_route and update_notification_route now do that.",
+    };
+
     /// <summary>
     /// D6, generically: for every MCP tool name registered on BOTH SKUs, if either side's description carries
     /// the marker, both must, and the served heads must be byte-identical. Tool names and marker presence are
@@ -90,6 +103,11 @@ public sealed class McpToolGuideTests
             }
 
             if (!darlingConverted)
+            {
+                continue;
+            }
+
+            if (SkuSpecificHeads.ContainsKey(tool))
             {
                 continue;
             }
