@@ -689,4 +689,43 @@ VALUES (9689301, 'no-pin-table', 'no-pin-table.example', 'sql', @username, TRUE)
 
         return stored;
     }
+
+    /* ---- a password longer than SQL Server takes (#9693) ---- */
+
+    [Theory]
+    [InlineData("sqlserver", 128, false)]
+    [InlineData("sqlserver", 129, true)]
+    [InlineData("postgresql", 129, false)]
+    [InlineData("postgresql", 4000, false)]
+    public void APasswordOver128Characters_StopsARunThatWouldSetItForASqlServer_AndNotForPostgres(string engine, int length, bool stops)
+    {
+        using var key = PasswordPrivateKey.Generate();
+        var ring = DarlingPasswordKey.FromPrivateKey(key);
+        var password = new string('k', length);
+        var server = Server("target", null);
+        server.Engine = engine;
+
+        var plan = DarlingCliCommands.PlanLoginPassword([server], Login, password, ring);
+        var reason = DarlingCliCommands.LoginPasswordTooLongReason(plan, password);
+
+        Assert.Equal(DarlingCliCommands.LoginPasswordAction.Set, Assert.Single(plan).Action);
+        Assert.Equal(stops, reason is not null);
+        Assert.DoesNotContain(password, reason ?? "", StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ALongPassword_DoesNotStopARunWhoseOnlySqlServerIsSkipped()
+    {
+        using var key = PasswordPrivateKey.Generate();
+        var ring = DarlingPasswordKey.FromPrivateKey(key);
+        var password = new string('k', 200);
+        var postgres = Server("pg", null);
+        postgres.Engine = "postgresql";
+        var byReference = Server("sql-by-reference", "env:SOME_VARIABLE");
+
+        var plan = DarlingCliCommands.PlanLoginPassword([postgres, byReference], Login, password, ring);
+
+        Assert.Equal(DarlingCliCommands.LoginPasswordAction.Skip, plan.Single(l => l.Server.Name == "sql-by-reference").Action);
+        Assert.Null(DarlingCliCommands.LoginPasswordTooLongReason(plan, password));
+    }
 }

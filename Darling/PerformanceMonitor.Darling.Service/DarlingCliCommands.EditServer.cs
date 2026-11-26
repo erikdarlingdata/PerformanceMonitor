@@ -322,7 +322,8 @@ public static partial class DarlingCliCommands
     /// the password is asked for, and the <c>modified_at</c> the edit carries as <c>expected_modified_at</c>, so a row that moved
     /// while the prompt waited is refused and the password is never used against a server the operator did not see.</summary>
     internal sealed record EditServerTarget(
-        int ServerId, string StorageName, string DisplayName, string Host, int Port, string Auth, string? Username, string ModifiedAt)
+        int ServerId, string StorageName, string DisplayName, string Host, int Port, string Auth, string? Username, string ModifiedAt,
+        bool IsPostgres = false)
     {
         /// <summary>The server as the operator is shown it. Control characters in a value are escaped.</summary>
         internal string Describe()
@@ -349,16 +350,20 @@ public static partial class DarlingCliCommands
     }
 
     /// <summary>
-    /// Finds the one server <paramref name="name"/> names, by its exact display name or storage name and never by a part of one:
-    /// a write verb that can ask for a password must not guess. A name that matches nothing, a part of a name and a name several
-    /// servers share each answer with the sentence to print and no target.
+    /// Finds the one server <paramref name="name"/> names (#9693), by the rule <c>edit_server</c> uses
+    /// (<see cref="DarlingMcpServerAdminTools.ResolveForEdit"/>): its exact display name, its exact storage name or
+    /// <c>id:&lt;server id&gt;</c>, capitals aside, and never a part of a name. A write verb that can ask for a password must not
+    /// guess, so a name that more than one server answers to in any of those ways is refused with every one of them listed (its
+    /// id, its name and its storage name), and the refusal says the id form names exactly one. A server that matches in two ways
+    /// is one match. A name that matches nothing and a part of a name each answer with the sentence to print and no target.
     /// </summary>
     internal static (EditServerTarget? Target, string? Refusal) ResolveEditServerTarget(
         IReadOnlyList<PerformanceMonitor.Darling.Storage.RegisteredServer> servers, string name)
     {
-        var match = DarlingMcpServerAdminTools.ResolveForRemoval(servers, name, nameClash: NameClash.Refuse);
+        var match = DarlingMcpServerAdminTools.ResolveForEdit(servers, name);
         string List(IEnumerable<PerformanceMonitor.Darling.Storage.RegisteredServer> candidates) =>
-            string.Join(Environment.NewLine, candidates.Select(c => $"    {StoreConfigProvider.DriftValue(c.DisplayName)} ({StoreConfigProvider.DriftValue(c.ServerName)})"));
+            string.Join(Environment.NewLine, candidates.Select(c =>
+                $"    id {c.ServerId.ToString(CultureInfo.InvariantCulture)}: name {StoreConfigProvider.DriftValue(c.DisplayName ?? c.ServerName)}, storage name {StoreConfigProvider.DriftValue(c.ServerName)}"));
         if (match.Candidates.Count == 0)
         {
             return (null, "  Not changed: no registered server is named that. Nothing was changed.");
@@ -372,7 +377,8 @@ public static partial class DarlingCliCommands
 
         if (match.Candidates.Count > 1)
         {
-            return (null, "  Not changed: more than one registered server has that name. Use the storage name in parentheses:"
+            return (null, $"  Not changed: {match.Candidates.Count.ToString(CultureInfo.InvariantCulture)} registered servers answer to that, by name or by storage name, and --edit-server never picks one of several."
+                + $" Name the one you mean by its id, as {DarlingMcpServerAdminTools.ServerIdNamePrefix}<id> (--edit-server {DarlingMcpServerAdminTools.ServerIdNamePrefix}<id> --set ...), or by a name or a storage name that no other server in this list has:"
                 + Environment.NewLine + List(match.Candidates));
         }
 
@@ -390,6 +396,9 @@ public static partial class DarlingCliCommands
     /// <c>modified_at</c> as <c>expected_modified_at</c>, so a server that changed while the password was typed is refused before
     /// the password is used. A server that changed during the connection test is refused by the write, after the password was
     /// sent: <paramref name="passwordWasSent"/> tells the two apart, and without it the line says only that nothing was saved.
+    /// When no password comes back, <paramref name="passwordRefusal"/> gives the reader's reason and that reason is the one
+    /// line printed. A password longer than SQL Server takes is refused for a SQL Server target before the second send
+    /// (<see cref="SqlServerPasswordRefusal"/>).
     /// The enabled state is applied only after the edit, if there is one, has succeeded. An enabled step that fails keeps the
     /// edit's lines and says the settings were saved. Every line returned has the characters that do not print escaped
     /// (<see cref="StoreConfigProvider.DriftText"/>), whatever a store answer, a server's name or a driver's message holds.
@@ -401,9 +410,10 @@ public static partial class DarlingCliCommands
         Func<string, string?> readPassword,
         EditServerTarget target,
         Action<string>? announce = null,
-        Func<bool>? passwordWasSent = null)
+        Func<bool>? passwordWasSent = null,
+        Func<string?>? passwordRefusal = null)
     {
-        var (lines, exitCode) = await RunEditServerCoreAsync(request, edit, setEnabled, readPassword, target, announce, passwordWasSent);
+        var (lines, exitCode) = await RunEditServerCoreAsync(request, edit, setEnabled, readPassword, target, announce, passwordWasSent, passwordRefusal);
         return (lines.Select(StoreConfigProvider.DriftText).ToList(), exitCode);
     }
 
@@ -414,7 +424,8 @@ public static partial class DarlingCliCommands
         Func<string, string?> readPassword,
         EditServerTarget target,
         Action<string>? announce,
-        Func<bool>? passwordWasSent)
+        Func<bool>? passwordWasSent,
+        Func<string?>? passwordRefusal)
     {
         var lines = new List<string>();
         var saved = false;
@@ -430,7 +441,17 @@ public static partial class DarlingCliCommands
                 var typed = readPassword($"  This change sets how {target.Describe()} is reached, and a saved password is never sent with changed connection settings unless it is typed again. Password for it (tested with the change, then saved with it): ");
                 if (string.IsNullOrEmpty(typed))
                 {
-                    lines.Add("  Not changed: this change needs the server's password, and none was entered.");
+                    /* One line for one cause: input the reader refused is named by the reader's own sentence, and only input that
+                       held no password is "none was entered". */
+                    lines.Add(passwordRefusal?.Invoke() is { Length: > 0 } refused
+                        ? "  Not changed: " + refused
+                        : "  Not changed: this change needs the server's password, and none was entered.");
+                    return (lines, 1);
+                }
+
+                if (SqlServerPasswordRefusal(typed, target.IsPostgres) is { } tooLong)
+                {
+                    lines.Add("  Not changed: " + tooLong + " It was not sent anywhere.");
                     return (lines, 1);
                 }
 
@@ -716,6 +737,7 @@ public static partial class DarlingCliCommands
                 Username = row.Username,
                 DisplayName = row.Name,
                 ModifiedAt = DarlingMcpServerAdminTools.ModifiedAtToken(row.ModifiedAt),
+                IsPostgres = PerformanceMonitor.Collectors.MonitoredEngineKind.ParseConfiguredEngine(row.Engine) == PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql,
             };
 
             /* Before the first send and before any prompt: the store and the configuration file this run reaches, the key a typed
@@ -728,6 +750,7 @@ public static partial class DarlingCliCommands
             output.WriteLine();
 
             DarlingCliSealKey.Decision? sealedWith = null;
+            string? inputRefusal = null;
             async Task<string> EditAsync(string changesJson)
             {
                 /* The key is chosen again for every send, so the one after the password prompt is the store's key now. */
@@ -749,18 +772,11 @@ public static partial class DarlingCliCommands
                 EditAsync,
                 (serverId, enable) => DarlingMcpCollectionStateTools.SetServerEnabledByIdAsync(dataSource, serverId, enable, null, cancellationToken),
                 readPassword ?? ((Func<string, string?>)(label =>
-                {
-                    var typed = ReadLoginPassword(label, input, output, Console.IsInputRedirected, out var inputRefusal);
-                    if (inputRefusal is not null)
-                    {
-                        output.WriteLine("  " + inputRefusal);
-                    }
-
-                    return typed;
-                })),
+                    ReadLoginPassword(label, input, output, Console.IsInputRedirected, out inputRefusal))),
                 target,
                 line => output.WriteLine(line),
-                () => probes > 0);
+                () => probes > 0,
+                () => inputRefusal);
 
             foreach (var line in lines)
             {

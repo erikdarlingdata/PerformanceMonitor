@@ -354,4 +354,208 @@ public sealed class EditServerVerbTests
         Assert.Equal(5, StoreConfigProvider.BuildSettingDriftWarnings(drift, maxServers: 10, entryPoint: "darling").Count);
         Assert.Equal(4, StoreConfigProvider.BuildSettingDriftWarnings(drift, maxServers: 3, entryPoint: "darling").Count);
     }
+
+    /* ---- a string several servers answer to (#9693) ---- */
+
+    /* One host with three registrations that show the host as their display name, and a fourth whose storage name is the host. */
+    private static IReadOnlyList<PerformanceMonitor.Darling.Storage.RegisteredServer> OneHostFourWays() =>
+    [
+        new(11, "lab01:master", "lab01"),
+        new(12, "lab01:tempdb", "lab01"),
+        new(13, "lab01:RO", "lab01"),
+        new(14, "lab01", "lab match"),
+    ];
+
+    [Theory]
+    [InlineData("lab01")]
+    [InlineData("LAB01")]
+    public void A_string_that_is_three_display_names_and_a_fourth_storage_name_picks_none_and_lists_all_four(string name)
+    {
+        var (target, refusal) = DarlingCliCommands.ResolveEditServerTarget(OneHostFourWays(), name);
+
+        Assert.Null(target);
+        var listed = refusal!.Split(Environment.NewLine);
+        foreach (var server in OneHostFourWays())
+        {
+            var line = Assert.Single(listed, l => l.Contains("id " + server.ServerId + ":", StringComparison.Ordinal));
+            Assert.Contains("\"" + server.ServerName + "\"", line, StringComparison.Ordinal);
+            Assert.Contains("\"" + server.DisplayName + "\"", line, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(new[] { 11, 12, 13, 14 }, Edit.ResolveForEdit(OneHostFourWays(), name).Candidates.Select(c => c.ServerId).Order());
+    }
+
+    [Theory]
+    [InlineData("id:14", 14)]
+    [InlineData("ID:11", 11)]
+    [InlineData("lab01:master", 11)]
+    [InlineData("LAB01:ro", 13)]
+    [InlineData("lab match", 14)]
+    public void An_id_or_a_name_only_one_server_has_names_exactly_one(string name, int expected)
+    {
+        var (target, refusal) = DarlingCliCommands.ResolveEditServerTarget(OneHostFourWays(), name);
+
+        Assert.Null(refusal);
+        Assert.Equal(expected, target!.ServerId);
+        Assert.Equal(expected, Assert.Single(Edit.ResolveForEdit(OneHostFourWays(), name).Candidates).ServerId);
+    }
+
+    [Fact]
+    public void One_server_that_has_the_string_as_both_its_names_is_one_match()
+    {
+        IReadOnlyList<PerformanceMonitor.Darling.Storage.RegisteredServer> servers = [new(21, "solo01", "SOLO01"), new(22, "other01", "other")];
+
+        var (target, refusal) = DarlingCliCommands.ResolveEditServerTarget(servers, "solo01");
+
+        Assert.Null(refusal);
+        Assert.Equal(21, target!.ServerId);
+    }
+
+    [Fact]
+    public void A_server_named_like_another_server_s_id_is_refused_with_both()
+    {
+        IReadOnlyList<PerformanceMonitor.Darling.Storage.RegisteredServer> servers = [new(31, "a.example.test", "id:32"), new(32, "b.example.test", "b")];
+
+        var (target, refusal) = DarlingCliCommands.ResolveEditServerTarget(servers, "id:32");
+
+        Assert.Null(target);
+        Assert.Equal(new[] { 31, 32 }, Edit.ResolveForEdit(servers, "id:32").Candidates.Select(c => c.ServerId).Order());
+        Assert.Equal(31, DarlingCliCommands.ResolveEditServerTarget(servers, "id:31").Target!.ServerId);
+        Assert.False(string.IsNullOrWhiteSpace(refusal));
+    }
+
+    [Fact]
+    public void An_id_no_server_has_finds_nothing_even_when_it_is_a_part_of_a_name()
+    {
+        IReadOnlyList<PerformanceMonitor.Darling.Storage.RegisteredServer> servers = [new(41, "grid:5432", "grid")];
+
+        Assert.Empty(Edit.ResolveForEdit(servers, "id:5").Candidates);
+        Assert.Null(DarlingCliCommands.ResolveEditServerTarget(servers, "id:5").Target);
+        Assert.Equal(41, Assert.Single(Edit.ResolveForEdit(servers, "id:41").Candidates).ServerId);
+
+        /* A part of a name that is not an id still finds the one server for the tool, and never for the verb. */
+        var part = Edit.ResolveForEdit(servers, "rid:54");
+        Assert.Equal(41, Assert.Single(part.Candidates).ServerId);
+        Assert.NotEqual("exact", part.MatchedBy);
+        Assert.Null(DarlingCliCommands.ResolveEditServerTarget(servers, "rid:54").Target);
+    }
+
+    /* ---- one line for one cause, and the SQL Server password limit (#9693) ---- */
+
+    [Fact]
+    public async Task Input_the_reader_refuses_is_one_line_that_gives_the_reader_s_reason()
+    {
+        string? readerRefusal = null;
+        var output = new System.IO.StringWriter();
+        var stdin = new System.IO.MemoryStream([0xEF, 0xBB, 0xBF, (byte)'p', (byte)'w', (byte)'\n']);
+
+        var (lines, exitCode) = await DarlingCliCommands.RunEditServerAsync(
+            Parsed("sql01", "--set", "trustServerCertificate=true"),
+            _ => Task.FromResult(Answer(Edit.EditStatus.Invalid, Edit.EditPasswordNeededText)),
+            NoEnable,
+            label => DarlingCliCommands.ReadLoginPassword(label, stdin, output, inputRedirected: true, out readerRefusal),
+            Sql01,
+            passwordRefusal: () => readerRefusal);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains(DarlingCliCommands.LoginPasswordHasByteOrderMarkText, Assert.Single(lines), StringComparison.Ordinal);
+        Assert.Equal("", output.ToString());
+    }
+
+    [Fact]
+    public async Task Input_that_holds_no_password_is_one_line_too()
+    {
+        string? readerRefusal = null;
+        var output = new System.IO.StringWriter();
+
+        var (lines, exitCode) = await DarlingCliCommands.RunEditServerAsync(
+            Parsed("sql01", "--set", "trustServerCertificate=true"),
+            _ => Task.FromResult(Answer(Edit.EditStatus.Invalid, Edit.EditPasswordNeededText)),
+            NoEnable,
+            label => DarlingCliCommands.ReadLoginPassword(label, new System.IO.MemoryStream(), output, inputRedirected: true, out readerRefusal),
+            Sql01,
+            passwordRefusal: () => readerRefusal);
+
+        Assert.Equal(1, exitCode);
+        Assert.Single(lines);
+        Assert.Null(readerRefusal);
+        Assert.Equal("", output.ToString());
+    }
+
+    [Theory]
+    [InlineData(false, 128, 0)]
+    [InlineData(false, 129, 1)]
+    [InlineData(true, 129, 0)]
+    [InlineData(true, 4000, 0)]
+    public async Task A_password_over_128_characters_is_refused_before_it_is_sent_for_SQL_Server_and_sent_for_PostgreSQL(bool postgres, int length, int expectedExit)
+    {
+        var typed = new string('k', length);
+        var sent = new List<JsonObject>();
+        Task<string> EditAsync(string json)
+        {
+            sent.Add((JsonObject)JsonNode.Parse(json)!);
+            return Task.FromResult(sent.Count == 1 ? Answer(Edit.EditStatus.Invalid, Edit.EditPasswordNeededText) : Updated());
+        }
+
+        var (lines, exitCode) = await DarlingCliCommands.RunEditServerAsync(
+            Parsed("sql01", "--set", "trustServerCertificate=true"), EditAsync, NoEnable, _ => typed, Sql01 with { IsPostgres = postgres });
+
+        Assert.Equal(expectedExit, exitCode);
+        Assert.Equal(expectedExit == 0 ? 2 : 1, sent.Count);
+        Assert.DoesNotContain(sent, s => expectedExit == 1 && s.ContainsKey("password"));
+        Assert.DoesNotContain(lines, l => l.Contains(typed, StringComparison.Ordinal));
+        if (expectedExit == 1)
+        {
+            Assert.Single(lines);
+        }
+    }
+
+    /* ---- the printed command names the configuration the service is using (#9693) ---- */
+
+    private static StoreConfigProvider.ServerSettingDrift HostDrift(string server = "orders") =>
+        new(server, true, [new StoreConfigProvider.SettingDrift("host", "new.example.test", "old.example.test", true)]);
+
+    [Theory]
+    [InlineData(false, "/etc/darling/darling.json", "--config /etc/darling/darling.json")]
+    [InlineData(false, "/srv/lab one/darling.json", "--config '/srv/lab one/darling.json'")]
+    [InlineData(false, "/srv/it's/darling.json", "--config '/srv/it'\\''s/darling.json'")]
+    [InlineData(true, "C:\\ProgramData\\Darling Data\\darling.json", "--config 'C:\\ProgramData\\Darling Data\\darling.json'")]
+    public void The_printed_command_ends_with_the_configuration_path_as_one_quoted_word(bool windows, string configPath, string expectedEnd)
+    {
+        var entryPoint = windows ? "& 'C:\\Darling\\PerformanceMonitor.Darling.Service.exe'" : "dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll";
+
+        var line = Assert.Single(StoreConfigProvider.BuildSettingDriftWarnings([HostDrift()], 10, entryPoint, windows, configPath));
+
+        Assert.EndsWith(expectedEnd, line, StringComparison.Ordinal);
+        Assert.Contains(entryPoint + " --edit-server ", line, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, "/srv/lab\u202Eone/darling.json")]
+    [InlineData(true, "C:\\Program Files (x86)\\Darling\\darling.json")]
+    [InlineData(true, "C:\\it's\\darling.json")]
+    public void A_configuration_path_the_quoter_does_not_print_leaves_the_server_without_a_command(bool windows, string configPath)
+    {
+        var entryPoint = windows ? "& 'C:\\Darling\\PerformanceMonitor.Darling.Service.exe'" : "dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll";
+
+        var line = Assert.Single(StoreConfigProvider.BuildSettingDriftWarnings([HostDrift()], 10, entryPoint, windows, configPath));
+
+        Assert.DoesNotContain("--edit-server orders", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("--edit-server 'orders'", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(" --config '", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(" --config /", line, StringComparison.Ordinal);
+        Assert.DoesNotContain(" --config C:", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_configuration_path_in_use_is_the_full_path_DARLING_CONFIG_names_or_the_file_beside_the_service()
+    {
+        var named = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "lab one", "darling.json");
+
+        Assert.Equal(named, StoreConfigProvider.ConfigPathInUse(name => name == "DARLING_CONFIG" ? named : null));
+        Assert.Equal(
+            System.IO.Path.Combine(AppContext.BaseDirectory, "darling.json"),
+            StoreConfigProvider.ConfigPathInUse(_ => null));
+        Assert.True(System.IO.Path.IsPathFullyQualified(StoreConfigProvider.ConfigPathInUse(name => name == "DARLING_CONFIG" ? "relative.json" : null)!));
+    }
 }

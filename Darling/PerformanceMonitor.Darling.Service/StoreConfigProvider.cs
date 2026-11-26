@@ -692,7 +692,7 @@ public sealed class StoreConfigProvider
 
         /* #9693: one line per server, each with the --edit-server command that applies the file's values, so a host with no
            Viewer, web dashboard or MCP still has a way to make the registry agree. */
-        foreach (var line in BuildSettingDriftWarnings(live, MaxDriftedServersLogged, OperatorVerbForm.PasteableEntryPointHere()))
+        foreach (var line in BuildSettingDriftWarnings(live, MaxDriftedServersLogged, OperatorVerbForm.PasteableEntryPointHere(), configPath: ConfigPathInUse()))
         {
             _logger?.LogWarning("{DriftLine}", line);
         }
@@ -721,11 +721,14 @@ public sealed class StoreConfigProvider
     /// and PowerShell 7) when <paramref name="windows"/> is true, where <paramref name="entryPoint"/> is the call operator and
     /// the full path of the service executable (<see cref="OperatorVerbForm.PasteableEntryPoint"/>). A server with a value
     /// <see cref="CommandWord"/> does not print gets no command, and so does every server when <paramref name="entryPoint"/> is
-    /// null: the line says to run <c>--edit-server</c> by hand. The command is the end of the line, so copying from its first
+    /// null: the line says to run <c>--edit-server</c> by hand. The command ends with <c>--config</c> and
+    /// <paramref name="configPath"/>, the configuration file the service is using, as one more quoted word, so the paste edits
+    /// through that file wherever it is. A path <see cref="CommandWord"/> does not print leaves the server without a command.
+    /// The command is the end of the line, so copying from its first
     /// word to the end of the line copies the command and nothing else. Pure, so a test reads the lines.
     /// </summary>
     internal static IReadOnlyList<string> BuildSettingDriftWarnings(
-        IReadOnlyList<ServerSettingDrift> live, int maxServers, string? entryPoint, bool? windows = null)
+        IReadOnlyList<ServerSettingDrift> live, int maxServers, string? entryPoint, bool? windows = null, string? configPath = null)
     {
         var lines = new List<string>();
         if (live is null || live.Count == 0)
@@ -742,17 +745,27 @@ public sealed class StoreConfigProvider
             var args = EditServerArgsFor(server);
             /* args is the name, then "--set" and a field=value pair for each field: the flag is printed as it is, the rest is quoted. */
             var words = args.Select((a, i) => i > 0 && i % 2 == 1 ? a : CommandWord(a, powershell)).ToList();
+
+            /* The command names the configuration the service is using, so a paste on a host whose configuration is not at the
+               default path edits through that one. The path is one more quoted word, and a path the quoter does not print
+               leaves the server without a command. */
+            var configWord = configPath is null ? null : CommandWord(configPath, powershell);
+            var configPrintable = configPath is null || configWord is not null;
             var remedy = "";
-            if (args.Count > 0 && entryPoint is not null && !words.Contains(null))
+            if (args.Count > 0 && entryPoint is not null && !words.Contains(null) && configPrintable)
             {
-                remedy = $" To apply the file's values, {(powershell ? "in PowerShell, run" : "run")}: {entryPoint} --edit-server {string.Join(" ", words)}";
+                remedy = $" To apply the file's values, {(powershell ? "in PowerShell, run" : "run")}: {entryPoint} --edit-server {string.Join(" ", words)}"
+                    + (configWord is null ? "" : " --config " + configWord);
             }
             else if (args.Count > 0)
             {
                 remedy = " No command is printed for this server because "
-                    + (words.Contains(null) ? "a value holds characters" : "the folder the service is installed in holds characters")
+                    + (words.Contains(null) ? "a value holds characters"
+                        : entryPoint is null ? "the folder the service is installed in holds characters"
+                        : "the path of the service's configuration file holds characters")
                     + $" that cannot be pasted safely. Run --edit-server by hand{(powershell ? " in PowerShell" : "")}: {entryPoint ?? OperatorVerbForm.EntryPoint(powershell, null)} --edit-server <server name>"
-                    + $" followed by --set <field>=<value> for {string.Join(", ", server.Fields.Where(f => DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field))}.";
+                    + $" followed by --set <field>=<value> for {string.Join(", ", server.Fields.Where(f => DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field))}"
+                    + (configPath is null ? "." : $", then --config and the path of the configuration file the service is using ({DriftValue(configPath)}).");
             }
 
             var otherNote = other.Count == 0
@@ -781,6 +794,21 @@ public sealed class StoreConfigProvider
         }
 
         return lines;
+    }
+
+    /// <summary>The full path of the configuration file this service is using (<c>DARLING_CONFIG</c>, else the file beside the
+    /// service), for the printed <c>--edit-server</c> command (#9693). Null when the path cannot be made absolute, and the command
+    /// then names no configuration.</summary>
+    internal static string? ConfigPathInUse(Func<string, string?>? environment = null)
+    {
+        try
+        {
+            return System.IO.Path.GetFullPath(DarlingConfig.ResolveConfigPath(null, environment ?? Environment.GetEnvironmentVariable));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or System.IO.PathTooLongException or System.Security.SecurityException)
+        {
+            return null;
+        }
     }
 
     /// <summary>The arguments after <c>--edit-server</c> that apply a drifted server's darling.json values (#9693): the registered name,
@@ -3048,9 +3076,28 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         foreach (var declared in bootstrap.Servers)
         {
             /* A null element is skipped, as DarlingConfig.Parse's own loop skips it (#5240). */
-            if (declared is null
-                || declared.ServerId != server.ServerId
-                || ServerConnectionIdentity.Differ(ConnectionIdentityOf(declared), ConnectionIdentityOf(server)))
+            if (declared is null)
+            {
+                continue;
+            }
+
+            if (ServerConnectionIdentity.Differ(ConnectionIdentityOf(declared), ConnectionIdentityOf(server)))
+            {
+                /* #9693: the file declares this same reference for this server (by id, or by name when a changed host or database
+                   gave the entry another id) with other connection settings. The reference stays unused, and the mark below
+                   only lets the refusal say that the settings differ instead of that the reference is the service's own. */
+                if ((declared.ServerId == server.ServerId || string.Equals(declared.DisplayName, server.DisplayName, StringComparison.OrdinalIgnoreCase))
+                    && declared.EncryptedPasswordDeclaredByFile
+                    && DarlingSecrets.DeclaresSecretText(server.EncryptedPassword)
+                    && string.Equals(declared.EncryptedPassword, server.EncryptedPassword, StringComparison.Ordinal))
+                {
+                    server.EncryptedPasswordDeclaredForOtherSettings = true;
+                }
+
+                continue;
+            }
+
+            if (declared.ServerId != server.ServerId)
             {
                 continue;
             }

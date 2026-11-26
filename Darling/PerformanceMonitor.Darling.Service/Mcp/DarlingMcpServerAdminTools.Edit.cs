@@ -225,15 +225,55 @@ public sealed partial class DarlingMcpServerAdminTools
         "the request equals the stored values, nothing was written. updated returns {status, server, display_name, " +
         "server_id, changed:[field names], reconnects, tested, query_store_replica_test, modified_at, note, previous, undo, undo_note}; previous holds the changed fields as they were and undo is the edit_server call that sets them back (guarded by the new modified_at); the password and AWS external ID cannot be read back, so undo never carries them and undo_note says what to add (undo is null when nothing else changed); reconnects says whether the " +
         "service drops and re-opens its connection to the server; query_store_replica_test is the replica's own connection result when the " +
-        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved; on an Azure SQL Database it says the setting has no effect, because that engine has no readable-replica Query Store read). server_name is resolved as remove_server resolves it.")]
+        "server has one and the edit was tested (a replica that does not open is a note, the edit is still saved; on an Azure SQL Database it says the setting has no effect, because that engine has no readable-replica Query Store read). server_name is resolved as remove_server resolves it, with two differences: a name that is the display name or the storage name of more than one definition is always ambiguous, and id:<server_id> names one definition.")]
     public static Task<string> EditServer(
         NpgsqlDataSource postgres,
-        [Description("The monitored server to edit: its display name or storage name / address. A partial name is accepted only when it matches exactly one definition.")] string server_name,
+        [Description("The monitored server to edit: its display name or storage name / address, or id:<server_id>. A partial name is accepted only when it matches exactly one definition.")] string server_name,
         [Description("A JSON object with ONLY the fields to change (e.g. {\"display_name\":\"Orders\",\"monthly_cost_usd\":120}). See the tool guide for the keys.")] string changes_json,
         DarlingMcpAddServersPolicy policy,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
         EditServerByNameAsync(postgres, server_name, changes_json, DefaultProbeAsync, DarlingPasswordKey.Current, logger, cancellationToken, policy: policy);
+
+    /// <summary>The word before a server's id in a name that picks a server by its id, as in <c>id:42</c>.</summary>
+    internal const string ServerIdNamePrefix = "id:";
+
+    /// <summary>
+    /// The registrations a name answers to for an edit (#9693): the one rule <c>edit_server</c> and <c>--edit-server</c> share.
+    /// A name answers for every registration that has it as its display name or its storage name, capitals aside, and for the
+    /// registration whose id it gives as <c>id:&lt;server_id&gt;</c>. A registration that matches in more than one of those ways is
+    /// one match. Two or more matches are all returned as <c>exact</c> and the caller refuses: an edit can change where a saved
+    /// password is sent, so a storage name does not win here over another registration's display name. The id form is the name
+    /// that always picks one registration, because a plain registration's storage name is the display name its read-only and
+    /// per-database registrations get by default. A name that is none of those is matched as a part of a name
+    /// (<see cref="ResolveForRemoval"/>), except the id form, which never matches a part of a name.
+    /// </summary>
+    internal static ServerNameMatch ResolveForEdit(IReadOnlyList<RegisteredServer> servers, string serverName)
+    {
+        var name = (serverName ?? string.Empty).Trim();
+        if (name.Length == 0)
+        {
+            return new ServerNameMatch(Array.Empty<RegisteredServer>(), "none");
+        }
+
+        int? id = name.StartsWith(ServerIdNamePrefix, StringComparison.OrdinalIgnoreCase)
+            && int.TryParse(name.AsSpan(ServerIdNamePrefix.Length), System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
+        var exact = servers
+            .Where(s => s.ServerId == id
+                     || string.Equals(s.ServerName, name, StringComparison.OrdinalIgnoreCase)
+                     || string.Equals(s.DisplayName, name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (exact.Count > 0)
+        {
+            return new ServerNameMatch(exact, "exact");
+        }
+
+        return id is null
+            ? ResolveForRemoval(servers, name, nameClash: NameClash.Refuse)
+            : new ServerNameMatch(Array.Empty<RegisteredServer>(), "none");
+    }
 
     /// <summary>The tool's body with the probe and the platform injected, so a test drives the product's own path
     /// (parse, resolve, core, store) without a reachable server.</summary>
@@ -258,7 +298,7 @@ public sealed partial class DarlingMcpServerAdminTools
 
             submittedSecrets = [changes!.Password, changes.AwsExternalId];
             var definitions = await LoadDefinitionsForRemovalAsync(postgres);
-            var target = ResolveForRemoval(definitions.Select(d => d.Server).ToList(), server_name, nameClash: NameClash.Refuse);
+            var target = ResolveForEdit(definitions.Select(d => d.Server).ToList(), server_name);
             if (target.Candidates.Count == 0)
             {
                 if (definitions.Count == 0)
@@ -276,11 +316,11 @@ public sealed partial class DarlingMcpServerAdminTools
                 {
                     status = "ambiguous",
                     message = $"'{server_name}' matches {target.Candidates.Count} defined servers " +
-                              $"({(target.MatchedBy == "exact" ? "the same name on more than one definition" : "as a partial name")}); " +
-                              "nothing was changed. Re-issue edit_server with ONE candidate's full name.",
+                              $"({(target.MatchedBy == "exact" ? "as the display name or the storage name of more than one definition" : "as a partial name")}); " +
+                              $"nothing was changed. Re-issue edit_server with ONE candidate: its server_id as {ServerIdNamePrefix}<server_id>, or a display name or storage name that no other definition has.",
                     matched_by = target.MatchedBy,
                     matched_in = "config_monitored_servers",
-                    candidates = target.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+                    candidates = target.Candidates.Select(c => new { server_id = c.ServerId, server = c.ServerName, display_name = c.DisplayName }),
                 }, McpHelpers.JsonOptions);
             }
 

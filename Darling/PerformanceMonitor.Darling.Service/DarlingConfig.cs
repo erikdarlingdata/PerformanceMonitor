@@ -3667,6 +3667,12 @@ public sealed class MonitoredServer
     [JsonIgnore]
     internal bool EncryptedPasswordDeclaredByFile { get; set; }
 
+    /// <summary>True when darling.json declares the reference in <see cref="EncryptedPassword"/> for this server with connection
+    /// settings that differ from this row's (#9693). It never lets the reference resolve: it only chooses the refusal's sentence.
+    /// Set where a server is built from a store row (<c>StoreConfigProvider.MarkSlotsTheFileDeclares</c>), never from a stored value.</summary>
+    [JsonIgnore]
+    internal bool EncryptedPasswordDeclaredForOtherSettings { get; set; }
+
     /// <summary><see cref="EncryptedPasswordDeclaredByFile"/> for <see cref="RemediationEncryptedPassword"/>.</summary>
     [JsonIgnore]
     internal bool RemediationEncryptedPasswordDeclaredByFile { get; set; }

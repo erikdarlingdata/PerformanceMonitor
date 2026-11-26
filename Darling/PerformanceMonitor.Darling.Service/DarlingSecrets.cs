@@ -130,6 +130,12 @@ public static class DarlingSecrets
         }
     }
 
+    /// <summary>The refusal for a stored reference that darling.json declares for the same server with connection settings that
+    /// differ from the registry's (#9693). It names no path and no variable.</summary>
+    internal const string ReferenceDeclaredForOtherSettingsText =
+        "darling.json declares this password reference for this server with connection settings that differ from the registry's, and a reference is used only for the connection it is declared for. "
+        + "Make the two agree: run --edit-server with the file's values (the start-up warning about this server gives the command), or set the entry in darling.json back to the registry's values.";
+
     /// <summary>
     /// Dereferences an <c>env:</c>/<c>file:</c> reference held in a server's stored secret slot (#5240), after asking
     /// whether it names one of this service's own configuration files or secrets
@@ -142,14 +148,16 @@ public static class DarlingSecrets
     /// nothing else stops. The text is the refusal's own sentence, which names no path and no variable, and the
     /// referenced value is never read.</para>
     /// </summary>
-    private static string ResolveStoredReference(string reference, string settingName, bool declaredByFile)
+    private static string ResolveStoredReference(string reference, string settingName, bool declaredByFile, bool declaredForOtherSettings = false)
     {
         /* One exception to the refusal: darling.json itself declares this same reference, in this same slot, for this same
            server id (MonitoredServer.EncryptedPasswordDeclaredByFile). The mark is set where the server is built, from the
            file, and never from a stored value, so a reference that is only in the store is still asked about. */
         if (!declaredByFile && DarlingOwnedSecrets.ReferenceRefusal(reference) is { } refusal)
         {
-            throw new InvalidOperationException($"{settingName}: {refusal}");
+            /* #9693: a reference darling.json declares for this server with other connection settings is refused all the same,
+               and the sentence says what is true of it: the settings differ. A reference no entry declares keeps the refusal's own. */
+            throw new InvalidOperationException($"{settingName}: {(declaredForOtherSettings ? ReferenceDeclaredForOtherSettingsText : refusal)}");
         }
 
         return DarlingSecretSource.Resolve(reference, settingName);
@@ -186,7 +194,8 @@ public static class DarlingSecrets
             if (DarlingSecretSource.IsReference(server.EncryptedPassword))
             {
                 return ResolveStoredReference(
-                    server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword", server.EncryptedPasswordDeclaredByFile);
+                    server.EncryptedPassword, $"servers['{server.DisplayName}'].encryptedPassword", server.EncryptedPasswordDeclaredByFile,
+                    server.EncryptedPasswordDeclaredForOtherSettings);
             }
 
             /* #2255: the raw CryptographicException ("Key not valid for use in specified state") reached the
