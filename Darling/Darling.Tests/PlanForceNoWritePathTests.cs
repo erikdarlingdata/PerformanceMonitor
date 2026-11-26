@@ -177,6 +177,10 @@ public sealed class PlanForceNoWritePathTests
         Assert.Equal(new[]
         {
             /* #6394: a new webhook signing key is sealed for the destination's stored sealed generic URL, which the mcp role cannot read, so the tool reads that URL as the store owner. */
+            /* #9641: the three alert source writes create, change and drop a database login, which the mcp role cannot do, so they run on the owner source, behind mcp.allowWrites and mcp.allowServerAdmin. */
+            nameof(DarlingMcpAlertSourceTools) + "." + nameof(DarlingMcpAlertSourceTools.AddAlertSource),
+            nameof(DarlingMcpAlertSourceTools) + "." + nameof(DarlingMcpAlertSourceTools.RemoveAlertSource),
+            nameof(DarlingMcpAlertSourceTools) + "." + nameof(DarlingMcpAlertSourceTools.RotateAlertSource),
             nameof(DarlingMcpAlertTools) + "." + nameof(DarlingMcpAlertTools.GenerateWebhookSigningKey),
             /* #9644: a password key reset marks the key row replaced and counts sealed values, which only the store owner can do, and it asks for the key's fingerprint first. */
             nameof(DarlingMcpPasswordKeyTools) + "." + nameof(DarlingMcpPasswordKeyTools.ResetPasswordKey),

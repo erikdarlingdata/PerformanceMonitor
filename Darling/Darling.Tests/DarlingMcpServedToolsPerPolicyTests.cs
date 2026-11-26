@@ -113,6 +113,7 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
     /// then its front door class, then <c>server_name</c> when it takes one.</summary>
     private static readonly string[] ExpectedRows =
     {
+        "add_alert_source 00100 StoreRequired",
         "add_servers 00100 StoreRequired",
         "analyze_now 01100 StoreRequired server_name",
         "analyze_plan_xml 11111 AnyOneStore",
@@ -350,6 +351,7 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
         "get_wait_types 11111 FanOut server_name",
         "get_waiting_tasks 11111 FanOut server_name",
         "kill_session 01111 StoreRequired server_name",
+        "list_alert_sources 11111 FanOut",
         "list_custom_alert_rules 11111 FanOut",
         "list_custom_alert_templates 11111 AnyOneStore",
         "list_custom_views 11111 FanOut",
@@ -369,12 +371,14 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
         "record_investigation_feedback 01100 StoreRequired",
         "reject_investigation_note 01100 StoreRequired",
         "reload_config 01100 StoreRequired",
+        "remove_alert_source 00100 StoreRequired",
         "remove_server 00100 StoreRequired server_name",
         "remove_webhook_signing_key 01100 StoreRequired",
         "reset_collector_schedules 01100 StoreRequired server_name",
         "reset_password_key 00100 StoreRequired",
         "restore_alert_history 01100 StoreRequired",
         "resume_collection 01100 StoreRequired",
+        "rotate_alert_source 00100 StoreRequired",
         "run_collectors_now 01100 StoreRequired server_name",
         "run_custom_view_panel 11111 StoreRequired",
         "save_environment_profile 01100 StoreRequired server_name",

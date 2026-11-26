@@ -7900,20 +7900,38 @@ public static partial class DarlingCliCommands
             return PrintAlertSourceList(await ExternalAlertSourceAdmin.ListAsync(connection, cancellationToken), output, error);
         }
 
-        var result = IsAddAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.AddAsync(connection, sourceName!, cancellationToken)
-            : IsRotateAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.RotateAsync(connection, sourceName!, cancellationToken)
-            : await ExternalAlertSourceAdmin.RemoveAsync(connection, sourceName!, cancellationToken);
+        var change = await ChangeAlertSourceAsync(verb, connection, sourceName!, cancellationToken, postgres, readGroupExtras);
+        return PrintAlertSourceResult(verb, change.Result, sourceName!, storeConnectionString, output, error, postgres, change.GroupExtras, change.LineDropFailure);
+    }
+
+    /// <summary>What an add, rotate or remove did, with the two follow-up facts the text about it needs: the roles besides the source logins that
+    /// the group admits, and why the live pg_hba line could not be dropped (null when it was or there was none).</summary>
+    internal sealed record AlertSourceChange(ExternalAlertSourceAdmin.Result Result, IReadOnlyList<string>? GroupExtras, string? LineDropFailure);
+
+    /// <summary>
+    /// The change itself behind <c>--add-alert-source</c>, <c>--rotate-alert-source</c> and <c>--remove-alert-source</c> (#5654), apart from the
+    /// printing, so the MCP tools of the same names (#9641) run exactly the steps the command line does and print through
+    /// <see cref="PrintAlertSourceResult"/>. The verb is one of the three that change a source.
+    /// </summary>
+    internal static async Task<AlertSourceChange> ChangeAlertSourceAsync(
+        string verb, NpgsqlConnection connection, string sourceName, CancellationToken cancellationToken, PostgresConfig? postgres = null,
+        Func<NpgsqlConnection, CancellationToken, Task<IReadOnlyList<string>>>? readGroupExtras = null)
+    {
+        var result = IsAddAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.AddAsync(connection, sourceName, cancellationToken)
+            : IsRotateAlertSourceVerb(verb) ? await ExternalAlertSourceAdmin.RotateAsync(connection, sourceName, cancellationToken)
+            : await ExternalAlertSourceAdmin.RemoveAsync(connection, sourceName, cancellationToken);
 
         /* The roles besides the source logins that a +darling_alert_sources pg_hba line would admit (#5654): what the
            provisioning step could not revoke, read after it ran. The add and rotate text name each one. The verb has
            committed by now, so a failure here is reported after the result (and its one-time password), never in its place. */
+        /* #9641: this step and the line drop below run on CancellationToken.None, because the change is already committed and a cancel here must not lose the new password. */
         IReadOnlyList<string>? groupExtras = null;
         if (!IsRemoveAlertSourceVerb(verb)
             && result.Outcome is ExternalAlertSourceAdmin.Outcome.Done or ExternalAlertSourceAdmin.Outcome.NeedsDbaSql)
         {
             try
             {
-                groupExtras = await (readGroupExtras ?? DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync)(connection, cancellationToken);
+                groupExtras = await (readGroupExtras ?? DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync)(connection, CancellationToken.None);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -7931,10 +7949,10 @@ public static partial class DarlingCliCommands
         if (postgres is { Managed: true } && groupExtras is { Count: > 0 })
         {
             lineDropFailure = await DarlingManagedPostgres.DropAlertSourcePgHbaLineAsync(
-                DarlingManagedPostgres.ResolveDataDirectory(postgres), connection, cancellationToken);
+                DarlingManagedPostgres.ResolveDataDirectory(postgres), connection, CancellationToken.None);
         }
 
-        return PrintAlertSourceResult(verb, result, sourceName!, storeConnectionString, output, error, postgres, groupExtras, lineDropFailure);
+        return new AlertSourceChange(result, groupExtras, lineDropFailure);
     }
 
     /// <summary>Prints what an add, rotate or remove did, and returns the exit code. The only place a password is written, and only inside the connection string.</summary>

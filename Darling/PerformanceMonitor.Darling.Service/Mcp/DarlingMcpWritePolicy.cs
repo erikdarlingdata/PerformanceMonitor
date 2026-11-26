@@ -60,6 +60,10 @@ internal static class DarlingMcpWritePolicy
         "set_server_action",
         "new_password_key",
         "reset_password_key",
+        /* #9641: they create, change and drop a database login, so they sit behind the same switch. */
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
@@ -80,6 +84,9 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
         "mute_analysis_finding",
         "unmute_analysis_finding",
         "create_mute_rule",
@@ -276,6 +283,10 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        /* #9641: a database login is never an agent's to create, change or drop. */
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
         "undo_plan_change",
         "write_investigation_note",
         "approve_investigation_note",
