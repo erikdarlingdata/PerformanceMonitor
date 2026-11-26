@@ -195,6 +195,85 @@ public sealed class QueryStoreRegressionsTableReadTests
         Assert.Empty(QueryStoreRegressionBaseline.WithRecentDays(plan, []).RecentDays);
     }
 
+    private static PlanRegressionDaily.BuiltDay Partial(int day, int throughDay, int throughHour) =>
+        new(new DateOnly(2026, 10, day), new DateTime(2026, 10, throughDay, throughHour, 0, 0));
+
+    /// <summary>#9606: the partial day the recent arm reads from the daily totals, at each of its edges. The window starts at
+    /// 24 Oct 06:00 and ends at 28 Oct 06:00, the baseline at 17 Oct 06:00, and 28 Oct is built through 03:00.</summary>
+    [Fact]
+    public void ChooseRecentPartial_TakesTheOpenDayAfterTheWholeDays_OnlyWithItsWatermarkInsideTheDayAndTheWindow()
+    {
+        var baselineStart = new DateTime(2026, 10, 17, 6, 0, 0);
+        var start = new DateTime(2026, 10, 24, 6, 0, 0);
+        var end = new DateTime(2026, 10, 28, 6, 0, 0);
+        DateOnly[] Days(params int[] days) => days.Select(d => new DateOnly(2026, 10, d)).ToArray();
+        PlanRegressionDaily.BuiltDay? Chosen(PlanRegressionDaily.BuiltDay[] built, DateOnly[] recentDays, DateTime? windowStart = null, DateTime? windowEnd = null, DateTime? baseline = null) =>
+            QueryStoreRegressionBaseline.ChooseRecentPartial(built, baseline ?? baselineStart, windowStart ?? start, windowEnd ?? end, recentDays);
+
+        /* The day after the last whole day, with its watermark. */
+        var today = Partial(28, 28, 3);
+        Assert.Equal(today, Chosen([Whole(25), Whole(26), Whole(27), today], Days(25, 26, 27)));
+
+        /* A watermark equal to the window end is taken; a window that ends one tick before it reads the day live. */
+        Assert.Equal(today, Chosen([Whole(27), today], Days(27), windowEnd: new DateTime(2026, 10, 28, 3, 0, 0)));
+        Assert.Null(Chosen([Whole(27), today], Days(27), windowEnd: new DateTime(2026, 10, 28, 3, 0, 0).AddTicks(-1)));
+
+        /* A watermark at or below the day's midnight has no row of the day, and one at the next midnight is a whole build. */
+        Assert.Null(Chosen([Whole(27), Partial(28, 28, 0)], Days(27)));
+        Assert.Null(Chosen([Whole(27), Partial(28, 27, 21)], Days(27)));
+        Assert.Null(Chosen([Whole(27), Partial(28, 29, 0)], Days(27), windowEnd: new DateTime(2026, 10, 30)));
+        Assert.Null(Chosen([Whole(27), Whole(28)], Days(27), windowEnd: new DateTime(2026, 10, 30)));
+
+        /* Not the day after the last whole day (a gap, here a stale 27 Oct): the day is read live. */
+        Assert.Null(Chosen([Whole(25), Whole(26), today], Days(25, 26)));
+
+        /* No whole day: the latest open day is taken, yesterday while today has no row, then today. */
+        var yesterday = Partial(27, 27, 21);
+        Assert.Equal(yesterday, Chosen([yesterday, Partial(28, 27, 21)], []));
+        Assert.Equal(today, Chosen([yesterday, today], []));
+
+        /* The whole days' lower bounds: the day the window starts in is not taken, a day that starts at the window start is,
+           and a baseline start above D - 1 day drops the day (the strict rule). */
+        Assert.Null(Chosen([Partial(24, 24, 20)], []));
+        Assert.Equal(Partial(24, 24, 20), Chosen([Partial(24, 24, 20)], [], windowStart: new DateTime(2026, 10, 24)));
+        Assert.Equal(today, Chosen([today], [], baseline: new DateTime(2026, 10, 27)));
+        Assert.Null(Chosen([today], [], baseline: new DateTime(2026, 10, 27).AddTicks(1)));
+        Assert.Null(Chosen([], Days(27)));
+    }
+
+    /// <summary>#9606: the partial day is the last recent day, and the live high range starts at its watermark or at the next
+    /// midnight minus the measured margin, whichever is lower, never below the day's midnight. Without the partial day the
+    /// plan carries no watermark.</summary>
+    [Fact]
+    public void ThePartialDay_IsTheLastRecentDay_AndTheHighRangeNeverStartsAboveItsWatermark()
+    {
+        var live = QueryStoreRegressionBaseline.AllLive(new DateTime(2026, 10, 24, 6, 0, 0)) with { RegularFromLatest = true };
+        var plan = QueryStoreRegressionBaseline.WithRecentDays(live, [new DateOnly(2026, 10, 26), new DateOnly(2026, 10, 27)], Partial(28, 28, 3));
+        Assert.Equal([new DateOnly(2026, 10, 26), new DateOnly(2026, 10, 27), new DateOnly(2026, 10, 28)], plan.RecentDays);
+        Assert.Equal(new DateTime(2026, 10, 28, 3, 0, 0), plan.RecentPartialThrough);
+        Assert.Equal(new DateTime(2026, 10, 26), plan.RecentLowEnd);
+        Assert.Equal(new DateTime(2026, 10, 28), plan.RecentHighStart);
+        Assert.True(QueryStoreRegressionBaseline.ReadsRecentDays(plan));
+
+        /* The next midnight minus three hours is 21:00, above the watermark: the range starts at the watermark. */
+        Assert.Equal(new DateTime(2026, 10, 28, 3, 0, 0), QueryStoreRegressionBaseline.WithMeasuredHighStart(plan, TimeSpan.FromHours(3)).RecentHighStart);
+        /* A margin that reaches below the watermark wins: a row of the next day may start that early. */
+        Assert.Equal(new DateTime(2026, 10, 28, 1, 0, 0), QueryStoreRegressionBaseline.WithMeasuredHighStart(plan, TimeSpan.FromHours(23)).RecentHighStart);
+        Assert.Equal(new DateTime(2026, 10, 28), QueryStoreRegressionBaseline.WithMeasuredHighStart(plan, QueryStoreIntervalWide.PurgeEdgeMargin).RecentHighStart);
+
+        /* Yesterday built through 21:00, read just after midnight: both bounds are 21:00. */
+        var yesterday = QueryStoreRegressionBaseline.WithRecentDays(live, [new DateOnly(2026, 10, 26)], Partial(27, 27, 21));
+        Assert.Equal(new DateTime(2026, 10, 27, 21, 0, 0), QueryStoreRegressionBaseline.WithMeasuredHighStart(yesterday, TimeSpan.FromHours(3)).RecentHighStart);
+
+        /* The partial day alone is a recent day; no day at all carries no watermark, and neither do whole days. */
+        var alone = QueryStoreRegressionBaseline.WithRecentDays(live, [], Partial(28, 28, 3));
+        Assert.Equal([new DateOnly(2026, 10, 28)], alone.RecentDays);
+        Assert.Equal(new DateTime(2026, 10, 28), alone.RecentLowEnd);
+        Assert.Null(QueryStoreRegressionBaseline.WithRecentDays(plan, []).RecentPartialThrough);
+        Assert.Empty(QueryStoreRegressionBaseline.WithRecentDays(plan, []).RecentDays);
+        Assert.Null(QueryStoreRegressionBaseline.WithRecentDays(plan, [new DateOnly(2026, 10, 26)]).RecentPartialThrough);
+    }
+
     /// <summary>#5506: the latest form's high range starts at the next midnight minus the measured margin, never below the
     /// last run day's midnight, and the wide form and the all-live plan keep their bounds.</summary>
     [Fact]

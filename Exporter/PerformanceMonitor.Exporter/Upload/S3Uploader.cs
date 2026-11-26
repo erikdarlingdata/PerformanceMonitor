@@ -72,14 +72,14 @@ public sealed class S3Uploader : IUploader
             case S3Credentials.Profile profile:
                 if (!new CredentialProfileStoreChain().TryGetAWSCredentials(profile.Name, out var fromProfile))
                 {
-                    throw new InvalidOperationException($"AWS profile '{profile.Name}' was not found or has no usable credentials.");
+                    throw new InvalidOperationException("destination.credentials.profile: the AWS profile it names was not found or has no usable credentials.");
                 }
 
                 return fromProfile;
 
             case S3Credentials.EnvKeys keys:
-                var accessKey = Required(keys.AccessKeyIdEnv);
-                var secretKey = Required(keys.SecretAccessKeyEnv);
+                var accessKey = Required("destination.credentials.access_key_id_env", keys.AccessKeyIdEnv);
+                var secretKey = Required("destination.credentials.secret_access_key_env", keys.SecretAccessKeyEnv);
                 var token = keys.SessionTokenEnv is null ? null : getEnvironmentVariable(keys.SessionTokenEnv);
                 return string.IsNullOrEmpty(token)
                     ? new BasicAWSCredentials(accessKey, secretKey)
@@ -89,11 +89,11 @@ public sealed class S3Uploader : IUploader
                 throw new InvalidOperationException("Unknown S3 credentials setting.");
         }
 
-        string Required(string name)
+        string Required(string configKey, string variable)
         {
-            var value = getEnvironmentVariable(name);
+            var value = getEnvironmentVariable(variable);
             return string.IsNullOrEmpty(value)
-                ? throw new InvalidOperationException($"Environment variable {name} (named in the S3 credentials setting) is not set.")
+                ? throw new InvalidOperationException($"{configKey}: the environment variable it names is not set.")
                 : value;
         }
     }
