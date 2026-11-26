@@ -807,9 +807,11 @@ public sealed class DarlingWebHostService : BackgroundService
         }
         catch (Exception ex)
         {
-            logger.LogCritical(ex, 
-                "Web dashboard token (web.network.encryptedToken) could not be decrypted ({Message}). The loopback listener is not served without a token, so the web dashboard is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in web.network.encryptedToken. On another OS, remove it and set web.network.token to an env: or file: reference.",
-                ex.Message);
+            logger.LogCritical(ex,
+                "{Message}",
+                DarlingSecretSource.DescribeTokenReadFailure(
+                    "Web dashboard token", "web.network", "The loopback listener is not served without a token, so the web dashboard is not started.",
+                    ex.Message, !string.IsNullOrWhiteSpace(network.EncryptedToken)));
             return new LoopbackTokenResolution(true, "");
         }
     }
@@ -908,9 +910,11 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogCritical(ex, 
-                        "Web dashboard token (web.network.encryptedToken) could not be decrypted ({Message}). The web dashboard is not started. A token made on another machine or account cannot be read here. Run PerformanceMonitor.Darling.Service.exe --encrypt-password on this machine and put the new value in web.network.encryptedToken. On another OS, remove it and set web.network.token to an env: or file: reference.",
-                        ex.Message);
+                    _logger.LogCritical(ex,
+                        "{Message}",
+                        DarlingSecretSource.DescribeTokenReadFailure(
+                            "Web dashboard token", "web.network", "The web dashboard is not started.", ex.Message,
+                            !string.IsNullOrWhiteSpace(network.EncryptedToken)));
                     await DisposeFailedStartAsync();
                     return false;
                 }
