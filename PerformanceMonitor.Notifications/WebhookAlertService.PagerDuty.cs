@@ -628,12 +628,20 @@ public partial class WebhookAlertService
     /// <summary>
     /// Sends a test notification to PagerDuty. Returns null on success, error message on failure.
     /// </summary>
-    public static async Task<string?> SendTestPagerDutyAsync(string routingKey, bool useEuRegion, AlertBranding branding, string? proxyAddress = null)
+    public static async Task<string?> SendTestPagerDutyAsync(string routingKey, bool useEuRegion, AlertBranding branding, string? proxyAddress = null) =>
+        (await SendTestPagerDutyDetailedAsync(routingKey, useEuRegion, branding, proxyAddress, includeBody: true)).Error;
+
+    /// <summary>
+    /// The PagerDuty test send with its result (#9636). It sends one trigger event under a synthetic dedup key and does not resolve it
+    /// afterwards, which is what the Viewer's Test button does.
+    /// </summary>
+    public static async Task<TestSendResult> SendTestPagerDutyDetailedAsync(
+        string routingKey, bool useEuRegion, AlertBranding branding, string? proxyAddress, bool includeBody, CancellationToken cancellationToken = default)
     {
         try
         {
             if (string.IsNullOrWhiteSpace(routingKey))
-                return "PagerDuty routing key is not configured.";
+                return TestSendResult.Refused("PagerDuty routing key is not configured.", notConfigured: true);
 
             /* Synthetic dedup key so repeated test sends don't collide with real incidents. */
             var testDedupKey = "test-" + Guid.NewGuid();
@@ -643,11 +651,11 @@ public partial class WebhookAlertService
                 branding, routingKey, isTest: true, dedupKey: testDedupKey);
 
             var endpoint = PagerDutyEndpoint(useEuRegion);
-            return await PostWebhookAsync(endpoint, payload, proxyAddress, bodyInResult: true);
+            return await PostTestAsync(endpoint, payload, proxyAddress, headers: null, signing: null, includeBody, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
         {
-            return ex.Message;
+            return new TestSendResult(false, null, ex.Message, ex.GetType().Name);
         }
     }
 }
