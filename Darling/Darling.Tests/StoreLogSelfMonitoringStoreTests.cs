@@ -270,7 +270,7 @@ public class StoreLogSelfMonitoringStoreTests
             + "down too");
 
         /* The once-then-Debug rule for a capture the store will never allow is behaviour, pinned by
-           StoreLogCaptureNoticeTests, not by what the catch's text spells. */
+           NewInstallLogNoiseTests, not by what the catch's text spells. */
         /* No second timer: a new cadence field would put the two series on different grids, which is the
            thing riding this tick buys. */
         Assert.DoesNotContain("_nextStoreLog", worker, StringComparison.Ordinal);

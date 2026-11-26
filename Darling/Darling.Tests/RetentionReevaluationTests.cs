@@ -239,15 +239,16 @@ public sealed class RetentionReevaluationTests
     {
         var sweep = MethodBody(ReadStorageSource(), "public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(");
 
-        /* The steady-state hold: level by pass. */
-        var heldAt = sweep.IndexOf("HELD PAUSED - {ShortConsumers} do not yet cover everything it holds", StringComparison.Ordinal);
+        /* The steady-state hold: level by pass. The templates below are the ones that name a remedy, the holds that can
+           drop history (#9695 words the holds that cannot, on a store younger than the horizon, separately). */
+        var heldAt = sweep.IndexOf("HELD PAUSED - {ShortConsumers} do not yet cover everything it holds, so arming", StringComparison.Ordinal);
         Assert.True(heldAt > 0);
         var heldStatement = sweep[sweep.LastIndexOf("logger?.Log(", heldAt, StringComparison.Ordinal)..heldAt];
         Assert.Contains("pass == RetentionSweepPass.Startup ? LogLevel.Warning : LogLevel.Debug,", heldStatement, StringComparison.Ordinal);
 
         /* The transitions: unconditional levels. The statement each template sits in is found by walking back
            to its `logger?.Log` and reading which method it is. */
-        var reHeldAt = sweep.IndexOf("RE-HELD - it was armed, and its short consumers ({ShortConsumers}) no longer cover", StringComparison.Ordinal);
+        var reHeldAt = sweep.IndexOf("RE-HELD - it was armed, and its short consumers ({ShortConsumers}) no longer cover everything it holds, so the {DropAfter} purge is stopped before", StringComparison.Ordinal);
         Assert.True(reHeldAt > 0);
         Assert.StartsWith("logger?.LogWarning(", sweep[sweep.LastIndexOf("logger?.Log", reHeldAt, StringComparison.Ordinal)..], StringComparison.Ordinal);
 
