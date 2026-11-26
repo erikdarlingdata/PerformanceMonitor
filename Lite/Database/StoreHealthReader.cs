@@ -313,6 +313,25 @@ public static class StoreHealthText
             : string.Create(CultureInfo.InvariantCulture, $"{rows:N0} rows in {files:N0} files");
     }
 
+    /// <summary>The Moved cell of the window's housekeeping history (#9604). It is <see cref="WorkSummary"/> except for a compaction row, which shows
+    /// only the size part of its pass (<see cref="CompactionMoved"/>) so the cell stays short. The rest of the pass is in <see cref="MessageText"/>.</summary>
+    public static string MovedText(StoreHousekeepingEvent e) =>
+        e.Kind == StoreHousekeepingHistory.KindCompaction && e.Compaction is { } c ? CompactionMoved(c) : WorkSummary(e);
+
+    /// <summary>The Message cell of the window's housekeeping history (#9604). A compaction row carries the rest of its pass here
+    /// (<see cref="CompactionNotes"/>), then its own message after a full stop when it has one, the order <see cref="Render"/> writes them in.
+    /// Every other row carries its message as it is.</summary>
+    public static string MessageText(StoreHousekeepingEvent e)
+    {
+        if (e.Kind != StoreHousekeepingHistory.KindCompaction || e.Compaction is not { } c)
+        {
+            return e.Message ?? "";
+        }
+
+        var notes = CompactionNotes(c);
+        return string.IsNullOrEmpty(e.Message) ? notes : notes + ". " + e.Message;
+    }
+
     /// <summary>A re-cut skip reason in plain words (#9422). A reason this does not name yet prints as its own name.</summary>
     internal static string RecutSkipLabel(ArchiveService.RecutSkipReason reason) => reason switch
     {
@@ -327,12 +346,24 @@ public static class StoreHealthText
         _ => reason.ToString(),
     };
 
-    /// <summary>What one compaction pass did, in plain words (#9422, #9424).</summary>
-    public static string CompactionSummary(CompactionPassDetail c)
+    /// <summary>What one compaction pass did, in plain words (#9422, #9424): its notes with the size part in brackets after the groups merged.</summary>
+    public static string CompactionSummary(CompactionPassDetail c) =>
+        CompactionHead(c) + " (" + CompactionMoved(c) + ")" + CompactionTail(c);
+
+    /// <summary>The size part of a compaction pass: the files and bytes the merges read and the files and bytes they wrote (#9604).</summary>
+    public static string CompactionMoved(CompactionPassDetail c) =>
+        string.Create(CultureInfo.InvariantCulture, $"{c.FilesIn:N0} files, {Bytes(c.BytesIn)} in, {c.FilesOut:N0} files, {Bytes(c.BytesOut)} out");
+
+    /// <summary>Every part of <see cref="CompactionSummary"/> except the size part (<see cref="CompactionMoved"/>), in the same order (#9604).</summary>
+    public static string CompactionNotes(CompactionPassDetail c) => CompactionHead(c) + CompactionTail(c);
+
+    private static string CompactionHead(CompactionPassDetail c) =>
+        string.Create(CultureInfo.InvariantCulture, $"started {c.StartUtc:HH:mm:ss} UTC, took {c.Seconds:0.0} s, merged {c.GroupsMerged:N0} groups");
+
+    private static string CompactionTail(CompactionPassDetail c)
     {
         var ci = CultureInfo.InvariantCulture;
         var sb = new StringBuilder();
-        sb.Append(ci, $"started {c.StartUtc:HH:mm:ss} UTC, took {c.Seconds:0.0} s, merged {c.GroupsMerged:N0} groups ({c.FilesIn:N0} files, {Bytes(c.BytesIn)} in, {c.FilesOut:N0} files, {Bytes(c.BytesOut)} out)");
         if (c.SortedAtSmallGroupBatches > 0 || c.UnsortedFallbackBatches > 0)
         {
             sb.Append(ci, $"; {c.SortedAtSmallGroupBatches:N0} batches sorted again at 2,048-row groups, {c.UnsortedFallbackBatches:N0} batches fell back to unsorted");
