@@ -416,6 +416,15 @@ if (args.Length > 0 && DarlingCliCommands.IsResetPasswordKeyVerb(args[0]))
     return await DarlingCliCommands.ResetPasswordKeyAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 }
 
+/* CLI verb: --set-login-password --username <login> [--dry-run] [--config <path>] (#9689) - save one password, read from stdin,
+   for every server that uses the login, disabled ones included. A store moved to another machine, or a reset password key, leaves every saved
+   password to be entered again, and a headless host has no Viewer to enter them in. The password is never an argument. Same
+   platform posture as the verbs around it (Windows only for a MANAGED store credential, which the verb checks). */
+if (args.Length > 0 && DarlingCliCommands.IsSetLoginPasswordVerb(args[0]))
+{
+    return await DarlingCliCommands.SetLoginPasswordAsync(args[1..], Console.OpenStandardInput(), Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verb: --new-password-key <path> (#8006) - write a new password key to a path that holds nothing, for an operator to put in
    the secret store passwordKey reads, and print only its fingerprint, never the key. It reads no configuration and opens no
    store, so it runs anywhere the exe does. */

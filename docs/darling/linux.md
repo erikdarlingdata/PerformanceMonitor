@@ -412,6 +412,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `--enable-collector`, `--disable-collector`, `--set-collector-run-at`, `--set-collector-frequency`, `--set-collector-retention` | The same verbs after `darling-verb`. See [Collector settings](cli.md#collector-settings) |
 | `.\PerformanceMonitor.Darling.Service.exe --backfill-rollups` | `darling-verb --backfill-rollups`. Add `--dry-run` to see the plan first |
 | `.\PerformanceMonitor.Darling.Service.exe --reset-password-key` | `darling-verb --reset-password-key`, then `sudo systemctl restart darling` |
+| `.\PerformanceMonitor.Darling.Service.exe --set-login-password --username <login>` | `<command that prints the password> \| darling-verb --set-login-password --username <login>`. Add `--dry-run` first. A sudo policy that records input (`log_input`) records the piped password: see [Set-login-password](cli.md#--set-login-password) |
 | `.\PerformanceMonitor.Darling.Service.exe --diagnostics-bundle` | `darling-verb --diagnostics-bundle`. See [Diagnostics Bundle](cli.md#diagnostics-bundle) |
 | `--add-alert-source`, `--rotate-alert-source`, `--remove-alert-source`, `--list-alert-sources` | The same verbs after `darling-verb` |
 | `--encrypt-password` | Windows only. Use a `file:` or `env:` reference in `darling.json` |
