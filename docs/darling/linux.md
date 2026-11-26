@@ -319,7 +319,7 @@ Know these limits of the unit ([#9702](https://github.com/erikdarlingdata/Perfor
 Read the file log, not the journal:
 
 ```bash
-sudo tail -n 60 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date -u +%Y%m%d).log
+sudo tail -n 60 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date +%Y%m%d).log
 ```
 
 **Proof:** these lines, at the default log level:
@@ -368,7 +368,7 @@ Work the formula with those two numbers and the host's RAM. For host RAM, use th
 
 ## Logs
 
-- **The file log is the one to read.** It is `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, one file for each day, kept 14 days, one line for each event.
+- **The file log is the one to read.** It is `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, one file for each day, kept 14 days, one line for each event. The date in the name is the host's local date, so a command that builds the name uses `date +%Y%m%d`, not `date -u`.
 - **The journal is the noisy one.** `journalctl -u darling` shows one line for each event, as `source[event id] message`, and the log level goes to the journal priority. To list only warnings and errors, run `journalctl -u darling -p warning`. Use the journal for what systemd itself reports: starts, stops and a process that exits.
 - **The log files are mode `644` inside a `700` folder.** The service creates each file with the process umask. The folder's mode is what keeps other users out, so this is harmless. To make the files owner-only as well, add `UMask=0077` to the unit's `[Service]` section and restart the service.
 - **The log level** is set with a standard .NET logging source. In the unit, that is a line such as `Environment=Logging__LogLevel__PerformanceMonitor.Darling.Service=Debug`. See [Logs](operations.md#logs).
@@ -405,7 +405,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `--print-viewer-connection`, `--export-viewer-config` | Windows only, for the managed store. Write the Viewer's `darling.json` by hand, as [Manual configuration](viewer.md#manual-configuration-fallback) says |
 | `Start-Service`, `Stop-Service` or `Restart-Service 'PerformanceMonitor Darling'` | `sudo systemctl start darling`, `stop` or `restart` |
 | `Get-Service 'PerformanceMonitor Darling'` | `systemctl status darling` |
-| `Get-Content <log> -Wait -Tail 40` | `sudo tail -n 40 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date -u +%Y%m%d).log` |
+| `Get-Content <log> -Wait -Tail 40` | `sudo tail -n 40 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date +%Y%m%d).log` |
 | `install-darling.ps1`, `Install-Darling.cmd`, the MSI | Steps 5 to 8 of this page |
 | `upgrade-darling.ps1` | [Upgrade by hand](#upgrade-by-hand) |
 | `uninstall-darling.ps1` | [Uninstall](#uninstall) |
