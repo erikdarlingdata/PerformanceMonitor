@@ -267,10 +267,12 @@ public class ConfigErrorsEarlyTests
 
     public static TheoryData<string, string> RefusedDestinations => new()
     {
-        { """{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "c", "auth": { "method": "default_credential" } }""", "destination.type: run supports s3 and local for now, got 'azure_blob'" },
-        { """{ "type": "s3", "bucket": "b", "endpoint_url": "http://127.0.0.1:9000", "force_path_style": true }""", "destination: run supports only bucket, prefix and region for s3 for now" },
-        { """{ "type": "s3", "bucket": "b", "credentials": { "access_key_id_env": "LAB_AK", "secret_access_key_env": "LAB_SK" } }""", "destination: run supports only bucket, prefix and region for s3 for now" },
-        { """{ "type": "s3", "bucket": "b", "checksum": "none" }""", "destination: run supports only bucket, prefix and region for s3 for now" },
+        { """{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "c", "hive_store_folder": true, "auth": { "method": "default_credential" } }""", "destination.hive_store_folder: run does not support it for now" },
+        { """{ "type": "s3", "bucket": "b", "endpoint_url": "http://127.0.0.1:9000", "hive_store_folder": true }""", "destination.hive_store_folder: run does not support it for now" },
+        { """{ "type": "s3", "bucket": "b", "credentials": { "access_key_id_env": "LAB_AK", "secret_access_key": "LAB_SK" } }""", "destination.credentials has an unknown field 'secret_access_key'" },
+        { """{ "type": "s3", "bucket": "b", "checksum": "md5" }""", "destination.checksum must be 'sha256' or 'none', got 'md5'" },
+        { """{ "type": "azure_blob", "container": "c", "auth": { "method": "default_credential" } }""", "destination.account_url is required unless auth.method is 'connection_string_env'" },
+        { """{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "c", "auth": { "method": "shared_key" } }""", "destination.auth.method must be 'default_credential', 'connection_string_env' or 'sas_url_env', got 'shared_key'" },
         { """{ "type": "s3", "bucket": "b", "regoin": "us-east-1" }""", "destination has an unknown field 'regoin'" },
         { """{ "type": "local", "path": "/srv/landing", "prefx": "hourly" }""", "destination has an unknown field 'prefx'" },
         { """{ "type": "ftp", "host": "h" }""", "destination.type must be 'local', 's3' or 'azure_blob', got 'ftp'" },

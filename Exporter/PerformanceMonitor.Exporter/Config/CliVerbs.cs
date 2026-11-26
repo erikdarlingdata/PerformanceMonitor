@@ -70,6 +70,7 @@ public static class CliVerbs
             // The mapping `run` uses, so a destination or schedule `run` refuses is refused here with the same message.
             Run.RunConfigMapping.ToRunSettings(config, path);
             var secret = CredentialResolver.Resolve(config.Store.Credential);
+            DestinationCheck.AssertCredentials(config);
             DestinationCheck.Assert(config);
             var builder = StoreCheck.BuildConnection(config, secret);
             var notChecked = await StoreCheck.CheckCollationAsync(builder, ct).ConfigureAwait(false);

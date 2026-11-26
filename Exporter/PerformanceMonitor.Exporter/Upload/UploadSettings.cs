@@ -174,11 +174,22 @@ public abstract record UploadSettings
                     "none" => S3Checksum.None,
                     _ => throw new ArgumentException($"destination.checksum must be 'sha256' or 'none', got '{checksumText}'"),
                 };
+                var endpointUrl = OptionalString(element, "endpoint_url");
+                if (endpointUrl is not null)
+                {
+                    if (!Uri.TryCreate(endpointUrl, UriKind.Absolute, out var endpoint) || (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps))
+                    {
+                        throw new ArgumentException("destination.endpoint_url is not a valid http or https URL");
+                    }
+
+                    RejectSecretInUrl(endpoint, "endpoint_url", "name the keys with destination.credentials");
+                }
+
                 return new S3(
                     RequiredString(element, "bucket", "destination"),
                     OptionalPrefix(element),
                     OptionalString(element, "region"),
-                    OptionalString(element, "endpoint_url"),
+                    endpointUrl,
                     OptionalBool(element, "force_path_style", false),
                     checksum,
                     ParseS3Credentials(element),
@@ -193,9 +204,14 @@ public abstract record UploadSettings
                     throw new ArgumentException("destination.account_url is required unless auth.method is 'connection_string_env'");
                 }
 
-                if (accountUrl is not null && !Uri.TryCreate(accountUrl, UriKind.Absolute, out _))
+                if (accountUrl is not null)
                 {
-                    throw new ArgumentException("destination.account_url is not a valid URL");
+                    if (!Uri.TryCreate(accountUrl, UriKind.Absolute, out var account))
+                    {
+                        throw new ArgumentException("destination.account_url is not a valid URL");
+                    }
+
+                    RejectSecretInUrl(account, "account_url", "put the SAS in an environment variable and use auth.method 'sas_url_env'");
                 }
 
                 return new AzureBlob(accountUrl?.TrimEnd('/'), RequiredString(element, "container", "destination"), OptionalPrefix(element), auth, hive);
@@ -232,9 +248,9 @@ public abstract record UploadSettings
 
         RejectUnknown(credentials, "destination.credentials", "access_key_id_env", "secret_access_key_env", "session_token_env");
         return new S3Credentials.EnvKeys(
-            RequiredString(credentials, "access_key_id_env", "destination.credentials"),
-            RequiredString(credentials, "secret_access_key_env", "destination.credentials"),
-            OptionalString(credentials, "session_token_env"));
+            RequiredVariableName(credentials, "access_key_id_env", "destination.credentials"),
+            RequiredVariableName(credentials, "secret_access_key_env", "destination.credentials"),
+            OptionalString(credentials, "session_token_env") is null ? null : RequiredVariableName(credentials, "session_token_env", "destination.credentials"));
     }
 
     private static AzureAuth ParseAzureAuth(JsonElement destination)
@@ -252,12 +268,24 @@ public abstract record UploadSettings
                 return new AzureAuth.DefaultCredential();
             case "connection_string_env":
                 RejectUnknown(auth, "destination.auth", "method", "name");
-                return new AzureAuth.ConnectionStringEnv(RequiredString(auth, "name", "destination.auth"));
+                return new AzureAuth.ConnectionStringEnv(RequiredVariableName(auth, "name", "destination.auth"));
             case "sas_url_env":
                 RejectUnknown(auth, "destination.auth", "method", "name");
-                return new AzureAuth.SasUrlEnv(RequiredString(auth, "name", "destination.auth"));
+                return new AzureAuth.SasUrlEnv(RequiredVariableName(auth, "name", "destination.auth"));
             default:
                 throw new ArgumentException($"destination.auth.method must be 'default_credential', 'connection_string_env' or 'sas_url_env', got '{method}'");
+        }
+    }
+
+    /// <summary>
+    /// A URL in the config is printed by `check-config` and in the upload log lines, so it must not carry a key: no user
+    /// name or password and no query string (where a SAS goes). The message never repeats the URL.
+    /// </summary>
+    private static void RejectSecretInUrl(Uri url, string name, string instead)
+    {
+        if (url.UserInfo.Length > 0 || url.Query.Length > 0)
+        {
+            throw new ArgumentException($"destination.{name} must not carry a user name, a password or a query string; {instead}");
         }
     }
 
@@ -267,6 +295,17 @@ public abstract record UploadSettings
     {
         var value = OptionalString(element, name);
         return string.IsNullOrWhiteSpace(value) ? throw new ArgumentException($"{where}.{name} is required") : value;
+    }
+
+    /// <summary>
+    /// A field that names an environment variable. The name is printed by `check-config` and in error messages, so a value
+    /// that is not a plain name (a key, a SAS or a connection string pasted in its place) is refused without repeating it.
+    /// </summary>
+    private static string RequiredVariableName(JsonElement element, string name, string where)
+    {
+        var value = RequiredString(element, name, where);
+        var plain = (char.IsAsciiLetter(value[0]) || value[0] == '_') && value.All(c => char.IsAsciiLetterOrDigit(c) || c == '_');
+        return plain ? value : throw new ArgumentException($"{where}.{name} must be the name of an environment variable (letters, digits and underscores), not the key itself");
     }
 
     private static string? OptionalString(JsonElement element, string name)
