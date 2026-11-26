@@ -44,6 +44,7 @@ public sealed class McpServerAdminTools
 
     [McpServerTool(Name = "edit_server"), Description(
         "Write: edits one monitored server's settings in place, as the Edit Server window's Save does: name, address, database, authentication, TLS posture, cost and the other fields the window sets. The server keeps its id, tags and history. " +
+        "<<GUIDE>>" +
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, database, read_only_intent, auth (\"Windows\", \"SQL\", \"ServicePrincipal\", \"ManagedIdentity\", \"EntraDefault\"), username (a service principal's client id), password, " +
         "encrypt_mode (\"Optional\", \"Mandatory\", \"Strict\"), trust_server_certificate, multi_subnet_failover, query_store_replica (empty or null removes it), monthly_cost_usd (null clears it, stored as 0), " +
         "and the Lite window's own fields: is_enabled (collection on or off), is_favorite, description, utility_database, alert_delivery_mode (\"summary\", \"per_event\" or null to inherit the global default), azure_tenant_id (service principal), managed_identity_client_id (managed identity). " +

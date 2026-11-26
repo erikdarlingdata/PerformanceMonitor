@@ -70,6 +70,11 @@ public sealed class McpToolGuideTests
     /// (<see cref="DescriptionLiteral"/>) is only ever needed for Lite's side of a tool BOTH sides already agree
     /// is converted, and every converted description is hand-authored literals a caller can resolve.
     /// </summary>
+    private static readonly Dictionary<string, string> SkuSpecificHeads = new(StringComparer.Ordinal)
+    {
+        ["edit_server"] = "#9640: Darling's head names the service, PostgreSQL, the port and the AWS role fields, none of which Lite has, and Lite's names the Edit Server window and the fields only Lite's window sets.",
+    };
+
     [Fact]
     public void EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads()
     {
@@ -90,6 +95,12 @@ public sealed class McpToolGuideTests
             }
 
             if (!darlingConverted)
+            {
+                continue;
+            }
+
+            /* A head that is false for the other SKU is not copied: the entry says why, and the marker check above still applies. */
+            if (SkuSpecificHeads.ContainsKey(tool))
             {
                 continue;
             }
