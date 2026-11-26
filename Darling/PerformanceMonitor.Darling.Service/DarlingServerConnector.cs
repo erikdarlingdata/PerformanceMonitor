@@ -1233,7 +1233,7 @@ public sealed record ConnectionProbeResult(
        not read). A warning beside a successful connection. Trailing and defaulted, like the fields above. */
     string? MissingGrantsNote = null,
     /* #9674: the number of the SqlException a failed SQL Server connect threw, or null (a success, another exception, or a PostgreSQL
-       target). A failed Strict connection test reads it to tell a login failure, which gets no Strict hint, from a transport or
+       target). A failed Strict connection test reads it to tell a server refusal (a login failure, a missing database, an Azure firewall), which gets no Strict hint, from a transport or
        certificate failure, which does. Trailing and defaulted, like the fields above. */
     int? SqlErrorNumber = null)
 {

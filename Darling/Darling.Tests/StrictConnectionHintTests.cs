@@ -23,7 +23,7 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #9674: a connection test that failed with encrypt_mode Strict says what Strict needs, because the driver's text alone does not.
-/// The line is not added for a login failure, a cancellation, any other mode, or a PostgreSQL target. The wiring tests dial a
+/// The line is not added for a login failure or another server refusal, a cancellation, any other mode, or a PostgreSQL target. The wiring tests dial a
 /// closed local port, so the failure is the driver's own and no server is involved.
 /// </summary>
 [Collection("darling-owned-secrets")]
@@ -49,11 +49,14 @@ public sealed class StrictConnectionHintTests : IDisposable
     [InlineData("Strict", 18486, false)]
     [InlineData("Strict", 18487, false)]
     [InlineData("Strict", 18488, false)]
+    [InlineData("Strict", 4060, false)]
+    [InlineData("Strict", 40532, false)]
+    [InlineData("Strict", 40615, false)]
     [InlineData("Mandatory", null, false)]
     [InlineData("Optional", null, false)]
     [InlineData("", null, false)]
     [InlineData(null, null, false)]
-    public void Hint_AppliesToAStrictNonLoginFailureOnly(string? mode, int? number, bool expected)
+    public void Hint_AppliesToAStrictTransportFailureOnly(string? mode, int? number, bool expected)
     {
         Assert.Equal(expected, StrictEncryptionHint.For(mode, number) is not null);
     }

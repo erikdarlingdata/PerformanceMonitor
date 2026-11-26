@@ -119,7 +119,7 @@ internal static class ServerEntryRules
 
     /// <summary>
     /// #9674: the failure text a connection test shows. The driver's message, with the Strict line after it when the entry used
-    /// Strict and the failure is not a login failure (<see cref="StrictEncryptionHint"/>). The Add Server window uses it too.
+    /// Strict and the failure is not a server refusal such as a login failure (<see cref="StrictEncryptionHint"/>). The Add Server window uses it too.
     /// </summary>
     internal static string FailureText(Exception ex, string? encryptMode)
     {

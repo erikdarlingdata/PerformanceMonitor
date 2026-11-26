@@ -27,16 +27,18 @@ public static class StrictEncryptionHint
         + "machine, or use Mandatory with trust_server_certificate.";
 
     /// <summary>
-    /// SQL Server error numbers that mean the server was reached and refused the login, so Strict is not the cause:
+    /// SQL Server error numbers the server sends after the connection is made over TLS, so Strict is not the cause:
     /// 18456 (login failed), 18452 (untrusted domain), 18470 (account disabled), 18486 (locked out),
-    /// 18487 (password expired), 18488 (password must change).
+    /// 18487 (password expired), 18488 (password must change), 4060 (cannot open the database the login asked for),
+    /// 40532 (cannot open the server the login asked for, Azure), 40615 (the Azure SQL Database firewall refused
+    /// the client address).
     /// </summary>
-    private static readonly int[] LoginFailureNumbers = [18456, 18452, 18470, 18486, 18487, 18488];
+    private static readonly int[] ServerRefusalNumbers = [18456, 18452, 18470, 18486, 18487, 18488, 4060, 40532, 40615];
 
     /// <summary>
     /// The hint for a failed connection test, or null when none applies. It applies only when <paramref name="encryptMode"/>
     /// is <c>Strict</c> (any casing, trimmed, as Darling's connection builders read it) and the failure is not a
-    /// login failure. <paramref name="sqlErrorNumber"/> is the number of the <c>SqlException</c> the driver threw, or null
+    /// server refusal (<c>ServerRefusalNumbers</c>). <paramref name="sqlErrorNumber"/> is the number of the <c>SqlException</c> the driver threw, or null
     /// when it threw something else. The caller does not ask for a hint on a cancellation.
     /// </summary>
     public static string? For(string? encryptMode, int? sqlErrorNumber)
@@ -49,7 +51,7 @@ public static class StrictEncryptionHint
             return null;
         }
 
-        if (sqlErrorNumber is int number && Array.IndexOf(LoginFailureNumbers, number) >= 0)
+        if (sqlErrorNumber is int number && Array.IndexOf(ServerRefusalNumbers, number) >= 0)
         {
             return null;
         }
