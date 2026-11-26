@@ -310,6 +310,67 @@ public sealed class EditServerVerbTests
         Assert.Empty(Warnings(Server(), Server()));
     }
 
+    /* ---- the word that names the server in the printed command ---- */
+
+    private static MonitoredServer Row(string name, string host, bool trust = false) => new()
+    {
+        Name = name,
+        Host = host,
+        Auth = "sql",
+        Username = "darling_monitor",
+        TrustServerCertificate = trust,
+    };
+
+    /// <summary>The command at the end of the one drift line for <paramref name="file"/> against <paramref name="registry"/>,
+    /// and the registry as the verb resolves a name against it.</summary>
+    private static (string Command, IReadOnlyList<PerformanceMonitor.Darling.Storage.RegisteredServer> Registry) PrintedCommand(
+        MonitoredServer file, bool windows, params MonitoredServer[] registry)
+    {
+        var line = Assert.Single(StoreConfigProvider.BuildSettingDriftWarnings(
+            StoreConfigProvider.DescribeSettingDrift([file], registry.Select(r => new StoreConfigProvider.RegisteredServer(r, IsEnabled: true)).ToList()),
+            maxServers: 10, entryPoint: "darling", windows: windows));
+        return (line[(line.IndexOf("run: ", StringComparison.Ordinal) + 5)..],
+            registry.Select(r => new PerformanceMonitor.Darling.Storage.RegisteredServer(r.ServerId, r.StorageName, r.DisplayName)).ToList());
+    }
+
+    [Fact]
+    public void The_printed_command_names_the_server_by_its_name_when_that_name_picks_exactly_that_server()
+    {
+        var orders = Row("orders", "a.example.test");
+        var (command, registry) = PrintedCommand(Row("orders", "a.example.test", trust: true), windows: false, orders, Row("billing", "b.example.test"));
+
+        Assert.Equal("darling --edit-server orders --set trustServerCertificate=true", command);
+        Assert.Equal(orders.ServerId, DarlingCliCommands.ResolveEditServerTarget(registry, "orders").Target!.ServerId);
+    }
+
+    [Fact]
+    public void The_printed_command_names_the_server_by_its_id_when_another_server_answers_to_its_name()
+    {
+        /* "orders" is the first server's display name and the second server's storage name, so the verb refuses it. */
+        var orders = Row("orders", "a.example.test");
+        var (command, registry) = PrintedCommand(Row("orders", "a.example.test", trust: true), windows: false, orders, Row("billing", "orders"));
+
+        var id = "id:" + orders.ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal($"darling --edit-server {id} --set trustServerCertificate=true", command);
+        Assert.Null(DarlingCliCommands.ResolveEditServerTarget(registry, "orders").Target);
+        Assert.Equal(orders.ServerId, DarlingCliCommands.ResolveEditServerTarget(registry, id).Target!.ServerId);
+    }
+
+    [Fact]
+    public void The_printed_windows_command_names_a_server_whose_name_powershell_cannot_carry_by_its_id()
+    {
+        var quoted = Row("say \"hi\"", "a.example.test");
+        var (command, registry) = PrintedCommand(Row("say \"hi\"", "a.example.test", trust: true), windows: true, quoted);
+
+        var id = "id:" + quoted.ServerId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal($"darling --edit-server '{id}' --set 'trustServerCertificate=true'", command);
+        Assert.Equal(quoted.ServerId, DarlingCliCommands.ResolveEditServerTarget(registry, id).Target!.ServerId);
+
+        /* bash carries the same name in single quotes, so there the command keeps the name. */
+        Assert.Equal("darling --edit-server 'say \"hi\"' --set trustServerCertificate=true",
+            PrintedCommand(Row("say \"hi\"", "a.example.test", trust: true), windows: false, quoted).Command);
+    }
+
     [Fact]
     public void A_password_that_differs_gets_no_line()
     {
@@ -533,7 +594,7 @@ public sealed class EditServerVerbTests
     [Theory]
     [InlineData(false, "/srv/lab\u202Eone/darling.json")]
     [InlineData(true, "C:\\Program Files (x86)\\Darling\\darling.json")]
-    [InlineData(true, "C:\\it's\\darling.json")]
+    [InlineData(true, "C:\\a&b\\darling.json")]
     public void A_configuration_path_the_quoter_does_not_print_leaves_the_server_without_a_command(bool windows, string configPath)
     {
         var entryPoint = windows ? "& 'C:\\Darling\\PerformanceMonitor.Darling.Service.exe'" : "dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll";

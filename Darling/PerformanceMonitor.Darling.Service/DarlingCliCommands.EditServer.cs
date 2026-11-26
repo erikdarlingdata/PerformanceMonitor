@@ -382,7 +382,7 @@ public static partial class DarlingCliCommands
 
         if (match.MatchedBy != "exact")
         {
-            return (null, "  Not changed: no registered server is named exactly that, and --edit-server never matches a part of a name. Servers whose names contain it:"
+            return (null, $"  Not changed: no registered server is named exactly that, and --edit-server never matches a part of a name. Name one of these by its whole name, or by its id as {DarlingMcpServerAdminTools.ServerIdNamePrefix}<id>, which is one plain word in any shell. Servers whose names contain it:"
                 + Environment.NewLine + List(match.Candidates));
         }
 
@@ -465,7 +465,10 @@ public static partial class DarlingCliCommands
                    would otherwise go to the server as a password in the connection test and be refused only at the write. */
                 if (LoginPasswordRefusal(typed) is { } unusable)
                 {
-                    lines.Add("  Not changed: " + unusable + " It was not sent anywhere.");
+                    /* A reference gets the edit's own sentence (what an edit does with one), not the one that verb gives. */
+                    lines.Add("  Not changed: "
+                        + (DarlingSecretSource.IsReference(typed) ? DarlingMcpServerAdminTools.EditReferenceRefusedText : unusable)
+                        + " It was not sent anywhere.");
                     return (lines, 1);
                 }
 

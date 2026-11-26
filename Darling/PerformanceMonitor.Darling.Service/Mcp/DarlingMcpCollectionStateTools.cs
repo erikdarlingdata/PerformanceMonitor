@@ -547,7 +547,7 @@ public sealed class DarlingMcpCollectionStateTools
             + ". Send one storage name from this list as server_name. Nothing was changed."));
     }
 
-    private static async Task<List<ServerRow>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    internal static async Task<List<ServerRow>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         var rows = new List<ServerRow>();
         await using var command = postgres.CreateCommand(

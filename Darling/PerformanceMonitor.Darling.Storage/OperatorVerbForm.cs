@@ -96,13 +96,16 @@ public static class OperatorVerbForm
     /// a line or paragraph separator, a format character such as a right-to-left override, an unassigned or private-use code
     /// point, a lone surrogate and U+FFFD: no quoting makes those safe to read or paste.</para>
     ///
-    /// <para>PowerShell: the word is always in single quotes, and it is printed only when every character is an ASCII letter, a
-    /// digit, one of <c>. _ : / = -</c>, a space or a backslash, it is not empty and it does not end in a backslash. Windows
-    /// PowerShell 5.1 and PowerShell before 7.3 hand a word to an executable without escaping a <c>"</c> in it, drop an empty
-    /// word and let a last backslash swallow the quote they add around a word with a space, so those words become other
-    /// arguments. The characters cmd.exe acts on (<c>&amp; | &lt; &gt; ^ %</c>) and every other character PowerShell reads
-    /// (<c>' ` $ ; , ( ) { } @ #</c>, the curly quotes, anything outside ASCII) get no command either, so a line pasted into
-    /// the wrong shell still runs nothing a name or a host put there.</para>
+    /// <para>PowerShell: the word is always in single quotes, where PowerShell reads nothing but the quote itself, so a single
+    /// quote in the word is written as two and a backslash is written as it is (PowerShell has no backslash escape, and a named
+    /// instance such as <c>SQL01\INST</c> has to reach the executable with its one backslash). It is printed only when every
+    /// character is an ASCII letter, a digit, one of <c>. _ : / = - '</c>, a space or a backslash, it is not empty and it does
+    /// not end in a backslash. Windows PowerShell 5.1 and PowerShell before 7.3 hand a word to an executable without escaping a
+    /// <c>"</c> in it, drop an empty word and let a last backslash swallow the quote they add around a word with a space, so
+    /// those words become other arguments. The characters cmd.exe acts on (<c>&amp; | &lt; &gt; ^ %</c>) and every other
+    /// character PowerShell reads (<c>` $ ; , ( ) { } @ #</c>, the curly quotes, which PowerShell reads as single quotes,
+    /// anything outside ASCII) get no command either, so a line pasted into the wrong shell still runs nothing a name or a host
+    /// put there.</para>
     /// </summary>
     public static string? ShellWord(string text, bool isWindows)
     {
@@ -111,7 +114,9 @@ public static class OperatorVerbForm
 
         if (isWindows)
         {
-            return text.Length > 0 && text[^1] != '\\' && text.All(c => Bare(c) || c is ' ' or '\\') ? "'" + text + "'" : null;
+            return text.Length > 0 && text[^1] != '\\' && text.All(c => Bare(c) || c is ' ' or '\\' or '\'')
+                ? "'" + text.Replace("'", "''", StringComparison.Ordinal) + "'"
+                : null;
         }
 
         foreach (var rune in text.EnumerateRunes())

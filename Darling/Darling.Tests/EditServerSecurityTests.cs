@@ -133,7 +133,9 @@ public sealed class EditServerSecurityTests
         ["%PATH%", false],
         ["a^b", false],
         ["caf\u00E9", false],
-        ["it's", false],
+        ["it's", true],
+        ["O'Brien's db", true],
+        ["SQL01\\INST", true],
         ["\u2018x\u2019", false],
         ["$(id)", false],
         ["`id`", false],
@@ -155,7 +157,21 @@ public sealed class EditServerSecurityTests
     [MemberData(nameof(WindowsWords))]
     public void A_windows_word_is_printed_in_single_quotes_or_not_at_all(string word, bool printed)
     {
-        Assert.Equal(printed ? "'" + word + "'" : null, StoreConfigProvider.CommandWord(word, powershell: true));
+        Assert.Equal(printed ? PowerShellQuoted(word) : null, StoreConfigProvider.CommandWord(word, powershell: true));
+    }
+
+    /// <summary>A word as PowerShell takes it literally: in single quotes, with each single quote in it written as two.</summary>
+    private static string PowerShellQuoted(string word) => "'" + word.Replace("'", "''", StringComparison.Ordinal) + "'";
+
+    [Theory]
+    [InlineData("it's", "'it''s'")]
+    [InlineData("O'Brien's db", "'O''Brien''s db'")]
+    [InlineData("''", "''''''")]
+    [InlineData("SQL01\\INST", "'SQL01\\INST'")]
+    [InlineData("C:\\Program Files\\Darling\\darling.json", "'C:\\Program Files\\Darling\\darling.json'")]
+    public void A_powershell_word_doubles_a_single_quote_and_never_touches_a_backslash(string word, string expected)
+    {
+        Assert.Equal(expected, StoreConfigProvider.CommandWord(word, powershell: true));
     }
 
     [Theory]
@@ -168,7 +184,7 @@ public sealed class EditServerSecurityTests
 
         if (printed)
         {
-            Assert.EndsWith($" To apply the file's values, in PowerShell, run: {WindowsEntry} --edit-server '{word}' --set 'host=new'", line, StringComparison.Ordinal);
+            Assert.EndsWith($" To apply the file's values, in PowerShell, run: {WindowsEntry} --edit-server {PowerShellQuoted(word)} --set 'host=new'", line, StringComparison.Ordinal);
         }
         else
         {
@@ -183,7 +199,7 @@ public sealed class EditServerSecurityTests
     [InlineData(@"C:\Program Files\Darling", WindowsEntry)]
     [InlineData(@"C:\Program Files\Darling\", WindowsEntry)]
     [InlineData(@"C:\Program Files (x86)\Darling", null)]
-    [InlineData(@"C:\Users\it's\Darling", null)]
+    [InlineData(@"C:\Users\it's\Darling", @"& 'C:\Users\it''s\Darling\PerformanceMonitor.Darling.Service.exe'")]
     [InlineData(@"C:\a&calc", null)]
     [InlineData(null, null)]
     public void The_windows_entry_point_is_the_call_operator_and_the_full_path_or_nothing(string? folder, string? expected)
@@ -207,7 +223,7 @@ public sealed class EditServerSecurityTests
     }
 
     /// <summary>A program that writes its arguments, one per line, as base64 of UTF-8, named as the service executable in a
-    /// folder with a space. Built once with the .NET Framework compiler every Windows has. Null when there is no compiler.</summary>
+    /// folder with a space and a single quote, so the entry point itself is a word with a doubled quote. Built once with the .NET Framework compiler every Windows has. Null when there is no compiler.</summary>
     private static readonly Lazy<string?> s_echoFolder = new(() =>
     {
         var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
@@ -219,7 +235,7 @@ public sealed class EditServerSecurityTests
             return null;
         }
 
-        var folder = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "darling 9693 " + Guid.NewGuid().ToString("N"));
+        var folder = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "darling 9693 it's " + Guid.NewGuid().ToString("N"));
         System.IO.Directory.CreateDirectory(folder);
         var source = System.IO.Path.Combine(folder, "echo.cs");
         System.IO.File.WriteAllText(source,
@@ -234,6 +250,109 @@ public sealed class EditServerSecurityTests
         process.WaitForExit();
         return process.ExitCode == 0 ? folder : null;
     });
+
+    /// <summary>Runs each printed command as one pasted line in <paramref name="shell"/> and returns the arguments the
+    /// program that stands in for the service received, one list per command. Skips when the shell is not installed.</summary>
+    private static async Task<List<List<string>>> PasteIntoAsync(string shell, IReadOnlyList<string> commands)
+    {
+        var start = new ProcessStartInfo(shell) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-NonInteractive");
+        start.ArgumentList.Add("-EncodedCommand");
+        /* Each printed command is one line of the script, as it is when it is pasted at the prompt. */
+        start.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(string.Join("\n", commands))));
+        Process? started = null;
+        try
+        {
+            started = Process.Start(start);
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+        }
+
+        Assert.SkipWhen(started is null, shell + " is not installed on this machine.");
+        using var process = started!;
+        var errors = process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
+        var seen = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
+        await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+        Assert.Equal("", await errors);
+
+        var received = new List<List<string>> { new() };
+        foreach (var entryLine in seen.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim()))
+        {
+            if (entryLine == "end")
+            {
+                received.Add([]);
+            }
+            else
+            {
+                received[^1].Add(Encoding.UTF8.GetString(Convert.FromBase64String(entryLine)));
+            }
+        }
+
+        /* The list after the last "end" is the one no command filled. */
+        Assert.Empty(received[^1]);
+        received.RemoveAt(received.Count - 1);
+        return received;
+    }
+
+    /// <summary>The four names a pasted Windows command has to carry (#9693): a named instance, a name with a space, a name
+    /// with a single quote and a name with a double quote, each with the id it is registered under.</summary>
+    private static readonly (int Id, string Name)[] s_pastedNames =
+    [
+        (11, "SQL01\\INST"),
+        (12, "orders db"),
+        (13, "O'Brien's"),
+        (14, "say \"hi\""),
+    ];
+
+    [Theory]
+    [InlineData("powershell.exe")]
+    [InlineData("pwsh.exe")]
+    public async Task A_windows_command_pasted_into_powershell_names_the_server_it_was_printed_for(string shell)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var folder = s_echoFolder.Value;
+        Assert.SkipWhen(folder is null, "No .NET Framework C# compiler was found to build the program that echoes its arguments.");
+        var entry = OperatorVerbForm.PasteableEntryPoint(isWindows: true, folder);
+        Assert.SkipWhen(entry is null, "The temporary folder's path holds a character the Windows rule does not print.");
+
+        var registry = s_pastedNames.Select(n => new RegisteredServer(n.Id, n.Name, n.Name)).ToList();
+        var commands = s_pastedNames.Select(n =>
+        {
+            /* The file's host is the named instance, so the value after --set carries a backslash too. */
+            var line = Assert.Single(StoreConfigProvider.BuildSettingDriftWarnings(
+                [new StoreConfigProvider.ServerSettingDrift(n.Name, true, [new StoreConfigProvider.SettingDrift("host", "SQL01\\INST", "old", true)], ServerId: n.Id)],
+                maxServers: 10, entryPoint: entry, windows: true));
+            return line[(line.IndexOf("run: ", StringComparison.Ordinal) + 5)..];
+        }).ToList();
+
+        var received = await PasteIntoAsync(shell, commands);
+
+        Assert.Equal(s_pastedNames.Length, received.Count);
+        for (var i = 0; i < s_pastedNames.Length; i++)
+        {
+            var (id, name) = s_pastedNames[i];
+            Assert.Equal(4, received[i].Count);
+            Assert.Equal("--edit-server", received[i][0]);
+            Assert.Equal("--set", received[i][2]);
+            /* The backslash of the named instance arrives as one backslash. */
+            Assert.Equal("host=SQL01\\INST", received[i][3]);
+
+            /* What the shell handed over names that server and no other, by the rule the verb resolves a name with. */
+            var match = Edit.ResolveForEdit(registry, received[i][1]);
+            Assert.Equal("exact", match.MatchedBy);
+            Assert.Equal(id, Assert.Single(match.Candidates).ServerId);
+
+            /* A named instance, a space and a single quote arrive as the name itself. A double quote cannot be handed to an
+               executable by Windows PowerShell 5.1, so that server is named by its id. */
+            Assert.Equal(name.Contains('"', StringComparison.Ordinal) ? "id:" + id.ToString(System.Globalization.CultureInfo.InvariantCulture) : name, received[i][1]);
+        }
+    }
 
     [Theory]
     [InlineData("powershell.exe")]
@@ -259,47 +378,8 @@ public sealed class EditServerSecurityTests
             return line[(line.IndexOf("run: ", StringComparison.Ordinal) + 5)..];
         }).ToList();
 
-        var start = new ProcessStartInfo(shell) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
-        start.ArgumentList.Add("-NoProfile");
-        start.ArgumentList.Add("-NonInteractive");
-        start.ArgumentList.Add("-EncodedCommand");
-        /* Each printed command is one line of the script, as it is when it is pasted at the prompt. */
-        start.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(string.Join("\n", commands))));
-        Process? started = null;
-        try
-        {
-            started = Process.Start(start);
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-        }
-
-        Assert.SkipWhen(started is null, shell + " is not installed on this machine.");
-        var process = started!;
-
-        using (process)
-        {
-            var errors = process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
-            var seen = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
-            await process.WaitForExitAsync(TestContext.Current.CancellationToken);
-            Assert.Equal("", await errors);
-
-            var runs = seen.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim()).ToList();
-            var received = new List<List<string>> { new() };
-            foreach (var entryLine in runs)
-            {
-                if (entryLine == "end")
-                {
-                    received.Add([]);
-                }
-                else
-                {
-                    received[^1].Add(Encoding.UTF8.GetString(Convert.FromBase64String(entryLine)));
-                }
-            }
-
-            Assert.Equal(words.Select(w => new List<string> { "--edit-server", w, "--set", "host=" + w }).Append([]), received);
-        }
+        var received = await PasteIntoAsync(shell, commands);
+        Assert.Equal(words.Select(w => new List<string> { "--edit-server", w, "--set", "host=" + w }), received);
 
         /* What the verb makes of those arguments: the same server and the same host. */
         Assert.True(DarlingCliCommands.TryParseEditServerArgs(["orders db", "--set", "host=host\\inst"], out var request, out var error), error);
@@ -877,16 +957,25 @@ public sealed class EditServerSecurityTests
     /* ---- round 3 of the security review ---- */
 
     [Fact]
-    public void A_backslash_in_a_quoted_value_is_written_as_two_so_it_never_reads_as_the_start_of_an_escape()
+    public void A_backslash_in_a_shown_value_is_never_doubled_so_a_named_instance_reads_as_it_is_typed()
     {
-        /* A value that ends in a backslash and a quote, and a value that holds the six characters of the quote's own escape,
-           are two values and print as two texts. */
-        var backslashThenQuote = StoreConfigProvider.DriftValue("a\\\"");
-        var theEscapeAsText = StoreConfigProvider.DriftValue("a\\u0022");
-        Assert.Equal("\"a\\\\\\u0022\"", backslashThenQuote);
-        Assert.Equal("\"a\\\\u0022\"", theEscapeAsText);
-        Assert.NotEqual(StoreConfigProvider.DriftValue("a\""), theEscapeAsText);
-        Assert.Equal("\"host\\\\inst\"", StoreConfigProvider.DriftValue("host\\inst"));
+        const string instance = "SQL01\\INST";
+        Assert.Equal("\"SQL01\\INST\"", StoreConfigProvider.DriftValue(instance));
+        Assert.Equal("\"C:\\ProgramData\\Darling\\darling.json\"", StoreConfigProvider.DriftValue("C:\\ProgramData\\Darling\\darling.json"));
+
+        /* The lines a person reads a name off before typing it: the server line, the list a refusal prints, and the drift line. */
+        var shown = new List<string>
+        {
+            (Orders with { DisplayName = instance, Host = instance }).Describe(),
+            DarlingCliCommands.ResolveEditServerTarget([new RegisteredServer(7, instance, instance)], "SQL01").Refusal!,
+            Assert.Single(Lines(instance, "host", instance, "old", windows: true)),
+            Assert.Single(Lines(instance, "host", instance, "old", windows: false)),
+        };
+        Assert.All(shown, text =>
+        {
+            Assert.Contains(instance, text, StringComparison.Ordinal);
+            Assert.DoesNotContain("SQL01\\\\INST", text, StringComparison.Ordinal);
+        });
     }
 
     [Fact]
@@ -943,7 +1032,9 @@ public sealed class EditServerSecurityTests
         Assert.Single(sends);
         Assert.DoesNotContain(sends, s => s.Contains("password", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(lines, l => l.Contains(typed, StringComparison.Ordinal));
-        Assert.Contains(lines, l => l.Contains("reference", StringComparison.Ordinal) && l.Contains("not sent anywhere", StringComparison.Ordinal));
+        /* The edit's own sentence for a reference, not the one --set-login-password gives. */
+        Assert.Equal("  Not changed: " + Edit.EditReferenceRefusedText + " It was not sent anywhere.", Assert.Single(lines));
+        Assert.DoesNotContain(lines, l => l.Contains(DarlingCliCommands.LoginPasswordIsReferenceText, StringComparison.Ordinal));
     }
 
     private static readonly PerformanceMonitor.Darling.Service.Mcp.DarlingMcpCollectionStateTools.ServerRow EnabledRow = new(7, "orders", "sql01", "sqlserver", false, [], 0m);

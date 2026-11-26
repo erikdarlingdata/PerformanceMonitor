@@ -629,6 +629,68 @@ VALUES (@id, @name, @host, 'sql', @username, @stored, @enabled, @remediation_use
         }
     }
 
+    /// <summary>#9693: the stop inside the store run. A password one character longer than SQL Server takes stops the run before
+    /// a row is written, with exit code 1 and the limit named, and the dry run says a run would stop. A password of exactly the
+    /// limit is saved.</summary>
+    [Fact]
+    public async Task OnAStore_APasswordLongerThanSqlServerTakes_StopsBeforeARowIsWritten_AndOneAtTheLimitIsSaved()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to run --set-login-password against a scratch store.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct);
+        await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var bodySucceeded = false;
+        try
+        {
+            using var key = PasswordPrivateKey.Generate();
+            var ring = DarlingPasswordKey.FromPrivateKey(key);
+            await using (var setup = await source.OpenConnectionAsync(ct))
+            {
+                await DarlingPasswordKeyStore.PublishAsync(setup, key.PublicKey.KeyId, key.PublicKey.Spki, ct);
+                await using var insert = new NpgsqlCommand(@"
+INSERT INTO config.config_monitored_servers (server_id, name, host, auth, username, is_enabled)
+VALUES (9693301, 'long-password', 'long-password.example', 'sql', @username, TRUE);", setup);
+                insert.Parameters.AddWithValue("username", Login);
+                await insert.ExecuteNonQueryAsync(ct);
+            }
+
+            var before = await ReadStoredAsync(source, ct);
+            var tooLong = new string('p', DarlingCliCommands.SqlServerMaxPasswordCharacters + 1);
+            var args = new DarlingCliCommands.SetLoginPasswordArgs(Login, DryRun: false, null);
+
+            var output = new StringWriter();
+            var error = new StringWriter();
+            var exit = await DarlingCliCommands.SetLoginPasswordInStoreAsync(source, new DarlingConfig(), ring, null, args, tooLong, output, error, ct);
+
+            Assert.Equal(DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig, exit);
+            Assert.Contains(DarlingCliCommands.SqlServerPasswordTooLongText, error.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain(tooLong, output.ToString() + error.ToString(), StringComparison.Ordinal);
+            Assert.Equal(before, await ReadStoredAsync(source, ct));
+
+            var dryOutput = new StringWriter();
+            var dryExit = await DarlingCliCommands.SetLoginPasswordInStoreAsync(
+                source, new DarlingConfig(), ring, null, new DarlingCliCommands.SetLoginPasswordArgs(Login, DryRun: true, null), tooLong, dryOutput, new StringWriter(), ct);
+            Assert.Equal(DarlingCliCommands.CollectorToggleExitCode.Success, dryExit);
+            Assert.Contains(DarlingCliCommands.SqlServerPasswordTooLongText, dryOutput.ToString(), StringComparison.Ordinal);
+            Assert.Equal(before, await ReadStoredAsync(source, ct));
+
+            var atTheLimit = new string('p', DarlingCliCommands.SqlServerMaxPasswordCharacters);
+            var saved = await DarlingCliCommands.SetLoginPasswordInStoreAsync(source, new DarlingConfig(), ring, null, args, atTheLimit, new StringWriter(), new StringWriter(), ct);
+            Assert.Equal(DarlingCliCommands.CollectorToggleExitCode.Success, saved);
+            await using (var read = await source.OpenConnectionAsync(ct))
+            {
+                var server = (await StoreConfigProvider.ReadMonitoredServersAsync(read, new DarlingConfig(), ct)).Single(s => s.Name == "long-password");
+                Assert.Equal(atTheLimit, DarlingSecrets.ResolvePassword(server, out _, ring));
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, (_, _) => Task.CompletedTask);
+        }
+    }
+
     [Fact]
     public async Task OnAStoreWithoutTheLegacyPinTable_TheRunStillSets_BecauseTheSwallowedPinReadDoesNotAbortItsTransaction()
     {

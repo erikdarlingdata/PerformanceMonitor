@@ -145,9 +145,20 @@ public sealed partial class DarlingMcpServerAdminTools
         }
     }
 
-    /// <summary>The answer when the store refuses a password that is a reference (env: or file:): the store takes the
-    /// password itself from the viewer, admin and MCP roles. The same words in the store's own trigger and edit function.</summary>
-    internal const string EditReferenceRefusedText = ServerConnectionRule.ReferenceRefusedText;
+    /// <summary>The answer when an edit is given an <c>env:</c> or <c>file:</c> reference as the password (#9693), from the
+    /// plan before any connection, from the store's own check at the write, and from the <c>--edit-server</c> prompt. It says
+    /// what an edit does with a reference, which is not what registering a server does: an edit saves a password itself and
+    /// never a reference, a typed password replaces a stored reference, a switch to an authentication that takes no password
+    /// removes it, and a reference is set on the server's entry in the configuration file. It names no value.</summary>
+    internal const string EditReferenceRefusedText =
+        "That is an env: or file: reference, and an edit saves only the password itself, never a reference. "
+        + "An edit can drop a stored reference: give the password itself and it replaces the reference, or switch the server to an authentication that takes no password and the reference is removed. "
+        + "To use or change a reference, edit the server's entry in the configuration file.";
+
+    /// <summary>The refusal for a password an edit was given: <see cref="ValidateSecret"/>, with the edit's own sentence for a
+    /// reference in place of the one a new registration gets.</summary>
+    internal static string? EditSecretRefusal(string? secret, PasswordKeyStatus key, bool isServicePrincipal) =>
+        DarlingSecretSource.IsReference(secret) ? EditReferenceRefusedText : ValidateSecret(secret, key, isServicePrincipal);
 
     /// <summary>The store's own answer when an edit sends an empty value for a required field, or one the store's field rules do not accept: nothing is saved.</summary>
     internal const string EditInvalidValueText = "One of the values in this edit is empty or is not accepted for its field, so nothing was saved. Check the fields you changed and try again.";
@@ -1375,7 +1386,7 @@ LIMIT 1";
             }
         }
 
-        if (secretMode && c.Password is not null && (ValidateSecret(c.Password, key, isSp) ?? SealableTextRefusal(c.Password, host, database, username)) is { } secretRefusal)
+        if (secretMode && c.Password is not null && (EditSecretRefusal(c.Password, key, isSp) ?? SealableTextRefusal(c.Password, host, database, username)) is { } secretRefusal)
         {
             return (null, secretRefusal);
         }

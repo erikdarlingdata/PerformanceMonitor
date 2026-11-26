@@ -364,6 +364,46 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
         Assert.Equal(fileReference ? OwnedFileValue : OwnedVariableValue, DarlingSecrets.ResolvePassword(agreed, out _));
     }
 
+    /// <summary>#9693: an entry whose host was edited in darling.json derives another id than the row it was seeded as, so the
+    /// entry is found by the server's name, capitals aside. The row, which still holds that entry's reference, is refused as
+    /// settings that differ. A row with another name and another id holds a reference no entry declares for it, and keeps the
+    /// refusal for the service's own secrets.</summary>
+    [Fact]
+    public void AnEntryWhoseEditedHostGaveItAnotherId_IsFoundByName_AndItsReferenceIsRefusedAsSettingsThatDiffer()
+    {
+        var reference = "env:" + OwnedVariable;
+        var config = DarlingConfig.Parse(DarlingJson(
+            new { name = "alpha", host = "alpha-new.example.test", auth = "sql", username = "monitor", encryptedPassword = reference }));
+        OwnWhatTheFileWrites(config);
+        var declared = config.Servers.Single();
+
+        /* The registry row keeps the id the entry derived from its host before the file was edited. */
+        var seededId = new MonitoredServer { Name = "alpha", Host = "alpha-old.example.test", Auth = declared.Auth, Username = declared.Username }.ServerId;
+        Assert.NotEqual(declared.ServerId, seededId);
+        MonitoredServer Row(string name) => new()
+        {
+            StoredServerId = seededId,
+            Name = name,
+            Host = "alpha-old.example.test",
+            Port = declared.Port,
+            Auth = declared.Auth,
+            Username = declared.Username,
+            EncryptMode = declared.EncryptMode,
+            EncryptedPassword = reference,
+        };
+
+        var sameName = Row("ALPHA");
+        StoreConfigProvider.MarkSlotsTheFileDeclares(sameName, config);
+        var differ = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(sameName, out _));
+        Assert.EndsWith(": " + DarlingSecrets.ReferenceDeclaredForOtherSettingsText, differ.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(OwnedVariable, differ.Message, StringComparison.Ordinal);
+
+        var otherName = Row("gamma");
+        StoreConfigProvider.MarkSlotsTheFileDeclares(otherName, config);
+        var own = Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(otherName, out _));
+        Assert.EndsWith(": " + DarlingOwnedSecrets.ReferenceRefusalText, own.Message, StringComparison.Ordinal);
+    }
+
     private async Task RunStoreRowScenarioAsync(bool remediationSlot)
     {
         var ct = TestContext.Current.CancellationToken;
@@ -481,17 +521,17 @@ public sealed class DarlingSecretsOwnedReferenceTests : IDisposable
             return await StoreConfigProvider.ReadMonitoredServersAsync(connection, config, ct);
         }
 
+        /* Each of the three rows below still holds its own entry's reference while one connection setting differs from that
+           entry. In the password slot that is refused as settings that differ (#9693). The remediation slot has no such
+           mark, so there the same row is refused as the service's own secret. Each scenario gives exactly one of the two. */
+        var expectedRefusal = remediationSlot ? DarlingOwnedSecrets.ReferenceRefusalText : DarlingSecrets.ReferenceDeclaredForOtherSettingsText;
+        var otherRefusal = remediationSlot ? DarlingSecrets.ReferenceDeclaredForOtherSettingsText : DarlingOwnedSecrets.ReferenceRefusalText;
         void AssertRefused(MonitoredServer server)
         {
             var refused = Assert.Throws<InvalidOperationException>(() => Resolve(server));
             Assert.Contains($"servers['{server.Name}'].{setting}", refused.Message, StringComparison.Ordinal);
-
-            /* A moved row that still holds its own entry's reference in the password slot is refused as settings that differ
-               (#9693), and every other row here as the service's own secret. Both are refusals: nothing resolves. */
-            Assert.True(
-                refused.Message.Contains(DarlingOwnedSecrets.ReferenceRefusalText, StringComparison.Ordinal)
-                || refused.Message.Contains(DarlingSecrets.ReferenceDeclaredForOtherSettingsText, StringComparison.Ordinal),
-                refused.Message);
+            Assert.EndsWith(": " + expectedRefusal, refused.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain(otherRefusal, refused.Message, StringComparison.Ordinal);
         }
 
         /* An edit made by a process that holds no owned set (the viewer's own process does not read darling.json) stores

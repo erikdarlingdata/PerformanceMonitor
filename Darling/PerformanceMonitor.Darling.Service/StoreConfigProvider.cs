@@ -719,7 +719,9 @@ public sealed class StoreConfigProvider
     /// how the line displays or add words that read as the line's own.
     /// The command runs as printed in the shell the line names: bash everywhere but Windows, PowerShell (Windows PowerShell 5.1
     /// and PowerShell 7) when <paramref name="windows"/> is true, where <paramref name="entryPoint"/> is the call operator and
-    /// the full path of the service executable (<see cref="OperatorVerbForm.PasteableEntryPoint"/>). A server with a value
+    /// the full path of the service executable (<see cref="OperatorVerbForm.PasteableEntryPoint"/>). Every word is quoted for
+    /// that shell and a backslash is never escaped. The server is named by its name or as <c>id:&lt;server id&gt;</c>
+    /// (<see cref="ServerWord"/>). A server with a value
     /// <see cref="CommandWord"/> does not print gets no command, and so does every server when <paramref name="entryPoint"/> is
     /// null: the line says to run <c>--edit-server</c> by hand. The command ends with <c>--config</c> and
     /// <paramref name="configPath"/>, the configuration file the service is using, as one more quoted word, so the paste edits
@@ -745,6 +747,10 @@ public sealed class StoreConfigProvider
             var args = EditServerArgsFor(server);
             /* args is the name, then "--set" and a field=value pair for each field: the flag is printed as it is, the rest is quoted. */
             var words = args.Select((a, i) => i > 0 && i % 2 == 1 ? a : CommandWord(a, powershell)).ToList();
+            if (words.Count > 0)
+            {
+                words[0] = ServerWord(server, powershell);
+            }
 
             /* The command names the configuration the service is using, so a paste on a host whose configuration is not at the
                default path edits through that one. The path is one more quoted word, and a path the quoter does not print
@@ -815,6 +821,20 @@ public sealed class StoreConfigProvider
         }
     }
 
+    /// <summary>The word that names <paramref name="server"/> in the printed command (#9693): its name, when that name answers
+    /// for this server and no other under the rule the verb resolves a name by and the shell's quoting can carry it, else
+    /// <c>id:&lt;server id&gt;</c>, which names exactly one server and is one plain word in every shell. A name several servers
+    /// answer to would be refused by the verb, and a name with a double quote cannot be handed to an executable by Windows
+    /// PowerShell 5.1, so the paste names the server by its id in both cases. Null when neither can be printed.</summary>
+    internal static string? ServerWord(ServerSettingDrift server, bool powershell)
+    {
+        var byName = server.NamePicksOne ? CommandWord(server.Server, powershell) : null;
+        return byName
+            ?? (server.ServerId is { } id
+                ? CommandWord(Mcp.DarlingMcpServerAdminTools.ServerIdNamePrefix + id.ToString(CultureInfo.InvariantCulture), powershell)
+                : null);
+    }
+
     /// <summary>The arguments after <c>--edit-server</c> that apply a drifted server's darling.json values (#9693): the registered name,
     /// then one <c>--set</c> per field the verb sets. Empty when it sets none of the fields that differ.</summary>
     internal static IReadOnlyList<string> EditServerArgsFor(ServerSettingDrift server)
@@ -871,11 +891,15 @@ public sealed class StoreConfigProvider
         return builder.ToString();
     }
 
-    /// <summary>A value between double quotes in a drift line: <see cref="DriftText"/>, with a double quote in the value written
-    /// as <c>\u0022</c> and a backslash in the value written as two, so the value ends at the closing quote, nothing in it reads
-    /// as the line's own words, and a backslash the value holds is never read as the start of an escape (#9693).</summary>
+    /// <summary>A value between double quotes in a line a person reads: <see cref="DriftText"/>, with a double quote in the value
+    /// written as <c>\u0022</c>, so the value ends at the closing quote and nothing in it reads as the line's own words (#9693).
+    /// A backslash is written as it is and never doubled: a named instance (<c>SQL01\INST</c>) and a Windows path are read off
+    /// this line and typed into a command, and neither PowerShell nor cmd.exe takes a backslash as an escape, so a doubled one
+    /// would name another server. The cost is that a value holding the six characters of an escape as text prints like the
+    /// character the escape stands for. These quotes are for reading. A word of a printed command is quoted for its shell by
+    /// <see cref="CommandWord"/>.</summary>
     internal static string DriftValue(string? value) =>
-        "\"" + DriftText(value?.Replace("\\", "\\\\", StringComparison.Ordinal)).Replace("\"", "\\u0022", StringComparison.Ordinal) + "\"";
+        "\"" + DriftText(value).Replace("\"", "\\u0022", StringComparison.Ordinal) + "\"";
 
     /// <summary>One side of a drifted field: <see cref="DriftValue"/>, or the bare <c>(none)</c> for a value that is not set, so
     /// a value that is set is always the one in quotes.</summary>
@@ -1090,9 +1114,14 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
 
     /// <summary>One registered server and every field its darling.json entry disagrees with (#2552).
     /// <paramref name="FileEntryCarriesPassword"/> is whether the entry holds a password or a reference, which decides
-    /// whether the warning says that password is not used while a connection setting differs.</summary>
+    /// whether the warning says that password is not used while a connection setting differs.
+    /// <paramref name="ServerId"/> is the registry row's id, and <paramref name="NamePicksOne"/> is whether
+    /// <paramref name="Server"/> answers for that row and no other under the rule <c>--edit-server</c> resolves a name by
+    /// (<see cref="Mcp.DarlingMcpServerAdminTools.ResolveForEdit"/>): together they decide whether the printed command names the
+    /// server by its name or as <c>id:&lt;server id&gt;</c> (#9693).</summary>
     internal sealed record ServerSettingDrift(
-        string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields, bool FileEntryCarriesPassword = false);
+        string Server, bool IsEnabled, IReadOnlyList<SettingDrift> Fields, bool FileEntryCarriesPassword = false,
+        int? ServerId = null, bool NamePicksOne = true);
 
     /// <summary>
     /// Pairs each darling.json entry with its registry row and reports the fields they disagree on (#2552).
@@ -1125,6 +1154,10 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             byId[stored.Config.ServerId] = stored;
         }
 
+        /* The registry as --edit-server resolves a name against it: each row's id, storage name and display name. */
+        var registered = storeServers
+            .Select(s => new PerformanceMonitor.Darling.Storage.RegisteredServer(s.Config.ServerId, s.Config.StorageName, s.Config.DisplayName))
+            .ToList();
         var storeNameCounts = CountNames(storeServers.Select(s => s.Config.DisplayName));
         var fileNameCounts = CountNames(file.Select(s => s.DisplayName));
         var fileIdCounts = new Dictionary<int, int>();
@@ -1156,9 +1189,12 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
             var fields = CompareServerSettings(entry, match.Config);
             if (fields.Count > 0)
             {
+                var answers = Mcp.DarlingMcpServerAdminTools.ResolveForEdit(registered, match.Config.DisplayName);
                 drifted.Add(new ServerSettingDrift(
                     match.Config.DisplayName, match.IsEnabled, fields,
-                    !string.IsNullOrWhiteSpace(entry.EncryptedPassword) || !string.IsNullOrWhiteSpace(entry.Password)));
+                    !string.IsNullOrWhiteSpace(entry.EncryptedPassword) || !string.IsNullOrWhiteSpace(entry.Password),
+                    match.Config.ServerId,
+                    answers.MatchedBy == "exact" && answers.Candidates.Count == 1 && answers.Candidates[0].ServerId == match.Config.ServerId));
             }
         }
 

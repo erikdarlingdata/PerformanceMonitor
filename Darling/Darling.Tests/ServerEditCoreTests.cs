@@ -676,7 +676,7 @@ public sealed class ServerEditCoreTests : IDisposable
         var (plan, error) = Plan(SqlRow(), "{\"host\":\"b.example.test\",\"password\":\"env:DARLING_CONFIG\"}");
 
         Assert.Null(plan);
-        Assert.Equal(DarlingSecretSource.RequestReferenceRefusalText, error);
+        Assert.Equal(Edit.EditReferenceRefusedText, error);
     }
 
     [Fact]
@@ -980,8 +980,8 @@ public sealed class ServerEditCoreTests : IDisposable
         var answer = JsonNode.Parse(await Run(store, "{\"monthly_cost_usd\":5}"))!;
 
         Assert.Equal("invalid", answer["status"]!.GetValue<string>());
-        Assert.Equal("Enter the password itself. References (env: or file:) can only be set in the configuration file.", answer["message"]!.GetValue<string>());
         Assert.Equal(Edit.EditReferenceRefusedText, answer["message"]!.GetValue<string>());
+        Assert.NotEqual(ServerConnectionRule.ReferenceRefusedText, answer["message"]!.GetValue<string>());
     }
 
     [Fact]
