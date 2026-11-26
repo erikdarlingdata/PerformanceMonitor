@@ -6,16 +6,16 @@
 #   sudo ./upgrade-darling.sh --rollback [--health-seconds <n>]
 #
 # Run the copy of this script that came out of the NEW tarball, as root, from a folder that is not /opt/darling.
-# That folder, this script and darling-script-lib.sh must be root's own and closed to group and other writes,
-# because root runs what they hold.
+# That folder, every folder above it, this script and darling-script-lib.sh must be root's own and closed to group
+# and other writes, because root runs what they hold.
 # What it does, in order:
 #   1. Pre-flight, with the service still running: root, systemd, the .NET runtime host, an installed unit and build,
 #      the source and its SHA256, the new build's --version as the service user, and a refusal when any process
 #      other than the service runs from /opt/darling. --check stops here, and nothing is changed.
 #   2. Stops the service, and checks that no process is left that runs from /opt/darling.
-#   3. Moves /opt/darling to /opt/darling.previous, the rollback copy, and moves the new build into /opt/darling.
-#      Both are renames, so /opt/darling never holds a mix of two builds. /etc/darling (the config, the secret files
-#      and the keys) is not touched, and the script checks that afterwards.
+#   3. Moves /opt/darling to /opt/darling.previous, the rollback copy, makes that copy root's own, and moves the new
+#      build into /opt/darling. Both moves are renames, so /opt/darling never holds a mix of two builds. /etc/darling
+#      (the config, the secret files and the keys) is not touched, and the script checks that afterwards.
 #   4. Starts the service and runs the health check.
 #   5. When the start or the health check fails: stops the service, moves the new build to /opt/darling.failed, moves
 #      /opt/darling.previous back, starts the old build and checks it too. The exit code is 1 either way.
@@ -31,16 +31,26 @@ set -euo pipefail
 umask 022
 # The tools come from the system folders, whatever PATH the caller has.
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# What the caller's environment could change in the shell and in the tools: bash's POSIX mode, the folders "cd"
+# searches, the names a glob skips, and extra arguments for every tar (#9688).
+set +o posix
+unset TAR_OPTIONS POSIXLY_CORRECT CDPATH GLOBIGNORE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-# Root sources darling-script-lib.sh from this folder. An account that could write the folder or either file would run
-# its own commands as root, so a root run stops before it reads the file (#9688).
+# Root sources darling-script-lib.sh from this folder. An account that could write the folder, a folder above it or
+# either file would run its own commands as root, so a root run stops before it reads the file (#9688).
 [ -f "${SCRIPT_DIR}/darling-script-lib.sh" ] || { echo "ERROR: darling-script-lib.sh is not beside this script. Run the script from the folder the new tarball extracted into." >&2; exit 1; }
 if [ "$(id -u)" -eq 0 ]; then
-    for trusted in "${SCRIPT_DIR}" "${BASH_SOURCE[0]}" "${SCRIPT_DIR}/darling-script-lib.sh"; do
+    trusted="${SCRIPT_DIR}"
+    trusted_paths=("${BASH_SOURCE[0]}" "${SCRIPT_DIR}/darling-script-lib.sh" "${trusted}")
+    while [ "${trusted}" != / ]; do
+        trusted="$(dirname "${trusted}")"
+        trusted_paths+=("${trusted}")
+    done
+    for trusted in "${trusted_paths[@]}"; do
         case "$(stat -L -c '%u %A' -- "${trusted}" 2>/dev/null || true)" in
             "0 "?????-??-?) ;;
-            *) echo "ERROR: ${trusted} is not owned by root, or its group or other users can write it. Extract the new tarball as root into a new folder (sudo mkdir <folder>, then sudo tar -xzf <tarball> -C <folder> --no-same-owner) and run the script from there." >&2; exit 1 ;;
+            *) echo "ERROR: ${trusted} is not owned by root, or its group or other users can write it. Extract the new tarball as root into a new folder under /opt (sudo mkdir <folder>, then sudo tar -xzf <tarball> -C <folder> --no-same-owner) and run the script from there." >&2; exit 1 ;;
         esac
     done
 fi
@@ -68,14 +78,21 @@ while [ $# -gt 0 ]; do
     esac
 done
 case "${health_seconds}" in ''|*[!0-9]*) die "--health-seconds takes a whole number of seconds." ;; esac
+[ "${#health_seconds}" -le 5 ] || die "--health-seconds takes 5 digits at most (99999 seconds)."
+# Read as base 10: with a leading zero the shell would take 08 for a bad octal number, and the health check would not run (#9688).
+health_seconds=$((10#${health_seconds}))
 [ "${rollback_only}" = 0 ] || [ "${check_only}" = 0 ] || die "--rollback and --check cannot be combined."
 
 # One "hash path" line for the config, each secret file beside it and each key file. The upgrade writes none of them. The
 # service may add a key file at a start, so the check afterwards is that every line from before is still there. The
 # service user can swap a key file for a link or a FIFO, so the hashes are taken as the service user, which reads every
-# file the service reads, and for 60 seconds at most.
+# file the service reads, and for 60 seconds at most. Returns 1 when the 60 seconds ran out or no line came back: the
+# config is always there, so a listing with no line in it did not run, and the check has nothing to compare (#9688).
 config_listing() {
-    as_service_user timeout 60 find "${CONFIG_DIR}" "${KEY_DIR}" -maxdepth 1 -type f -exec sha256sum {} + 2>/dev/null | sort || true
+    local listing status=0
+    listing="$(as_service_user timeout 60 find "${CONFIG_DIR}" "${KEY_DIR}" -maxdepth 1 -type f -exec sha256sum {} + 2>/dev/null)" || status=$?
+    [ "${status}" != 124 ] && [ -n "${listing}" ] || return 1
+    printf '%s\n' "${listing}" | sort
 }
 
 # Stops the unit and waits until no process runs from the install folder. Returns 1 with the list in LEFT_RUNNING when one stays.
@@ -91,12 +108,30 @@ stop_and_confirm() {
 }
 
 # Puts the build in /opt/darling.previous back, with the unit file when this run replaced it, and starts it. The build it
-# replaces stays in /opt/darling.failed for a look. Returns the old build's own start and health check result.
+# replaces stays in /opt/darling.failed for a look. Returns the old build's own start and health check result. The
+# callers run it inside "if", where a failed command does not stop the script, so each step that moves a build is
+# checked here: when one fails, RESTORED stays 0, HEALTH_REASON says which, and nothing is started (#9688).
+RESTORED=0
 restore_previous() {
+    RESTORED=0
     systemctl stop "${UNIT_NAME}" 2>/dev/null || true
-    rm -rf "${FAILED_ROOT}"
-    [ -d "${INSTALL_ROOT}" ] && mv "${INSTALL_ROOT}" "${FAILED_ROOT}"
-    mv "${PREVIOUS_ROOT}" "${INSTALL_ROOT}"
+    # A rollback copy that this script did not make can hold files of another account, so it is made root's first.
+    if ! make_root_owned "${PREVIOUS_ROOT}"; then
+        HEALTH_REASON="could not make ${PREVIOUS_ROOT} root's own, so no build was moved"
+        return 1
+    fi
+    if [ -d "${INSTALL_ROOT}" ]; then
+        rm -rf "${FAILED_ROOT}"
+        if ! mv -T "${INSTALL_ROOT}" "${FAILED_ROOT}"; then
+            HEALTH_REASON="could not move ${INSTALL_ROOT} to ${FAILED_ROOT}, so no build was moved"
+            return 1
+        fi
+    fi
+    if ! mv -T "${PREVIOUS_ROOT}" "${INSTALL_ROOT}"; then
+        HEALTH_REASON="could not move ${PREVIOUS_ROOT} to ${INSTALL_ROOT}, so ${INSTALL_ROOT} holds no build"
+        return 1
+    fi
+    RESTORED=1
     if [ "${unit_replaced}" = 1 ]; then
         cp -p "${UNIT_PATH}.previous" "${UNIT_PATH}"
         systemctl daemon-reload
@@ -125,6 +160,7 @@ ${LEFT_RUNNING:-}"
         note "The build from ${PREVIOUS_ROOT} is back in ${INSTALL_ROOT} and is healthy. The build it replaced is in ${FAILED_ROOT}. The store's migrations stay applied."
         exit 0
     fi
+    [ "${RESTORED}" = 1 ] || die "The rollback did NOT finish: ${HEALTH_REASON}. The service is STOPPED. Fix what stopped the move, then run this script with --rollback again."
     die "The build from ${PREVIOUS_ROOT} is back in ${INSTALL_ROOT}, and its health check failed: ${HEALTH_REASON}. The build it replaced is in ${FAILED_ROOT}."
 fi
 
@@ -132,7 +168,7 @@ if [ ! -f "${INSTALL_ROOT}/${SERVICE_DLL}" ]; then
     # An upgrade that stopped between its two renames leaves the old build in the rollback copy and nothing in the install folder.
     [ -f "${PREVIOUS_ROOT}/${SERVICE_DLL}" ] && [ ! -e "${INSTALL_ROOT}" ] || die "${INSTALL_ROOT} holds no Darling build, so there is nothing to upgrade. install-darling.sh installs Darling."
     [ "${check_only}" = 0 ] || die "${INSTALL_ROOT} is missing and ${PREVIOUS_ROOT} holds a build: an earlier upgrade stopped half way. Run this script without --check, and it puts that build back first."
-    mv "${PREVIOUS_ROOT}" "${INSTALL_ROOT}"
+    mv -T "${PREVIOUS_ROOT}" "${INSTALL_ROOT}" || die "Could not move ${PREVIOUS_ROOT} back to ${INSTALL_ROOT}. Nothing else was changed."
     note "An earlier upgrade stopped half way: moved ${PREVIOUS_ROOT} back to ${INSTALL_ROOT} before this upgrade."
 fi
 [ -e "${CONFIG_FILE}" ] || die "${CONFIG_FILE} does not exist. This script upgrades the install that docs/darling/linux.md and install-darling.sh make."
@@ -158,7 +194,8 @@ if [ "${check_only}" = 1 ]; then
 fi
 
 # ---- 2. stop ----
-config_before="$(config_listing)"
+config_checked=1
+config_before="$(config_listing)" || config_checked=0
 note "Stopping ${UNIT_NAME}..."
 if ! stop_and_confirm; then
     die "A process still runs from ${INSTALL_ROOT} after the stop, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'.
@@ -166,9 +203,13 @@ ${LEFT_RUNNING:-}"
 fi
 
 # ---- 3. the rollback copy and the new build ----
-rm -rf "${PREVIOUS_ROOT}"
-mv "${INSTALL_ROOT}" "${PREVIOUS_ROOT}"
-mv "${STAGED_BUILD}" "${INSTALL_ROOT}"
+# -T on each move of a whole folder: when the target is still there, the move fails, where a plain mv would put the
+# folder inside it.
+rm -rf "${PREVIOUS_ROOT}" || die "Could not remove the old rollback copy ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+mv -T "${INSTALL_ROOT}" "${PREVIOUS_ROOT}" || die "Could not move ${INSTALL_ROOT} to ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+# The rollback copy is root's own before anything can start from it, whatever owners the old build's files record.
+make_root_owned "${PREVIOUS_ROOT}" || die "Could not make ${PREVIOUS_ROOT} root's own. The service is STOPPED, ${old_version} is in ${PREVIOUS_ROOT} and ${INSTALL_ROOT} holds no build. Fix the cause, then run this script again: it puts that build back first."
+mv -T "${STAGED_BUILD}" "${INSTALL_ROOT}" || die "Could not move the new build into ${INSTALL_ROOT}. The service is STOPPED, ${old_version} is in ${PREVIOUS_ROOT} and ${INSTALL_ROOT} holds no build. Fix the cause, then run this script again: it puts that build back first."
 note "The rollback copy of ${old_version} is ${PREVIOUS_ROOT}."
 
 if [ -n "${SHIPPED_UNIT}" ] && ! cmp -s "${SHIPPED_UNIT}" "${UNIT_PATH}"; then
@@ -186,11 +227,15 @@ fi
 # ---- 4. start and check ----
 note "Starting ${UNIT_NAME} and watching it for ${health_seconds} seconds..."
 if start_and_check "${health_seconds}"; then
-    changed="$(comm -23 <(printf '%s\n' "${config_before}") <(config_listing) | cut -d' ' -f3- | printable)"
-    if [ -n "${changed}" ]; then
-        warn "These files in ${CONFIG_DIR} changed or went away during the upgrade. The script writes nothing there, so compare them with your backup: ${changed}"
+    if [ "${config_checked}" = 1 ] && config_after="$(config_listing)"; then
+        changed="$(comm -23 <(printf '%s\n' "${config_before}") <(printf '%s\n' "${config_after}") | cut -d' ' -f3- | printable)"
+        if [ -n "${changed}" ]; then
+            warn "These files in ${CONFIG_DIR} changed or went away during the upgrade. The script writes nothing there, so compare them with your backup: ${changed}"
+        else
+            note "The config, the secret files and the keys in ${CONFIG_DIR} are as they were."
+        fi
     else
-        note "The config, the secret files and the keys in ${CONFIG_DIR} are as they were."
+        warn "The check that the config, the secret files and the keys in ${CONFIG_DIR} are unchanged could NOT run: the listing that the '${SERVICE_USER}' user takes of them came back empty or did not finish in 60 seconds. The script writes nothing there. Compare them with your backup yourself."
     fi
     note "Darling ${STAGED_VERSION} is in ${INSTALL_ROOT}, and ${UNIT_NAME} is active."
     note "To go back: run this script with --rollback. Remove ${PREVIOUS_ROOT} when you no longer need it."
@@ -206,4 +251,5 @@ note "Rolling back to ${old_version}..."
 if restore_previous; then
     die "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT} and is healthy. The new build is in ${FAILED_ROOT} for a look. Migrations the new build applied stay applied in the store."
 fi
+[ "${RESTORED}" = 1 ] || die "The upgrade to ${STAGED_VERSION} failed (${failure}), and the rollback did NOT finish: ${HEALTH_REASON}. The service is STOPPED and ${old_version} is still in ${PREVIOUS_ROOT}. Fix what stopped the move, then run this script with --rollback. Migrations the new build applied stay applied in the store."
 die "The upgrade to ${STAGED_VERSION} was ROLLED BACK: ${failure}. ${old_version} is back in ${INSTALL_ROOT}, and its own health check failed too: ${HEALTH_REASON}. So the cause is probably not the new build: read 'journalctl -u darling' and the file log in ${LOG_DIR}. The new build is in ${FAILED_ROOT}."

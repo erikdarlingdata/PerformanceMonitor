@@ -30,21 +30,52 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 # goes through this before root's terminal shows it: every byte that is not printable ASCII becomes "?", so no escape
 # sequence reaches the terminal.
 printable() { LC_ALL=C tr -c '\040-\176\n' '?'; }
-# The same for the lines a build prints for the operator to read, which may hold UTF-8 text: the control characters
-# go (C0 apart from tab and line end, DEL, and C1 in its UTF-8 form) and the rest stays, a line at a time.
-printable_lines() { LC_ALL=C sed -u -e 's/[\x01-\x08\x0b-\x1f\x7f]//g' -e 's/\xc2[\x80-\x9f]//g'; }
+# The same for the lines a build prints for the operator to read, a line at a time. The pre-flight prints UTF-8 text
+# (an em dash in every result line). Where root's locale is UTF-8, a whole UTF-8 character stays and the rest goes:
+# the C0 control characters apart from tab, DEL, every byte that is not part of a whole UTF-8 character, and then the
+# C1 control characters in their UTF-8 form, in a loop until none is left, because taking one out can join the bytes
+# around it into another. In any other locale the terminal may read one byte at a time, where the second byte of a
+# UTF-8 character can be a C1 control character itself, so only printable ASCII and tab stay there (#9688).
+UTF8_CHARACTER='[\xc2-\xdf][\x80-\xbf]\|\xe0[\xa0-\xbf][\x80-\xbf]\|[\xe1-\xef][\x80-\xbf][\x80-\xbf]\|\xf0[\x90-\xbf][\x80-\xbf][\x80-\xbf]\|[\xf1-\xf4][\x80-\xbf][\x80-\xbf][\x80-\xbf]'
+printable_lines() {
+    case "$(locale charmap 2>/dev/null || true)" in
+        UTF-8) LC_ALL=C sed -u -e 's/[\x01-\x08\x0b-\x1f\x7f]//g' -e "s/\\(${UTF8_CHARACTER}\\)\\|[\\x80-\\xff]/\\1/g" -e ':a' -e 's/\xc2[\x80-\x9f]//' -e 'ta' ;;
+        *) LC_ALL=C sed -u -e "s/${UTF8_CHARACTER}/?/g" -e 's/[^\x20-\x7e\t]/?/g' ;;
+    esac
+}
 
 # Runs a command as the service user in a session of its own, with no terminal: a new session has no controlling
 # terminal, stdin is /dev/null, and every caller pipes or drops the output. A process of the service user can then
 # reach nothing of the root session that started it, even on a host that lets one process of a user attach to another.
+# The command starts in /, because root's own folder can be closed to the service user (/root is), and find goes back
+# to its start folder before each -exec. It gets PATH and nothing else of root's environment, which every process of
+# the service user could read from /proc (#9688).
 as_service_user() {
-    setsid -w runuser -u "${SERVICE_USER}" -- "$@" </dev/null
+    (cd / && setsid -w runuser -u "${SERVICE_USER}" -- env -i "PATH=${PATH}" "$@" </dev/null)
 }
 
 # True when root owns the path and neither its group nor other users can write it.
 root_only_writable() {
     case "$(stat -L -c '%u %A' -- "$1" 2>/dev/null)" in "0 "?????-??-?) return 0 ;; esac
     return 1
+}
+
+# True when that holds for the folder and for every folder above it, up to /. An account that could write a folder
+# above it could put another folder in its place between this check and the read. $1 is an absolute path.
+root_only_path() {
+    local folder="$1"
+    while :; do
+        root_only_writable "${folder}" || return 1
+        [ "${folder}" != / ] || return 0
+        folder="$(dirname "${folder}")"
+    done
+}
+
+# Makes a build folder root's own and closed to group and other writes, whatever owners its files record. A build that
+# was extracted by hand from an older tarball can belong to the uid of the machine that built it, and an account of
+# this host with that uid could then change what a rollback starts (#9688).
+make_root_owned() {
+    chown -R root:root "$1" && chmod -R go-w "$1"
 }
 
 # Stops when the path is a symbolic link, or exists and is not a folder. The install script creates its folders with
@@ -78,7 +109,7 @@ require_host() {
 
 # Sets SOURCE_KIND (tarball or folder) and SOURCE_PATH from the --source value, or from the folder the script is in.
 resolve_source() {
-    local source="$1" script_dir="$2"
+    local source="$1" script_dir="$2" open_entry
     [ -n "${source}" ] || source="${script_dir}"
     [ -e "${source}" ] || die "The source '${source}' does not exist."
     SOURCE_PATH="$(readlink -f "${source}")"
@@ -86,7 +117,10 @@ resolve_source() {
         SOURCE_KIND=folder
         [ -f "${SOURCE_PATH}/${SERVICE_DLL}" ] || die "The folder '${SOURCE_PATH}' holds no ${SERVICE_DLL}, so it is not an extracted Darling tarball."
         [ "${SOURCE_PATH}" != "${INSTALL_ROOT}" ] || die "The source is the install folder ${INSTALL_ROOT} itself. Extract the tarball to another folder and run the script from there, or pass --source with the tarball."
-        root_only_writable "${SOURCE_PATH}" || die "The source folder '${SOURCE_PATH}' is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner), or pass --source with the tarball."
+        root_only_path "${SOURCE_PATH}" || die "The source folder '${SOURCE_PATH}' or a folder above it is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner), or pass --source with the tarball."
+        # The same for what the folder holds. A link has no mode of its own, and the folder that holds it is checked.
+        open_entry="$(find "${SOURCE_PATH}" \( ! -user 0 -o -perm /022 \) ! -type l -print -quit)"
+        [ -z "${open_entry}" ] || die "'$(printf '%s' "${open_entry}" | printable)' in the source folder is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner), or pass --source with the tarball."
     else
         SOURCE_KIND=tarball
     fi
@@ -98,7 +132,7 @@ resolve_source() {
 # can replace the tarball can replace the file beside it. A folder source has no checksum to check, so the two hash
 # arguments are refused with one, not ignored.
 verify_source() {
-    local expected="$1" skip="$2" actual sums name line
+    local expected="$1" skip="$2" actual sums name line entry
     if [ "${SOURCE_KIND}" != tarball ]; then
         [ -z "${expected}" ] && [ "${skip}" = 0 ] || die "--sha256 and --skip-hash-check are for a tarball source. The source '${SOURCE_PATH}' is a folder, which has no checksum to check. Pass --source with the tarball, or leave the argument out."
         return 0
@@ -114,8 +148,16 @@ verify_source() {
     sums="$(dirname "${SOURCE_PATH}")/${SUMS_NAME}"
     name="$(basename "${SOURCE_PATH}")"
     if [ -f "${sums}" ]; then
-        line="$(awk -v n="${name}" '{ f = $2; sub(/^\*/, "", f); if (f == n) print $1 }' "${sums}" | head -n 1)"
-        [ -n "${line}" ] || die "${sums} has no line for ${name}. Download the checksum file of the same release."
+        # A line counts when it is 64 hex characters, a space, a second space or the "*" of binary mode, and this
+        # tarball's name. Only the hash of such a line is printed, so nothing else the file holds reaches the terminal.
+        line=""
+        while IFS= read -r entry || [ -n "${entry}" ]; do
+            if [[ "${entry}" =~ ^([0-9A-Fa-f]{64})\ [\ *]?(.*)$ ]] && [ "${BASH_REMATCH[2]}" = "${name}" ]; then
+                line="$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-F' 'a-f')"
+                break
+            fi
+        done <"${sums}"
+        [ -n "${line}" ] || die "${sums} has no SHA256 line for ${name} (64 hex characters, then the file name). Download the checksum file of the same release."
         [ "${actual}" = "${line}" ] || die "The SHA256 of ${SOURCE_PATH} is ${actual}, and ${sums} says ${line}. Download the tarball again."
         note "SHA256 matches ${sums}. That shows the file is whole. --sha256 with a hash from the release page shows where it came from."
         return 0
@@ -153,6 +195,8 @@ stage_source() {
         from="${script_dir}/${name}"
         [ "${SOURCE_KIND}" = folder ] && [ -f "${STAGED_BUILD}/${name}" ] && [ ! -L "${STAGED_BUILD}/${name}" ] && from="${STAGED_BUILD}/${name}"
         [ -f "${from}" ] && [ ! -L "${from}" ] || continue
+        # Root installs the unit as a root unit, so the file beside the script passes the check its folder passed.
+        root_only_writable "${from}" || die "${from} is not owned by root, or its group or other users can write it, so it was not installed. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner) and run the script from there."
         install -m 644 "${from}" "${STAGING_ROOT}/${name}"
         case "${name}" in darling.service) SHIPPED_UNIT="${STAGING_ROOT}/${name}" ;; *) SHIPPED_SAMPLE="${STAGING_ROOT}/${name}" ;; esac
     done
