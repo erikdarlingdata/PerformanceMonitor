@@ -588,6 +588,9 @@ WHEN (OLD.bucket = '2026-08-01 01:00'::timestamp) EXECUTE FUNCTION collect.fail_
 
             Assert.Equal(1, logger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
             Assert.Contains("2026-08-01 01:00", logger.Lines.Single(l => l.StartsWith("Warning:", StringComparison.Ordinal)), StringComparison.Ordinal);
+            Assert.NotNull(result.PruneFailure);
+            Assert.Contains("2026-08-01 01:00", result.PruneFailure, StringComparison.Ordinal);
+            Assert.Contains("prune blocked", result.PruneFailure, StringComparison.Ordinal);
             Assert.Equal(0, result.Failed);
             Assert.Equal(2L * RowsPerServerHour, result.RowsRemoved);
             Assert.True(result.HoursBuilt > 0);
@@ -598,6 +601,7 @@ WHEN (OLD.bucket = '2026-08-01 01:00'::timestamp) EXECUTE FUNCTION collect.fail_
             await ExecuteAsync(connection, "DROP TRIGGER fail_prune_9711 ON collect.query_stats_host_hourly", ct);
             var next = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
 
+            Assert.Null(next.PruneFailure);
             Assert.Equal(2L * 2 * RowsPerServerHour, next.RowsRemoved);
             Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE bucket < @b", ct, ("b", Hour8)));
         });

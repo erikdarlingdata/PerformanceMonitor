@@ -354,8 +354,21 @@ ORDER BY h.bucket;";
     /// <summary>One planned hour and the servers due in it.</summary>
     public readonly record struct Build(DateTime Bucket, int[] ServerIds);
 
-    /// <summary>What one tick did.</summary>
-    public readonly record struct TickResult(int HoursBuilt, int ServerHoursBuilt, int Failed, int Deferred, long RowsRemoved);
+    /// <summary>What one tick did. <paramref name="PruneFailure"/> is null when the prune ran clean, and otherwise one line naming the slice's hours and
+    /// the error (#9711), so the step records as failed while the builds still ran.</summary>
+    public readonly record struct TickResult(int HoursBuilt, int ServerHoursBuilt, int Failed, int Deferred, long RowsRemoved, string? PruneFailure = null);
+
+    /// <summary>The one-line prune failure a tick carries: the slice's hours and the first line of the error, cut short.</summary>
+    internal static string PruneFailureText(PruneSlice slice, Exception ex)
+    {
+        var message = ex.Message.Split('\n', 2)[0].Trim();
+        if (message.Length > 120)
+        {
+            message = message[..120];
+        }
+
+        return $"prune of hours {slice.From:yyyy-MM-dd HH}:00 to {slice.To:yyyy-MM-dd HH}:00 failed: {message}";
+    }
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
@@ -624,12 +637,17 @@ ORDER BY h.bucket;";
         ArgumentNullException.ThrowIfNull(elapsed);
 
         int hoursBuilt = 0, serverHours = 0, failed = 0, started = 0;
+        string? pruneFailure = null;
 
         await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.QueryStatsHostHourly, cancellationToken);
         var horizonDays = await HorizonDaysAsync(connection, retentionDays, cancellationToken);
         var removed = await PruneAsync(connection, nowUtc, horizonDays, PruneSliceHours, elapsed, pacerFactory, cancellationToken,
-            (slice, ex) => logger.LogWarning(ex, "Query stats host hourly rollup: pruning hours {From:yyyy-MM-dd HH}:00 to {To:yyyy-MM-dd HH}:00 failed, the prune stops for this tick and the builds go on: {Message}",
-                slice.From, slice.To, ex.Message));
+            (slice, ex) =>
+            {
+                pruneFailure = PruneFailureText(slice, ex);
+                logger.LogWarning(ex, "Query stats host hourly rollup: pruning hours {From:yyyy-MM-dd HH}:00 to {To:yyyy-MM-dd HH}:00 failed, the prune stops for this tick and the builds go on: {Message}",
+                    slice.From, slice.To, ex.Message);
+            });
         var plan = await PlanBuildsAsync(connection, nowUtc, horizonDays, cancellationToken);
 
         foreach (var item in plan)
@@ -657,6 +675,6 @@ ORDER BY h.bucket;";
         var deferred = plan.Count - started;
         logger.LogInformation("Query stats host hourly rollup: built {Hours} hour(s) for {ServerHours} server-hour(s), failed {Failed}, deferred {Deferred}, removed {Removed} row(s), {ElapsedMs} ms",
             hoursBuilt, serverHours, failed, deferred, removed, (long)elapsed().TotalMilliseconds);
-        return new TickResult(hoursBuilt, serverHours, failed, deferred, removed);
+        return new TickResult(hoursBuilt, serverHours, failed, deferred, removed, pruneFailure);
     }
 }
