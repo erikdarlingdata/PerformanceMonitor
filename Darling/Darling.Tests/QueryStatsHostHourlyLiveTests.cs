@@ -457,6 +457,217 @@ WHERE (SELECT count(DISTINCT q.query_text_digest) FILTER (WHERE {Honest}) FROM c
         }
     }
 
+    /// <summary>The first whole hour inside four days of <see cref="TickNow"/>: the prune's cutoff on a store whose raw is a raw hypertable.</summary>
+    private static readonly DateTime FirstKeptInFourDays = new(2026, 9, 11, 13, 0, 0, DateTimeKind.Unspecified);
+
+    private const int OldHours = 40;
+    private const int KeptHours = 10;
+    private const int SliceHours = 6;
+    private const int RowsPerServerHour = 3;
+
+    /// <summary>Built rows whose rollup rows are gone: the ledger would claim an hour the rollup no longer holds.</summary>
+    private const string LedgerWithoutRollupRows = @"
+SELECT count(*) FROM collect.query_stats_host_hourly_built AS b
+WHERE NOT EXISTS (SELECT 1 FROM collect.query_stats_host_hourly AS h WHERE h.server_id = b.server_id AND h.bucket = b.bucket)";
+
+    /// <summary>Rollup rows whose built row is gone.</summary>
+    private const string RollupRowsWithoutLedger = @"
+SELECT count(*) FROM collect.query_stats_host_hourly AS h
+WHERE NOT EXISTS (SELECT 1 FROM collect.query_stats_host_hourly_built AS b WHERE b.server_id = h.server_id AND b.bucket = h.bucket)";
+
+    /// <summary>Runs <paramref name="onSlice"/> after each committed prune slice, through the pacer seam the prune already takes.</summary>
+    private sealed class SliceWatcher(Func<Task> onSlice) : IBatchWalPacer
+    {
+        public Task<long?> ReadWalPositionAsync(NpgsqlConnection connection, CancellationToken cancellationToken) => Task.FromResult<long?>(null);
+
+        public Task AfterBatchAsync(NpgsqlConnection connection, long? before, CancellationToken cancellationToken) => onSlice();
+    }
+
+    /// <summary>
+    /// A prune over more old hours than one slice takes removes them oldest first, a slice per transaction, and after every commit
+    /// the ledger names no hour whose rollup rows are gone and no rollup row lacks its ledger row. It ends at the cutoff in both tables.
+    /// </summary>
+    [Fact]
+    public Task ThePrune_RemovesOldHoursInSlices_AndNeverLeavesALedgerRowWithoutItsRollupRows() =>
+        WithStoreAsync(tiered: false, async (scratch, connection, ct) =>
+        {
+            var firstOld = FirstKeptInFourDays.AddHours(-OldHours);
+            await SeedBuiltHoursAsync(connection, firstOld, OldHours + KeptHours, ct);
+            var oldRollupRows = 2L * OldHours * RowsPerServerHour;
+            Assert.Equal(oldRollupRows, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE bucket < @cutoff", ct, ("cutoff", FirstKeptInFourDays)));
+
+            var oldestAfterEachSlice = new List<DateTime>();
+            var watcher = new SliceWatcher(async () =>
+            {
+                Assert.Equal(0L, await ScalarAsync<long>(connection, LedgerWithoutRollupRows, ct));
+                Assert.Equal(0L, await ScalarAsync<long>(connection, RollupRowsWithoutLedger, ct));
+                oldestAfterEachSlice.Add(await ScalarAsync<DateTime>(connection, "SELECT min(bucket) FROM collect.query_stats_host_hourly_built", ct));
+            });
+
+            var removed = await QueryStatsHostHourly.PruneAsync(
+                connection, TickNow, 4, SliceHours, () => TimeSpan.Zero, _ => Task.FromResult<IBatchWalPacer?>(watcher), ct);
+
+            Assert.Equal(oldRollupRows, removed);
+            Assert.Equal(
+                Enumerable.Range(1, OldHours / SliceHours).Select(i => firstOld.AddHours(i * SliceHours)).Append(FirstKeptInFourDays).ToList(),
+                oldestAfterEachSlice);
+            foreach (var table in new[] { QueryStatsHostHourly.Table, QueryStatsHostHourly.BuiltTable })
+            {
+                Assert.Equal(FirstKeptInFourDays, await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM {table}", ct));
+            }
+
+            Assert.Equal(2L * KeptHours * RowsPerServerHour, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly", ct));
+            Assert.Equal(2L * KeptHours, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly_built", ct));
+            Assert.Equal(0L, await QueryStatsHostHourly.PruneAsync(connection, TickNow, 4, SliceHours, () => TimeSpan.Zero, null, ct));
+        });
+
+    /// <summary>
+    /// A prune that reaches its share of the tick (<see cref="QueryStatsHostHourly.MaxPruneDuration"/>) after two slices stops with both tables cut at the same hour and no ledger row without its rollup
+    /// rows, and the next call removes the rest. The budget is a counter that reads spent from its third look, so no clock is involved.
+    /// </summary>
+    [Fact]
+    public Task AnOutOfBudgetPrune_LeavesAConsistentState_AndTheNextCallFinishesIt() =>
+        WithStoreAsync(tiered: false, async (scratch, connection, ct) =>
+        {
+            var firstOld = FirstKeptInFourDays.AddHours(-OldHours);
+            await SeedBuiltHoursAsync(connection, firstOld, OldHours + KeptHours, ct);
+            var oldRollupRows = 2L * OldHours * RowsPerServerHour;
+
+            var looks = 0;
+            Func<TimeSpan> twoSlicesOfBudget = () => ++looks <= 2 ? TimeSpan.Zero : QueryStatsHostHourly.MaxPruneDuration;
+            var first = await QueryStatsHostHourly.PruneAsync(connection, TickNow, 4, SliceHours, twoSlicesOfBudget, null, ct);
+
+            Assert.Equal(2L * 2 * SliceHours * RowsPerServerHour, first);
+            foreach (var table in new[] { QueryStatsHostHourly.Table, QueryStatsHostHourly.BuiltTable })
+            {
+                Assert.Equal(firstOld.AddHours(2 * SliceHours), await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM {table}", ct));
+            }
+
+            Assert.Equal(0L, await ScalarAsync<long>(connection, LedgerWithoutRollupRows, ct));
+            Assert.Equal(0L, await ScalarAsync<long>(connection, RollupRowsWithoutLedger, ct));
+
+            var second = await QueryStatsHostHourly.PruneAsync(connection, TickNow, 4, SliceHours, () => TimeSpan.Zero, null, ct);
+
+            Assert.Equal(oldRollupRows, first + second);
+            foreach (var table in new[] { QueryStatsHostHourly.Table, QueryStatsHostHourly.BuiltTable })
+            {
+                Assert.Equal(FirstKeptInFourDays, await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM {table}", ct));
+            }
+
+            Assert.Equal(0L, await ScalarAsync<long>(connection, LedgerWithoutRollupRows, ct));
+            Assert.Equal(0L, await ScalarAsync<long>(connection, RollupRowsWithoutLedger, ct));
+        });
+
+    /// <summary>
+    /// The tick prunes and plans at the horizon <see cref="QueryStatsHostHourly.HorizonDaysAsync"/> resolves. Where raw is a raw hypertable
+    /// that is four days, and a tick removes the older rollup and built rows, builds nothing older, and builds every hour inside. Where raw
+    /// is a plain table the collector's thirty days stand and the older rows stay.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public Task ATick_KeepsTheHoursRawHolds_ByTheTableRawIs(bool tiered) =>
+        WithStoreAsync(tiered, async (scratch, connection, ct) =>
+        {
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var rolledUpFiveDaysBack = new DateTime(2026, 9, 8, 0, 0, 0, DateTimeKind.Unspecified);
+            await SeedBuiltHoursAsync(connection, rolledUpFiveDaysBack, 1, ct);
+            var insideHour = new DateTime(2026, 9, 12, 9, 0, 0, DateTimeKind.Unspecified);
+            var outsideHour = new DateTime(2026, 9, 9, 9, 0, 0, DateTimeKind.Unspecified);
+            var seeder = new RawSeeder(connection, ct);
+            await seeder.InsertAsync(ServerId, insideHour.AddMinutes(5), "DbA", "0xIN", null);
+            await seeder.InsertAsync(ServerId, outsideHour.AddMinutes(5), "DbA", "0xOUT", null);
+            await QueryStatsLedgerSeed.SeedAsync(connection, rolledUpFiveDaysBack, TickNow, ct);
+
+            var built = 0;
+            for (var ticks = 0; ticks < 8; ticks++)
+            {
+                var result = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
+                Assert.Equal(0, result.Failed);
+                built += result.HoursBuilt;
+                if (!tiered || result.HoursBuilt == 0)
+                {
+                    break;
+                }
+            }
+
+            var rollupRowsOfFiveDaysBack = await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly WHERE bucket = @bucket", ct, ("bucket", rolledUpFiveDaysBack));
+            var builtRowsOfFiveDaysBack = await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly_built WHERE bucket = @bucket", ct, ("bucket", rolledUpFiveDaysBack));
+            if (!tiered)
+            {
+                Assert.Equal(2L * RowsPerServerHour, rollupRowsOfFiveDaysBack);
+                Assert.Equal(2L, builtRowsOfFiveDaysBack);
+                return;
+            }
+
+            Assert.Equal(0L, rollupRowsOfFiveDaysBack);
+            Assert.Equal(0L, builtRowsOfFiveDaysBack);
+            Assert.Equal(FirstKeptInFourDays, await ScalarAsync<DateTime>(connection, "SELECT min(bucket) FROM collect.query_stats_host_hourly_built", ct));
+            Assert.Equal(0L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly_built WHERE bucket = @bucket", ct, ("bucket", outsideHour)));
+            Assert.Equal(1L, await ScalarAsync<long>(connection, "SELECT raw_rows FROM collect.query_stats_host_hourly_built WHERE server_id = @id AND bucket = @bucket", ct, ("id", ServerId), ("bucket", insideHour)));
+
+            /* Every hour from the first whole one inside four days to the last closed one is built for both servers: 13:00 on the 11th through 10:00 on the 15th. */
+            Assert.Equal(2L * 94, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly_built", ct));
+            Assert.Equal(94, built);
+        });
+
+    /// <summary>Plants <paramref name="hours"/> consecutive hours from <paramref name="from"/> for both servers: a built row each, and three rollup rows each.</summary>
+    private static async Task SeedBuiltHoursAsync(NpgsqlConnection connection, DateTime from, int hours, CancellationToken ct)
+    {
+        await ExecuteAsync(connection, @"
+INSERT INTO collect.query_stats_host_hourly (server_id, bucket, database_name, query_hash, host_object_name, raw_rows)
+SELECT s, h, 'DbOld', '0xK' || k, NULL, 1
+FROM unnest(ARRAY[@a, @b]) AS s
+CROSS JOIN generate_series(@from::timestamp, @from::timestamp + (@hours - 1) * interval '1 hour', interval '1 hour') AS h
+CROSS JOIN generate_series(1, 3) AS k", ct, ("a", ServerId), ("b", OtherServerId), ("from", from), ("hours", hours));
+        await ExecuteAsync(connection, @"
+INSERT INTO collect.query_stats_host_hourly_built (server_id, bucket, built_at, raw_rows, ledger_rows)
+SELECT s, h, @built, 3, 0
+FROM unnest(ARRAY[@a, @b]) AS s
+CROSS JOIN generate_series(@from::timestamp, @from::timestamp + (@hours - 1) * interval '1 hour', interval '1 hour') AS h", ct,
+            ("a", ServerId), ("b", OtherServerId), ("from", from), ("hours", hours), ("built", TickNow));
+    }
+
+    /// <summary>
+    /// A migrated scratch store with the two servers enabled for the rollup. <paramref name="tiered"/> converts <c>collect.query_stats</c> to a
+    /// hypertable first, the shape the gated raw purge owns.
+    /// </summary>
+    private static async Task WithStoreAsync(bool tiered, Func<ScratchPostgres, NpgsqlConnection, CancellationToken, Task> body)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9684 host hourly live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        Assert.SkipUnless(!tiered || scratch.TimescaleEnabled, "A tiered raw table needs the TimescaleDB extension.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await ExecuteAsync(connection, "SELECT _timescaledb_functions.stop_background_workers()", ct);
+        if (tiered)
+        {
+            await ExecuteAsync(connection, TimescaleSupport.CreateHypertableSql("collect.query_stats", "collection_time"), ct);
+        }
+
+        await EnableServersAsync(connection, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await body(scratch, connection, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                Assert.Equal(0L, Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt)));
+            });
+        }
+    }
+
     private static Task<int> EnableServersAsync(NpgsqlConnection connection, CancellationToken ct) =>
         ExecuteAsync(connection, @"
 INSERT INTO collect.servers (server_id, server_name, is_enabled)

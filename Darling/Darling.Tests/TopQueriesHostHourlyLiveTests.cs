@@ -331,6 +331,100 @@ public sealed class TopQueriesHostHourlyLiveTests
             Assert.Equal(routed.Json, raw.Json);
         });
 
+    /// <summary>
+    /// #9684: where raw <c>query_stats</c> is a raw hypertable, raw keeps four days and the rollup is kept to the same horizon. The window is five days
+    /// back, so its hours are ones raw no longer reaches in production. They are rolled up here, with rollup rows that differ from raw's, as a
+    /// thirty-day prune would have kept them, and the page names which table served it. Before the tick the rollup serves the whole
+    /// middle of the window, and after it the hours are gone from the rollup, the read finds a hole and the raw statement answers with raw's rows.
+    /// </summary>
+    [Fact]
+    public async Task OnATieredStore_AWindowPastRawsHorizon_ReadsRaw_OnceTheTickPrunesTheRollupHoursRawNoLongerHolds()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #9684 top queries host hourly test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        Assert.SkipUnless(scratch.TimescaleEnabled, "A tiered raw table needs the TimescaleDB extension.");
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "SELECT _timescaledb_functions.stop_background_workers()");
+        await DarlingMcpTestData.ExecAsync(connection, ct, TimescaleSupport.CreateHypertableSql("collect.query_stats", "collection_time"));
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = LiveClock.Now();
+            var first = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddDays(-5);
+            var start = first.AddMinutes(30);
+            var end = first.AddHours(6).AddMinutes(30);
+            await DarlingMcpTestData.ExecAsync(connection, ct, $"""
+                INSERT INTO collect.query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, delta_execution_count,
+                                                 delta_worker_time, delta_elapsed_time, min_dop, max_dop, sample_interval_seconds)
+                SELECT 916840000000 + row_number() OVER (ORDER BY t), t, {ServerId}, '{ServerName}', 'dbH', 'RAW_ONLY', 1, 1000, 1000, 4, 4, 600
+                FROM generate_series($1::timestamp, $2::timestamp, interval '10 minutes') AS t
+                """, first, first.AddHours(7));
+            await QueryStatsLedgerSeed.SeedAsync(connection, first.AddHours(-1), first.AddHours(8), ct);
+
+            for (var hour = first.AddHours(1); hour < first.AddHours(6); hour = hour.AddHours(1))
+            {
+                await QueryStatsHostHourly.BuildHourAsync(connection, [ServerId], hour, now, ct);
+            }
+
+            await DarlingMcpTestData.ExecAsync(connection, ct, "UPDATE collect.query_stats_host_hourly SET query_hash = 'ROLLUP_ONLY' WHERE server_id = " + ServerId);
+
+            async Task<(DarlingDataReader.TopQueriesReadResult Result, string[] Hashes, long Executions)> ReadPastHorizonAsync()
+            {
+                await using var source = NpgsqlDataSource.Create(scratch.ConnectionString);
+                var result = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
+                    source, ServerId, start, end, 10, DatabaseFilter.All, rollUpByHostObject: false, minMaxDop: 2, TopRanking.Cpu, ct, nowUtc: now);
+                Assert.Equal(RetentionTier.Raw, result.Tier);
+                return (result, result.Rows.Select(r => r.QueryHash).ToArray(), result.Rows.Sum(r => r.TotalExecutions));
+            }
+
+            long rawRowsInWindow;
+            await using (var count = new NpgsqlCommand(
+                $"SELECT count(*) FROM collect.query_stats WHERE server_id = {ServerId} AND collection_time > @start AND collection_time <= @end", connection))
+            {
+                count.Parameters.AddWithValue("start", start);
+                count.Parameters.AddWithValue("end", end);
+                rawRowsInWindow = (long)(await count.ExecuteScalarAsync(ct))!;
+            }
+
+            Assert.True(rawRowsInWindow > 0);
+
+            var before = await ReadPastHorizonAsync();
+            Assert.True(before.Result.ServedByHostHourly, "the setup must make the rollup serve the window, or the read below proves nothing");
+            Assert.Contains("ROLLUP_ONLY", before.Hashes);
+
+            await using (var postgres = NpgsqlDataSource.Create(scratch.ConnectionString))
+            {
+                var tick = await QueryStatsHostHourly.RunTickAsync(postgres, now, 30, NullLogger.Instance, ct);
+                Assert.Equal(0, tick.Failed);
+            }
+
+            var after = await ReadPastHorizonAsync();
+            Assert.False(after.Result.ServedByHostHourly);
+            Assert.Equal(["RAW_ONLY"], after.Hashes);
+            Assert.Equal(rawRowsInWindow, after.Executions);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                Assert.Equal(0L, Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt)));
+            });
+        }
+    }
+
     [Fact]
     public Task RoutedStatement_ReadsFewerPagesThanTheRawStatement() =>
         WithStoreAsync(async (scratch, connection, start, end, ct) =>

@@ -22,7 +22,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// The hourly host-object rollup of <c>collect.query_stats</c> (#9164): one row per (server, UTC hour, database, query hash, host object)
 /// carrying every aggregate that the top-queries statement (<c>DarlingDataReader.TopQueriesSql</c>) builds in its two passes, so a Past
 /// day read can rank whole hours from this table and read raw only for the edge hours. This class is the table, the job that keeps it and
-/// the coverage check a read asks first. No read uses it yet.
+/// the coverage check a read asks first. The MCP top-queries read and the Viewer's top-queries read rank whole hours from it.
 ///
 /// <para><b>What a row holds.</b> The statement's own aggregates over the same rows under the same filters. Its ranking pass and its
 /// wide-row pass both read the interval-honest rows (<c>sample_interval_seconds IS DISTINCT FROM 0</c>), so the sums, the minimums and
@@ -47,8 +47,12 @@ namespace PerformanceMonitor.Darling.Storage;
 /// hours before the ledger's <c>counted_since</c>, the hours with no build, and the hours whose build counted a different number of raw
 /// rows than the ledger holds now. A read that finds none takes those hours from this table, and takes any other hour from raw.</para>
 ///
-/// <para><b>Retention.</b> Raw's: a tick removes the hours before the first whole hour inside raw's retention, from both tables, and
-/// builds none of them.</para>
+/// <para><b>Retention.</b> The horizon raw <c>query_stats</c> is held to (<see cref="HorizonDays"/>). Where raw is a TimescaleDB raw hypertable the
+/// gated raw purge drops it at <see cref="TimescaleSupport.RawRetentionSpan"/>, whatever the collector's longer retention, and older windows are
+/// served by the tier rollups, so the horizon is the shorter of that span and the collector's retention: an hour older than that is one no raw read
+/// reaches. Where raw is a plain table it is the collector's retention. A tick removes the hours before the first whole hour inside the horizon from
+/// both tables, oldest first, <see cref="PruneSliceHours"/> hours per transaction (<see cref="PruneAsync"/>), and builds none of them. A window that
+/// reaches an hour the rollup no longer holds reads that hour from raw, which is correct and slower (#9684).</para>
 /// </summary>
 public static class QueryStatsHostHourly
 {
@@ -76,6 +80,11 @@ public static class QueryStatsHostHourly
 
     /// <summary>The wall-clock budget of one tick: no new hour starts once this much time has passed since the tick began.</summary>
     public static readonly TimeSpan MaxTickDuration = TimeSpan.FromMinutes(5);
+
+    /// <summary>The part of <see cref="MaxTickDuration"/> the prune may spend: no new slice starts once this much time has passed since the tick
+    /// began, so a long first prune under the WAL pacer still leaves the builds half the tick, and the hours it has not reached wait for the next
+    /// tick.</summary>
+    public static readonly TimeSpan MaxPruneDuration = MaxTickDuration / 2;
 
     /// <summary>The server-side <c>statement_timeout</c> each hour's transaction runs under.</summary>
     public const int BuildStatementTimeoutSeconds = 60;
@@ -250,15 +259,33 @@ GROUP BY d.bucket
 ORDER BY d.bucket DESC
 LIMIT $5;";
 
-    /// <summary>Removes the rollup's hours before the first one inside raw's retention. $1 now, $2 raw retention in days.</summary>
+    /// <summary>
+    /// The next slice of hours to prune, or no row when no hour is older than the cutoff. $1 now, $2 the horizon in days, $3 the hours per
+    /// slice. <c>lo</c> is the oldest built hour and <c>hi</c> is the lower of the cutoff (the first whole hour inside the horizon) and
+    /// <c>lo</c> plus the slice. <c>servers</c> is every server the ledger holds an hour for: the rollup's index leads with <c>server_id</c>, so
+    /// a delete that names them reads a range of the index and does not scan the table. The ledger is small, and the build writes a rollup row and
+    /// its ledger row in one transaction, so the ledger's oldest hour is the rollup's.
+    /// </summary>
+    public const string NextPruneSliceSql = @"
+SELECT o.lo,
+       LEAST(c.at, o.lo + make_interval(hours => $3)) AS hi,
+       (SELECT array_agg(DISTINCT b.server_id) FROM collect.query_stats_host_hourly_built AS b) AS servers
+FROM (SELECT date_trunc('hour', $1::timestamp - make_interval(days => $2)) + interval '1 hour' AS at) AS c
+CROSS JOIN (SELECT min(b.bucket) AS lo FROM collect.query_stats_host_hourly_built AS b) AS o
+WHERE o.lo < c.at;";
+
+    /// <summary>Removes one slice of the rollup's hours. $1 server ids, $2 first hour, $3 the hour the slice stops before.</summary>
     public const string PruneSql = @"
 DELETE FROM collect.query_stats_host_hourly
-WHERE bucket < date_trunc('hour', $1::timestamp - make_interval(days => $2)) + interval '1 hour';";
+WHERE server_id = ANY($1::integer[])
+  AND bucket >= $2::timestamp
+  AND bucket < $3::timestamp;";
 
-    /// <summary>Removes the built rows of the same hours. $1 now, $2 raw retention in days.</summary>
+    /// <summary>Removes the built rows of the same slice. $1 first hour, $2 the hour the slice stops before.</summary>
     public const string PruneBuiltSql = @"
 DELETE FROM collect.query_stats_host_hourly_built
-WHERE bucket < date_trunc('hour', $1::timestamp - make_interval(days => $2)) + interval '1 hour';";
+WHERE bucket >= $1::timestamp
+  AND bucket < $2::timestamp;";
 
     /// <summary>
     /// The whole hours of <c>[$2, $3)</c> that the rollup does not hold for server $1: before the ledger's <c>counted_since</c>, with no
@@ -407,34 +434,116 @@ ORDER BY h.bucket;";
         return builds;
     }
 
-    /// <summary>Removes the hours before the first one inside raw's retention from both tables, in one transaction; returns the rollup rows removed.</summary>
-    public static async Task<long> PruneAsync(
-        NpgsqlConnection connection, DateTime nowUtc, int retentionDays, CancellationToken cancellationToken)
+    /// <summary>The hours one prune transaction removes from both tables: a quarter of a day, so each transaction deletes a small slice of the table
+    /// inside the <see cref="BuildStatementTimeoutSeconds"/> bound, and a first prune over the weeks between the collector's retention and raw's takes
+    /// about a hundred of them, spread over as many ticks as <see cref="MaxPruneDuration"/> needs.</summary>
+    public const int PruneSliceHours = 6;
+
+    /// <summary>One slice of hours to prune: <c>[From, To)</c> for the servers the ledger holds.</summary>
+    public readonly record struct PruneSlice(DateTime From, DateTime To, int[] ServerIds);
+
+    /// <summary>
+    /// The days the rollup is kept for, given the collector's retention for <c>query_stats</c> (<paramref name="retentionDays"/>). On a store where
+    /// raw <c>query_stats</c> is a raw hypertable (<paramref name="rawIsTiered"/>) the gated raw purge drops it at
+    /// <see cref="TimescaleSupport.RawRetentionSpan"/>, whole days, or sooner under a shorter custom retention, so the horizon is the shorter of the
+    /// two. On a plain raw table the collector's retention is the horizon.
+    /// </summary>
+    public static int HorizonDays(bool rawIsTiered, int retentionDays) =>
+        rawIsTiered ? Math.Min((int)TimescaleSupport.RawRetentionSpan.TotalDays, retentionDays) : retentionDays;
+
+    /// <summary>
+    /// <see cref="HorizonDays(bool, int)"/> for this store: whether raw <c>query_stats</c> is a raw hypertable is read from the extension's catalog,
+    /// the way the retention sweep decides which raw relations it leaves to the gated raw purge
+    /// (<see cref="TimescaleSupport.ReadRawHypertablesAsync"/>).
+    /// </summary>
+    public static async Task<int> HorizonDaysAsync(NpgsqlConnection connection, int retentionDays, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(connection);
 
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-        long removed;
-        await using (var rollup = PruneCommand(connection, transaction, PruneSql, nowUtc, retentionDays))
+        var hypertables = await TimescaleSupport.ReadRawHypertablesAsync(connection, CommandTimeoutSeconds, cancellationToken);
+        return HorizonDays(hypertables.Contains("query_stats", StringComparer.Ordinal), retentionDays);
+    }
+
+    /// <summary>The next slice of hours before the first whole hour inside <paramref name="retentionDays"/>, or null when no hour is older than that.</summary>
+    public static async Task<PruneSlice?> NextPruneSliceAsync(
+        NpgsqlConnection connection, DateTime nowUtc, int retentionDays, int sliceHours, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+
+        await using var command = new NpgsqlCommand(NextPruneSliceSql, connection) { CommandTimeout = CommandTimeoutSeconds };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = sliceHours });
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? new PruneSlice(reader.GetDateTime(0), reader.GetDateTime(1), reader.GetFieldValue<int[]>(2))
+            : null;
+    }
+
+    /// <summary>
+    /// Removes the hours before the first whole hour inside <paramref name="retentionDays"/> from both tables, oldest first, <paramref name="sliceHours"/>
+    /// hours per transaction, and returns the rollup rows removed. A slice's rollup rows and built rows go in one transaction, so the ledger never
+    /// names an hour whose rows are gone. No slice starts once <paramref name="elapsed"/> reaches <see cref="MaxPruneDuration"/>; the hours left wait for the
+    /// next tick. After each commit the WAL the slice wrote goes to the pacer <paramref name="pacerFactory"/> builds (null runs unpaced), which is the
+    /// retention purge's, so the prune holds the same share of the checkpoint budget the purge does.
+    /// </summary>
+    public static async Task<long> PruneAsync(
+        NpgsqlConnection connection, DateTime nowUtc, int retentionDays, int sliceHours, Func<TimeSpan> elapsed,
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(elapsed);
+        ArgumentOutOfRangeException.ThrowIfLessThan(sliceHours, 1);
+
+        long removed = 0;
+        IBatchWalPacer? pacer = null;
+        var pacerBuilt = false;
+        while (elapsed() < MaxPruneDuration && await NextPruneSliceAsync(connection, nowUtc, retentionDays, sliceHours, cancellationToken) is { } slice)
         {
+            if (!pacerBuilt && pacerFactory is not null)
+            {
+                pacer = await pacerFactory(cancellationToken);
+                pacerBuilt = true;
+            }
+
+            var walBefore = pacer is null ? null : await pacer.ReadWalPositionAsync(connection, cancellationToken);
+            removed += await PruneSliceAsync(connection, slice, cancellationToken);
+            if (pacer is not null)
+            {
+                await pacer.AfterBatchAsync(connection, walBefore, cancellationToken);
+            }
+        }
+
+        return removed;
+    }
+
+    private static async Task<long> PruneSliceAsync(NpgsqlConnection connection, PruneSlice slice, CancellationToken cancellationToken)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (var timeout = new NpgsqlCommand(StatementTimeoutSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            await timeout.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        long removed;
+        await using (var rollup = new NpgsqlCommand(PruneSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            rollup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = slice.ServerIds });
+            rollup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(slice.From) });
+            rollup.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(slice.To) });
             removed = await rollup.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using (var built = PruneCommand(connection, transaction, PruneBuiltSql, nowUtc, retentionDays))
+        await using (var built = new NpgsqlCommand(PruneBuiltSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
+            built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(slice.From) });
+            built.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(slice.To) });
             await built.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await transaction.CommitAsync(cancellationToken);
         return removed;
-    }
-
-    private static NpgsqlCommand PruneCommand(NpgsqlConnection connection, NpgsqlTransaction transaction, string sql, DateTime nowUtc, int retentionDays)
-    {
-        var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds };
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = Unspecified(nowUtc) });
-        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = retentionDays });
-        return command;
     }
 
     /// <summary>
@@ -476,21 +585,25 @@ ORDER BY h.bucket;";
     }
 
     /// <summary>
-    /// One tick: remove the hours raw's retention took, plan, then build each planned hour in its own transaction, newest first. An hour
-    /// that fails is logged and the loop goes on; the next tick plans it again. Once <see cref="MaxTickDuration"/> has passed no further
-    /// hour starts, and the planned hours left are reported as deferred.
+    /// One tick: resolve the horizon raw is held to (<see cref="HorizonDaysAsync"/>), remove the hours before it in slices (<see cref="PruneAsync"/>),
+    /// plan against the same horizon, then build each planned hour in its own transaction, newest first. An hour that fails is logged and the loop
+    /// goes on; the next tick plans it again. Once <see cref="MaxPruneDuration"/> has passed no further slice starts, and once
+    /// <see cref="MaxTickDuration"/> has passed no further hour starts and the planned hours left are reported as deferred.
+    /// <paramref name="retentionDays"/> is the collector's retention for <c>query_stats</c>.
     /// </summary>
     public static Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, CancellationToken cancellationToken,
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory = null)
     {
         var clock = Stopwatch.StartNew();
-        return RunTickAsync(dataSource, nowUtc, retentionDays, logger, () => clock.Elapsed, cancellationToken);
+        return RunTickAsync(dataSource, nowUtc, retentionDays, logger, () => clock.Elapsed, cancellationToken, pacerFactory);
     }
 
-    /// <summary><see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, CancellationToken)"/> with the elapsed time since the
-    /// tick began supplied by <paramref name="elapsed"/>, read before each hour starts.</summary>
+    /// <summary><see cref="RunTickAsync(NpgsqlDataSource, DateTime, int, ILogger, CancellationToken, Func{CancellationToken, Task{IBatchWalPacer?}}?)"/> with the
+    /// elapsed time since the tick began supplied by <paramref name="elapsed"/>, read before each slice and each hour starts.</summary>
     public static async Task<TickResult> RunTickAsync(
-        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken)
+        NpgsqlDataSource dataSource, DateTime nowUtc, int retentionDays, ILogger logger, Func<TimeSpan> elapsed, CancellationToken cancellationToken,
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory = null)
     {
         ArgumentNullException.ThrowIfNull(dataSource);
         ArgumentNullException.ThrowIfNull(logger);
@@ -499,8 +612,9 @@ ORDER BY h.bucket;";
         int hoursBuilt = 0, serverHours = 0, failed = 0, started = 0;
 
         await using var connection = await dataSource.OpenConnectionAsync(StoreSessionNames.QueryStatsHostHourly, cancellationToken);
-        var removed = await PruneAsync(connection, nowUtc, retentionDays, cancellationToken);
-        var plan = await PlanBuildsAsync(connection, nowUtc, retentionDays, cancellationToken);
+        var horizonDays = await HorizonDaysAsync(connection, retentionDays, cancellationToken);
+        var removed = await PruneAsync(connection, nowUtc, horizonDays, PruneSliceHours, elapsed, pacerFactory, cancellationToken);
+        var plan = await PlanBuildsAsync(connection, nowUtc, horizonDays, cancellationToken);
 
         foreach (var item in plan)
         {

@@ -14,8 +14,8 @@ using PerformanceMonitor.Darling.Storage;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// #8967: gives the attention legacy copy the retention purge's WAL pacer (#4823), so the copy writes no more WAL a second than the purge
-/// does. The copy lives in the Storage project, which cannot see <see cref="RetentionWalPacer"/>.
+/// #8967: gives the Storage project's batched writes (the attention legacy copy, the host hourly rollup's prune) the retention purge's WAL pacer
+/// (#4823), so they write no more WAL a second than the purge does. Storage cannot see <see cref="RetentionWalPacer"/>.
 /// </summary>
 internal sealed class AttentionLegacyCopyPacer : IBatchWalPacer
 {
