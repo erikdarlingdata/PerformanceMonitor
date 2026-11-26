@@ -370,15 +370,20 @@ Collector queries specifically:
   hint. One on a neighbouring statement does not cover it.
 
   One narrow exception (#9539): some statements can drop the hint. Such a statement takes no
-  parameters, and the server's own setup (its availability groups, databases and files) sets
-  how many rows it reads. A lab run on two engine versions must prove the change. Without the
-  hint, the statement uses less CPU at idle and under load, and returns the same rows. A plan
-  compiled at idle and then reused under load must also cost less than the hinted statement.
-  The comment at the statement gives those numbers.
+  parameters, bar the one named below, and the server's own setup (its availability groups,
+  databases and files) sets how many rows it reads. A lab run on two engine versions must
+  prove the change. Without the hint, the statement uses less CPU at idle and under load, and
+  returns the same rows. A plan compiled at idle and then reused under load must also cost
+  less than the hinted statement. The comment at the statement gives those numbers.
 
   Today the exception covers the `ag_replica_states` and `ag_database_replica_states` staging
-  statements, and the `file_io_stats` statement used when no databases are excluded. A
-  statement that takes a parameter keeps the hint. So does a statement that reads rows that
+  statements, the `file_io_stats` statement used when no databases are excluded, and the on-prem
+  `query_snapshots` statement used when no databases are excluded (#9683). That last one is the
+  single parameterized statement the exception names. Its held-plan parameters sit in a `CASE`
+  and an `IN` list that pick a plan state, never in a seek or a row filter, so no cached plan
+  can return other rows. Its bar is the same lab run on two engine versions, with the added
+  states of requests sharing one plan key, many distinct plans and held keys. A statement that
+  takes a parameter in a predicate keeps the hint. So does a statement that reads rows that
   grow with blocking or load (waiting tasks, blocked sessions, the plan cache).
 - **Comments explain WHY, at length.** This codebase's comments carry measurements, issue
   numbers, and the failure the line prevents. A comment restating the code is noise; one
