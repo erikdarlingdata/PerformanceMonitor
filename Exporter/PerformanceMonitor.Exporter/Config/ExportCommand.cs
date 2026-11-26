@@ -4,7 +4,7 @@ namespace PerformanceMonitor.Exporter;
 public sealed class UsageException(string message) : ArgumentException(message);
 
 /// <summary>The parsed `export` command: the options plus the two DuckDB limits the process applies before it runs.</summary>
-public sealed record ExportInvocation(ExportOptions Options, string DuckDbMemoryLimit, int DuckDbThreads);
+public sealed record ExportInvocation(ExportOptions Options, string DuckDbMemoryLimit, int DuckDbThreads, bool Verbose = false);
 
 /// <summary>
 /// Parses `export [--config F] [flags]`. With no config, every flag and default is the one `export` has always had
@@ -19,7 +19,7 @@ public static class ExportCommand
         string? pgHost = null, pgDatabase = null, pgUser = null, upload = null, awsRegion = null, stateDir = null;
         string? applicationName = null, duckDbMemoryLimit = null, dimensionOrigin = null, also = null, procedurePlanReuse = null, queryStoreSource = null;
         int? pgPort = null, statementTimeoutSeconds = null, duckDbThreads = null, queryStoreLagHours = null, freshGuardMinutes = null;
-        bool dryRun = false, allowOpenWindow = false, ignoreState = false, allowCompressed = false, pgTextFetchAll = false, planFetchAll = false;
+        bool verbose = false, dryRun = false, allowOpenWindow = false, ignoreState = false, allowCompressed = false, pgTextFetchAll = false, planFetchAll = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -53,6 +53,7 @@ public static class ExportCommand
                 case "--dimension-origin": dimensionOrigin = Next(); break;
                 case "--also": also = Next(); break;
                 case "--allow-compressed": allowCompressed = true; break;
+                case "--verbose": verbose = true; break;
                 case "--pg-text-fetch-all": pgTextFetchAll = true; break;
                 case "--plan-fetch-all": planFetchAll = true; break;
                 case "--procedure-plan-reuse": procedurePlanReuse = Next(); break;
@@ -111,6 +112,6 @@ public static class ExportCommand
             throw new ConfigException("--state-dir is required (or set paths.state in a --config file)");
         }
 
-        return new ExportInvocation(options, duckDbMemoryLimit ?? DuckDbSession.DefaultMemoryLimit, duckDbThreads ?? DuckDbSession.DefaultThreads);
+        return new ExportInvocation(options, duckDbMemoryLimit ?? DuckDbSession.DefaultMemoryLimit, duckDbThreads ?? DuckDbSession.DefaultThreads, verbose);
     }
 }

@@ -38,6 +38,9 @@ public sealed record RunSettings
     /// <summary>When set, every child call carries `--aws-region`. Null passes nothing.</summary>
     public string? AwsRegion { get; init; }
 
+    /// <summary>When true, every child call carries `--verbose`. `run --verbose` sets it; it is not a config key.</summary>
+    public bool Verbose { get; init; }
+
     public int StatementTimeoutSeconds { get; init; } = 120;
     public string DuckdbMemoryLimit { get; init; } = "4GB";
     public int? DuckdbThreads { get; init; }
