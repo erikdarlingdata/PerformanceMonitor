@@ -129,12 +129,13 @@ public class NewInstallLogNoiseTests
     [Fact]
     public void AnyOtherRegistryReadFailureKeepsItsOwnText()
     {
-        var denied = DarlingCliCommands.RegistryReadFailureNote(
-            Pg(PostgresErrorCodes.InsufficientPrivilege), "validating darling.json's own server list instead.");
+        var deniedException = Pg(PostgresErrorCodes.InsufficientPrivilege);
+        var denied = DarlingCliCommands.RegistryReadFailureNote(deniedException, "validating darling.json's own server list instead.");
         var broken = DarlingCliCommands.RegistryReadFailureNote(
             new InvalidOperationException("the connection is closed"), "validating darling.json's own server list instead.");
 
-        Assert.Equal("NOTE: could not read the store's registry (boom), so validating darling.json's own server list instead.", denied);
+        Assert.Equal($"NOTE: could not read the store's registry ({deniedException.Message}), so validating darling.json's own server list instead.", denied);
+        Assert.Contains("42501", denied, StringComparison.Ordinal);
         Assert.Equal("NOTE: could not read the store's registry (the connection is closed), so validating darling.json's own server list instead.", broken);
     }
 }
