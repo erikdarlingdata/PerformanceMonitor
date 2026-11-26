@@ -27,7 +27,8 @@ namespace PerformanceMonitorLite.Tests;
 /// <see cref="ObjectUsageChainHistory"/> reaches the cap: the chain never passes it, a trim keeps the newest snapshots and the builder carries on from its
 /// watermark, a window inside the kept chain reads from it and a window outside folds, and every answer is the full fold's. A cap that the newest week does
 /// not fit under drops the chain and leaves the fold. With two databases a pass that starts over the cap drops only the one that does not fit, and the same
-/// builder rebuilds it once it fits.
+/// builder rebuilds it once it fits. A database whose backfill a trim removes is rebuilt from the trim's cutoff and keeps a chain over its newest days, a
+/// chain dropped after a trim comes back from that cutoff, and with no trim each database's chain starts at its own oldest snapshot.
 /// </summary>
 public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
@@ -293,5 +294,190 @@ public sealed class ObjectUsageChainCapTests : IClassFixture<SharedDuckDbFixture
                 Assert.Equal(expected[(database, daysBack)], await ToolAsync(database, daysBack));
             }
         }
+    }
+
+    private const string LightDatabase = "Ledger";
+
+    private Task<DateTime?> OldestAsync(string database) =>
+        TimeAsync($"SELECT min(collection_time) FROM object_usage_snapshots WHERE database_name = '{database}'");
+
+    private Task<DateTime?> NewestAsync(string database) =>
+        TimeAsync($"SELECT max(collection_time) FROM object_usage_snapshots WHERE database_name = '{database}'");
+
+    [Fact]
+    public async Task ADatabaseWhoseBackfillATrimRemoves_IsRebuiltFromTheTrimsCutoff_AndKeepsAChainOverItsNewestDays()
+    {
+        /* Two databases on one server. Ledger sorts first and holds the history. Sales holds it three times over, the copies under other object ids,
+           so one day of Sales is three times the rows of one day of Ledger. */
+        var history = ObjectUsageChainHistory.Generate();
+        var heavy = Enumerable.Range(0, 3)
+            .SelectMany(copy => history.Select(r => r with { ObjectId = r.ObjectId + (100 * copy), Table = r.Table + copy }))
+            .ToList();
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, Database, heavy);
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, LightDatabase, history, firstId: -5_000_000, logRuns: false);
+        var databases = new[] { LightDatabase, Database };
+        var expected = new Dictionary<(string, int), string>();
+        foreach (var database in databases)
+        {
+            foreach (var daysBack in new[] { 7, 90 })
+            {
+                expected[(database, daysBack)] = await ToolAsync(database, daysBack);
+            }
+        }
+
+        await new ObjectUsageChainBuilder(_duckDb, () => Now).BuildPassAsync(int.MaxValue, CancellationToken.None);
+        var lightRows = await PairRowsAsync(LightDatabase);
+        Assert.True(await PairRowsAsync(Database) > 2 * lightRows);
+        await ClearChainAsync();
+
+        /* The cap holds Ledger whole with a twentieth to spare, which Sales uses up in the first days of its backfill. */
+        var snapshots = ObjectUsageChainHistory.SnapshotDays().Count();
+        var capRows = lightRows + (lightRows / 20);
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now, ResetPointFor(capRows));
+
+        /* Pass 1: Ledger is built whole, Sales reaches the cap part way, and the trim to the newest days removes every row Sales built. */
+        var first = await builder.BuildPassAsync(int.MaxValue, CancellationToken.None);
+        Assert.InRange(first, snapshots + 1, (2 * snapshots) - 1);
+        Assert.Equal(0L, await PairRowsAsync(Database));
+        var cutoff = await OldestAsync(LightDatabase);
+        Assert.True(cutoff > Start(100), "the first pass did not trim");
+        Assert.Equal(Start(0), await NewestAsync(LightDatabase));
+        Assert.True(await ChainRowsAsync() <= capRows);
+
+        /* Pass 2 on: Sales is built from the trim's cutoff, never again from its oldest snapshot, and no pass leaves it without a chain. */
+        var trail = new List<string>();
+        var lost = 0;
+        var pass = 1;
+        int built;
+        do
+        {
+            built = await builder.BuildPassAsync(int.MaxValue, CancellationToken.None);
+            pass++;
+            var salesRows = await PairRowsAsync(Database);
+            lost += salesRows == 0 ? 1 : 0;
+            trail.Add($"pass {pass} built {built} and left Sales {salesRows} rows from {await OldestAsync(Database):MM-dd}");
+            Assert.True(await ChainRowsAsync() <= capRows, $"the chain passed its cap of {capRows} rows after pass {pass}");
+        }
+        while (built > 0 && pass < 30);
+
+        Assert.True(lost == 0 && built == 0, "Sales did not keep a chain: " + string.Join(", ", trail));
+        Assert.True(pass > 3, "Sales was built in one pass, so the cap never stopped it after the trim");
+
+        /* Both chains end over the newest days: from the same oldest kept day to the newest snapshot, with no snapshot missing. */
+        var oldestKept = await OldestAsync(Database);
+        Assert.True(oldestKept >= cutoff && oldestKept <= Start(ObjectUsageChainBuilder.MinKeptDays), $"Sales' chain starts at {oldestKept}");
+        Assert.Equal(oldestKept, await OldestAsync(LightDatabase));
+        foreach (var database in databases)
+        {
+            Assert.Equal(Start(0), await NewestAsync(database));
+            Assert.Equal(
+                await ScalarAsync(
+                    $"SELECT count(DISTINCT collection_time) FROM index_object_stats WHERE database_name = '{database}' "
+                    + $"AND collection_time >= TIMESTAMP '{oldestKept:yyyy-MM-dd HH:mm:ss}'"),
+                await ScalarAsync($"SELECT count(*) FROM object_usage_snapshots WHERE database_name = '{database}'"));
+        }
+
+        /* A 7 day read comes from the chain and is the fold's, a 90 day read starts before the kept chain and folds, and the tool answers the same. */
+        foreach (var database in databases)
+        {
+            var week = await _dataService.TryReadObjectUsageChainAsync(_serverId, database, Start(7));
+            Assert.NotNull(week.Result);
+            Assert.Equal(Json(await _dataService.GetObjectUsageWindowFullAsync(_serverId, database, Start(7))), Json(week.Result));
+            var (quarter, reason) = await _dataService.TryReadObjectUsageChainAsync(_serverId, database, Start(90));
+            Assert.Null(quarter);
+            Assert.False(string.IsNullOrEmpty(reason));
+            Assert.Equal(expected[(database, 7)], await ToolAsync(database, 7));
+            Assert.Equal(expected[(database, 90)], await ToolAsync(database, 90));
+        }
+
+        /* A further pass builds nothing and removes nothing. */
+        var settled = await ChainRowsAsync();
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(settled, await ChainRowsAsync());
+    }
+
+    [Fact]
+    public async Task AfterATrim_ACapTheNewestWeekDoesNotFitUnder_StillDropsTheChain_AndItComesBackFromTheTrimsCutoff()
+    {
+        /* One builder with a cap the test moves. At half the uncapped size the passes trim the chain to its newest days. */
+        var uncapped = await SeedAndMeasureAsync();
+        var expected7 = await ToolAsync(7);
+        var capRows = uncapped / 2;
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now,
+            () => capRows * (double)ObjectUsageChainBuilder.EstimatedBytesPerRow / (1048576.0 * ObjectUsageChainBuilder.CapShareOfResetPoint));
+        for (var pass = 0; pass < 80 && await builder.BuildPassAsync(int.MaxValue, CancellationToken.None) > 0; pass++)
+        {
+            Assert.True(await ChainRowsAsync() <= capRows);
+        }
+
+        var cutoff = await OldestAsync(Database);
+        Assert.True(cutoff > Start(100) && cutoff <= Start(ObjectUsageChainBuilder.MinKeptDays), $"the chain starts at {cutoff}");
+        Assert.Equal(Start(0), await NewestAsync(Database));
+        var fromCutoff = await ScalarAsync(
+            $"SELECT count(DISTINCT collection_time) FROM index_object_stats WHERE collection_time >= TIMESTAMP '{cutoff:yyyy-MM-dd HH:mm:ss}'");
+
+        /* The cap drops to where the newest week does not fit: no trim reaches it, so the pass drops the chain, and the chain is under the cap. */
+        capRows = uncapped / 40;
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(0L, await ChainRowsAsync());
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(0L, await ChainRowsAsync());
+
+        /* The cap goes back up: the chain is built from the trim's cutoff on, each snapshot once and none older, and stays under the cap. */
+        capRows = uncapped / 2;
+        var back = 0;
+        for (var pass = 0; pass < 80; pass++)
+        {
+            var built = await builder.BuildPassAsync(int.MaxValue, CancellationToken.None);
+            Assert.True(await ChainRowsAsync() <= capRows, $"the chain passed its cap of {capRows} rows");
+            if (built == 0)
+            {
+                break;
+            }
+
+            back += built;
+        }
+
+        Assert.Equal(fromCutoff, (long)back);
+        Assert.True(await OldestAsync(Database) >= cutoff);
+        Assert.Equal(Start(0), await NewestAsync(Database));
+        var week = await _dataService.TryReadObjectUsageChainAsync(_serverId, Database, Start(7));
+        Assert.NotNull(week.Result);
+        Assert.Equal(Json(await _dataService.GetObjectUsageWindowFullAsync(_serverId, Database, Start(7))), Json(week.Result));
+        Assert.Equal(expected7, await ToolAsync(7));
+    }
+
+    [Fact]
+    public async Task WithNoTrim_EachDatabasesChainStartsAtItsOwnOldestSnapshot_WhateverTheOtherChainsHold()
+    {
+        /* Sales holds the newest 40 days of the history and is built first. Tiny, with the whole history, arrives after it. The cap is far above both. */
+        var history = ObjectUsageChainHistory.Generate();
+        var recent = history.Where(r => r.CollectionTime >= Start(40)).ToList();
+        var recentSnapshots = recent.Select(r => r.CollectionTime).Distinct().Count();
+        var snapshots = ObjectUsageChainHistory.SnapshotDays().Count();
+        Assert.True(recentSnapshots < snapshots);
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, Database, recent);
+        var capRows = 100_000L;
+        var builder = new ObjectUsageChainBuilder(_duckDb, () => Now, ResetPointFor(capRows));
+
+        Assert.Equal(recentSnapshots, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(Start(40), await OldestAsync(Database));
+
+        await ObjectUsageChainHistory.SeedAsync(_duckDb, _serverId, ServerName, SmallDatabase, history, firstId: -5_000_000, logRuns: false);
+        Assert.Equal(snapshots, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(Start(100), await OldestAsync(SmallDatabase));
+        Assert.Equal(Start(0), await NewestAsync(SmallDatabase));
+        Assert.Equal(Start(40), await OldestAsync(Database));
+        Assert.Equal((long)snapshots, await ScalarAsync($"SELECT count(*) FROM object_usage_snapshots WHERE database_name = '{SmallDatabase}'"));
+        Assert.Equal((long)recentSnapshots, await ScalarAsync($"SELECT count(*) FROM object_usage_snapshots WHERE database_name = '{Database}'"));
+        Assert.True(await ChainRowsAsync() < capRows);
+
+        /* Tiny's whole history reads from its chain, and a further pass builds nothing and moves neither start. */
+        var quarter = await _dataService.TryReadObjectUsageChainAsync(_serverId, SmallDatabase, Start(90));
+        Assert.NotNull(quarter.Result);
+        Assert.Equal(Json(await _dataService.GetObjectUsageWindowFullAsync(_serverId, SmallDatabase, Start(90))), Json(quarter.Result));
+        Assert.Equal(0, await builder.BuildPassAsync(int.MaxValue, CancellationToken.None));
+        Assert.Equal(Start(100), await OldestAsync(SmallDatabase));
+        Assert.Equal(Start(40), await OldestAsync(Database));
     }
 }

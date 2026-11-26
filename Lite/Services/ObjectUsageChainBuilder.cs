@@ -27,8 +27,9 @@ namespace PerformanceMonitorLite.Services;
 ///
 /// <para><b>Where a pair starts.</b> A database with no chain row, or with a row built under an older <see cref="ObjectUsageChainVersion.Current"/>,
 /// has its chain rows deleted and is built from its oldest stored snapshot (the backfill that fills a store from an earlier version, and the rebuild
-/// after a change of the stepper's rules). Otherwise the stepper is restored from the chain rows and the raw rows of each answering instance's
-/// last snapshot, and carries on with the snapshots after the watermark.</para>
+/// after a change of the stepper's rules), or from the trim floor when the cap has trimmed the chain since the app started (<see cref="_trimFloor"/>).
+/// Otherwise the stepper is restored from the chain rows and the raw rows of each answering instance's last snapshot, and carries on with the
+/// snapshots after the watermark.</para>
 ///
 /// <para><b>Short lock holds.</b> One snapshot is one read (the store's read lock, released before the step) and one write transaction under the
 /// store's READ lock. This class is the only writer of the three chain tables and its gate keeps it to one pass at a time, so no other writer
@@ -155,6 +156,18 @@ internal sealed class ObjectUsageChainBuilder
             s.collection_time
         """;
 
+    /// <summary>The distinct snapshot times of one database from a floor on, the floor included. $1 server_id, $2 database_name, $3 the floor.</summary>
+    private const string TimesFromSql = """
+        SELECT DISTINCT
+            s.collection_time
+        FROM v_index_object_stats AS s
+        WHERE s.server_id = $1
+        AND   s.database_name = $2
+        AND   s.collection_time >= $3
+        ORDER BY
+            s.collection_time
+        """;
+
     /// <summary>Every snapshot time of one database. $1 server_id, $2 database_name.</summary>
     private const string TimesAllSql = """
         SELECT DISTINCT
@@ -219,6 +232,16 @@ internal sealed class ObjectUsageChainBuilder
 
     /// <summary>The database being extended when the chain reached the cap, for the pass to deal with at its end.</summary>
     private (int ServerId, string DatabaseName)? _capHit;
+
+    /// <summary>
+    /// The cutoff of the latest cap trim (<see cref="EnforceCapAsync"/>), null until one runs. A trim removes the rows older than its cutoff from every
+    /// database, so a database that starts a chain from nothing starts at this floor and not at its oldest stored snapshot. Built from its oldest
+    /// snapshot, a database part way through its backfill holds only days older than the cutoff the other databases' newest days set: the trim removes
+    /// all of them, the next pass builds the same days and the trim removes them again, and the database never keeps a chain. Built from the floor, its
+    /// days are days the trim keeps. Its windows that start before the floor fold, as every database's do after a trim. The floor lives in memory, so
+    /// after a restart one pass may build such a database from its oldest snapshot and lose it to one trim, which sets the floor again.
+    /// </summary>
+    private DateTime? _trimFloor;
 
     internal ObjectUsageChainBuilder(DuckDbInitializer duckDb, Func<DateTime>? utcNow = null, Func<double>? resetPointMb = null)
     {
@@ -371,7 +394,7 @@ internal sealed class ObjectUsageChainBuilder
             }
         }
 
-        var times = await ReadTimesAsync(serverId, databaseName, watermark, cancellationToken);
+        var times = await ReadTimesAsync(serverId, databaseName, watermark, _trimFloor, cancellationToken);
 
         /* #9596: only a snapshot whose collection run has finished. The collector appends a database's rows through one appender with no explicit
            transaction, which may flush part of a snapshot before the rest lands, and a snapshot folded short would never be folded again. A run's
@@ -625,19 +648,23 @@ internal sealed class ObjectUsageChainBuilder
         return (rows, versions);
     }
 
-    private async Task<List<DateTime>> ReadTimesAsync(int serverId, string databaseName, DateTime? watermark, CancellationToken cancellationToken)
+    /// <summary>
+    /// The snapshot times a pair has left to build, oldest first: those after <paramref name="watermark"/> when it has a chain, else those from
+    /// <paramref name="floor"/> on when a trim has set one, else all of them.
+    /// </summary>
+    private async Task<List<DateTime>> ReadTimesAsync(int serverId, string databaseName, DateTime? watermark, DateTime? floor, CancellationToken cancellationToken)
     {
         var times = new List<DateTime>();
         using var readLock = _duckDb.AcquireReadLock(cancellationToken);
         using var connection = _duckDb.CreateConnection();
         await connection.OpenAsync(cancellationToken);
         using var command = connection.CreateCommand();
-        command.CommandText = watermark is null ? TimesAllSql : TimesAfterSql;
+        command.CommandText = watermark is not null ? TimesAfterSql : floor is not null ? TimesFromSql : TimesAllSql;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
-        if (watermark is { } mark)
+        if ((watermark ?? floor) is { } bound)
         {
-            command.Parameters.Add(new DuckDBParameter { Value = Naive(mark) });
+            command.Parameters.Add(new DuckDBParameter { Value = Naive(bound) });
         }
 
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -809,7 +836,8 @@ internal sealed class ObjectUsageChainBuilder
     /// reader needs the chain's facts at the window's baseline). If the newest <see cref="MinKeptDays"/> days do not fit, one database's chain is
     /// dropped and the check runs again: the database being extended when the cap was reached, else the one whose newest week holds the most rows.
     /// So only the databases that do not fit lose their chain, and the rest keep theirs, trimmed when they still need it. A dropped database waits in
-    /// <see cref="_stopped"/> until it fits. Returns the sentence for the pass's one warning, or null when the chain was under the cap.
+    /// <see cref="_stopped"/> until it fits. A trim's cutoff becomes <see cref="_trimFloor"/>, where a database with no chain starts its own.
+    /// Returns the sentence for the pass's one warning, or null when the chain was under the cap.
     /// </summary>
     private async Task<string?> EnforceCapAsync(CancellationToken cancellationToken)
     {
@@ -844,6 +872,7 @@ internal sealed class ObjectUsageChainBuilder
             {
                 await PurgeAsync(from, cancellationToken);
                 trimmedFrom = from;
+                _trimFloor = from;
                 break;
             }
 
