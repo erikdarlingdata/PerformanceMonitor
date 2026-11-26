@@ -890,7 +890,7 @@ public sealed class AlertDeliveryChannelTests
         Assert.All(bodies, body => Assert.Contains(Prose, body, StringComparison.Ordinal));
 
         /* The display name is a TITLE concern, so the two card channels carry it. */
-        var teams = Assert.Single(bodies, b => b.Contains("themeColor", StringComparison.Ordinal));
+        var teams = Assert.Single(bodies, b => b.Contains("\"AdaptiveCard\"", StringComparison.Ordinal));
         Assert.Contains(DisplayName, teams, StringComparison.Ordinal);
         Assert.DoesNotContain(MetricKey, teams, StringComparison.Ordinal);
 

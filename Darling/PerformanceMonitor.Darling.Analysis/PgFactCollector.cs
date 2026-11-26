@@ -240,7 +240,8 @@ public sealed partial class PgFactCollector : IFactCollector
            The order of this list is the order the facts land in. The wait family groups its own facts (the general-lock and
            parallelism rows) inside its own step, which is where the serial pass grouped them: the list held only the coverage
            stamp and the wait facts at that point. */
-        await RunFamiliesAsync(context, facts,
+        /* #8570: a read asked for some sources only (get_analysis_facts with source) runs the families those sources need. */
+        await RunFamiliesAsync(context, facts, NarrowToRequestedSources(context,
         [
             WaitStatsAndGroupStepAsync,
             CollectBlockingFactsAsync,
@@ -274,9 +275,26 @@ public sealed partial class PgFactCollector : IFactCollector
             CollectServerPropertiesFactsAsync,
             CollectDiskSpaceFactsAsync,
             CollectPlanAdvisoryFactsAsync
-        ]);
+        ]));
 
         return facts;
+    }
+
+    /// <summary>
+    /// #8570: the families for <see cref="AnalysisContext.RequestedFactSources"/> (<see cref="FamiliesFor"/>). When it skips
+    /// any, the context's family total drops by as many, so a collection caveat counts the families this pass read.
+    /// </summary>
+    private static List<Func<AnalysisContext, List<Fact>, Task>> NarrowToRequestedSources(
+        AnalysisContext context, List<Func<AnalysisContext, List<Fact>, Task>> families)
+    {
+        var kept = FamiliesFor(context.RequestedFactSources, families, out var skipped);
+        if (skipped > 0)
+        {
+            context.CollectionFamilyCount -= skipped;
+            context.FactSourcesNarrowed = true;
+        }
+
+        return kept;
     }
 
     /// <summary>

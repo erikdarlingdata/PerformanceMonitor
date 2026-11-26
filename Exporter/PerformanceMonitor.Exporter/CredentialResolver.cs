@@ -13,7 +13,8 @@ public static class CredentialResolver
 {
     /// <summary>
     /// Darling's own DPAPI entropy string for this credential family. Must match what
-    /// Darling used to encrypt the blob, or Unprotect fails.
+    /// Darling used to encrypt the blob, or Unprotect fails. The README's "The dpapi_file password file" section
+    /// documents it, with a PowerShell snippet that writes a file this resolver accepts.
     /// </summary>
     private const string DpapiEntropy = "PerformanceMonitor.Darling.v1";
 
@@ -41,7 +42,7 @@ public static class CredentialResolver
                 var key = spec.Source == CredentialSources.Env ? "store.password" : "store.connection_string_env";
                 var value = Environment.GetEnvironmentVariable(spec.Name ?? "");
                 return string.IsNullOrEmpty(value)
-                    ? throw new CredentialException($"{key}: env var '{spec.Name}' is not set or is empty")
+                    ? throw new CredentialException($"{key}: the environment variable it names is not set or is empty")
                     : value;
             }
 
@@ -65,7 +66,10 @@ public static class CredentialResolver
                 }
                 catch (Exception ex) when (ex is CryptographicException or FormatException or IOException)
                 {
-                    throw new CredentialException($"store.password.path: DPAPI credential file '{spec.Path}' could not be decrypted ({ex.GetType().Name})");
+                    throw new CredentialException(
+                        $"store.password.path: DPAPI credential file '{spec.Path}' could not be decrypted ({ex.GetType().Name}). " +
+                        $"Likely causes: the file is not the base64 text of a DPAPI blob, the blob was protected with other entropy than '{DpapiEntropy}', " +
+                        "or it was written on another machine (see \"The dpapi_file password file\" in the Exporter README).");
                 }
 
             default:
@@ -126,6 +130,11 @@ public static class CredentialResolver
     {
         var base64Text = File.ReadAllText(path).Trim();
         var encryptedBytes = Convert.FromBase64String(base64Text);
+        if (encryptedBytes.Length == 0)
+        {
+            throw new FormatException("The credential file is empty.");
+        }
+
         var entropy = Encoding.UTF8.GetBytes(DpapiEntropy);
         var decryptedBytes = ProtectedData.Unprotect(encryptedBytes, entropy, DataProtectionScope.LocalMachine);
         return Encoding.UTF8.GetString(decryptedBytes);
