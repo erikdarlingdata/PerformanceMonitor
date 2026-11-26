@@ -272,7 +272,8 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
         sql = Regex.Replace(sql, @"'\{T:(-?[0-9.]+)\}'", m =>
             "TIMESTAMP '" + now.AddSeconds(double.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture)).ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture) + "'");
         sql = sql.Replace("{ARCHIVE}", store.ArchiveDir.Replace('\\', '/'), StringComparison.Ordinal)
-                 .Replace("{MONTH}", now.AddDays(-5).ToString("yyyyMM", CultureInfo.InvariantCulture), StringComparison.Ordinal);
+                 .Replace("{MONTH}", now.AddDays(-5).ToString("yyyyMM", CultureInfo.InvariantCulture), StringComparison.Ordinal)
+                 .Replace("{DAY}", now.AddDays(-5).ToString("yyyyMMdd", CultureInfo.InvariantCulture), StringComparison.Ordinal);
         using (var conn = new DuckDBConnection($"Data Source={store.DbPath}"))
         {
             await conn.OpenAsync();

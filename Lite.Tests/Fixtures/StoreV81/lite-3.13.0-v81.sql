@@ -270,15 +270,15 @@ INSERT INTO "waiting_tasks" VALUES (212, '{T:-57600}', -998843892, 'LAB-SQL02\IN
 INSERT INTO "waiting_tasks" VALUES (213, '{T:-54720}', -1147478991, 'lab-sql03.example.local', 213, 'LCK_M_X', 213, 213, 'resource_description_12', 'Db0', 'program_name_12');
 CREATE TEMP TABLE lupg_parquet AS SELECT * FROM "query_snapshots" WHERE false;
 INSERT INTO "lupg_parquet" VALUES (1, '{T:-665280}', 256407802, 'LAB-SQL01', 1, 'Db0', 'elapsed_time_formatted_0', 'query_text_0', '<x n="0"/>', '<x n="0"/>', 'status_0', 1, 'CXPACKET', 1, 'wait_resource_0', 1, 1, 1, 1, 1, 0.25, 'transaction_isolation_level_0', 1, 1, 'login_name_0', 'host_name_0', 'program_name_0', 1, 0.25, true, '0x0000000000000000', 0, 0, 0, 0, 0, 0, '{T:-665280}', 1);
-COPY lupg_parquet TO '{ARCHIVE}/20261126_0013_query_snapshots.parquet' (FORMAT parquet);
+COPY lupg_parquet TO '{ARCHIVE}/{DAY}_0013_query_snapshots.parquet' (FORMAT parquet);
 DROP TABLE lupg_parquet;
 CREATE TEMP TABLE lupg_parquet AS SELECT * FROM "query_stats" WHERE false;
 INSERT INTO "lupg_parquet" VALUES (1, '{T:-665280}', 256407802, 'LAB-SQL01', 'Db0', '0x0000000000000000', '<x n="0"/>', '{T:-665280}', '{T:-665280}', 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 'query_text_0', '<x n="0"/>', '0x0000000000000000', '<x n="0"/>', 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 'host_object_name_0', 1, 1, 1);
-COPY lupg_parquet TO '{ARCHIVE}/20261126_0013_query_stats.parquet' (FORMAT parquet);
+COPY lupg_parquet TO '{ARCHIVE}/{DAY}_0013_query_stats.parquet' (FORMAT parquet);
 DROP TABLE lupg_parquet;
 CREATE TEMP TABLE lupg_parquet AS SELECT * FROM "query_store_stats" WHERE false;
 INSERT INTO "lupg_parquet" VALUES (1, '{T:-665280}', 256407802, 'LAB-SQL01', 'Db0', 1, 1, 'execution_type_desc_0', '{T:-665280}', '{T:-665280}', 'module_name_0', 'query_text_0', '0x0000000000000000', 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, '<x n="0"/>', '<x n="0"/>', true, 1, 'last_force_failure_reason_0', 1, '<x n="0"/>', '<x n="0"/>', 'replica_role_0', 1, '{T:-665280}', '{T:-665280}');
-COPY lupg_parquet TO '{ARCHIVE}/20261126_0013_query_store_stats.parquet' (FORMAT parquet);
+COPY lupg_parquet TO '{ARCHIVE}/{DAY}_0013_query_store_stats.parquet' (FORMAT parquet);
 DROP TABLE lupg_parquet;
 CREATE TEMP TABLE lupg_parquet AS SELECT * FROM "ag_database_replica_states" WHERE false;
 INSERT INTO "lupg_parquet" VALUES (1, '{T:-665280}', 256407802, 'LAB-SQL01', 'ag_name_0', 'Db0', 'replica_server_name_0', true, 'synchronization_state_desc_0', 'last_hardened_lsn_0', 'last_commit_lsn_0', 1, 1, 1, 1, true, 'suspend_reason_desc_0', 'availability_mode_desc_0', 1, '{T:-665280}', '{T:-665280}', '{T:-665280}', '{T:-665280}', 0, 0, 'group_id_0');
