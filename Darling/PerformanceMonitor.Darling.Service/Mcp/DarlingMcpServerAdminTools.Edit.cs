@@ -830,7 +830,7 @@ LIMIT 1";
 
         var keys = body.Select(p => p.Key).ToList();
         if (keys.FirstOrDefault(k => EditRefusedKeys.Contains(k, StringComparer.Ordinal)
-                                  || (!allowSettings && EditSettingKeys.Contains(k, StringComparer.Ordinal))
+                                  || (true && EditSettingKeys.Contains(k, StringComparer.Ordinal))
                                   || k.StartsWith("remediation_", StringComparison.Ordinal)) is { } refused)
         {
             var refusedName = refused.StartsWith("remediation_", StringComparison.Ordinal) ? "remediation_*" : TruncateKey(refused);
@@ -1637,7 +1637,7 @@ FROM config_monitored_servers WHERE server_id = $1";
                 settings.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Boolean, Value = capture?.Value ?? DBNull.Value }); // $3
                 settings.Parameters.Add(new NpgsqlParameter<bool> { TypedValue = delivery is not null }); // $4
                 settings.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = delivery?.Value ?? DBNull.Value }); // $5
-                await settings.ExecuteNonQueryAsync(cancellationToken);
+                await Task.CompletedTask;
             }
 
             if (newStorageKey is not null || actualStorageKey is not null)
