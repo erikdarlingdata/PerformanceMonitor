@@ -96,7 +96,7 @@ public sealed partial class McpAlertTools
         {
             if (string.IsNullOrWhiteSpace(metric_match))
             {
-                return McpHelpers.Status("invalid", "metric_match is required: " + RouteMatchHelp + ".");
+                return McpHelpers.Refusal("metric_match", "metric_match is required: " + RouteMatchHelp + ".");
             }
 
             var match = NotificationRouteKinds.MatchToSave(null, metric_match);
@@ -107,7 +107,7 @@ public sealed partial class McpAlertTools
 
             if (ChangedDestinations(destinations, includeClears: true).FirstOrDefault(c => c.Typed == ClearMarker) is { Argument: not null } clear)
             {
-                return McpHelpers.Status("invalid", $"{clear.Argument} is - but a new route has no destination to remove: pass a value or omit it.");
+                return McpHelpers.Refusal(clear.Argument, $"{clear.Argument} is - but a new route has no destination to remove: pass a value or omit it.");
             }
 
             foreach (var (value, argument) in DestinationUrls(destinations))
@@ -139,11 +139,11 @@ public sealed partial class McpAlertTools
             }
             catch (ArgumentException ex)
             {
-                return McpHelpers.Status("invalid", RouteArgumentMessage(ex));
+                return McpHelpers.Refusal("route", RouteArgumentMessage(ex));
             }
             catch (RouteSecretException ex)
             {
-                return McpHelpers.Status("invalid", ex.Message);
+                return McpHelpers.Refusal("destinations", ex.Message);
             }
 
             var stored = await store.GetAsync(routeId);
@@ -231,12 +231,12 @@ public sealed partial class McpAlertTools
 
             if (scope_server_id.HasValue && scope_tag_id.HasValue)
             {
-                return McpHelpers.Status("invalid", "Pass scope_server_id or scope_tag_id, not both.");
+                return McpHelpers.Refusal("scope_server_id", "Pass scope_server_id or scope_tag_id, not both.");
             }
 
             if (fleet_wide == true && (scope_server_id.HasValue || scope_tag_id.HasValue))
             {
-                return McpHelpers.Status("invalid", "fleet_wide true clears the scope: do not pass scope_server_id or scope_tag_id with it.");
+                return McpHelpers.Refusal("fleet_wide", "fleet_wide true clears the scope: do not pass scope_server_id or scope_tag_id with it.");
             }
 
             var match = string.IsNullOrWhiteSpace(metric_match) ? existing.MetricMatch : NotificationRouteKinds.MatchToSave(null, metric_match);
@@ -338,11 +338,11 @@ public sealed partial class McpAlertTools
             }
             catch (ArgumentException ex)
             {
-                return McpHelpers.Status("invalid", RouteArgumentMessage(ex));
+                return McpHelpers.Refusal("route", RouteArgumentMessage(ex));
             }
             catch (RouteSecretException ex)
             {
-                return McpHelpers.Status("invalid", ex.Message);
+                return McpHelpers.Refusal("destinations", ex.Message);
             }
 
             /* Re-read AFTER the write, so the reported row is the stored one. */
@@ -369,12 +369,12 @@ public sealed partial class McpAlertTools
     {
         if (serverId.HasValue && tagId.HasValue)
         {
-            return McpHelpers.Status("invalid", "Pass scope_server_id or scope_tag_id, not both.");
+            return McpHelpers.Refusal("scope_server_id", "Pass scope_server_id or scope_tag_id, not both.");
         }
 
         if (NotificationRouteKinds.IsWildcard(match) && !serverId.HasValue && !tagId.HasValue)
         {
-            return McpHelpers.Status("invalid", "metric_match * needs scope_server_id or scope_tag_id: a fleet-wide route must name a metric or a family.");
+            return McpHelpers.Refusal("metric_match", "metric_match * needs scope_server_id or scope_tag_id: a fleet-wide route must name a metric or a family.");
         }
 
         if (!checkExists)
@@ -384,12 +384,12 @@ public sealed partial class McpAlertTools
 
         if (serverId is { } sid && !ServerNames(servers).ContainsKey(sid))
         {
-            return McpHelpers.Status("invalid", $"scope_server_id {sid} names no monitored server (see get_notification_routes or list_servers).");
+            return McpHelpers.Refusal("scope_server_id", $"scope_server_id {sid} names no monitored server (see get_notification_routes or list_servers).");
         }
 
         if (tagId is { } tid && tags.All(t => t.Id != tid))
         {
-            return McpHelpers.Status("invalid", $"scope_tag_id {tid} names no server tag.");
+            return McpHelpers.Refusal("scope_tag_id", $"scope_tag_id {tid} names no server tag.");
         }
 
         return null;
@@ -413,7 +413,7 @@ public sealed partial class McpAlertTools
 
         return Uri.TryCreate(text, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
             ? null
-            : McpHelpers.Status("invalid", $"{argument} must be an absolute http or https URL.");
+            : McpHelpers.Refusal(argument, $"{argument} must be an absolute http or https URL.");
     }
 
     /// <summary>The store's <see cref="ArgumentException"/> message without the "(Parameter 'route')" suffix the runtime appends.</summary>
