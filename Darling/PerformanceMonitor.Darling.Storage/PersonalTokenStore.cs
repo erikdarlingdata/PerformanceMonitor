@@ -434,8 +434,9 @@ WHERE t.token_id = v.token_id";
         var (result, commit) = await body(connection, transaction);
         if (commit)
         {
-            /* #9643: the change has run, so the commit does not take the caller's token: a cancel now would roll back a token the caller never
-               gets to learn about, or leave a revoke the caller was told failed. */
+            /* #9643: the change has run, so the commit does not take the caller's token. A cancel during the commit could let it land while the
+               caller is told the call was cancelled. On None the outcome is definite and journalled, though a caller that has gone still does
+               not see the answer. */
             await transaction.CommitAsync(CancellationToken.None);
         }
 
