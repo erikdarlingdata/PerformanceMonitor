@@ -21,10 +21,18 @@ namespace Darling.Tests;
 /// #9753: the single-server flag form of <c>--add-server</c> reads a piped or redirected password with the strict reader
 /// <c>--set-login-password</c> uses (#9689), with the same refusals. Each test drives the flag form's own reader and builder
 /// (<see cref="DarlingCliCommands.BuildAddServerJsonFromStdin"/>) with stdin as bytes and the input marked redirected, so no
-/// test depends on whether the test process has a terminal.
+/// test depends on whether the test process has a terminal. The JSON-form test reads the process-wide owned set, so it takes the
+/// <c>darling-owned-secrets</c> collection and starts from an empty set: from the unpopulated set every reference is refused.
 /// </summary>
-public sealed class AddServerStrictPasswordTests
+[Collection("darling-owned-secrets")]
+public sealed class AddServerStrictPasswordTests : IDisposable
 {
+    private readonly DarlingOwnedSet _ownedBefore = DarlingOwnedSecrets.Current;
+
+    public AddServerStrictPasswordTests() => DarlingOwnedSecrets.Set(DarlingOwnedSet.Empty);
+
+    public void Dispose() => DarlingOwnedSecrets.Set(_ownedBefore);
+
     private static readonly DarlingCliCommands.AddServerFlags SqlLogin =
         new(Host: "sql01", Auth: "sql", Username: "darling_monitor");
 
