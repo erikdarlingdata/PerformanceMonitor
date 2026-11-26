@@ -45,6 +45,22 @@ public sealed class DarlingConfigTests
         return config;
     }
 
+    /* #9688: the sample install-darling.sh copies to /etc/darling/darling.json. It loads with its comments, it is the
+       bring-your-own store shape Linux needs, and it validates as shipped, so the only edits an operator makes are
+       the placeholders and the two secret files. */
+    [Fact]
+    public void LinuxSampleConfig_ParsesAndValidatesAsShipped()
+    {
+        var samplePath = Path.Combine(AppContext.BaseDirectory, "darling.linux.sample.json");
+        var config = DarlingConfig.Parse(File.ReadAllText(samplePath));
+
+        Assert.False(config.Postgres.Managed);
+        Assert.NotEqual("", config.Postgres.ConnectionString);
+        var server = Assert.Single(config.Servers);
+        Assert.True(server.UsesSqlAuth);
+        Assert.Empty(config.Validate());
+    }
+
     [Fact]
     public void SampleConfig_ParsesWithComments()
     {

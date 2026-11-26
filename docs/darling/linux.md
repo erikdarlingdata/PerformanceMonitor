@@ -12,9 +12,51 @@ Every step ends with a proof point. If a proof point does not appear, stop at th
 
 - The bundled store is Windows only. On Linux `postgres.managed` is `false`, and you create the database and its login.
 - There is no DPAPI, so `--encrypt-password` is Windows only. A secret in `darling.json` is a `file:` or `env:` reference.
-- The tarball has no install script, no upgrade script and no unit file ([#9688](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9688)). You write the unit, and you upgrade by hand.
+- The scripts are `install-darling.sh` and `upgrade-darling.sh`, and the tarball has the unit, `darling.service`. See [Install and upgrade with the scripts](#install-and-upgrade-with-the-scripts).
 - The Viewer is a Windows app. A Linux host serves the [web dashboard](web-dashboard.md), or a Windows Viewer connects to the store over the network.
 - Every command on the other pages is written `.\PerformanceMonitor.Darling.Service.exe --verb`. The Linux form is in [Service verbs on Linux](#service-verbs-on-linux).
+
+## Install and upgrade with the scripts
+
+The tarball has `install-darling.sh`, `upgrade-darling.sh`, `darling.service` and `darling.linux.sample.json` in its root ([#9688](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9688)). The scripts do steps 5 to 8 of this page and the upgrade, with the same paths, and they check their own work. The numbered steps stay the reference for what the scripts do, and for a host where you do them by hand.
+
+**Install.** Do steps 1 to 4 first. Then extract the tarball into a new folder that only root can write, and run its script. The folder is not `/opt/darling`: the script puts the build there.
+
+```bash
+sudo mkdir /opt/darling-new
+sudo tar -xzf PerformanceMonitorDarling-linux-x64-<version>.tar.gz -C /opt/darling-new --no-same-owner
+sudo /opt/darling-new/install-darling.sh
+```
+
+- The first run creates the `darling` user and the folders of step 5, puts the build in `/opt/darling`, installs the unit, and creates `/etc/darling/darling.json` from `darling.linux.sample.json` with two empty secret files beside it. It does not start the service, and it exits with code `2`.
+- Edit the three files as [step 6](#step-6-write-darlingjson-and-the-secret-files) says, then run the script again. The second run runs the pre-flight of step 7 as the `darling` user, enables and starts the unit, and runs the health check.
+- A config that is already in `/etc/darling` is kept, and so is a unit that is already installed. `--replace-unit` installs the tarball's unit over yours and keeps yours as `darling.service.previous`.
+- `--check` runs the checks and changes nothing. `--source <tarball>` installs from a tarball that you did not extract, and checks it against the `SHA256SUMS-linux.txt` beside it.
+
+**Upgrade.** Read the release notes and back up the store first, as [Upgrade by hand](#upgrade-by-hand) says. Then extract the new tarball into a new folder and run the upgrade script that came out of it:
+
+```bash
+sudo rm -rf /opt/darling-new && sudo mkdir /opt/darling-new
+sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling-new --no-same-owner
+sudo /opt/darling-new/upgrade-darling.sh --check
+sudo /opt/darling-new/upgrade-darling.sh
+```
+
+- It refuses, and changes nothing, while a process other than the service runs from `/opt/darling`, such as a `--backfill-rollups` that has not finished.
+- It stops the service and checks that no process is left that runs from `/opt/darling`.
+- It moves `/opt/darling` to `/opt/darling.previous`, the rollback copy, and moves the new build into `/opt/darling`. `/etc/darling` is not touched, and the script checks that the config, the secret files and the keys are as they were.
+- It starts the service and runs the health check. When the start or the check fails, it puts the old build back, starts it, and exits with code `1`. The build that failed stays in `/opt/darling.failed`.
+- `--rollback` goes back to `/opt/darling.previous` by hand. The store is not rolled back: read [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) first.
+- A unit that you wrote by hand is kept. `--replace-unit` installs the tarball's unit, and a rollback puts yours back.
+
+**The health check.** With the web dashboard off there is no port to ask, so the scripts watch what systemd and the service give. For 30 seconds after the start (`--health-seconds` changes it), the unit must stay `active`, its main process must stay the same one, and the file `/run/darling/stopped` must not exist. The service keeps that file present while a startup failure has stopped collection for good, such as a `darling.json` that it rejects. Its process stays up in that state, so `active (running)` alone does not show it. The tarball's unit names the file in `DARLING_STOPPED_MARKER`. With a unit that does not, the scripts see only the first two signs and say so. A healthy start is not proof of collection: [step 9](#step-9-proof-that-it-collects) is.
+
+**The unit's sandbox.** The tarball's `darling.service` is the unit of step 8 with `RestartSec=10`, `ProtectSystem=strict`, `NoNewPrivileges=yes` and `PrivateTmp=yes`. The service can write only `/etc/darling/darling-keys`, `/usr/share/PerformanceMonitorDarling/logs`, `/run/darling` and its own private `/tmp`. If `darling.json` names another path for the service to write, add it with `sudo systemctl edit darling`:
+
+```ini
+[Service]
+ReadWritePaths=/your/folder
+```
 
 ## Step 1: Prerequisites
 
@@ -204,7 +246,7 @@ sudo chmod 700 /usr/share/PerformanceMonitorDarling/logs
 
 ## Step 6: Write `darling.json` and the secret files
 
-The `darling.sample.json` in the tarball is shaped for Windows: it starts with `"managed": true` and uses `encryptedPassword`. Do not copy it on Linux ([#9701](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9701)). Write a file like the one below.
+The `darling.sample.json` in the tarball is shaped for Windows: it starts with `"managed": true` and uses `encryptedPassword`. Do not copy it on Linux ([#9701](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9701)). Write a file like the one below, or copy `darling.linux.sample.json` from the tarball, which is the same file with comments.
 
 Create the three files empty, with the right owner and mode, before anything secret goes in them:
 
@@ -404,8 +446,8 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `Start-Service`, `Stop-Service` or `Restart-Service 'PerformanceMonitor Darling'` | `sudo systemctl start darling`, `stop` or `restart` |
 | `Get-Service 'PerformanceMonitor Darling'` | `systemctl status darling` |
 | `Get-Content <log> -Wait -Tail 40` | `sudo tail -n 40 -f /usr/share/PerformanceMonitorDarling/logs/darling-service_$(date -u +%Y%m%d).log` |
-| `install-darling.ps1`, `Install-Darling.cmd`, the MSI | Steps 5 to 8 of this page |
-| `upgrade-darling.ps1` | [Upgrade by hand](#upgrade-by-hand) |
+| `install-darling.ps1`, `Install-Darling.cmd`, the MSI | `install-darling.sh`, or steps 5 to 8 of this page |
+| `upgrade-darling.ps1` | `upgrade-darling.sh`, or [Upgrade by hand](#upgrade-by-hand) |
 | `uninstall-darling.ps1` | [Uninstall](#uninstall) |
 
 ## Changing a registered server
@@ -426,7 +468,7 @@ The `network` block of each surface (`listen`, `allowFrom`, `token`) is read fro
 
 ## Upgrade by hand
 
-There is no upgrade script for Linux ([#9688](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9688)). The config, the secrets and the keys are in `/etc/darling`, outside the service folder, so an upgrade replaces only `/opt/darling`.
+`upgrade-darling.sh` does these steps and checks them: see [Install and upgrade with the scripts](#install-and-upgrade-with-the-scripts). The config, the secrets and the keys are in `/etc/darling`, outside the service folder, so an upgrade replaces only `/opt/darling`.
 
 1. Read the release notes, and [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) for anything that an older build reads differently.
 2. Back up the store. See [Back up, restore and move the store](../darling-store-backup.md).
@@ -480,7 +522,7 @@ sudo -u postgres dropuser darling
 | Service logs | `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`, and `journalctl -u darling` |
 | Store | Your PostgreSQL server's data directory, database `darling` |
 | Store settings | `/etc/postgresql/18/main/conf.d/darling.conf` on a Debian or Ubuntu package install |
-| Rollback copy | `/opt/darling.previous`, after an upgrade by hand |
+| Rollback copy | `/opt/darling.previous`, after an upgrade |
 
 Back up `/etc/darling`, with its keys, and the store.
 
