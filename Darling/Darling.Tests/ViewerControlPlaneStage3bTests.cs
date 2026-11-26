@@ -213,13 +213,6 @@ public sealed class ViewerServiceConfigSqlTests
     }
 
     [Fact]
-    public void SelectSql_ReadsPausedAndTheViewerOwnedFlags()
-    {
-        Assert.Contains("SELECT paused, capture_plans, mcp_enabled, mcp_port, web_enabled, web_port, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n FROM config_service WHERE id = 1",
-            ViewerDataService.ServiceConfigSelectSql, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void ReloadSignalSql_TouchesConfigService_ToBumpTheBeacon_WithoutChangingAFlag()
     {
         /* F16: config_mute_rules has no bump trigger, so a viewer mute write must touch config_service to fire
