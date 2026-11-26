@@ -374,6 +374,12 @@ public partial class RemoteCollectorService
     /// </summary>
     private readonly HashSet<int> _serversSeenOffline = new();
 
+    /// <summary>
+    /// The reason last announced for each server the sweep skips (#9769), so a server that stays skipped for the same reason is
+    /// named once rather than every cycle. A new reason announces again, and a server coming back online forgets its entry.
+    /// </summary>
+    private readonly Dictionary<int, string> _skipReasonsAnnounced = new();
+
     public RemoteCollectorService(
         DuckDbInitializer duckDb,
         ServerManager serverManager,
@@ -440,10 +446,12 @@ public partial class RemoteCollectorService
 
     /// <summary>
     /// Clears collector health entries for a server that has been removed.
-    /// Prevents stale error counts from showing in the status bar.
+    /// Prevents stale error counts from showing in the status bar. The server's blocked process threshold refusal goes with
+    /// it (#9743), so a server removed and added again is asked again.
     /// </summary>
     public void ClearHealthForServer(int serverId)
     {
+        BlockedProcessThresholdBootstrap.Forget(serverId);
         lock (_healthLock)
         {
             var keys = _collectorHealth.Keys.Where(k => k.ServerId == serverId).ToList();
@@ -664,6 +672,7 @@ public partial class RemoteCollectorService
             {
                 skippedOffline++;
                 NoteServerOffline(server);
+                AnnounceSkippedServer(server, serverStatus.UnreachableReason ?? serverStatus.ErrorMessage);
                 AppLogger.Debug("Scheduler", $"Skipping offline server '{server.DisplayName}'");
                 continue;
             }
@@ -671,9 +680,10 @@ public partial class RemoteCollectorService
             /* A server whose host this user has not confirmed is not connected to at all: its status and the Edit dialog
                say why. Every connection string is refused for it anyway; skipping here keeps the cycle from logging one
                refusal per collector. */
-            if (_serverManager.HostChange(server) != null)
+            if (_serverManager.HostChange(server) is { } hostChange)
             {
                 skippedOffline++;
+                AnnounceSkippedServer(server, hostChange.Describe(server));
                 AppLogger.Debug("Scheduler", $"Skipping server '{server.DisplayName}': its host is not confirmed");
                 continue;
             }
@@ -1360,6 +1370,30 @@ public partial class RemoteCollectorService
     }
 
     /// <summary>
+    /// Names a server the sweep skips, with the reason (#9769), at Info: the "N offline, skipped" count says how many servers were
+    /// left out and not which or why. Said once per state change, so a server that stays down for the same reason adds no line per
+    /// cycle: the same reason is not repeated, a different one is announced, and <see cref="NoteServerOnline"/> clears the memory so a
+    /// later outage is announced again. The reason is the one the sidebar shows (the connection error, or the host confirmation rule).
+    /// </summary>
+    internal void AnnounceSkippedServer(ServerConnection server, string? reason)
+    {
+        var text = string.IsNullOrWhiteSpace(reason) ? "no connection error is recorded for it" : reason;
+        var serverId = GetServerId(server);
+
+        lock (_azureMasterLock)
+        {
+            if (_skipReasonsAnnounced.TryGetValue(serverId, out var announced) && announced == text)
+            {
+                return;
+            }
+
+            _skipReasonsAnnounced[serverId] = text;
+        }
+
+        AppLogger.Info("Scheduler", $"[{server.DisplayName}] skipped, not collected from: {text}");
+    }
+
+    /// <summary>
     /// Handles a server coming back after an outage by dropping the master-inaccessible verdict.
     ///
     /// An outage and a permission problem are not distinguishable from the error number alone —
@@ -1377,6 +1411,7 @@ public partial class RemoteCollectorService
         bool returnedFromOutage;
         lock (_azureMasterLock)
         {
+            _skipReasonsAnnounced.Remove(serverId);
             returnedFromOutage = _serversSeenOffline.Remove(serverId);
             if (returnedFromOutage)
             {
