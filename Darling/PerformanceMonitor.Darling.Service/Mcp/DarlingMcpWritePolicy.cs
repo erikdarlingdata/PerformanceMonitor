@@ -51,7 +51,9 @@ internal static class DarlingMcpWritePolicy
     internal const string ServerAdminSetting = "mcp.allowServerAdmin";
 
     /// <summary>The tools that change which servers the service connects to, or where. They present the service's
-    /// own account to whatever host the caller names, so they sit behind their own setting.</summary>
+    /// own account to whatever host the caller names, so they sit behind their own setting. <c>get_web_access_groups</c> is a read that
+    /// sits here too (#9642): it reads on the store owner connection, and the store grants those columns to the Viewer's admin and web
+    /// roles only, so it is served only where the group writes are.</summary>
     internal static readonly IReadOnlySet<string> ServerAdminTools = new HashSet<string>(StringComparer.Ordinal)
     {
         "add_servers",
@@ -63,6 +65,7 @@ internal static class DarlingMcpWritePolicy
         "rotate_web_access_group_token",
         "set_advanced_web_access",
         "update_web_access_group",
+        "get_web_access_groups",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
@@ -278,6 +281,12 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "create_web_access_group",
+        "delete_web_access_group",
+        "rotate_web_access_group_token",
+        "set_advanced_web_access",
+        "update_web_access_group",
+        "get_web_access_groups",
         "undo_plan_change",
         "write_investigation_note",
         "approve_investigation_note",

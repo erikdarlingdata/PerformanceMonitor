@@ -46,10 +46,10 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
             Assert.Equal(0, (int)empty["groups_returned"]!);
             Assert.False((bool)empty["advanced_web_access_enabled"]!);
 
-            var on = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, Actor, null, ct))!;
+            var on = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, true, Actor, null, ct))!;
             Assert.Equal("set", (string)on["status"]!);
             Assert.NotNull(await store.ReadAdvancedSessionEpochAsync(ct));
-            Assert.Equal("unchanged", (string)JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, Actor, null, ct))!["status"]!);
+            Assert.Equal("unchanged", (string)JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, true, Actor, null, ct))!["status"]!);
 
             var created = JsonNode.Parse(await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "  Support  ", "all_servers", null, Actor, null, ct))!;
             Assert.Equal("created", (string)created["status"]!);
@@ -63,7 +63,7 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
             Assert.Equal(firstToken, ring.Open(credential.SealedToken, PasswordBinding.ForWebAccessToken(id, credential.Group.TokenGeneration)));
 
             var tag = (int)(await ScalarAsync(owner, "INSERT INTO config.server_tags(name) VALUES ('web-tag') RETURNING id", ct))!;
-            var updated = JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Support", "tags", [tag], false, Actor, null, ct))!;
+            var updated = JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Support", "tags", [tag], false, false, Actor, null, ct))!;
             Assert.Equal("updated", (string)updated["status"]!);
             var group = (await store.ListAsync(ct)).Single();
             Assert.Equal(WebAccessGroupScope.Tags, group.Scope);
@@ -145,6 +145,130 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
             var duplicate = await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "dup", "all_servers", null, Actor, null, ct);
             Assert.True(duplicate.Contains("A group with this name already exists", StringComparison.Ordinal), duplicate);
             Assert.Single(await store.ListAsync(ct));
+        });
+    }
+
+    [Fact]
+    public async Task TurningAdvancedAccessOn_NeedsConfirm_AndNamesWhatItBringsBack_TurningItOffDoesNot()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var store = new WebAccessGroupStore(owner);
+            await DarlingMcpWebAccessTools.CreateAsync(owner, TestKeyRings.Healthy, "Support", "all_servers", null, Actor, null, ct);
+
+            var refused = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, false, Actor, null, ct))!;
+            Assert.Equal("confirm_required", (string)refused["code"]!);
+            Assert.Contains("'Support'", (string)refused["message"]!, StringComparison.Ordinal);
+            Assert.Null(await store.ReadAdvancedSessionEpochAsync(ct));
+
+            var on = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, true, true, Actor, null, ct))!;
+            Assert.Equal("set", (string)on["status"]!);
+            Assert.NotNull(await store.ReadAdvancedSessionEpochAsync(ct));
+
+            var off = JsonNode.Parse(await DarlingMcpWebAccessTools.SetAdvancedAsync(owner, false, false, Actor, null, ct))!;
+            Assert.Equal("set", (string)off["status"]!);
+            Assert.Null(await store.ReadAdvancedSessionEpochAsync(ct));
+            /* The undo of a switch-off turns it on, so the hint carries the confirm it will need. */
+            Assert.True((bool)off["undo"]!["arguments"]!["confirm"]!);
+        });
+    }
+
+    [Fact]
+    public async Task AnUpdateThatEnablesAGroupOrWidensItToAllServers_NeedsConfirm_AndChangesNothingWithout()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var ring = TestKeyRings.Healthy;
+            var store = new WebAccessGroupStore(owner);
+            var tag = (int)(await ScalarAsync(owner, "INSERT INTO config.server_tags(name) VALUES ('t1') RETURNING id", ct))!;
+            var created = JsonNode.Parse(await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "Narrow", "tags", [tag], Actor, null, ct))!;
+            var id = Guid.Parse((string)created["group"]!["group_id"]!);
+            Assert.Equal("updated", (string)JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Narrow", null, null, false, false, Actor, null, ct))!["status"]!);
+
+            var enable = JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Narrow", null, null, true, false, Actor, null, ct))!;
+            Assert.Equal("confirm_required", (string)enable["code"]!);
+            Assert.False((await store.ReadAsync(id, ct))!.Enabled);
+
+            var widen = JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Narrow", "all_servers", null, null, false, Actor, null, ct))!;
+            Assert.Equal("confirm_required", (string)widen["code"]!);
+            Assert.Equal(WebAccessGroupScope.Tags, (await store.ReadAsync(id, ct))!.Scope);
+
+            var confirmed = JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Narrow", "all_servers", null, true, true, Actor, null, ct))!;
+            Assert.Equal("updated", (string)confirmed["status"]!);
+            var after = (await store.ReadAsync(id, ct))!;
+            Assert.Equal(WebAccessGroupScope.AllServers, after.Scope);
+            Assert.True(after.Enabled);
+
+            /* Narrowing and disabling widen nothing, so they take no confirm. */
+            var narrowed = JsonNode.Parse(await DarlingMcpWebAccessTools.UpdateAsync(owner, "Narrow", "tags", [tag], false, false, Actor, null, ct))!;
+            Assert.Equal("updated", (string)narrowed["status"]!);
+        });
+    }
+
+    [Fact]
+    public async Task ARotateWithoutConfirm_ChangesNothing_NotTheTokenNorTheJournal()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var ring = TestKeyRings.Healthy;
+            var store = new WebAccessGroupStore(owner);
+            await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "Ops", "all_servers", null, Actor, null, ct);
+            var before = (await store.ReadCredentialsAsync(ct)).Single();
+
+            var refused = JsonNode.Parse(await DarlingMcpWebAccessTools.RotateAsync(owner, ring, "Ops", false, Actor, null, ct))!;
+
+            Assert.Equal("confirm_required", (string)refused["code"]!);
+            Assert.Null(refused["token"]);
+            var after = (await store.ReadCredentialsAsync(ct)).Single();
+            Assert.Equal(before.Group.TokenGeneration, after.Group.TokenGeneration);
+            Assert.Equal(before.SealedToken, after.SealedToken);
+            Assert.Equal(0L, await ScalarAsync(owner, "SELECT count(*) FROM config.web_access_group_events WHERE event = 'rotated'", ct));
+        });
+    }
+
+    [Fact]
+    public async Task AGroupNamedLikeAnotherGroupsId_IsRefusedAsAmbiguous_NotResolvedToEither()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var ring = TestKeyRings.Healthy;
+            var store = new WebAccessGroupStore(owner);
+            var first = JsonNode.Parse(await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "First", "all_servers", null, Actor, null, ct))!;
+            var firstId = (string)first["group"]!["group_id"]!;
+            await DarlingMcpWebAccessTools.CreateAsync(owner, ring, firstId, "all_servers", null, Actor, null, ct);
+
+            Assert.Equal("ambiguous", Code(await DarlingMcpWebAccessTools.DeleteAsync(owner, firstId, true, Actor, null, ct)));
+            Assert.Equal("ambiguous", Code(await DarlingMcpWebAccessTools.RotateAsync(owner, ring, firstId, true, Actor, null, ct)));
+            Assert.Equal("ambiguous", Code(await DarlingMcpWebAccessTools.UpdateAsync(owner, firstId, null, null, false, false, Actor, null, ct)));
+            Assert.Equal(2, (await store.ListAsync(ct)).Count);
+
+            /* A name that is no other group's id still resolves by name. */
+            Assert.Equal("deleted", (string)JsonNode.Parse(await DarlingMcpWebAccessTools.DeleteAsync(owner, "First", true, Actor, null, ct))!["status"]!);
+        });
+    }
+
+    [Fact]
+    public async Task ACreateAndARotate_ReturnTheTokenEvenWhenTheFollowUpReadsFail()
+    {
+        await WithStoreAsync(async (owner, ct) =>
+        {
+            var ring = TestKeyRings.Healthy;
+            var store = new WebAccessGroupStore(owner);
+            var broken = NpgsqlDataSource.Create(owner.ConnectionString);
+            await broken.DisposeAsync();
+
+            var created = JsonNode.Parse(await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "Ops", "all_servers", null, Actor, null, ct, broken))!;
+            Assert.Equal("created", (string)created["status"]!);
+            var id = Guid.Parse((string)created["group"]!["group_id"]!);
+            var token = (string)created["token"]!;
+            var credential = (await store.ReadCredentialsAsync(ct)).Single();
+            Assert.Equal(token, ring.Open(credential.SealedToken, PasswordBinding.ForWebAccessToken(id, credential.Group.TokenGeneration)));
+
+            var rotated = JsonNode.Parse(await DarlingMcpWebAccessTools.RotateAsync(owner, ring, "Ops", true, Actor, null, ct, broken))!;
+            Assert.Equal("rotated", (string)rotated["status"]!);
+            var second = (string)rotated["token"]!;
+            var after = (await store.ReadCredentialsAsync(ct)).Single();
+            Assert.Equal(second, ring.Open(after.SealedToken, PasswordBinding.ForWebAccessToken(id, after.Group.TokenGeneration)));
         });
     }
 

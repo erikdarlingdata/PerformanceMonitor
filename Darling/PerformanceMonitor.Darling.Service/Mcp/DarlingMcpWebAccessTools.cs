@@ -26,7 +26,8 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// rotating and deleting a group. The writes run <see cref="WebAccessGroupAdmin"/>, the code the Viewer runs, on the service's own
 /// store connection (the <c>mcp</c> role holds no grant on these tables or functions, as with <c>set_server_action</c>). A create and
 /// a rotate answer with the new token once: the store keeps only the sealed copy, and no log line or journal row holds the value.
-/// The writes are served as <c>add_servers</c> is, only while <c>mcp.allowWrites</c> and <c>mcp.allowServerAdmin</c> are both on.
+/// The writes are served as <c>add_servers</c> is, only while <c>mcp.allowWrites</c> and <c>mcp.allowServerAdmin</c> are both on, and
+/// so is the group list: it reads on the store owner connection, which no reader or agent caller may use.
 /// </summary>
 [McpServerToolType]
 public sealed partial class DarlingMcpWebAccessTools
@@ -38,18 +39,20 @@ public sealed partial class DarlingMcpWebAccessTools
     [McpServerTool(Name = "get_web_access_groups"), Description(
         "Lists the web access groups and whether advanced web access is on: for each group its id, name, scope (tags or all_servers), " +
         "tag_ids, enabled, revision and activation state. No token is ever returned: a token is shown once, by create_web_access_group " +
-        "or rotate_web_access_group_token. groups_returned 0 means none exists.")]
+        "or rotate_web_access_group_token. groups_returned 0 means none exists. Needs mcp.allowWrites and mcp.allowServerAdmin.")]
     public static Task<string> GetWebAccessGroups(StoreOwnerSource? ownerSource = null, CancellationToken cancellationToken = default) =>
         ListAsync(ownerSource?.Read(), cancellationToken);
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "set_advanced_web_access"), Description(
         "Turns advanced web access on or off, the switch the Viewer shows as Advanced web access. While it is off, no web access group " +
-        "signs anyone in. Turning it off or on ends every existing group session. Needs mcp.allowWrites and mcp.allowServerAdmin.")]
+        "signs anyone in. Turning it off or on ends every existing group session. Turning it on takes confirm=true, because it lets every " +
+        "enabled group sign people in again. Needs mcp.allowWrites and mcp.allowServerAdmin.")]
     public static Task<string> SetAdvancedWebAccess(
         [Description("True to turn advanced web access on, false to turn it off.")] bool enabled,
+        [Description("Must be true to turn it on. Without it nothing changes and the answer names the groups it would bring back.")] bool confirm = false,
         StoreOwnerSource? ownerSource = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
-        SetAdvancedAsync(ownerSource?.Read(), enabled, ActorOf(), logger, cancellationToken);
+        SetAdvancedAsync(ownerSource?.Read(), enabled, confirm, ActorOf(), logger, cancellationToken);
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "create_web_access_group"), Description(
@@ -67,14 +70,16 @@ public sealed partial class DarlingMcpWebAccessTools
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "update_web_access_group"), Description(
         "Changes a group's scope, tag grants or enabled flag, as the Viewer's group editor does. A group's name does not change. " +
-        "Anything left out keeps its current value. Disabling a group ends its sessions. Needs mcp.allowWrites and mcp.allowServerAdmin.")]
+        "Anything left out keeps its current value. Disabling a group ends its sessions. Enabling a group, or widening it to all_servers, takes " +
+        "confirm=true. Needs mcp.allowWrites and mcp.allowServerAdmin.")]
     public static Task<string> UpdateWebAccessGroup(
         [Description("The group's id, or its exact name, as get_web_access_groups shows.")] string group,
         [Description("tags or all_servers. Leave out to keep the current scope.")] string? scope = null,
         [Description("For scope tags, the full list of server tag ids the group may read (replaces the current list). Leave out to keep it.")] int[]? tag_ids = null,
         [Description("True to enable the group, false to disable it. Leave out to keep it.")] bool? enabled = null,
+        [Description("Must be true when the change enables a disabled group or widens a group to all_servers. Without it nothing changes and the answer says what the change gives.")] bool confirm = false,
         StoreOwnerSource? ownerSource = null, ILogger? logger = null, CancellationToken cancellationToken = default) =>
-        UpdateAsync(ownerSource?.Read(), group, scope, tag_ids, enabled, ActorOf(), logger, cancellationToken);
+        UpdateAsync(ownerSource?.Read(), group, scope, tag_ids, enabled, confirm, ActorOf(), logger, cancellationToken);
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "rotate_web_access_group_token"), Description(
@@ -117,7 +122,7 @@ public sealed partial class DarlingMcpWebAccessTools
         }
     }
 
-    internal static async Task<string> SetAdvancedAsync(NpgsqlDataSource? owner, bool enabled, string actor, ILogger? logger, CancellationToken ct)
+    internal static async Task<string> SetAdvancedAsync(NpgsqlDataSource? owner, bool enabled, bool confirm, string actor, ILogger? logger, CancellationToken ct)
     {
         const string tool = "set_advanced_web_access";
         try
@@ -125,13 +130,23 @@ public sealed partial class DarlingMcpWebAccessTools
             if (owner is null) return NoOwner();
             var store = new WebAccessGroupStore(owner);
             var before = await store.ReadAdvancedSessionEpochAsync(ct) is not null;
+            if (enabled && !before && !confirm)
+            {
+                /* Turning the switch on is what lets a group sign in: every enabled group starts again, so the answer names them. */
+                var coming = (await store.ListAsync(ct)).Where(g => g.Enabled).ToList();
+                var names = coming.Count == 0
+                    ? "no group is enabled, so nobody signs in until one is"
+                    : $"{coming.Count} enabled group(s) sign people in again: " +
+                      string.Join(", ", coming.Take(10).Select(g => $"'{Clip(g.Name)}' ({ScopeName(g.Scope)})")) + (coming.Count > 10 ? ", and more" : string.Empty);
+                return Refuse("confirm_required", $"Turning advanced web access on lets web access groups sign in: {names}. Call again with confirm=true to go ahead. Nothing was changed.");
+            }
             await store.SetAdvancedEnabledAsync(enabled, ct);
             logger?.LogWarning("MCP advanced web access {Before} -> {After}, caller {Caller}", before, enabled, actor);
             return new JsonObject
             {
                 ["status"] = before == enabled ? "unchanged" : "set",
                 ["advanced_web_access_enabled"] = enabled,
-                ["undo"] = before == enabled ? null : Undo("set_advanced_web_access", new JsonObject { ["enabled"] = before }),
+                ["undo"] = before == enabled ? null : Undo("set_advanced_web_access", before ? new JsonObject { ["enabled"] = true, ["confirm"] = true } : new JsonObject { ["enabled"] = false }),
             }.ToJsonString();
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -141,7 +156,8 @@ public sealed partial class DarlingMcpWebAccessTools
     }
 
     internal static async Task<string> CreateAsync(
-        NpgsqlDataSource? owner, IPasswordKeyRing? ring, string? name, string? scope, int[]? tagIds, string actor, ILogger? logger, CancellationToken ct)
+        NpgsqlDataSource? owner, IPasswordKeyRing? ring, string? name, string? scope, int[]? tagIds, string actor, ILogger? logger, CancellationToken ct,
+        NpgsqlDataSource? followUpOwner = null)
     {
         const string tool = "create_web_access_group";
         try
@@ -159,15 +175,22 @@ public sealed partial class DarlingMcpWebAccessTools
 
             var store = new WebAccessGroupStore(owner);
             var token = await Admin(store, ring!, actor).CreateAsync(name, parsed, tags, ct);
-            var group = await store.ReadAsync(token.GroupId, ct);
             logger?.LogWarning("MCP web access group {GroupId} created, caller {Caller}", token.GroupId, actor);
+
+            /* The group is committed and the token is known only here, so nothing after this line may lose the answer: the group's own
+               row and the advanced switch are read best effort, and the answer falls back to what the write itself said. */
+            var after = followUpOwner is null ? store : new WebAccessGroupStore(followUpOwner);
+            var group = await TryReadGroupAsync(after, token.GroupId);
+            var advanced = await TryReadAdvancedAsync(after);
             return new JsonObject
             {
                 ["status"] = "created",
-                ["group"] = group is null ? null : GroupJson(group),
+                ["group"] = group is null
+                    ? new JsonObject { ["group_id"] = token.GroupId.ToString(), ["name"] = name.Trim(), ["scope"] = ScopeName(parsed), ["enabled"] = true }
+                    : GroupJson(group),
                 ["token"] = token.Plain,
                 ["token_note"] = "Shown once. The store keeps only a sealed copy. Rotate the token if it is lost.",
-                ["advanced_web_access_enabled"] = await store.ReadAdvancedSessionEpochAsync(ct) is not null,
+                ["advanced_web_access_enabled"] = advanced,
                 ["undo"] = Undo("delete_web_access_group", new JsonObject { ["group"] = token.GroupId.ToString(), ["confirm"] = true }),
             }.ToJsonString();
         }
@@ -178,7 +201,8 @@ public sealed partial class DarlingMcpWebAccessTools
     }
 
     internal static async Task<string> UpdateAsync(
-        NpgsqlDataSource? owner, string? groupText, string? scope, int[]? tagIds, bool? enabled, string actor, ILogger? logger, CancellationToken ct)
+        NpgsqlDataSource? owner, string? groupText, string? scope, int[]? tagIds, bool? enabled, bool confirm, string actor, ILogger? logger, CancellationToken ct,
+        NpgsqlDataSource? followUpOwner = null)
     {
         try
         {
@@ -206,9 +230,19 @@ public sealed partial class DarlingMcpWebAccessTools
             }
 
             var newEnabled = enabled ?? group.Enabled;
+            var widensScope = newScope == WebAccessGroupScope.AllServers && group.Scope != WebAccessGroupScope.AllServers;
+            var enables = newEnabled && !group.Enabled;
+            if ((widensScope || enables) && !confirm)
+            {
+                var gives = new List<string>();
+                if (widensScope) gives.Add("gives it every server, not only the servers its tags reach");
+                if (enables) gives.Add("lets its token sign people in again while advanced web access is on");
+                return Refuse("confirm_required", $"This change to group '{Clip(group.Name)}' {string.Join(" and ", gives)}. Call again with confirm=true to go ahead. Nothing was changed.");
+            }
+
             await Admin(store, null, actor).UpdateAsync(group, newScope, tags, newEnabled, ct);
-            var after = await store.ReadAsync(group.GroupId, ct);
             logger?.LogWarning("MCP web access group {GroupId} changed, caller {Caller}", group.GroupId, actor);
+            var after = await TryReadGroupAsync(followUpOwner is null ? store : new WebAccessGroupStore(followUpOwner), group.GroupId);
             return new JsonObject
             {
                 ["status"] = "updated",
@@ -216,9 +250,10 @@ public sealed partial class DarlingMcpWebAccessTools
                 ["undo"] = Undo("update_web_access_group", new JsonObject
                 {
                     ["group"] = group.GroupId.ToString(),
-                    ["scope"] = group.Scope == WebAccessGroupScope.AllServers ? "all_servers" : "tags",
+                    ["scope"] = ScopeName(group.Scope),
                     ["tag_ids"] = new JsonArray(group.TagIds.Select(t => (JsonNode)JsonValue.Create(t)!).ToArray()),
                     ["enabled"] = group.Enabled,
+                    ["confirm"] = group.Enabled || group.Scope == WebAccessGroupScope.AllServers ? true : null,
                 }),
             }.ToJsonString();
         }
@@ -229,7 +264,8 @@ public sealed partial class DarlingMcpWebAccessTools
     }
 
     internal static async Task<string> RotateAsync(
-        NpgsqlDataSource? owner, IPasswordKeyRing? ring, string? groupText, bool confirm, string actor, ILogger? logger, CancellationToken ct)
+        NpgsqlDataSource? owner, IPasswordKeyRing? ring, string? groupText, bool confirm, string actor, ILogger? logger, CancellationToken ct,
+        NpgsqlDataSource? followUpOwner = null)
     {
         try
         {
@@ -243,10 +279,11 @@ public sealed partial class DarlingMcpWebAccessTools
 
             var token = await Admin(store, ring!, actor).RotateAsync(group, ct);
             logger?.LogWarning("MCP web access group {GroupId} token rotated, caller {Caller}", group.GroupId, actor);
+            var after = await TryReadGroupAsync(followUpOwner is null ? store : new WebAccessGroupStore(followUpOwner), group.GroupId);
             return new JsonObject
             {
                 ["status"] = "rotated",
-                ["group"] = GroupJson((await store.ReadAsync(group.GroupId, ct)) ?? group),
+                ["group"] = GroupJson(after ?? group),
                 ["token"] = token.Plain,
                 ["token_note"] = "Shown once. The store keeps only a sealed copy. The old token no longer works. Rotate again if this one is lost.",
             }.ToJsonString();
@@ -292,12 +329,31 @@ public sealed partial class DarlingMcpWebAccessTools
         if (string.IsNullOrWhiteSpace(text)) return (null, Refuse("invalid", "group is required. Nothing was changed."));
         var trimmed = text.Trim();
         var groups = await store.ListAsync(ct);
-        var match = Guid.TryParse(trimmed, out var id)
-            ? groups.Where(g => g.GroupId == id).ToList()
-            : groups.Where(g => string.Equals(g.Name, trimmed, StringComparison.Ordinal)).ToList();
+        /* An id and a name are both asked about together: a group may be named like another group's id, and a write must not pick one silently. */
+        var isId = Guid.TryParse(trimmed, out var id);
+        var match = groups.Where(g => (isId && g.GroupId == id) || string.Equals(g.Name, trimmed, StringComparison.Ordinal)).ToList();
+        if (match.Count > 1)
+            return (null, Refuse("ambiguous", $"'{Clip(trimmed)}' is the id of one web access group and the name of another, so it cannot say which one you mean. " +
+                "Nothing was changed."));
         return match.Count == 1
             ? (match[0], null)
             : (null, Refuse("not_found", $"No web access group has the id or exact name '{Clip(trimmed)}'. Nothing was changed."));
+    }
+
+    private static string ScopeName(WebAccessGroupScope scope) => scope == WebAccessGroupScope.AllServers ? "all_servers" : "tags";
+
+    /// <summary>A read after a committed write: it never throws and never takes the caller's cancellation, so the answer that holds a
+    /// one-time token is not lost to a failed or cancelled follow-up.</summary>
+    private static async Task<WebAccessGroup?> TryReadGroupAsync(WebAccessGroupStore store, Guid groupId)
+    {
+        try { return await store.ReadAsync(groupId, CancellationToken.None); }
+        catch (Exception) { return null; }
+    }
+
+    private static async Task<bool?> TryReadAdvancedAsync(WebAccessGroupStore store)
+    {
+        try { return await store.ReadAdvancedSessionEpochAsync(CancellationToken.None) is not null; }
+        catch (Exception) { return null; }
     }
 
     private static bool TryScope(string? text, out WebAccessGroupScope scope)
@@ -315,7 +371,7 @@ public sealed partial class DarlingMcpWebAccessTools
     {
         ["group_id"] = g.GroupId.ToString(),
         ["name"] = g.Name,
-        ["scope"] = g.Scope == WebAccessGroupScope.AllServers ? "all_servers" : "tags",
+        ["scope"] = ScopeName(g.Scope),
         ["tag_ids"] = new JsonArray(g.TagIds.Select(t => (JsonNode)JsonValue.Create(t)!).ToArray()),
         ["enabled"] = g.Enabled,
         ["revision"] = g.Revision,
