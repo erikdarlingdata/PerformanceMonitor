@@ -286,6 +286,16 @@ public class AnalysisContext
     public IReadOnlyList<string>? PlanAdvisoryPlanXmls { get; set; }
 
     /// <summary>
+    /// Darling only (#8570): the fact sources the caller shows, set by <c>get_analysis_facts</c> when it is asked for one
+    /// source. The SQL Server collector then reads only the families whose facts carry those sources or feed their scoring,
+    /// and sets <see cref="FactSourcesNarrowed"/>. Null, the default, reads every family.
+    /// </summary>
+    public IReadOnlySet<string>? RequestedFactSources { get; set; }
+
+    /// <summary>True when the collector skipped families for <see cref="RequestedFactSources"/> (#8570).</summary>
+    public bool FactSourcesNarrowed { get; set; }
+
+    /// <summary>
     /// The queries whose timeouts (Aborted runs) or errors (Exception runs) rose, as the PLAN_REGRESSION fact read them
     /// this pass (#6267), stamped by the fact collector after that read. Null until then, and null when the read failed.
     /// The regressed-queries drill-down lists them next to the cost offenders. A pass with failures and no cost offender
@@ -491,15 +501,18 @@ public sealed record CollectionFailure(string Family, string Read, CollectionFai
 /// rather than parked on a service property for the reason <c>CollectAndScoreFactsAsync</c>'s coverage is:
 /// that path has no <c>IsAnalyzing</c> guard, two on-demand callers can overlap, and a shared property would
 /// let one read the other's failures.
+///
+/// <para>#8570: <c>SourcesNarrowed</c> is true when the collector read only the families the requested sources need
+/// (<see cref="AnalysisContext.RequestedFactSources"/>), so the facts read are not the server's whole fact set.</para>
 /// </summary>
 public sealed record CollectionCaveatState(
-    IReadOnlyList<CollectionFailure> Failures, int FamiliesTotal, IReadOnlySet<string>? SecondaryReplicaDatabases = null)
+    IReadOnlyList<CollectionFailure> Failures, int FamiliesTotal, IReadOnlySet<string>? SecondaryReplicaDatabases = null, bool SourcesNarrowed = false)
 {
     /// <summary>The state the context carries after its collector ran (or threw before recording anything).</summary>
     public static CollectionCaveatState From(AnalysisContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return new(context.CollectionFailures, context.CollectionFamilyCount, context.SecondaryReplicaDatabases);
+        return new(context.CollectionFailures, context.CollectionFamilyCount, context.SecondaryReplicaDatabases, context.FactSourcesNarrowed);
     }
 
     /// <summary>True when at least one family failed — the only case in which anything is emitted.</summary>
