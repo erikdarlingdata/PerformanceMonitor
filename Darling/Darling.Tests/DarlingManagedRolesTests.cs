@@ -122,7 +122,6 @@ public sealed class DarlingManagedRolesTests
 
         var webWrites = Regex.Matches(batch, writePrivilege + @"[^;]*? TO [^;]*\bweb\b[^;]*;")
             .Select(match => match.Value)
-            .Where(grant => !grant.Contains("record_custom_alert_resolution", StringComparison.Ordinal))
             // The transaction advisory lock grant is the one statement the script cannot carry: the functions belong to a superuser, so security.md's doc block has it.
             .Where(grant => !grant.Contains("pg_catalog.pg_advisory_xact_lock", StringComparison.Ordinal) && !grant.Contains("pg_catalog.pg_try_advisory_xact_lock", StringComparison.Ordinal))
             .Distinct()
@@ -149,7 +148,6 @@ public sealed class DarlingManagedRolesTests
 
         var revokedFunctions = Regex.Matches(batch, @"REVOKE EXECUTE ON FUNCTION [^;]*? FROM viewer;")
             .Select(match => match.Value)
-            .Where(revoke => !revoke.Contains("record_custom_alert_resolution", StringComparison.Ordinal))
             .ToList();
         Assert.True(revokedFunctions.Count >= 8, $"expected the batch to revoke the moved functions from viewer, found {revokedFunctions.Count}");
         foreach (var revoke in revokedFunctions)

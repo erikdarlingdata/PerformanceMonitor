@@ -404,6 +404,26 @@ internal static class DarlingStoreLogins
             return null;
         }
 
+        /* A string Npgsql cannot use would throw from the data source the worker creates from it, and the host logs that
+           exception's message, which can quote part of the string (a password with an unquoted ';' makes the text after
+           it the "keyword"). So prove it first, as every other site does, log the formatter's text and keep the
+           evaluator down while the service runs on. */
+        if (DarlingStoreConnection.TryDescribeParseFailure(resolved) is { } unusable)
+        {
+            logger.LogError(
+                "Custom alert evaluator not started: postgres.webConnectionString is unusable: {Detail}", unusable);
+            return null;
+        }
+
+        /* On a managed or compose store the evaluator gets the web role by construction. Here it gets whatever the
+           setting names, and the web host's own warning does not show when web.enabled is off, so say it here. The
+           login is still used, as the web host uses it. */
+        if (ConfiguredLoginWarning(
+                Surface.Web, resolved, postgres.ConnectionString, null, whatOverride: "The custom alert evaluator") is { } warning)
+        {
+            logger.LogWarning("{Warning}", warning);
+        }
+
         return resolved;
     }
 
@@ -693,7 +713,8 @@ internal static class DarlingStoreLogins
     /// store and re-keys from its own credential file every start, so a password set by hand stops working.
     /// </summary>
     internal static string? ConfiguredLoginWarning(
-        Surface surface, string configuredConnectionString, string ownerConnectionString, ComposeStoreVerdict? verdict)
+        Surface surface, string configuredConnectionString, string ownerConnectionString, ComposeStoreVerdict? verdict,
+        string? whatOverride = null)
     {
         string? configuredUser;
         string? ownerUser;
@@ -715,6 +736,7 @@ internal static class DarlingStoreLogins
         }
 
         var (what, setting, role) = Describe(surface);
+        what = whatOverride ?? what;
         if (string.Equals(configuredUser, ownerUser, StringComparison.Ordinal))
         {
             return $"{setting} logs in as '{configuredUser}', the owner login postgres.connectionString uses, so {char.ToLowerInvariant(what[0])}{what[1..]} still gives up "

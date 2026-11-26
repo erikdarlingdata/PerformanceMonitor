@@ -4220,4 +4220,4 @@ BEGIN
 END $personal_token$;
 
 -- Put the session's own message level back (#9700).
-DO $$ BEGIN PERFORM set_config('client_min_messages', current_setting('darling.saved_client_min_messages'), false); END $$;
+DO $$ DECLARE saved text := pg_catalog.current_setting('darling.saved_client_min_messages', true); BEGIN IF saved IS NULL OR saved = '' THEN RESET client_min_messages; ELSE PERFORM pg_catalog.set_config('client_min_messages', saved, false); END IF; END $$;
