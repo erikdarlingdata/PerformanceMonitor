@@ -206,6 +206,19 @@ public sealed class AlertSourceToolsLiveTests
             var unknownRemove = await Call("remove_alert_source", "--remove-alert-source", "nosuch");
             Assert.Equal("not_registered", (string?)unknownRemove["reason"]);
 
+            /* An unconfirmed call for a name no source has ends at the check and never reaches the change: the change logs a line when
+               it finishes, so a source added under that name a moment later would not be rotated or removed without a confirm. */
+            var unconfirmedLogs = new CaptureLogger();
+            foreach (var (tool, verb) in new[] { ("rotate_alert_source", "--rotate-alert-source"), ("remove_alert_source", "--remove-alert-source") })
+            {
+                var unconfirmed = JsonNode.Parse(await DarlingMcpAlertSourceTools.ChangeAsync(
+                    tool, verb, dataSource, new PostgresConfig(), "nosuch", unconfirmedLogs, ct, confirm: false))!.AsObject();
+                Assert.Equal("refused", (string?)unconfirmed["status"]);
+                Assert.Equal("not_registered", (string?)unconfirmed["reason"]);
+            }
+
+            Assert.DoesNotContain(unconfirmedLogs.Lines, line => line.Contains("finished as", StringComparison.Ordinal));
+
             /* Before the worker has published the owner connection, nothing is attempted. */
             var missing = JsonNode.Parse(await DarlingMcpAlertSourceTools.ChangeAsync(
                 "add_alert_source", "--add-alert-source", null, new PostgresConfig(), "netmon2", logs, ct))!.AsObject();
