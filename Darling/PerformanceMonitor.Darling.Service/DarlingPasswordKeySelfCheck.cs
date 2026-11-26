@@ -43,12 +43,6 @@ internal static class DarlingPasswordKeySelfCheck
     /// <summary>What the verb prints and returns for a call with the wrong arguments or on a platform it cannot check.</summary>
     internal const string UsageLine = Verb + " <vector-path>";
 
-    /// <summary>True on the platforms the checks can run on: they use the Unix file calls.</summary>
-    internal static bool CanRunHere => OperatingSystem.IsLinux() || OperatingSystem.IsMacOS();
-
-    /// <summary>What the verb prints, and the MCP <c>self_check_password_key</c> tool answers (#9644), where <see cref="CanRunHere"/> is false.</summary>
-    internal const string UnsupportedPlatformLine = Verb + " checks the Unix file calls, so it runs on Linux or macOS only.";
-
     /// <summary>
     /// Runs every check and prints one line each. Returns 0 only when all of them passed.
     /// </summary>
@@ -64,9 +58,9 @@ internal static class DarlingPasswordKeySelfCheck
             return 1;
         }
 
-        if (!CanRunHere)
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
         {
-            error.WriteLine(UnsupportedPlatformLine);
+            error.WriteLine(Verb + " checks the Unix file calls, so it runs on Linux or macOS only.");
             return 1;
         }
 

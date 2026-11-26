@@ -287,6 +287,11 @@ public static class DarlingFileSecurity
     public static void HardenDirectory(string path, bool allowInteractiveTraverse) =>
         new DirectoryInfo(path).SetAccessControl(HardenedDirectorySecurity(allowInteractiveTraverse));
 
+    /// <summary>Creates the directory at <paramref name="path"/> with the <see cref="HardenDirectory"/> ACL already on it, so
+    /// there is no moment it is readable by anyone else (#9644). Fails when the directory exists.</summary>
+    internal static void CreateHardenedDirectory(string path) =>
+        new DirectoryInfo(path).Create(HardenedDirectorySecurity(allowInteractiveTraverse: false));
+
     /// <summary>The one ACL <see cref="HardenDirectory"/> and <see cref="HardenWithoutFollowingLinks"/> apply to a
     /// directory.</summary>
     private static DirectorySecurity HardenedDirectorySecurity(bool allowInteractiveTraverse)
