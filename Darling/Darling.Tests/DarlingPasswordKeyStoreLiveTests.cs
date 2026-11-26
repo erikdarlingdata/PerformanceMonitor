@@ -134,7 +134,13 @@ public sealed class DarlingPasswordKeyStoreLiveTests
 
             Assert.Equal("missing", missing.State);
             Assert.False(missing.Ring.Status.CanSeal);
-            Assert.Contains("is missing from the credentials directory", missing.Ring.Status.Reason, StringComparison.Ordinal);
+            // #9750: a host install is told the folder it looked in, and no volume.
+            Assert.Contains(store.Directory, missing.Ring.Status.Reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("volume", missing.Ring.Status.Reason, StringComparison.OrdinalIgnoreCase);
+            var inTheContainer = await store.StartAsync(inContainer: true);
+            Assert.Equal("missing", inTheContainer.State);
+            Assert.Contains(store.Directory, inTheContainer.Ring.Status.Reason, StringComparison.Ordinal);
+            Assert.Contains("credentials volume", inTheContainer.Ring.Status.Reason, StringComparison.Ordinal);
             Assert.Equal("missing", (await store.ReadStateAsync("example-host")).State);
             Assert.False(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName)));
             bodySucceeded = true;
@@ -191,6 +197,86 @@ public sealed class DarlingPasswordKeyStoreLiveTests
             Assert.True(File.Exists(keptPath));
             Assert.False(File.Exists(Path.Combine(store.Directory, DarlingPasswordKeyFile.FileName)));
             Assert.Equal("mismatch", (await store.ReadStateAsync("example-host")).State);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    /// <summary>#9734: a refusal about the key folder carries the sentence that says why the folder was chosen. A refusal about the
+    /// key tables' triggers is not about the folder, so it does not.</summary>
+    [Fact]
+    public async Task AFolderRefusal_CarriesTheFolderNote_AndATriggerRefusalDoesNot()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        var bodySucceeded = false;
+        const string note = "DOTNET_RUNNING_IN_CONTAINER is true, so the service uses the compose folder.";
+        try
+        {
+            // A file where the folder should be: the start cannot write its key there.
+            System.IO.Directory.Delete(store.Directory, recursive: true);
+            File.WriteAllText(store.Directory, "not a folder");
+            try
+            {
+                var withNote = await store.StartAsync(folderNote: note);
+                Assert.Equal("refused", withNote.State);
+                Assert.EndsWith(note, withNote.Ring.Status.Reason, StringComparison.Ordinal);
+                Assert.EndsWith(note, (await store.ReadStateAsync("example-host")).Note, StringComparison.Ordinal);
+
+                var without = await store.StartAsync();
+                Assert.Equal("refused", without.State);
+                Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", without.Ring.Status.Reason, StringComparison.Ordinal);
+            }
+            finally
+            {
+                File.Delete(store.Directory);
+                System.IO.Directory.CreateDirectory(store.Directory);
+            }
+
+            await store.ExecAsync("ALTER TABLE config.password_key DISABLE TRIGGER trg_password_key_owner_only_row;");
+            var trigger = await store.StartAsync(folderNote: note);
+            Assert.Equal("refused", trigger.State);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", trigger.Ring.Status.Reason, StringComparison.Ordinal);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await store.CleanupAsync(bodySucceeded);
+        }
+    }
+
+    /// <summary>#9734: a refusal whose cause is not the key folder never carries the folder sentence, even when the start was given it:
+    /// the passwordKey refusal never reads the folder, and a published key whose id does not match is the store's fault.</summary>
+    [Fact]
+    public async Task ARefusalThatIsNotAboutTheKeyFolder_DoesNotCarryTheFolderNote()
+    {
+        await using var store = await StoreFixture.CreateAsync();
+        using var source = new SettingKeySource();
+        var bodySucceeded = false;
+        const string note = "DOTNET_RUNNING_IN_CONTAINER is true, so the service uses the compose folder.";
+        try
+        {
+            var missing = "file:" + Path.Combine(source.Directory, "no-such-key");
+            var setting = await store.StartAsync(keySetting: missing, folderNote: note);
+            Assert.Equal("refused", setting.State);
+            Assert.StartsWith("passwordKey", setting.Note, StringComparison.Ordinal);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", setting.Ring.Status.Reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", (await store.ReadStateAsync("example-host")).Note, StringComparison.Ordinal);
+
+            // A published key whose id does not match its own key, and no key file in the folder. The store's own check refuses
+            // such a row, so it is dropped for this scratch store.
+            using var other = PasswordPrivateKey.Generate();
+            await store.ExecAsync("ALTER TABLE config.password_key DROP CONSTRAINT ck_password_key_id_matches_key;");
+            await store.ExecAsync(
+                "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES (@id, @key, 'RSA3072-OAEP-SHA256/A256GCM', 'current');",
+                ("id", "0123456789abcdef"), ("key", other.PublicKey.Spki));
+            var inconsistent = await store.StartAsync(folderNote: note);
+            Assert.Equal("refused", inconsistent.State);
+            Assert.Contains("inconsistent", inconsistent.Note, StringComparison.Ordinal);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", inconsistent.Ring.Status.Reason, StringComparison.Ordinal);
+            Assert.DoesNotContain("DOTNET_RUNNING_IN_CONTAINER", (await store.ReadStateAsync("example-host")).Note, StringComparison.Ordinal);
             bodySucceeded = true;
         }
         finally
@@ -1223,7 +1309,8 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
 
         public Task<DarlingPasswordKeyRuntime> StartAsync(
             bool isWindows = false, Func<string, bool>? canOpen = null, Func<PasswordPrivateKey, PublishedKey, bool>? selfTest = null,
-            ILogger? logger = null, string serviceHost = "example-host", string? keySetting = null) =>
+            ILogger? logger = null, string serviceHost = "example-host", string? keySetting = null, string? folderNote = null,
+            bool inContainer = false) =>
             DarlingPasswordKeyRuntime.StartAsync(
                 Directory, Source, logger ?? new ListLogger(), TestContext.Current.CancellationToken,
                 new PasswordKeyStartOptions
@@ -1234,6 +1321,8 @@ UPDATE config.config_notification SET smtp_encrypted_password = 'sealed:v1:01234
                     SetRing = ring => LastRing = ring,
                     ServiceHost = serviceHost,
                     KeySetting = keySetting,
+                    FolderNote = folderNote,
+                    InContainer = inContainer,
                 });
 
         public async Task ExecAsync(string sql, params (string Name, object Value)[] parameters)

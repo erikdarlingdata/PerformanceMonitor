@@ -42,8 +42,9 @@ internal sealed record AddServerFlags(
 /// password prompt, because Lite is a GUI-subsystem exe and a shell does not wait for one, so the shell and the exe would both read
 /// the keyboard.</para>
 ///
-/// <para>Every entry is checked (host rule, credential rule, id rule, connection test) before anything is written, and one refused
-/// entry ends the run with exit code 1 and no change. A server already listed (same address, database and read-only intent) is
+/// <para>Every entry is checked (host rule, credential rule, id rule, connection test) before anything is written, and every refused
+/// entry is reported with its number and host (#9746). A run with any refused entry exits with code 1 and no change: the entries that passed
+/// their checks are not added either, and the last line says so. A server already listed (same address, database and read-only intent) is
 /// updated in place, with the new password, and gets no second entry. A running Lite keeps the server list in memory and writes
 /// it back, so the verb refuses to run beside one: <c>--stop</c> first. The new server is collected from the next start.</para>
 /// </summary>
@@ -367,7 +368,7 @@ internal static class AddServerCommand
         + "with the password piped on stdin as one line. There is no password flag. Run it as the Windows user that runs Lite: the password is stored for that user.";
 
     /// <summary>
-    /// Runs the verb over <paramref name="env"/>. Exit 0 when every entry was added or updated, 1 when the run was refused (the reason
+    /// Runs the verb over <paramref name="env"/>. Exit 0 when every entry was added or updated, 1 when the run was refused (every refusal
     /// on <paramref name="error"/>, nothing changed).
     /// </summary>
     internal static async Task<int> RunAsync(
@@ -412,16 +413,27 @@ internal static class AddServerCommand
         return ExitAdded;
     }
 
+    /// <summary>#9746: the last line of a run that refused entries: how many, and that nothing was added or updated, the entries that passed included.</summary>
+    internal static string RefusedSummary(int refused, int total) =>
+        total == 1
+            ? "The entry was refused, so nothing was added or updated."
+            : refused == total
+                ? $"All {total} entries were refused, so nothing was added or updated."
+                : $"{refused} of {total} entries {(refused == 1 ? "was" : "were")} refused, so nothing was added or updated, not even the {total - refused} that passed their checks. "
+                    + $"Fix the refused {(refused == 1 ? "entry" : "entries")} and submit all {total} again.";
+
     /// <summary>
     /// The check and the save of <paramref name="entries"/>, the part of <see cref="RunAsync"/> after the input is read (#9640: the MCP
-    /// <c>add_servers</c> tool runs it over the running Lite's own server manager). Every entry is checked before anything is written, and one
-    /// refused entry ends the run with <see cref="ExitRefused"/>, the reason on <paramref name="error"/> and no change. The servers added or
+    /// <c>add_servers</c> tool runs it over the running Lite's own server manager). Every entry is checked before anything is written, and every
+    /// refused entry is reported on <paramref name="error"/> (#9746). Any refused entry ends the run with <see cref="ExitRefused"/> and no change. The servers added or
     /// updated are appended to <paramref name="saved"/>.
     /// </summary>
     internal static async Task<int> SaveEntriesAsync(List<Entry> entries, TextWriter error, Machine env, SaveLog saved)
     {
         /* The rules that need no server list run first, so a refused entry never even opens (or creates) servers.json. */
         var pending = new List<(Entry Entry, string Label, ServerConnection Candidate)>();
+        var seen = new List<ServerConnection>();
+        var refused = 0;
         var number = 0;
         foreach (var entry in entries)
         {
@@ -429,32 +441,46 @@ internal static class AddServerCommand
             var label = $"Entry {number} ({entry.Host})";
             /* The read-only intent is part of the server's identity, so a run that does not give it names the server without it. */
             var candidate = new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database, ReadOnlyIntent = entry.ReadOnlyIntent ?? false };
+            /* Against every earlier entry, refused or not, so a duplicate of a refused entry is reported in this run and not the next. */
+            var listedTwice = seen.Any(p => ServerManager.IsSameServerIgnoringCase(p, candidate));
+            seen.Add(candidate);
 
             if (ServerManager.HostRefusal(entry.Host, null) is { } hostRefusal)
             {
                 error.WriteLine($"{label}: {hostRefusal}");
-                return ExitRefused;
+                refused++;
+                continue;
             }
 
             if (ServerEntryRules.CredentialRefusal(entry.AuthenticationType, entry.Username, entry.Password) is { } credentialRefusal)
             {
                 error.WriteLine($"{label}: {credentialRefusal}");
-                return ExitRefused;
+                refused++;
+                continue;
             }
 
             if (entry.AuthenticationType == AuthenticationTypes.SqlServer && string.IsNullOrEmpty(entry.Password))
             {
                 error.WriteLine($"{label}: a password is required for SQL Server authentication.");
-                return ExitRefused;
+                refused++;
+                continue;
             }
 
-            if (pending.Any(p => ServerManager.IsSameServerIgnoringCase(p.Candidate, candidate)))
+            if (listedTwice)
             {
                 error.WriteLine($"{label}: the same server is listed twice.");
-                return ExitRefused;
+                refused++;
+                continue;
             }
 
             pending.Add((entry, label, candidate));
+        }
+
+        /* Every entry was refused by a rule that needs no server list: servers.json is still never opened. */
+        if (refused > 0 && pending.Count == 0)
+        {
+            error.WriteLine(RefusedSummary(refused, entries.Count));
+            return ExitRefused;
         }
 
         var manager = env.ManagerFactory();
@@ -471,13 +497,15 @@ internal static class AddServerCommand
                 error.WriteLine($"{label}: the listed entry '{ServerHostChange.Shown(ServerManager.NameForMessage(spelledAnotherWay))}' (host '{ServerHostChange.Shown(spelledAnotherWay.ServerName)}', "
                     + $"database '{ServerHostChange.Shown(spelledAnotherWay.DatabaseName)}') is this server spelled in another letter case, so nothing was changed. "
                     + "Add this server with the host and database spelled as the entry has them.");
-                return ExitRefused;
+                refused++;
+                continue;
             }
 
             if (existing is null && manager.FindServerIdHolder(candidate) is { } holder)
             {
                 error.WriteLine($"{label}: {ServerManager.DescribeIdHolder(candidate, holder)}");
-                return ExitRefused;
+                refused++;
+                continue;
             }
 
             if (existing is not null)
@@ -490,7 +518,8 @@ internal static class AddServerCommand
                     error.WriteLine($"{label}: the listed entry '{ServerHostChange.Shown(ServerManager.NameForMessage(existing))}' (host '{ServerHostChange.Shown(existing.ServerName)}', "
                         + $"database '{ServerHostChange.Shown(existing.DatabaseName)}') has the same storage name as this server but a different host or database, so nothing was changed. "
                         + "Remove that entry, or add this server with the host and database spelled as the entry has them.");
-                    return ExitRefused;
+                    refused++;
+                    continue;
                 }
 
                 /* Two entries with one Id: an update replaces the first of them, which may not be the one matched here. */
@@ -498,7 +527,8 @@ internal static class AddServerCommand
                 {
                     error.WriteLine($"{label}: the listed entries '{ServerHostChange.Shown(ServerManager.NameForMessage(existing))}' and '{ServerHostChange.Shown(ServerManager.NameForMessage(sameId))}' "
                         + "have the same Id, so an update could replace the wrong one and nothing was changed. Remove one of them in the Add Server window or Manage Servers and run this again.");
-                    return ExitRefused;
+                    refused++;
+                    continue;
                 }
 
                 /* A saved password is written only for a server whose Id is a GUID, so the entry would be "updated" with no password stored. */
@@ -506,7 +536,8 @@ internal static class AddServerCommand
                 {
                     error.WriteLine($"{label}: the listed entry for this server has an Id that is not a GUID, so Lite stores no password for it and nothing was changed. "
                         + "Remove the entry and add the server again to give it a normal Id.");
-                    return ExitRefused;
+                    refused++;
+                    continue;
                 }
 
                 /* The entry's own settings are in a file any local account can change. The connection test below and the stored password
@@ -517,7 +548,8 @@ internal static class AddServerCommand
                 {
                     error.WriteLine($"{label}: the listed entry for this server holds {string.Join(", ", unconfirmed)} that this Windows account has not confirmed, so nothing was changed. "
                         + "Confirm the setting in the Add Server window, or remove the entry and add the server again.");
-                    return ExitRefused;
+                    refused++;
+                    continue;
                 }
             }
 
@@ -548,10 +580,19 @@ internal static class AddServerCommand
             if (failure is not null)
             {
                 error.WriteLine($"{label}: could not connect: {failure}");
-                return ExitRefused;
+                refused++;
+                continue;
             }
 
             planned.Add((entry, server, existing is not null, existing));
+        }
+
+        /* #9746: every entry was checked and every refusal is above. Nothing is written when any entry was refused, so the entries that passed
+           are not added either, and the last line says so. */
+        if (refused > 0)
+        {
+            error.WriteLine(RefusedSummary(refused, entries.Count));
+            return ExitRefused;
         }
 
         /* The tests above take seconds each: a Lite started meanwhile would write the list back over this run. */

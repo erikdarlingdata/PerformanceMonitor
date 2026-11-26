@@ -198,7 +198,7 @@ Do the whole procedure twice: once from the last release, and once from the olde
   1. `MAX(version)` equals the new build's top rung.
   2. `collect.collection_log` has rows for every configured server in the last 15 minutes.
   3. The collector count is about 50 (47 to 52 on 3.13.0), not single digits.
-  4. Every non-SUCCESS row since the restart gets read. YIELDED is the lock-timeout guard working. Anything else is a finding.
+  4. Every non-SUCCESS row since the restart gets read. YIELDED (the lock-timeout guard) and ANALYZED (the `analysis_pass` row, which is on every fresh and upgraded store) are expected. Anything else is a finding.
   5. One table the release added or changed shows new rows.
 
   The row counts you recorded before the upgrade must still be there, and the service account must be unchanged. A service that is Running but not collecting is a fail.

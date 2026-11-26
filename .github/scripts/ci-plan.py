@@ -69,6 +69,9 @@ Rules, in order:
      a new product file, a constant or enum of a shared project), the diff could not be read, no class is selected, or a class
      list is longer than the runner's environment variable allows. There is no drift rule: a changed or new test file is
      always picked. The map is never a reason for a red run.
+     A changed file under Lite/ or Darling/PerformanceMonitor.Darling.Service/ that declares MCP tools (#9779) also picks that suite's
+     description-measuring classes (McpToolGuideTests, McpToolsListBudgetTests, the McpToolGuideHeads* family), for a ready pull
+     request, a dev push and a draft alike: nothing in the map or the changed symbols links a description edit to them.
  10. A dev push with the nightly map (#7819) picks its classes as rule 8 does, from the files of the pushed commit (pr.yml lists
      HEAD^1..HEAD when the push is one commit on top of `before` and not forced; any other push gets an unknown/ path, so rule 5).
      The full suite runs on dev once an hour instead: a workflow_dispatch run, which has no file list, runs every area, as does a
@@ -757,12 +760,14 @@ def parse_labels(text: str) -> "list[str]":
     return [x.strip() for x in text.split(",") if x.strip()]
 
 
-def build_selection(map_path: str, map_error: str, root: str = ROOT, event: str = "pull_request") -> dict:
+def build_selection(map_path: str, map_error: str, root: str = ROOT, event: str = "pull_request",
+                    files: "list[str] | None" = None) -> dict:
     """The input of ready_picks for a pull request run (#7728): the map file the workflow downloaded, or why there is none, and
     the two things map_select reads from the pull request's own change. The checkout is the pull request's merge commit, so its
     change is `HEAD^1..HEAD`. A dev push (#7819) checks out the pushed commit, whose change against its first parent is the same
     range; pr.yml has already made sure the push is that one commit. A map that cannot be read, or a diff that cannot be read,
-    leaves `map` None: the run is FULL."""
+    leaves `map` None: the run is FULL. `files` (the change's file list) adds to `named` the classes that measure served MCP tool
+    descriptions when a changed file declares MCP tools (#9779)."""
     out: dict = {"map": None, "error": map_error or "no test map was downloaded", "now": None, "shared_diff": None, "named": None}
     if not map_path or not os.path.isfile(map_path):
         return out
@@ -782,7 +787,8 @@ def build_selection(map_path: str, map_error: str, root: str = ROOT, event: str 
             out["error"] = "the pull request's diff could not be read"
             return out
         tokens, _tests = _CS.changed_symbols(text)
-        out["named"] = _CS.named_classes(_CS.symbol_matches(tokens, set(), _CS.test_file_index(root), None))
+        out["named"] = _CS.with_description_classes(
+            _CS.named_classes(_CS.symbol_matches(tokens, set(), _CS.test_file_index(root), None)), files or [], root)
         out["shared_diff"] = text
     except Exception as exc:  # never red because of the map
         out["error"] = f"the pull request's diff could not be read ({type(exc).__name__})"
@@ -890,13 +896,16 @@ def main(argv: "list[str]") -> int:
     selection = None
     # A ready pull request and a dev push (#7819) pick their classes from the map; the hourly workflow_dispatch run has no file list.
     if args.event in ("pull_request", "push") and args.map is not None and not draft:
-        selection = build_selection(args.map, args.map_error, event=args.event)
+        selection = build_selection(args.map, args.map_error, event=args.event, files=files)
     named, named_error = None, ""
     if args.event == "pull_request" and draft:
         # #7734: a draft also runs the classes whose source names a changed product file. A scan that fails runs the pull request as
         # one that is ready for review (every class its areas select), never red.
         try:
             named, _path_only = _CS.classes_naming_files(files)
+            # #9779: a changed file that declares MCP tools also runs the classes that measure served descriptions.
+            named = {s: list(dict.fromkeys(list(named.get(s, [])) + sorted(v)))
+                     for s, v in (_CS.with_description_classes(named, files) or {}).items()}
         except Exception as exc:
             named_error = f"the scan for test classes that name a changed file failed ({type(exc).__name__}: {str(exc)[:80]})"
     def self_test_map() -> "tuple[object, str]":

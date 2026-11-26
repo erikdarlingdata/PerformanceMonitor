@@ -89,13 +89,32 @@ public static class DarlingLogHashKeyFile
             return Path.GetDirectoryName(credential) ?? throw new InvalidOperationException($"{credential} has no directory.");
         }
 
-        if (!config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer)
+        if (UsesContainerFolder(config))
         {
             return DarlingManagedRoles.ComposeStoreCredentialDirectory;
         }
 
         var configDirectory = Path.GetDirectoryName(Path.GetFullPath(configPath)) ?? AppContext.BaseDirectory;
         return Path.Combine(configDirectory, BringYourOwnDirectoryName);
+    }
+
+    /// <summary>True when <see cref="DirectoryFor"/> picks the compose key folder because <c>DOTNET_RUNNING_IN_CONTAINER</c> is true.</summary>
+    private static bool UsesContainerFolder(DarlingConfig config) =>
+        !config.Postgres.Managed && Hosting.DarlingHostBinding.IsRunningInContainer;
+
+    /// <summary>
+    /// The sentence the failure lines for the key folder add when <see cref="DirectoryFor"/> chose the compose folder only
+    /// because <c>DOTNET_RUNNING_IN_CONTAINER</c> is true (#9734): a tarball run in a container built from the stock .NET image
+    /// gets that variable from the image and then cannot create <c>/var/lib/darling/credentials</c>, and none of the
+    /// failure lines named the cause. Null for every other choice of folder. It changes no choice of folder.
+    /// </summary>
+    public static string? ContainerFolderNote(DarlingConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        return UsesContainerFolder(config)
+            ? $"DOTNET_RUNNING_IN_CONTAINER is true, so the service uses the compose folder {DarlingManagedRoles.ComposeStoreCredentialDirectory}. "
+                + $"Outside the compose image, unset that variable to use {BringYourOwnDirectoryName} beside darling.json."
+            : null;
     }
 
     /// <summary>
@@ -121,9 +140,20 @@ public static class DarlingLogHashKeyFile
             return new DarlingLogHashKeyLoad(null, string.Empty, Generated: false, Refusal: $"the directory for the store's log-hash key could not be resolved ({ex.Message})");
         }
 
+        return LoadWithNote(directory, ContainerFolderNote(config), logger);
+    }
+
+    /// <summary><see cref="Load"/>, logging a refusal as an error. A refusal carries <paramref name="folderNote"/> (#9734), when there is one.</summary>
+    internal static DarlingLogHashKeyLoad LoadWithNote(string directory, string? folderNote, ILogger logger)
+    {
         var load = Load(directory, logger);
         if (load.Key is null)
         {
+            if (folderNote is not null)
+            {
+                load = load with { Refusal = $"{load.Refusal} {folderNote}" };
+            }
+
             logger.LogError("{Refusal}", load.Refusal);
         }
 

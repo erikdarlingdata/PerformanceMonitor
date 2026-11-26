@@ -21,6 +21,11 @@ public record UpdateInfo(
     string ReleaseUrl,
     string ReleaseNotes);
 
+/// <summary>
+/// What one release check found: the release it read, or why it could not read one (#9745). Exactly one of the two is set.
+/// </summary>
+public record UpdateCheckResult(UpdateInfo? Info, string? FailureReason);
+
 public static class UpdateCheckService
 {
     private const string ReleasesApiUrl =
@@ -38,16 +43,23 @@ public static class UpdateCheckService
         return client;
     }
 
-    public static async Task<UpdateInfo?> CheckForUpdateAsync(bool bypassCache = false)
+    public static async Task<UpdateInfo?> CheckForUpdateAsync(bool bypassCache = false) =>
+        (await CheckForUpdateWithReasonAsync(bypassCache).ConfigureAwait(false)).Info;
+
+    /// <summary>
+    /// The same check as <see cref="CheckForUpdateAsync"/>, with the reason when it finds no release: the status GitHub answered
+    /// with, or the failure that stopped the request. A caller that logs the outcome (headless Lite, #9745) needs the reason.
+    /// </summary>
+    public static async Task<UpdateCheckResult> CheckForUpdateWithReasonAsync(bool bypassCache = false)
     {
         try
         {
             if (!bypassCache && _cachedResult != null && DateTime.UtcNow < _cacheExpiry)
-                return _cachedResult;
+                return new UpdateCheckResult(_cachedResult, null);
 
             var response = await HttpClient.GetAsync(ReleasesApiUrl).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
-                return null;
+                return new UpdateCheckResult(null, $"GitHub answered {(int)response.StatusCode} {response.ReasonPhrase}".TrimEnd());
 
             var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             using var doc = JsonDocument.Parse(json);
@@ -75,13 +87,16 @@ public static class UpdateCheckService
             _cachedResult = result;
             _cacheExpiry = DateTime.UtcNow.AddHours(24);
 
-            return result;
+            return new UpdateCheckResult(result, null);
         }
-        catch
+        catch (Exception ex)
         {
-            return null;
+            return new UpdateCheckResult(null, DescribeFailure(ex));
         }
     }
+
+    /// <summary>The exception type and the message of the innermost exception, which names the network or parse cause.</summary>
+    public static string DescribeFailure(Exception ex) => $"{ex.GetType().Name}: {ex.GetBaseException().Message}";
 
     private static Version? GetCurrentVersion()
     {
