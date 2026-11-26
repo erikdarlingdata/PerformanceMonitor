@@ -68,6 +68,7 @@ public static class CliVerbs
         {
             var config = ConfigLoader.Load(path);
             var secret = CredentialResolver.Resolve(config.Store.Credential);
+            DestinationCheck.Assert(config);
             var builder = StoreCheck.BuildConnection(config, secret);
             var notChecked = await StoreCheck.CheckCollationAsync(builder, ct).ConfigureAwait(false);
 

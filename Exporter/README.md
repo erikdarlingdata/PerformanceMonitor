@@ -143,6 +143,17 @@ Use it to find the exporter's statements in `pg_stat_statements` and in the Post
 
 The Parquet files go up first and the manifest goes up last. A manifest means every file it lists is complete.
 
+### The local folder
+
+The folder of a `local` destination must exist before the first run. The exporter does not create it.
+With a `prefix`, the folder is the `path` with the prefix added.
+With no `destination`, `run` writes to `landing` next to `paths.out`, and that folder must exist too.
+The account that runs the exporter must be able to write to it.
+
+`check-config` and `run --plan-only` check the folder and exit 2 with one line that names it when it is missing or cannot be written to.
+`run` makes the same check, and resolves the store credential, once before its first window, and exits 2 the same way.
+When an `export` call that `run` started exits 2, `run` exits 2 as well, so a scheduler can tell a configuration error (2) from a window that failed (1).
+
 ## State and files
 
 The exporter keeps small state files in `paths.state`. They remember which windows ran, which dimension keys were already written and what the plan-reuse cache holds.

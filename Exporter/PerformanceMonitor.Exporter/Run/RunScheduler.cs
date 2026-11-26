@@ -11,7 +11,8 @@ public sealed record RunOptions(bool PlanOnly = false, DateTime? NowUtc = null);
 /// <summary>
 /// `darling-export run`: the scheduler (R1-R26). One run: the restart delay, the lock, the families in order, the
 /// post-run hook, then the daily-log fold and cleanup. Exit codes: 0 = ok, skip, or lock busy; 1 = a failure; 2 =
-/// refused. Plan-only shares the planner but takes no lock, writes no state, daily log, or cleanup, runs no hook and
+/// refused, which includes a window whose child exited 2 (a configuration error the next run would meet again).
+/// Plan-only shares the planner but takes no lock, writes no state, daily log, or cleanup, runs no hook and
 /// never starts a child; it appends one JSON line to `plan-only-&lt;store&gt;-yyyyMMdd.jsonl`.
 /// </summary>
 public sealed class RunScheduler(
@@ -21,6 +22,11 @@ public sealed class RunScheduler(
     public const int ExitOk = 0, ExitFailed = 1, ExitRefused = 2;
 
     private sealed record CallRecord(string Family, string LogPath);
+
+    /// <summary>The child exit code that means a configuration error: a retry cannot fix it.</summary>
+    private const int ChildConfigErrorExit = 2;
+
+    private bool _childRefused;
 
     public async Task<int> RunAsync(CancellationToken ct)
     {
@@ -109,11 +115,11 @@ public sealed class RunScheduler(
         finally
         {
             // The fold happens while the lock is still held, so two runs never interleave blocks (R21).
-            var runExit = completed && !failed ? 0 : 1;
+            var runExit = completed && !failed ? 0 : _childRefused ? ExitRefused : ExitFailed;
             FoldDailyLog(dailyLogPath, nowUtc, calls, hookResult, runExit, stopwatch.Elapsed.TotalSeconds);
             Cleanup(nowUtc);
         }
-        return failed ? ExitFailed : ExitOk;
+        return !failed ? ExitOk : _childRefused ? ExitRefused : ExitFailed;
     }
 
     // ---- the families loop (R2, R7-R9, R12-R15) ----
@@ -204,6 +210,7 @@ public sealed class RunScheduler(
                     state.Save(settings.StatePath);
                     output.WriteLine($"export failed for {family} {call.FromArg} .. {call.ToArg}; stopping this family for this run");
                     failed = true;
+                    if (exit == ChildConfigErrorExit) _childRefused = true;
                     break;
                 }
             }

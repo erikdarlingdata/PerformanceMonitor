@@ -113,6 +113,8 @@ public sealed class StoreCollationTests(StoreCollationTests.NonCStoreFixture sto
     private string WriteConfig(RunRoot root, string database, int? port = null)
     {
         Environment.SetEnvironmentVariable(PasswordVariable, "pw");
+        // The default local destination must exist, or check-config and run stop at the destination check before the store.
+        Directory.CreateDirectory(Path.Combine(root.Root, "landing"));
         var path = Path.Combine(root.Root, "c.json");
         File.WriteAllText(path, Config(root, port ?? store.Port, database));
         return path;

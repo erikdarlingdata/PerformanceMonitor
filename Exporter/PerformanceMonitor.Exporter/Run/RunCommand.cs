@@ -14,8 +14,9 @@ public static class RunCommand
     /// <summary>The store check `--plan-only` runs: null when the store passed, or one line saying why the check could not run. Throws <see cref="ConfigException"/> for a store the exporter cannot read.</summary>
     public delegate Task<string?> PlanStoreCheck(ExporterConfig config, CancellationToken ct);
 
+    /// <param name="childRunner">Runs each window's child process. The default starts the exporter; a test passes its own.</param>
     /// <param name="planStoreCheck">The store check `--plan-only` runs with a config file. The default is <see cref="StoreCheck.PreflightForPlanAsync"/>.</param>
-    public static async Task<int> MainAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct, PlanStoreCheck? planStoreCheck = null)
+    public static async Task<int> MainAsync(string[] args, TextWriter output, TextWriter error, CancellationToken ct, IChildRunner? childRunner = null, PlanStoreCheck? planStoreCheck = null)
     {
         string? settingsPath = null, configPath = null;
         var planOnly = false;
@@ -62,6 +63,20 @@ public static class RunCommand
                 return RunScheduler.ExitRefused;
             }
 
+            // What every window of this run needs is checked once, before the first window, so a configuration error is
+            // exit 2 with one line and no window is started: the store credential (a real run only) and the local
+            // destination folder, which the upload never creates.
+            try
+            {
+                if (!planOnly) CredentialResolver.Resolve(config.Store.Credential, TextWriter.Null);
+                DestinationCheck.Assert(config);
+            }
+            catch (Exception ex) when (ex is ConfigException or CredentialException)
+            {
+                error.WriteLine($"Config error: {ex.Message}");
+                return RunScheduler.ExitRefused;
+            }
+
             if (planOnly)
             {
                 // The plan reads the store's collation when it can, so a store the exporter cannot read is found here and not at
@@ -98,7 +113,7 @@ public static class RunCommand
         var memory = new SystemHostMemory(error);
         var scheduler = new RunScheduler(
             settings, new RunOptions(planOnly, now), () => DateTime.UtcNow,
-            new ProcessChildRunner(settings.MemoryGuard, memory, output),
+            childRunner ?? new ProcessChildRunner(settings.MemoryGuard, memory, output),
             settings.Validate() is null ? RestartDelay.Create(settings.Restart, error) : new NoRestartDetector(),
             memory, output);
         return await scheduler.RunAsync(ct).ConfigureAwait(false);
