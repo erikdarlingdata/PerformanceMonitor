@@ -48,9 +48,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// rows than the ledger holds now. A read that finds none takes those hours from this table, and takes any other hour from raw.</para>
 ///
 /// <para><b>Retention.</b> The horizon raw <c>query_stats</c> is held to (<see cref="HorizonDays"/>). Where raw is a TimescaleDB raw hypertable the
-/// gated raw purge drops it at <see cref="TimescaleSupport.RawRetentionSpan"/>, whatever the collector's longer retention, and older windows are
-/// served by the tier rollups, so the horizon is the shorter of that span and the collector's retention: an hour older than that is one no raw read
-/// reaches. Where raw is a plain table it is the collector's retention. A tick removes the hours before the first whole hour inside the horizon from
+/// gated raw purge drops it at <see cref="TimescaleSupport.RawRetentionSpan"/>, whatever the collector's retention, and older windows are served by
+/// the tier rollups, so that span is the horizon: an hour older than that is one no raw read reaches. Where raw is a plain table it is the
+/// collector's retention. A tick removes the hours before the first whole hour inside the horizon from
 /// both tables, oldest first, <see cref="PruneSliceHours"/> hours per transaction (<see cref="PruneAsync"/>), and builds none of them. A window that
 /// reaches an hour the rollup no longer holds reads that hour from raw, which is correct and slower (#9684).</para>
 /// </summary>
@@ -444,12 +444,13 @@ ORDER BY h.bucket;";
 
     /// <summary>
     /// The days the rollup is kept for, given the collector's retention for <c>query_stats</c> (<paramref name="retentionDays"/>). On a store where
-    /// raw <c>query_stats</c> is a raw hypertable (<paramref name="rawIsTiered"/>) the gated raw purge drops it at
-    /// <see cref="TimescaleSupport.RawRetentionSpan"/>, whole days, or sooner under a shorter custom retention, so the horizon is the shorter of the
-    /// two. On a plain raw table the collector's retention is the horizon.
+    /// raw <c>query_stats</c> is a raw hypertable (<paramref name="rawIsTiered"/>) only the gated raw purge drops it, at
+    /// <see cref="TimescaleSupport.RawRetentionSpan"/> in whole days, and a custom retention, shorter or longer, does not apply to it, so that span is
+    /// the horizon. On a plain raw table the purge's time-sliced DELETE clears it at the collector's retention, which is the horizon. This is the
+    /// answer <see cref="QueryStoreClutterHourly.RawHeldDaysAsync"/> gives for raw <c>query_store_stats</c>.
     /// </summary>
     public static int HorizonDays(bool rawIsTiered, int retentionDays) =>
-        rawIsTiered ? Math.Min((int)TimescaleSupport.RawRetentionSpan.TotalDays, retentionDays) : retentionDays;
+        rawIsTiered ? (int)TimescaleSupport.RawRetentionSpan.TotalDays : retentionDays;
 
     /// <summary>
     /// <see cref="HorizonDays(bool, int)"/> for this store: whether raw <c>query_stats</c> is a raw hypertable is read from the extension's catalog,

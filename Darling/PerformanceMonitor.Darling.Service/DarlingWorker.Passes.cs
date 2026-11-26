@@ -1356,7 +1356,7 @@ public sealed partial class DarlingWorker
 
         /* #9164: the hourly host rollup of query_stats the top-queries read ranks whole hours from. It reads query_stats and the count ledger,
            and writes its own two tables, so it has its own catch and a failure leaves the passes above standing. It takes the retention
-           query_stats' raw rows are purged on, resolved the way the purge resolves it, and narrows it to the gated raw horizon on a store where
+           query_stats' raw rows are purged on, resolved the way the purge resolves it, and takes the gated raw horizon instead on a store where
            raw is a raw hypertable (#9684). Its prune runs in slices under the retention purge's WAL pacer. */
         try
         {

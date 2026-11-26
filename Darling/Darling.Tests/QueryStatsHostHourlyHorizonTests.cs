@@ -26,12 +26,14 @@ public sealed class QueryStatsHostHourlyHorizonTests
         Assert.Equal((int)TimescaleSupport.RawRetentionSpan.TotalDays, QueryStatsHostHourly.HorizonDays(rawIsTiered: true, CollectorRetentionDays));
     }
 
+    /// <summary>The gate, not a custom retention, decides when raw purges on a raw hypertable, so a shorter custom retention leaves raw's span.</summary>
     [Fact]
-    public void OnATieredStore_AShorterCollectorRetentionStillWins()
+    public void OnATieredStore_AShorterCustomRetention_StillGivesRawsGatedSpan()
     {
-        var shorter = (int)TimescaleSupport.RawRetentionSpan.TotalDays - 2;
+        var gatedDays = (int)TimescaleSupport.RawRetentionSpan.TotalDays;
+        var shorter = gatedDays - 2;
         Assert.True(shorter > 0);
-        Assert.Equal(shorter, QueryStatsHostHourly.HorizonDays(rawIsTiered: true, shorter));
+        Assert.Equal(gatedDays, QueryStatsHostHourly.HorizonDays(rawIsTiered: true, shorter));
     }
 
     [Theory]
