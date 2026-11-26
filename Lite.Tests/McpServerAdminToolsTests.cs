@@ -195,7 +195,8 @@ public sealed class McpServerAdminToolsTests : IDisposable
         Assert.Equal("sql01", previous.GetProperty("host").GetString());
         Assert.Equal("monitor", previous.GetProperty("username").GetString());
         Assert.Equal("<password>", previous.GetProperty("password").GetString());
-        Assert.Contains("<password>", root.GetProperty("undo").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(Secret, root.GetProperty("undo").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("password", root.GetProperty("undo").GetString()!, StringComparison.Ordinal);
     }
 
     [Fact]

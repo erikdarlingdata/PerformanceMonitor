@@ -223,7 +223,7 @@ public sealed class McpHostGateLiveTests : IDisposable
         var tools = await ListedAsync(host, SixteenCharToken);
 
         Assert.Contains("mute_analysis_finding", tools);
-        Assert.Equal(McpWritePolicy.WriteTools.Order(), tools.Where(McpWritePolicy.IsWrite).Order());
+        Assert.Equal(McpWritePolicy.WriteTools.Except(McpWritePolicy.ServerAdminTools).Order(), tools.Where(McpWritePolicy.IsWrite).Order());
         Assert.DoesNotContain(tools, McpInvestigationPolicy.IsStateChanging);
         AssertTheInvestigationReadsAreListed(tools);
     }
@@ -255,7 +255,7 @@ public sealed class McpHostGateLiveTests : IDisposable
         var writes = await ListedAsync(host, SixDistinctCharacters);
         var investigations = await ListedAsync(hostInvestigations, SixDistinctCharacters);
 
-        Assert.Equal(McpWritePolicy.WriteTools.Order(), writes.Where(McpWritePolicy.IsWrite).Order());
+        Assert.Equal(McpWritePolicy.WriteTools.Except(McpWritePolicy.ServerAdminTools).Order(), writes.Where(McpWritePolicy.IsWrite).Order());
         Assert.Equal(McpInvestigationPolicy.InvestigationTools.Order(), investigations.Where(McpInvestigationPolicy.IsInvestigationTool).Order());
     }
 
