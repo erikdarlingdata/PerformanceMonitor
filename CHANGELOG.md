@@ -21,6 +21,10 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ## [Unreleased]
 
+### Changed
+
+- **The exporter can send 20 more store tables, among them `query_snapshots`, `waiting_tasks`, `object_usage_snapshots` and the query tag tables**
+
 ## [3.14.0] - 2026-11-27
 
 Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
