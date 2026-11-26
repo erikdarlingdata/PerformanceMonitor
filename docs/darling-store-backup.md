@@ -137,6 +137,8 @@ Dump the `darling` database:
 pg_dump -h <host> -p <port> -U <owner> --format=custom --no-owner --no-acl --file darling-store.dump darling
 ```
 
+`pg_dump` and the restore commands below ask for the password at a terminal. A backup that runs from a script, a timer or a remote command has no terminal, so give the password in a password file. Put the line `<host>:<port>:darling:<owner>:<password>` in `~/.pgpass` of the user who runs the backup, or in another file that the `PGPASSFILE` variable names. Write a `:` or a `\` in the password as `\:` or `\\`. The file must be mode `0600`: libpq ignores a file that the group or others can read, and the command stops with `no password supplied`. Do not put the password in `PGPASSWORD` on the command line, because the shell history keeps it.
+
 On a TimescaleDB store the same circular foreign-key warning as above is expected, and you can ignore it.
 
 Restore it into an empty database. If the store has the TimescaleDB extension (`\dx` lists `timescaledb`), you need the two TimescaleDB steps. They must be in this order.
@@ -150,7 +152,7 @@ psql -h <host> -p <port> -U <owner> -d darling -c "SELECT timescaledb_post_resto
 
 If the store has no TimescaleDB, skip the `psql` lines and run `createdb` and `pg_restore` only. The new TimescaleDB version must match the old one.
 
-Run `Darling/tools/provision-roles.sql` again on the restored database, as the database owner. The dump left out the grants, and this script sets them for the admin, viewer and mcp roles.
+Run `Darling/tools/provision-roles.sql` again on the restored database, as a superuser or a role that has `CREATEROLE`. The store owner that step 3 of [Install Darling on Linux with systemd](darling/linux.md#the-owner-role-and-the-database) creates has neither, so on a systemd store run it as the `postgres` OS user, on a copy of the script, as [Security](darling/security.md#security--least-privilege-roles) says. The dump left out the grants, and this script sets them for the admin, viewer and mcp roles.
 
 Also keep these files. The database dump does not contain them.
 

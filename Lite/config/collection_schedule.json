@@ -1,29 +1,307 @@
 {
-  "collectors": [
-    { "name": "wait_stats", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Wait statistics from sys.dm_os_wait_stats" },
-    { "name": "query_stats", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Query statistics from sys.dm_exec_query_stats" },
-    { "name": "procedure_stats", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Stored procedure statistics from sys.dm_exec_procedure_stats" },
-    { "name": "query_store", "enabled": true, "frequency_minutes": 5, "retention_days": 30, "description": "Query Store data (top 100 queries per database)" },
-    { "name": "query_snapshots", "enabled": true, "frequency_minutes": 1, "retention_days": 7, "description": "Currently running queries snapshot" },
-    { "name": "cpu_utilization", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "CPU utilization from ring buffer" },
-    { "name": "file_io_stats", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "File I/O statistics from sys.dm_io_virtual_file_stats" },
-    { "name": "memory_stats", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Memory statistics from sys.dm_os_sys_memory and performance counters" },
-    { "name": "memory_clerks", "enabled": true, "frequency_minutes": 5, "retention_days": 30, "description": "Memory clerk allocations from sys.dm_os_memory_clerks" },
-    { "name": "tempdb_stats", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "TempDB space usage from sys.dm_db_file_space_usage" },
-    { "name": "perfmon_stats", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Key performance counters from sys.dm_os_performance_counters" },
-    { "name": "deadlocks", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Deadlocks from system_health extended event session" },
-    { "name": "server_config", "enabled": true, "frequency_minutes": 0, "retention_days": 30, "description": "Server configuration (on-load only)" },
-    { "name": "database_config", "enabled": true, "frequency_minutes": 0, "retention_days": 30, "description": "Database configuration (on-load only)" },
-    { "name": "memory_grant_stats", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Memory grant statistics from sys.dm_exec_query_memory_grants" },
-    { "name": "waiting_tasks", "enabled": true, "frequency_minutes": 1, "retention_days": 7, "description": "Point-in-time waiting tasks from sys.dm_os_waiting_tasks" },
-    { "name": "blocked_process_report", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Blocked process reports from XE ring buffer session (opt-out)" },
-    { "name": "long_query_completions", "enabled": false, "frequency_minutes": 1, "retention_days": 30, "description": "Long-running query completions from a dedicated XE ring buffer session. OPT-IN, default OFF (#1496). On Azure SQL Database the session is created in each monitored database." },
-    { "name": "database_scoped_config", "enabled": true, "frequency_minutes": 0, "retention_days": 30, "description": "Database-scoped configurations (on-load only)" },
-    { "name": "trace_flags", "enabled": true, "frequency_minutes": 0, "retention_days": 30, "description": "Active trace flags via DBCC TRACESTATUS (on-load only)" },
-    { "name": "running_jobs", "enabled": true, "frequency_minutes": 5, "retention_days": 7, "description": "Currently running SQL Agent jobs with duration comparison" },
-    { "name": "ag_replica_states", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Availability Group replica health from sys.dm_hadr_availability_replica_states (#991)" },
-    { "name": "ag_database_replica_states", "enabled": true, "frequency_minutes": 1, "retention_days": 30, "description": "Availability Group per-database replica health, queues, rates and secondary lag from sys.dm_hadr_database_replica_states (#991)" },
-    { "name": "pvs_stats", "enabled": true, "frequency_minutes": 60, "retention_days": 90, "description": "ADR persistent version store size and cleanup state per database from sys.dm_tran_persistent_version_store_stats (#1951)" },
-    { "name": "query_store_health", "enabled": true, "frequency_minutes": 60, "retention_days": 30, "description": "Per-database Query Store health from sys.database_query_store_options: actual vs desired state, readonly_reason, storage vs cap, cleanup thresholds, interval length (#2319)" }
-  ]
+  "version": 2,
+  "default_schedule": [
+    {
+      "name": "wait_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Wait statistics from sys.dm_os_wait_stats"
+    },
+    {
+      "name": "latch_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Latch statistics from sys.dm_os_latch_stats"
+    },
+    {
+      "name": "spinlock_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Spinlock statistics from sys.dm_os_spinlock_stats"
+    },
+    {
+      "name": "cpu_scheduler_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "CPU scheduler, workload group, NUMA, and OS memory pressure snapshot (not collected on Azure SQL DB)"
+    },
+    {
+      "name": "plan_cache_stats",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Plan cache composition (single-use vs multi-use bloat) from sys.dm_exec_cached_plans"
+    },
+    {
+      "name": "query_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Query statistics from sys.dm_exec_query_stats"
+    },
+    {
+      "name": "procedure_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Stored procedure statistics from sys.dm_exec_procedure_stats"
+    },
+    {
+      "name": "query_store",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Query Store data (top 100 queries per database)"
+    },
+    {
+      "name": "query_snapshots",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 7,
+      "description": "Currently running queries snapshot"
+    },
+    {
+      "name": "cpu_utilization",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "CPU utilization from ring buffer"
+    },
+    {
+      "name": "file_io_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "File I/O statistics from sys.dm_io_virtual_file_stats"
+    },
+    {
+      "name": "memory_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Memory statistics from sys.dm_os_sys_memory and performance counters"
+    },
+    {
+      "name": "memory_clerks",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Memory clerk allocations from sys.dm_os_memory_clerks"
+    },
+    {
+      "name": "memory_pressure_events",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Memory pressure notifications from RING_BUFFER_RESOURCE_MONITOR"
+    },
+    {
+      "name": "tempdb_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "tempdb space usage from sys.dm_db_file_space_usage"
+    },
+    {
+      "name": "perfmon_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Key performance counters from sys.dm_os_performance_counters"
+    },
+    {
+      "name": "deadlocks",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Deadlocks from a dedicated PerformanceMonitor_Deadlock XE session (xml_deadlock_report)"
+    },
+    {
+      "name": "server_config",
+      "enabled": true,
+      "frequency_minutes": 0,
+      "retention_days": 30,
+      "description": "Server configuration (on-load only)"
+    },
+    {
+      "name": "database_config",
+      "enabled": true,
+      "frequency_minutes": 0,
+      "retention_days": 30,
+      "description": "Database configuration (on-load only)"
+    },
+    {
+      "name": "database_states",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Per-database state (sys.databases.state_desc) time series; feeds the baseline-deviation database-state alert (not collected on Azure SQL DB)"
+    },
+    {
+      "name": "memory_grant_stats",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Memory grant statistics from sys.dm_exec_query_memory_grants"
+    },
+    {
+      "name": "waiting_tasks",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 7,
+      "description": "Point-in-time waiting tasks from sys.dm_os_waiting_tasks"
+    },
+    {
+      "name": "dmv_blocking_snapshot",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Always-on point-in-time blocking snapshot from DMVs (BPR-independent fallback; works when blocked process threshold is unset, e.g. AWS RDS)"
+    },
+    {
+      "name": "blocked_process_report",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Blocked process reports from XE ring buffer session (opt-out)"
+    },
+    {
+      "name": "attention",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Client attentions (queries a client cancelled or timed out) from the PerformanceMonitor_Attention XE session; feeds the Client Timeouts alert (#5640)"
+    },
+    {
+      "name": "long_query_completions",
+      "enabled": false,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Long-running query completions (rpc_completed/sql_batch_completed \u003E= threshold, plus attention/cancels) from this install\u0027s own XE ring buffer session. OPT-IN, default OFF: enabling creates the session on monitored servers, disabling drops it unless another registration of this install keeps it (#1496). On Azure SQL Database the session is created in each monitored database."
+    },
+    {
+      "name": "database_scoped_config",
+      "enabled": true,
+      "frequency_minutes": 0,
+      "retention_days": 30,
+      "description": "Database-scoped configurations (on-load only)"
+    },
+    {
+      "name": "trace_flags",
+      "enabled": true,
+      "frequency_minutes": 0,
+      "retention_days": 30,
+      "description": "Active trace flags via DBCC TRACESTATUS (on-load only)"
+    },
+    {
+      "name": "running_jobs",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 7,
+      "description": "Currently running SQL Agent jobs with duration comparison"
+    },
+    {
+      "name": "database_size_stats",
+      "enabled": true,
+      "frequency_minutes": 60,
+      "retention_days": 90,
+      "description": "Database file sizes for growth trending and capacity planning"
+    },
+    {
+      "name": "index_object_stats",
+      "enabled": true,
+      "frequency_minutes": 1440,
+      "retention_days": 90,
+      "description": "Per-object table/index size, usage, and locking stats for growth, unused-index, and contention analysis (daily collection)"
+    },
+    {
+      "name": "server_properties",
+      "enabled": true,
+      "frequency_minutes": 0,
+      "retention_days": 365,
+      "description": "Server edition, licensing, CPU/memory hardware metadata (on-load only)"
+    },
+    {
+      "name": "session_stats",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Per-application session counts from sys.dm_exec_sessions"
+    },
+    {
+      "name": "session_summary_stats",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Server-wide session summary (idle/leak signal): total/running/sleeping/idle-over-30min counts, memory waits, top app/host from sys.dm_exec_sessions \u002B sys.dm_exec_requests"
+    },
+    {
+      "name": "system_health_events",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Raw system_health Extended Events (memory broker/OOM, scheduler monitor, sp_server_diagnostics, severe errors, significant waits) captured as XML for health-parser analysis (not collected on Azure SQL DB)"
+    },
+    {
+      "name": "default_trace_events",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Built-in Default Trace events via sys.fn_trace_gettable: file auto-grow/shrink stalls, severe ErrorLog writes, schema DDL, security audits, and Server Memory Change (not collected on Azure SQL DB)"
+    },
+    {
+      "name": "job_history",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 365,
+      "description": "Retained SQL Agent job-run history from msdb.dbo.sysjobhistory (per-step results, retries, durations, failures) deduped on the instance_id high-water mark; up to a year retained for the Job History tab (not collected on Azure SQL DB)"
+    },
+    {
+      "name": "agent_status",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 7,
+      "description": "SQL Agent service status (Running/Stopped from sys.dm_server_services) and next scheduled run from msdb; drives the Job History tab header (not collected on Azure SQL DB)"
+    },
+    {
+      "name": "ag_replica_states",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Availability Group replica health (role, operational/connected state, recovery and synchronization health) from sys.dm_hadr_availability_replica_states; zero rows on a server with no AGs (not collected on Azure SQL DB)"
+    },
+    {
+      "name": "ag_database_replica_states",
+      "enabled": true,
+      "frequency_minutes": 1,
+      "retention_days": 30,
+      "description": "Availability Group per-database replica health (synchronization state, send/redo queue sizes and rates, secondary lag) from sys.dm_hadr_database_replica_states; zero rows on a server with no AGs (not collected on Azure SQL DB)"
+    },
+    {
+      "name": "plan_correction",
+      "enabled": true,
+      "frequency_minutes": 5,
+      "retention_days": 30,
+      "description": "Automatic plan correction: per-database FORCE_LAST_GOOD_PLAN enablement from sys.database_automatic_tuning_options plus the engine\u0027s live recommendation set from sys.dm_db_tuning_recommendations, with the regressed query\u0027s text resolved through Query Store (SQL Server 2017\u002B and Azure; Enterprise/Developer edition)"
+    },
+    {
+      "name": "pvs_stats",
+      "enabled": true,
+      "frequency_minutes": 60,
+      "retention_days": 90,
+      "description": "Accelerated Database Recovery persistent version store size and cleanup state per database from sys.dm_tran_persistent_version_store_stats, with the aborted-transaction count and the skipped-page counters that say why cleanup is not reclaiming; SQL Server 2019\u002B only, always collected on Azure SQL DB (ADR is always on there)"
+    },
+    {
+      "name": "query_store_health",
+      "enabled": true,
+      "frequency_minutes": 60,
+      "retention_days": 30,
+      "description": "Per-database Query Store health from sys.database_query_store_options: actual vs desired state (the cap-hit READ_ONLY transition and its readonly_reason), current vs max storage, cleanup mode and thresholds, and the runtime-stats interval length; one row per database, OFF recorded explicitly"
+    }
+  ],
+  "server_overrides": {}
 }
