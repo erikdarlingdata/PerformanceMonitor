@@ -13,6 +13,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -315,9 +316,16 @@ public static class AppLogger
         Log("DEBUG", source, message);
     }
 
+    /// <summary>
+    /// The one sink every static method here and every <see cref="AppLoggerAdapter{T}"/> line, an exception's <c>Stack:</c> and
+    /// <c>Inner[...]</c> lines included, funnels through. The whole assembled line is cleaned with the same rule Darling's file
+    /// log applies (<see cref="LogLineText.Clean"/>, #9768): a message holding a line feed (a SqlException joins every error
+    /// the server returned with one, a stack trace has them) writes its continuation lines indented rather than in column 0,
+    /// and any other control character a server's text carries is written as '.', so no text can start a forged entry.
+    /// </summary>
     private static void Log(string level, string source, string message)
     {
-        var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level,-5}] [{source}] {message}";
+        var line = LogLineText.Clean($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level,-5}] [{source}] {message}");
         s_buffer.Enqueue(line);
     }
 
