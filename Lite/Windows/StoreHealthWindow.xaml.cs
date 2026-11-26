@@ -105,10 +105,10 @@ public partial class StoreHealthWindow : Window
             e.TimeUtc,
             StoreHealthText.KindLabel(e.Kind),
             StoreHealthText.OutcomeLabel(e.Outcome),
-            StoreHealthText.WorkSummary(e),
+            StoreHealthText.MovedText(e),
             e.UsedMb is { } mb ? mb.ToString("0", ci) : "",
             e.Count,
-            e.Message ?? "",
+            StoreHealthText.MessageText(e),
             e.Outcome == StoreHousekeepingHistory.OutcomeFailed)).ToList();
         NoHistoryMessage.Visibility = snapshot.History.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
