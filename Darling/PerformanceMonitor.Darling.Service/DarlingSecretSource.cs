@@ -212,8 +212,9 @@ public static class DarlingSecretSource
     }
 
     /// <summary>What to do about a secret file that is not there (#9793). A compose secret exists in the container only
-    /// when <c>docker compose up -d</c> has recreated it with the secret listed, which a restart does not do.</summary>
-    private static string MissingFileAdvice(string settingName, string path)
+    /// when <c>docker compose up -d</c> has recreated it with the secret listed, which a restart does not do. Shared with the
+    /// password key's own refusal, which reads a <c>file:</c> reference through <see cref="DarlingPasswordKeyFileReader"/>.</summary>
+    internal static string MissingFileAdvice(string settingName, string path)
     {
         if (path.StartsWith(ComposeSecretsMount, StringComparison.Ordinal) && path.Length > ComposeSecretsMount.Length)
         {
