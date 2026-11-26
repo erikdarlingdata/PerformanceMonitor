@@ -58,6 +58,12 @@ SELECT current_user::text,
        COALESCE(current_setting('logging_collector', true), 'off') = 'on',
        COALESCE(has_schema_privilege(current_user, to_regnamespace('_timescaledb_internal')::oid, 'CREATE'), true)";
 
+    /// <summary>
+    /// The deadline of both reads. Each is one catalog round trip with no table scan, the same kind as TimescaleDB's job catalog reads, so it takes
+    /// their deadline. The start awaits these reads, and one that runs past it costs only the privilege line.
+    /// </summary>
+    internal const int ReadTimeoutSeconds = TimescaleSupport.JobCatalogReadTimeoutSeconds;
+
     /// <summary>The declared aggregates present in the catalog. $1 their view names.</summary>
     internal const string PresentAggregateCountSql = @"
 SELECT count(*)::int
@@ -73,7 +79,7 @@ WHERE view_schema = 'collect' AND view_name = ANY($1)";
         ArgumentNullException.ThrowIfNull(connection);
 
         LoginPrivileges probe;
-        using (var command = new NpgsqlCommand(LoginPrivilegesSql, connection))
+        using (var command = new NpgsqlCommand(LoginPrivilegesSql, connection) { CommandTimeout = ReadTimeoutSeconds })
         {
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             await reader.ReadAsync(cancellationToken);
@@ -85,7 +91,7 @@ WHERE view_schema = 'collect' AND view_name = ANY($1)";
         var missing = 0;
         if (timescaleAvailable && !probe.CanCreateInInternalSchema)
         {
-            using var count = new NpgsqlCommand(PresentAggregateCountSql, connection);
+            using var count = new NpgsqlCommand(PresentAggregateCountSql, connection) { CommandTimeout = ReadTimeoutSeconds };
             count.Parameters.AddWithValue(declared.ToArray());
             missing = declared.Count - Convert.ToInt32(await count.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         }
