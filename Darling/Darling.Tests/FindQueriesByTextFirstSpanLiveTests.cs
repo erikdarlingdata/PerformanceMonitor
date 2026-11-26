@@ -29,8 +29,9 @@ namespace Darling.Tests;
 /// first span of a search is a small slice of the newest data and the spans widen after it, so a store whose whole window cannot be read in the
 /// budget still answers with the newest matches and the span they cover. A slow span is modelled without a sleep: the budget's statement hook
 /// takes an advisory lock that a second connection holds, for a span wider than the test allows, so that statement waits on the lock until
-/// the source's own timeout cancels it, as a statement that cannot finish in the budget is cancelled. The spans' widths come from the tool's
-/// own schedule, so the test needs no knowledge of how wide any span is, only that the window cannot be read whole.
+/// the source's own timeout cancels it, as a statement that cannot finish in the budget is cancelled. The spans' widths come from the tool:
+/// its own schedule for the one-server search and the probe, and the span each statement binds for the all-servers search, whose lookup
+/// spans are sized by a row count (#9605). So the test needs no knowledge of how wide any span is, only that the window cannot be read whole.
 /// </summary>
 public sealed class FindQueriesByTextFirstSpanLiveTests
 {
@@ -46,6 +47,12 @@ public sealed class FindQueriesByTextFirstSpanLiveTests
     private const int ModelledBudgetMilliseconds = 2500;
 
     private const long LockKey = 921900;
+
+    /// <summary>The samples an all-servers lookup span reads for each of its parts in the modelled runs. The seed holds eleven samples, fewer
+    /// than one span reads by default, and a window read whole by the first statement has no later span to be slow on. At three a part the
+    /// newest span ends at the samples of 30 minutes ago and the second at those of 90 minutes ago, both inside <see cref="ReadableSpan"/>, and
+    /// the third takes the rest of the window, which is not.</summary>
+    private const int ModelledSpanRows = 3;
 
     private const string CommonPattern = "dbo.Common";
     private const string RarePattern = "dbo.Rare";
@@ -151,6 +158,35 @@ public sealed class FindQueriesByTextFirstSpanLiveTests
             };
         }
 
+        /// <summary>The all-servers search's budget for the same store. A lookup span is sized by a row count, so the span a statement reads is
+        /// the one it binds (its third and fourth parameters, the floor and the ceiling), not one of a fixed schedule: the hook, which runs once
+        /// the statement is bound, waits on the lock when that span is wider than <see cref="ReadableSpan"/>. A span reads
+        /// <see cref="ModelledSpanRows"/> samples a part, so the seed is several spans, as a large store is.</summary>
+        public static DarlingMcpFindQueriesByTextTools.SourceBudget AllServersBudget(List<TimeSpan>? widths = null)
+        {
+            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            var width = TimeSpan.Zero;
+            return new DarlingMcpFindQueriesByTextTools.SourceBudget(ModelledBudgetMilliseconds)
+            {
+                SpanRows = ModelledSpanRows,
+                StatementBound = (_, parameters) =>
+                {
+                    var floor = (DateTime)parameters[2].Value!;
+                    var ceiling = (DateTime)parameters[3].Value!;
+                    width = (ceiling > now ? now : ceiling) - floor;
+                },
+                BeforeStatement = async (connection, transaction, token) =>
+                {
+                    widths?.Add(width);
+                    if (width > ReadableSpan)
+                    {
+                        await using var wait = new NpgsqlCommand("SELECT pg_advisory_xact_lock(" + LockKey.ToString(CultureInfo.InvariantCulture) + ")", connection, transaction);
+                        await wait.ExecuteNonQueryAsync(token);
+                    }
+                },
+            };
+        }
+
         public async ValueTask DisposeAsync() => await _holder.DisposeAsync();
     }
 
@@ -194,9 +230,10 @@ public sealed class FindQueriesByTextFirstSpanLiveTests
         Assert.InRange(covered.TotalMinutes, 1, TimeSpan.FromHours(5).TotalMinutes);
     }
 
-    /// <summary>All servers, a pattern more texts contain than the probe takes: the window join. The store reads a span of up to two hours and not
-    /// a wider one, so the search reads the newest three spans and stops at the fourth. It returns the newest matches and names what it covered,
-    /// not nothing: a search whose first span was a sixth of a day would have waited on the lock at once.</summary>
+    /// <summary>All servers, a pattern more texts contain than the probe takes: lookup spans from end to end. The store reads a span of up to two
+    /// hours and not a wider one, so the search reads the newest two spans (the samples back to 30 minutes ago, then those back to 90 minutes
+    /// ago) and stops at the third, which is the rest of the window. It returns the newest matches and names what it covered, not nothing: a
+    /// search whose first statement read the whole window would have waited on the lock at once.</summary>
     [Fact]
     public async Task AllServers_ACommonPattern_OnAStoreThatCannotReadTheWholeWindow_ReturnsTheNewestMatches_AndSaysWhatItSearched()
     {
@@ -204,7 +241,7 @@ public sealed class FindQueriesByTextFirstSpanLiveTests
         await using var scratch = await OpenScratchAsync(ct);
         await using var store = await SlowStore.OpenAsync(scratch.ConnectionString, ct);
 
-        var planCache = await AllServersAsync(scratch.ConnectionString, CommonPattern, SlowStore.Budget(), 20, ct);
+        var planCache = await AllServersAsync(scratch.ConnectionString, CommonPattern, SlowStore.AllServersBudget(), 20, ct);
 
         Assert.Equal("stopped", planCache.GetProperty("status").GetString());
         Assert.Equal("join", planCache.GetProperty("sample_read").GetString());
@@ -212,7 +249,8 @@ public sealed class FindQueriesByTextFirstSpanLiveTests
         AssertNamesTheSpanItSearched(planCache);
     }
 
-    /// <summary>The same store, a pattern few texts contain: the digest probe, which reads in the same spans.</summary>
+    /// <summary>The same store, a pattern few texts contain: the newest lookup span, then the digest probe, which reads the rest of the window
+    /// in the fixed spans and stops at the first one wider than the store can read.</summary>
     [Fact]
     public async Task AllServers_ARarePattern_OnAStoreThatCannotReadTheWholeWindow_ReturnsTheNewestMatches_AndSaysWhatItSearched()
     {
@@ -220,7 +258,7 @@ public sealed class FindQueriesByTextFirstSpanLiveTests
         await using var scratch = await OpenScratchAsync(ct);
         await using var store = await SlowStore.OpenAsync(scratch.ConnectionString, ct);
 
-        var planCache = await AllServersAsync(scratch.ConnectionString, RarePattern, SlowStore.Budget(), 20, ct);
+        var planCache = await AllServersAsync(scratch.ConnectionString, RarePattern, SlowStore.AllServersBudget(), 20, ct);
 
         Assert.Equal("stopped", planCache.GetProperty("status").GetString());
         Assert.Equal("probe", planCache.GetProperty("sample_read").GetString());
@@ -299,7 +337,7 @@ public sealed class FindQueriesByTextFirstSpanLiveTests
 
         foreach (var planCache in new[]
         {
-            await AllServersAsync(scratch.ConnectionString, "dbo.NotThere", SlowStore.Budget(), 20, ct),
+            await AllServersAsync(scratch.ConnectionString, "dbo.NotThere", SlowStore.AllServersBudget(), 20, ct),
             await OneServerAsync(scratch.ConnectionString, "dbo.NotThere", SlowStore.Budget(), 20, true, ct),
         })
         {
@@ -309,7 +347,8 @@ public sealed class FindQueriesByTextFirstSpanLiveTests
     }
 
     /// <summary>The first statement of every search is a small slice of the newest data and no span after it is narrower, so a store that is slow
-    /// on any part of the window is slow on the newest slice last.</summary>
+    /// on any part of the window is slow on the newest slice last. An all-servers span is sized by rows, and it reads no fewer than the one
+    /// before it, so on this seed, whose samples thin out with age, each is at least as wide in time as the one before it.</summary>
     [Fact]
     public async Task TheFirstSpanOfASearch_IsTheNewestSlice_AndTheSpansWidenAfterIt()
     {
@@ -318,7 +357,7 @@ public sealed class FindQueriesByTextFirstSpanLiveTests
         await using var store = await SlowStore.OpenAsync(scratch.ConnectionString, ct);
 
         var widths = new List<TimeSpan>();
-        _ = await AllServersAsync(scratch.ConnectionString, CommonPattern, SlowStore.Budget(widths), 20, ct);
+        _ = await AllServersAsync(scratch.ConnectionString, CommonPattern, SlowStore.AllServersBudget(widths), 20, ct);
 
         Assert.True(widths.Count >= 3, "the store reads the newest spans, so the hook ran for each");
         Assert.True(widths[0] <= TimescaleSupport.RawRetentionSpan / 90, "the first statement reads a small slice of the window");
