@@ -33,7 +33,9 @@ namespace Darling.Tests;
 /// <item>the cursor goes back to the first key after the end, and a later pass adopts a row that lost its stamp row behind
 /// the cursor;</item>
 /// <item>a cursor kept in the store carries over to a new state, as after a restart, and one that does not fit starts the
-/// table at its first key.</item>
+/// table at its first key;</item>
+/// <item>the Query Store text's three-column key is covered slice by slice across servers and databases, with its cursor
+/// carried from state to state through the store.</item>
 /// </list>
 /// The clock is the test's: it advances one second each time it is read, and a slice reads it twice, so every slice takes
 /// one second and a budget is a count of slices. The timeout is forced by a lock the test holds and releases when the
@@ -267,6 +269,84 @@ public sealed class LivenessAdoptSliceLiveTests
     }
 
     [Fact]
+    public async Task TheQueryStoreTextKey_IsCoveredSliceBySliceAcrossServersAndDatabases_WithItsCursorCarriedThroughTheStore()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(BaseConnectionString!, ct);
+        await using var connection = await OpenAsync(scratch, ct);
+        const string seenTable = QueryStoreTextSeen.TableName;
+        var lastSeen = WholeSecondNow().AddHours(-1);
+
+        /* Thirteen texts over two servers and two databases, with query ids past the int range. 'alpha' and 'Beta' sort one
+           way by byte and the other way under most linguistic collations: the slice's order and its range both use the
+           column's own collation, so the keys below are read in that order and the test holds under either. The trigger
+           stamps every text, and then every text but the query id 2 ones loses its seen row. */
+        await ExecuteAsync(
+            connection,
+            "INSERT INTO collect.query_store_text (server_id, database_name, query_id, query_sql_text, last_seen) "
+            + "SELECT s, d, q, 'SELECT ' || q, $1 FROM unnest(ARRAY[3, 11]) AS s, unnest(ARRAY['alpha', 'Beta']) AS d, "
+            + "unnest(ARRAY[1, 2, 3000000001]::bigint[]) AS q "
+            + "UNION ALL SELECT 11, 'alpha', 4000000002, 'SELECT 4000000002', $1",
+            ct, lastSeen);
+        await ExecuteAsync(connection, $"DELETE FROM {seenTable} WHERE query_id <> 2", ct);
+
+        var keys = await TextKeysAsync(connection, "SELECT t.server_id, t.database_name, t.query_id FROM collect.query_store_text AS t", ct);
+        var missingAtStart = await TextKeysAsync(connection, MissingTextsSql, ct);
+        Assert.Equal(13, keys.Count);
+        Assert.Equal(9, missingAtStart.Count);
+        await using var postgres = DataSource(scratch);
+
+        /* Two keys a slice and three slices a pass, six keys a pass, each pass by a new state as a service that has just
+           started: the first pass covers keys one to six, the second seven to twelve, and the third reaches the end. */
+        for (var pass = 1; pass <= 3; pass++)
+        {
+            var state = new LivenessAdoptState(
+                sliceKeys: 2, sliceKeysFloor: 1, budget: TimeSpan.FromSeconds(3), sliceTimeoutSeconds: 30, secondsClock: TickingClock(),
+                keepsCursorInStore: true);
+            var log = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(
+                postgres, timescaleAvailable: false, log, ct, retentionDaysFor: _ => 30, livenessAdopt: state);
+
+            var covered = keys.Take(pass * 6).ToHashSet(StringComparer.Ordinal);
+            var expected = missingAtStart.Where(key => !covered.Contains(key)).ToArray();
+            var missing = (await TextKeysAsync(connection, MissingTextsSql, ct)).ToArray();
+            Assert.True(expected.SequenceEqual(missing), $"pass {pass}: missing [{string.Join(", ", missing)}], expected [{string.Join(", ", expected)}]\n{log.Joined}");
+            Assert.True("SUCCESS" == await LastRunStatusAsync(connection, ct), log.Joined);
+            Assert.DoesNotContain(log.Lines, line => line.StartsWith("Warning:", StringComparison.Ordinal) && line.Contains(seenTable, StringComparison.Ordinal));
+
+            /* The cursor is the last key the pass covered, as an int, a text and a bigint in key order, and the store holds the
+               same; the pass that reached the end holds none. */
+            var cursor = state.CursorOf(seenTable);
+            if (pass < 3)
+            {
+                Assert.NotNull(cursor);
+                Assert.Equal(3, cursor.Count);
+                Assert.IsType<int>(cursor[0]);
+                Assert.IsType<string>(cursor[1]);
+                Assert.IsType<long>(cursor[2]);
+                Assert.Equal(keys[(pass * 6) - 1], TextKey((int)cursor[0], (string)cursor[1], (long)cursor[2]));
+            }
+            else
+            {
+                Assert.Null(cursor);
+            }
+
+            Assert.Equal(LivenessAdoptState.EncodeCursor(cursor), await StoredCursorAsync(connection, seenTable, ct));
+        }
+
+        /* Every text has its seen row, stamped with the text row's own stamp, and no text was retired. */
+        Assert.Equal(13L, await CountAsync(connection, "SELECT count(*) FROM collect.query_store_text", ct));
+        Assert.Equal(
+            13L,
+            await CountAsync(
+                connection,
+                $"SELECT count(*) FROM collect.query_store_text AS t JOIN {seenTable} AS s "
+                + "ON s.server_id = t.server_id AND s.database_name = t.database_name AND s.query_id = t.query_id AND s.last_seen = t.last_seen",
+                ct));
+    }
+
+    [Fact]
     public void TheCursorTextForm_RoundTripsEveryKeyType_AndReadsWhatDoesNotFitAsNoCursor()
     {
         var digest = new byte[] { 0x00, 0x7F, 0x80, 0xFF };
@@ -293,6 +373,32 @@ public sealed class LivenessAdoptSliceLiveTests
         Assert.Null(LivenessAdoptState.DecodeCursor("[\"i:12x\"]", 1));
         Assert.Null(LivenessAdoptState.DecodeCursor("[null]", 1));
     }
+
+    /// <summary>The texts with no seen row. <see cref="TextKeysAsync"/> puts them in key order.</summary>
+    private const string MissingTextsSql =
+        "SELECT t.server_id, t.database_name, t.query_id FROM collect.query_store_text AS t "
+        + "WHERE NOT EXISTS (SELECT 1 FROM collect.query_store_text_seen AS s "
+        + "WHERE s.server_id = t.server_id AND s.database_name = t.database_name AND s.query_id = t.query_id)";
+
+    /// <summary>
+    /// The text keys <paramref name="sql"/> selects (server id, database name, query id, aliased <c>t</c>), in the primary
+    /// key's order under the column's own collation, which is the order the slices take.
+    /// </summary>
+    private static async Task<List<string>> TextKeysAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql + " ORDER BY t.server_id, t.database_name, t.query_id", connection);
+        var keys = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            keys.Add(TextKey(reader.GetInt32(0), reader.GetString(1), reader.GetInt64(2)));
+        }
+
+        return keys;
+    }
+
+    private static string TextKey(int serverId, string databaseName, long queryId) =>
+        string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{serverId}/{databaseName}/{queryId}");
 
     /// <summary>The adopt cursor the store holds for <paramref name="livenessTable"/>, or null when it holds none.</summary>
     private static async Task<string?> StoredCursorAsync(NpgsqlConnection connection, string livenessTable, CancellationToken ct)

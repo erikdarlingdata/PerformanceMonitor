@@ -448,8 +448,8 @@ public static class DarlingRetention
     /// </param>
     /// <param name="livenessAdopt">
     /// Where the adopt step is in each liveness table (<see cref="LivenessAdoptState"/>). The worker hands in its own, so
-    /// a pass goes on from the key the pass before it stopped at, after a restart too. Null starts every table at its first
-    /// key and keeps no cursor in the store.
+    /// a pass goes on from the key the pass before it stopped at, and after a restart from the key the last finished pass
+    /// stopped at. Null starts every table at its first key and keeps no cursor in the store.
     /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
@@ -3088,7 +3088,9 @@ $do$";
     /// <see cref="LivenessAdoptState.Budget"/>. A pass that stops on the budget leaves the cursor where it is and the next
     /// pass goes on from it. A pass that reaches the end clears the cursor, so the next one starts at the first key. The
     /// worker's state also keeps the cursor in <c>collect.collector_state</c>, read once after a restart and written after
-    /// every pass whose slices moved it, so a restart goes on from where the last pass stopped.</para>
+    /// every pass whose slices moved it, so a restart goes on from where the last finished pass stopped. A pass cut short by
+    /// a service stop writes nothing, because a stop does not wait on the store: the slices it ran are run again by the next
+    /// start, at most one pass of <see cref="LivenessAdoptState.Budget"/> per table.</para>
     ///
     /// <para><b>A slice that times out.</b> Each statement of a slice has <see cref="LivenessAdoptState.SliceTimeoutSeconds"/>
     /// as its command timeout. A slice that runs into it is not a failure: the cursor stays, the next slice is half the

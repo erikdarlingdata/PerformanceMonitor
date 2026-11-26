@@ -23,15 +23,17 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para>The worker owns one and hands it to every pass. Its cursors are also kept in the store, in
 /// <c>collect.collector_state</c> under the fleet server id (<see cref="CursorStateCollectorName"/>, state key the liveness
-/// table), so a restart goes on from the key the last pass stopped at. On a large store one pass covers a small part of the
-/// key, and the service restarts at every install, so a cursor kept in memory alone would start over at the first key each
-/// time and never reach the end. A cursor that cannot be read back, or that does not fit the table's key, starts that table
-/// at its first key, and a cursor that cannot be written is tried again by the next pass. Neither fails the table.</para>
+/// table), so a restart goes on from the key the last finished pass stopped at. On a large store one pass covers a small
+/// part of the key, and the service restarts at every install, so a cursor kept in memory alone would start over at the
+/// first key each time and never reach the end. A pass cut short by a service stop writes no cursor, so its slices are run
+/// again after the restart. A cursor that cannot be read back, or that does not fit the table's key, starts that table at
+/// its first key, and a cursor that cannot be written is tried again by the next pass. Neither fails the table.</para>
 ///
 /// <para>A slice that runs into its command timeout halves the next slice of that table, down to
 /// <see cref="SliceKeysFloor"/>, and a slice that finishes in under a quarter of the timeout doubles it, up to
-/// <see cref="SliceKeys"/>. The size is kept here with the cursor, so a store that needs small slices keeps them from
-/// pass to pass.</para>
+/// <see cref="SliceKeys"/>. The size is kept here from pass to pass, in memory only: a restart starts every table at
+/// <see cref="SliceKeys"/> again, and a store that needs small slices times its way back down, one timed-out slice per
+/// halving.</para>
 /// </summary>
 public sealed class LivenessAdoptState
 {
