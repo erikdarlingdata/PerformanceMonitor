@@ -1388,7 +1388,7 @@ public sealed partial class DarlingWorker
         var detail = tick.PruneFailure is null ? deferred : deferred is null ? tick.PruneFailure : $"{tick.PruneFailure}. {deferred}";
         return new StorePassSteps.StepCounts(
             Built: tick.Built + tick.HoursBuilt + tick.ClutterDaysFolded, Removed: tick.DaysRemoved + tick.HoursRemoved,
-            Failed: tick.Failed + tick.HoursFailed + (tick.PruneFailure is null ? 0 : 1), Detail: detail);
+            Failed: tick.Failed + tick.HoursFailed + tick.ClutterDaysFailed + (tick.PruneFailure is null ? 0 : 1), Detail: detail);
     }
 
     /// <summary>
