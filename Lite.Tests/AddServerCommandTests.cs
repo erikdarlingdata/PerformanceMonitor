@@ -246,6 +246,19 @@ public sealed class AddServerCommandTests : IDisposable
         Assert.Empty(StoredKeys());
     }
 
+    /// <summary>#9787: a zero-width non-joiner is part of an ordinary Persian word, so a database holding one is added.</summary>
+    [Fact]
+    public async Task ADatabaseHoldingAZeroWidthNonJoiner_IsAdded()
+    {
+        var database = "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645";
+        var entry = new Dictionary<string, object> { ["host"] = "sql01", ["auth"] = "windows", ["database"] = database };
+        var run = await RunVerbAsync(["--add-server"], JsonSerializer.Serialize(new[] { entry }));
+
+        Assert.Equal(0, run.Exit);
+        Assert.Equal(["sql01"], ServerNames());
+        Assert.Equal(database, Reload().GetAllServers().Single().DatabaseName);
+    }
+
     [Fact]
     public void ServerManagerAddServer_RefusesAControlCharacterInTheDisplayName_AndWritesNothing()
     {

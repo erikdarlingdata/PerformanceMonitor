@@ -36,13 +36,13 @@ public sealed class ServerFieldControlCharacterTests
         (_, _) => throw new InvalidOperationException("the probe must not run for a refused request");
 
     /// <summary>One of each class: line feed, carriage return, tab, DEL, a C1 control (NEL), the two Unicode separators,
-    /// a right-to-left override and an invisible tag character from outside the Basic Multilingual Plane.</summary>
+    /// a right-to-left override, a bidirectional isolate and an invisible tag character from outside the Basic Multilingual Plane.</summary>
     public static TheoryData<string, string> FieldsAndCharacters()
     {
         var data = new TheoryData<string, string>();
         foreach (var field in new[] { "display_name", "host", "database", "username" })
         {
-            foreach (var character in new[] { "\n", "\r", "\t", "\u007F", "\u0085", "\u2028", "\u2029", "\u202E", "\U000E0041" })
+            foreach (var character in new[] { "\n", "\r", "\t", "\u007F", "\u0085", "\u2028", "\u2029", "\u202E", "\u2066", "\U000E0041" })
             {
                 data.Add(field, character);
             }
@@ -200,6 +200,35 @@ public sealed class ServerFieldControlCharacterTests
         Assert.Contains("\\u0085", line, StringComparison.Ordinal);
     }
 
+    /// <summary>The zero-width non-joiner and joiner and the two direction marks are part of real names in Persian, Indic,
+    /// Hebrew and Arabic text, so a database or login holding one is accepted by the add and edit parses. A log line still
+    /// shows each one escaped.</summary>
+    [Theory]
+    [InlineData("\u200C")]
+    [InlineData("\u200D")]
+    [InlineData("\u200E")]
+    [InlineData("\u200F")]
+    public void AJoinerOrADirectionMark_InADatabaseOrLogin_IsAccepted_AndPrintsEscaped(string mark)
+    {
+        var database = "\u0645\u06CC" + mark + "\u062E\u0648\u0627\u0647\u0645";
+        var login = "user" + mark + "name";
+
+        var (entries, invalid, wholeError) = Edit.ParseRequest(
+            JsonSerializer.Serialize(new[] { new { host = "sql01.example.test", auth = "SQL", username = login, password = "pw-secret-1", database } }),
+            TestKeyRings.Healthy.Status);
+        Assert.Null(wholeError);
+        Assert.Empty(invalid);
+        Assert.Single(entries);
+
+        var (changes, editError) = Edit.ParseEditChanges(JsonSerializer.Serialize(new { database, username = login }));
+        Assert.Null(editError);
+        Assert.NotNull(changes);
+
+        Assert.Null(ServerFieldText.FirstRefusal(null, "sql01.example.test", database, login));
+        Assert.DoesNotContain(ServerFieldText.Escape(database), ServerFieldText.IsControl);
+        Assert.Contains($"\\u{(int)mark[0]:X4}", ServerFieldText.Escape(login), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TheEscaper_WritesEachRefusedCharacterVisibly_AndLeavesEverythingElseAlone()
     {
@@ -212,12 +241,12 @@ public sealed class ServerFieldControlCharacterTests
     [Fact]
     public void TheRule_JudgesWholeCodePoints_SoATagCharacterIsRefused_AndASurrogateIsLeftAlone()
     {
-        Assert.True(ServerFieldText.HasControlCharacter("ab\U000E0041\U000E007Fc"));
+        Assert.True(ServerFieldText.HasRefusedCharacter("ab\U000E0041\U000E007Fc"));
         Assert.NotNull(ServerFieldText.Refusal("display_name", "prod\U000E0001"));
         Assert.Equal("ab\\U000E0041\\U000E007Fc", ServerFieldText.Escape("ab\U000E0041\U000E007Fc"));
 
-        Assert.False(ServerFieldText.HasControlCharacter("rocket \U0001F680"));
-        Assert.False(ServerFieldText.HasControlCharacter("lone \uD800 half"));
+        Assert.False(ServerFieldText.HasRefusedCharacter("rocket \U0001F680"));
+        Assert.False(ServerFieldText.HasRefusedCharacter("lone \uD800 half"));
         Assert.Equal("lone \uD800 half \\u000A", ServerFieldText.Escape("lone \uD800 half \n"));
     }
 }
