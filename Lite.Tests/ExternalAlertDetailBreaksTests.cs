@@ -9,7 +9,7 @@ namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
 /// #9576: the detail of an alert another service submitted reaches the drain with its line breaks, and each channel shows them its
-/// own way: Slack mrkdwn keeps the line feed, a Teams MessageCard needs a doubled one, email HTML turns it into a break tag after
+/// own way: Slack mrkdwn keeps the line feed, a Teams card's TextBlock needs a doubled one, email HTML turns it into a break tag after
 /// the text is encoded, plain-text email and the Generic webhook keep the line feed. Text a source sends is still escaped.
 /// </summary>
 public class ExternalAlertDetailBreaksTests
@@ -54,7 +54,7 @@ public class ExternalAlertDetailBreaksTests
     }
 
     [Fact]
-    public void Teams_AnExternalDetailWithBreaks_GetsTheDoubledLineFeedAMessageCardNeeds_AndStillEscapesTheText()
+    public void Teams_AnExternalDetailWithBreaks_GetsTheDoubledLineFeedATextBlockNeeds_AndStillEscapesTheText()
     {
         var payload = WebhookAlertService.BuildTeamsPayload(
             Metric, "SRV1", "7", "", Branding,

@@ -276,7 +276,7 @@ A channel is enabled by a non-empty URL.
 | `pagerDutyProxy` | `""` | Optional proxy address |
 | `pagerDutyAutoResolve` | `false` | Close the PagerDuty incident when the alert resolves |
 
-Microsoft retired the Office 365 connectors in Teams, so a Teams webhook URL now comes from Workflows. A Workflows webhook shows the card's text but not its buttons. The link button to the triage page does not show in Teams.
+Microsoft retired the Office 365 connectors in Teams, so a Teams webhook URL comes from Workflows (a template such as "Send webhook alerts to a channel"). Darling posts each alert as one Adaptive Card in the message a Teams webhook takes. The card has a header in the severity's color, the alert's facts and details, and, when Darling has a triage link, a button that opens the triage page.
 
 Webhook and heartbeat posts do not connect to a link-local address (169.254.0.0/16, fe80::/10) or to the cloud instance addresses `fd00:ec2::254`, `168.63.129.16` and `100.100.100.200`; loopback and private addresses stay allowed. The address check applies to direct connections: when a channel posts through a proxy, Darling checks the address the URL itself spells out when it is saved (a trailing dot and the IPv4-mapped, NAT64 and IPv4-compatible forms included) but cannot see what the proxy connects to, so the proxy decides what it can reach.
 
