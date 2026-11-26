@@ -14,6 +14,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
@@ -39,7 +40,8 @@ namespace PerformanceMonitorLite.Tests;
 /// the same tables, columns in the same order, indexes and views, with neither store holding an object the other lacks; no migration
 /// step logged as non-fatal (#2748); every row kept; every
 /// LocalDataService read and every MCP read tool that answers on the fresh store answering on the upgraded one with the same row
-/// counts; and the housekeeping passes (archival, retention, the purges, the size reset) leaving the two stores alike.
+/// counts (for an MCP tool, the elements of every array in its answer, summed); and the housekeeping passes (archival, retention,
+/// the purges, the size reset) leaving the two stores alike.
 /// <para>Set <c>LITE_UPGRADE_STORE_DIR</c> to a folder holding a real store (monitor.duckdb, archive, config) to run the same checks
 /// on a copy of it; <c>LITE_UPGRADE_REPORT</c> names a file for the full report.</para>
 /// </summary>
@@ -82,6 +84,7 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
         var run = await RunAsync(FromFixtureAsync, reads: true, housekeeping: false);
         Assert.True(run.ReadsSwept > 250, $"only {run.ReadsSwept} reads were swept: the reflection under-enumerated LocalDataService and the MCP tools");
         Assert.True(run.ReadsWithRows > 40, $"only {run.ReadsWithRows} reads returned rows on the fresh store: the seeded rows are not visible to the reads");
+        Assert.True(run.McpReadsWithRows > 20, $"only {run.McpReadsWithRows} MCP tools answered rows on the fresh store: the row count reads nothing, or the seeded rows are not visible to the tools");
         Assert.True(run.Reads.Count == 0, Report("the reads", run.Reads, run));
     }
 
@@ -119,6 +122,7 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
         public readonly StringBuilder Details = new();
         public int ReadsSwept;
         public int ReadsWithRows;
+        public int McpReadsWithRows;
     }
 
     private sealed record Store(string Dir, string DbPath, string ArchiveDir, string ConfigDir);
@@ -195,6 +199,7 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
             var freshReads = await SweepAsync(freshDb, fresh.ConfigDir, serverIds);
             run.ReadsSwept = freshReads.Count;
             run.ReadsWithRows = freshReads.Values.Count(o => o.Rows > 0);
+            run.McpReadsWithRows = freshReads.Count(o => o.Key.StartsWith("mcp.", StringComparison.Ordinal) && o.Value.Rows > 0);
             foreach (var (key, f) in freshReads.OrderBy(k => k.Key, StringComparer.Ordinal))
             {
                 var u = upgradedReads.TryGetValue(key, out var x) ? x : new ReadOutcome("not swept", -1);
@@ -204,7 +209,7 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
                     run.Reads.Add($"{key}: {u.Rows} rows on the upgraded store, {f.Rows} on the fresh one");
             }
             var common = freshReads.Where(f => f.Value.Status != "ok").Select(f => $"{f.Key}: {f.Value.Status}").ToList();
-            run.Details.AppendLine($"reads: {freshReads.Count} swept, {run.ReadsWithRows} with rows on the fresh store, {common.Count} failing on both stores (not an upgrade finding)");
+            run.Details.AppendLine($"reads: {freshReads.Count} swept, {run.ReadsWithRows} with rows on the fresh store ({run.McpReadsWithRows} of them MCP tools), {common.Count} failing on both stores (not an upgrade finding)");
             foreach (var c in common) run.Details.AppendLine("  both: " + c);
         }
 
@@ -396,7 +401,7 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
     private sealed record ReadOutcome(string Status, long Rows);
 
     /// <summary>Every public Get* read on LocalDataService, for the first server and for all three where a read takes a list, and every
-    /// MCP read tool for the first server, bound the way <see cref="McpReadToolBudgetTests"/> binds them.</summary>
+    /// MCP read tool for each server, bound the way <see cref="McpReadToolBudgetTests"/> binds them.</summary>
     private static async Task<Dictionary<string, ReadOutcome>> SweepAsync(DuckDbInitializer db, string configDir, int[] serverIds)
     {
         var outcomes = new Dictionary<string, ReadOutcome>(StringComparer.Ordinal);
@@ -437,16 +442,19 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
             [typeof(InvestigationBriefComposer)] = new InvestigationBriefComposer(new DuckDbInvestigationBriefSourceReader(db),
                 new McpDataDetailSetting(McpDataDetail.Full), LiteInvestigationBriefTools.Tools),
         };
+        /* Each tool once per fixture server: the fixture holds nearly all of its rows on the second and third server, and a tool bound
+           to the first would answer from the archive alone. */
+        foreach (var serverName in FixtureServerNames)
         foreach (var (name, method) in McpReadToolBudgetTests.ReadToolMethods())
         {
-            var key = "mcp." + name;
+            var key = $"mcp.{name}({serverName})";
             var args = method.GetParameters().Select(p =>
                 p.ParameterType == typeof(LocalDataService) ? data :
                 p.ParameterType == typeof(ServerManager) ? serverManager :
                 p.ParameterType == typeof(AnalysisService) ? analysis :
                 p.ParameterType == typeof(McpToolGuideCatalog) ? catalog :
                 services.TryGetValue(p.ParameterType, out var service) ? service :
-                p.Name == "server_name" ? FixtureServerNames[0] :
+                p.Name == "server_name" ? serverName :
                 p.Name == "hours_back" && p.ParameterType == typeof(int) ? 240 :
                 p.HasDefaultValue ? p.DefaultValue :
                 p.ParameterType.IsValueType ? Activator.CreateInstance(p.ParameterType) : (object?)null).ToArray();
@@ -455,7 +463,7 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
                 var json = await McpReadToolBudgetTests.InvokeAsync(method, args).WaitAsync(TimeSpan.FromSeconds(60));
                 outcomes[key] = McpHelpers.IsErrorEnvelope(json)
                     ? new ReadOutcome("answered an error: " + json[..Math.Min(json.Length, 200)], -1)
-                    : new ReadOutcome("ok", json.Length > 400 ? 1 : 0);
+                    : new ReadOutcome("ok", McpRowCount(json));
             }
             catch (Exception ex)
             {
@@ -465,6 +473,22 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
         }
         return outcomes;
     }
+
+    /// <summary>The rows an MCP tool answered: the elements of every array in its payload, at any depth, summed. Scalars (timings,
+    /// generated_at, totals, notes) are never read, so two stores that hold the same rows answer with the same count however the
+    /// rest of the envelope differs, and a tool that loses a row, or a row's nested list entry, after the climb answers with fewer.</summary>
+    private static long McpRowCount(string json)
+    {
+        using var payload = JsonDocument.Parse(json);
+        return CountArrayElements(payload.RootElement);
+    }
+
+    private static long CountArrayElements(JsonElement element) => element.ValueKind switch
+    {
+        JsonValueKind.Array => element.GetArrayLength() + element.EnumerateArray().Sum(CountArrayElements),
+        JsonValueKind.Object => element.EnumerateObject().Sum(property => CountArrayElements(property.Value)),
+        _ => 0,
+    };
 
     private static object? BindRead(ParameterInfo p, int[] serverIds, DateTime now)
     {
