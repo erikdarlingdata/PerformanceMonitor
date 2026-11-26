@@ -126,6 +126,9 @@
     <None Include="..\Lite\config\settings.sample.json" Link="Fixtures\settings.sample.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\App.xaml.cs" Link="Fixtures\App.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\Mcp\McpSettings.cs" Link="Fixtures\McpSettings.cs" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #9611: the sample Teams payloads the tools\teams-test-card script posts. TeamsTestCardSampleTests builds the same
+         alerts with the shared builder and compares, so a committed sample cannot drift from what is sent. -->
+    <None Include="..\tools\teams-test-card\*.teams.json" Link="Fixtures\TeamsTestCard\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <!-- Lite's windows name their icon by a root-relative URI, which resolves against the entry assembly, this one, when a test builds a window. -->
