@@ -171,8 +171,10 @@ public sealed class ClientTimeoutsSettingsSurfaceTests
         Assert.DoesNotContain("\"Client Timeouts\"", code, StringComparison.Ordinal);
 
         /* Both pattern fields show for it, so the alert's top database and top client application (the pre-fill) are saved, not dropped by the visibility gate. */
-        Assert.Matches(@"bool showDatabase = [^;]*or AlertFamily\.ClientTimeoutsMetric;", code);
-        Assert.Contains("bool showClientApp = metric is null or \"(any)\" or AlertFamily.ClientTimeoutsMetric;", code, StringComparison.Ordinal);
+        Assert.True(PerformanceMonitorLite.Services.MuteRulePatternFields.AllowsDatabase(AttentionEvaluator.MetricName));
+        Assert.True(PerformanceMonitorLite.Services.MuteRulePatternFields.AllowsClientApp(AttentionEvaluator.MetricName));
+        Assert.Contains("bool showDatabase = MuteRulePatternFields.AllowsDatabase(metric);", code, StringComparison.Ordinal);
+        Assert.Contains("bool showClientApp = MuteRulePatternFields.AllowsClientApp(metric);", code, StringComparison.Ordinal);
         Assert.Contains("DatabasePatternBox.Text = context.DatabaseName;", code, StringComparison.Ordinal);
         Assert.Contains("ClientAppPatternBox.Text = context.ClientAppName;", code, StringComparison.Ordinal);
         Assert.Contains("Rule.DatabasePattern = DatabasePatternBox.Visibility == Visibility.Visible", code, StringComparison.Ordinal);

@@ -88,6 +88,73 @@ CREATE TABLE IF NOT EXISTS mcp_slow_calls (
     memory_source VARCHAR
 )";
 
+    /// <summary>
+    /// #9596 (v87, twinning Darling's V299 tables): the persisted object usage chain <c>get_object_usage</c> reads instead of every index row
+    /// of every snapshot in its window. One row per (server, database, snapshot): the chain step's facts. Derived from <c>index_object_stats</c>
+    /// by <c>ObjectUsageChainBuilder</c> and never archived: it holds one row per snapshot, so it stays small, and a 512 MB reset that clears it
+    /// costs a background rebuild from the archive and a full-fold read until that finishes. Columns as Darling's <c>collect.object_usage_snapshots</c>.
+    /// </summary>
+    public const string CreateObjectUsageSnapshotsTable = @"
+CREATE TABLE IF NOT EXISTS object_usage_snapshots (
+    server_id INTEGER NOT NULL,
+    database_name VARCHAR NOT NULL,
+    collection_time TIMESTAMP NOT NULL,
+    step_version SMALLINT NOT NULL,
+    answering_server_name VARCHAR,
+    sqlserver_start_time TIMESTAMP,
+    node_key VARCHAR NOT NULL,
+    compared_with TIMESTAMP,
+    kept_start TIMESTAMP,
+    reasons INTEGER NOT NULL,
+    counted SMALLINT NOT NULL,
+    index_resets INTEGER NOT NULL,
+    blind_from TIMESTAMP,
+    built_at TIMESTAMP NOT NULL
+)";
+
+    /// <summary>
+    /// #9596 (v87): one row per (server, database, snapshot, index) where the step contributed or anything moved. No key: it is the largest
+    /// of the three, and the builder deletes a pair's rows before it rebuilds the pair. Columns as Darling's <c>collect.object_usage_deltas</c>.
+    /// </summary>
+    public const string CreateObjectUsageDeltasTable = @"
+CREATE TABLE IF NOT EXISTS object_usage_deltas (
+    server_id INTEGER NOT NULL,
+    database_name VARCHAR NOT NULL,
+    collection_time TIMESTAMP NOT NULL,
+    object_id INTEGER NOT NULL,
+    index_id INTEGER NOT NULL,
+    reads BIGINT NOT NULL,
+    updates BIGINT NOT NULL,
+    last_read TIMESTAMP,
+    last_update TIMESTAMP
+)";
+
+    /// <summary>
+    /// #9596 (v87): index presence and identity runs. An open run has a NULL <c>last_time</c>. Columns as Darling's
+    /// <c>collect.object_usage_runs</c>.
+    /// </summary>
+    public const string CreateObjectUsageRunsTable = @"
+CREATE TABLE IF NOT EXISTS object_usage_runs (
+    server_id INTEGER NOT NULL,
+    database_name VARCHAR NOT NULL,
+    object_id INTEGER NOT NULL,
+    index_id INTEGER NOT NULL,
+    first_time TIMESTAMP NOT NULL,
+    last_time TIMESTAMP,
+    schema_name VARCHAR NOT NULL,
+    object_name VARCHAR NOT NULL,
+    is_indexed_view BOOLEAN NOT NULL,
+    is_memory_optimized BOOLEAN
+)";
+
+    /// <summary>The three chain tables (v87), in the order a pair is deleted: deltas, runs, snapshots.</summary>
+    public static IEnumerable<string> ObjectUsageChainTableStatements()
+    {
+        yield return CreateObjectUsageSnapshotsTable;
+        yield return CreateObjectUsageDeltasTable;
+        yield return CreateObjectUsageRunsTable;
+    }
+
     public const string CreateCollectionLogIndex = @"
 CREATE INDEX IF NOT EXISTS idx_collection_log_time ON collection_log(server_id, collection_time)";
 
@@ -645,6 +712,11 @@ CREATE TABLE IF NOT EXISTS investigation_evidence (
         yield return CreateServerTagMapTable;
         yield return CreateNotificationRoutesTable;
         yield return CreateMcpSlowCallsTable;
+
+        foreach (var statement in ObjectUsageChainTableStatements())
+        {
+            yield return statement;
+        }
 
         foreach (var statement in QueryTagTableStatements())
         {
