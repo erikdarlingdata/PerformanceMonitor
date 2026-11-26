@@ -44,7 +44,7 @@ public sealed class DarlingMcpWritePolicyTests
        tool but those two, and the whole catalog is a policy no start resolves; only the census reference reads it. */
     private static readonly int InvestigationCount = DarlingMcpWritePolicy.InvestigationTools.Count;
 
-    /* #9643: the server admin tools that are reads (the personal token list). They are served only with the server admin writes, so the default
+    /* #9643: the server admin tools that are reads (the personal token list and the web access group list). They are served only with the server admin writes, so the default
        policy leaves them out beside the writes. */
     private static readonly int ServerAdminReadCount = DarlingMcpWritePolicy.ServerAdminTools.Count(n => !DarlingMcpWritePolicy.IsWrite(n));
 
@@ -109,6 +109,27 @@ public sealed class DarlingMcpWritePolicyTests
             Assert.Equal(!isWrite, hints!.ReadOnlyHint);
             Assert.Equal(isWrite, hints.DestructiveHint);
         }
+    }
+
+    [Fact]
+    public void TheWebAccessGroupList_IsServedOnlyWhereTheGroupWritesAre_AndNoAgentIsOfferedAnyOfTheSix()
+    {
+        string[] writes = ["set_advanced_web_access", "create_web_access_group", "update_web_access_group", "rotate_web_access_group_token", "delete_web_access_group"];
+        string[] six = [.. writes, "get_web_access_groups"];
+        var agent = new DarlingMcpWritePolicy.Effective(false, false, Investigations: true);
+
+        foreach (var policy in new[] { DarlingMcpWritePolicy.Effective.Off, WritesOnly, agent })
+        {
+            var names = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), policy));
+            Assert.All(six, t => Assert.DoesNotContain(t, names));
+        }
+
+        var admin = Names(DarlingMcpWritePolicy.FilterToolCollection(ServedTools(), Everything));
+        Assert.All(six, t => Assert.Contains(t, admin));
+
+        /* Every server admin tool is one an agent is never offered, so a tool added to the set cannot reach an agent token unlisted. */
+        Assert.All(DarlingMcpWritePolicy.ServerAdminTools, t => Assert.Contains(t, DarlingMcpWritePolicy.NeverAgentTools));
+        Assert.All(six, t => Assert.False(DarlingMcpWritePolicy.IsAgentAction(t, new System.Collections.Generic.HashSet<string>(six))));
     }
 
     [Fact]

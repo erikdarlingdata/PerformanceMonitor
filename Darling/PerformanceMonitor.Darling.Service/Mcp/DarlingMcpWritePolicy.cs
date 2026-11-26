@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <item><see cref="McpConfig.AllowWrites"/> (<c>mcp.allowWrites</c>) offers the tools that change alerting,
 /// mutes, custom alert rules and Custom Views, and the analysis mute.</item>
 /// <item><see cref="McpConfig.AllowServerAdmin"/> (<c>mcp.allowServerAdmin</c>) additionally offers
-/// <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>. It does nothing unless <c>mcp.allowWrites</c> is also on.</item>
+/// <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c>, <c>set_server_action</c> and the web access tools (<c>create_web_access_group</c>, <c>update_web_access_group</c>, <c>rotate_web_access_group_token</c>, <c>delete_web_access_group</c>, <c>set_advanced_web_access</c>, #9642). It does nothing unless <c>mcp.allowWrites</c> is also on.</item>
 /// </list>
 /// A write that is not allowed is ABSENT from the served tool collection, not merely hidden from
 /// <c>tools/list</c>: the SDK's <c>tools/call</c> dispatch consults the same collection, so the call fails as an
@@ -51,13 +51,21 @@ internal static class DarlingMcpWritePolicy
     internal const string ServerAdminSetting = "mcp.allowServerAdmin";
 
     /// <summary>The tools that change which servers the service connects to, or where. They present the service's
-    /// own account to whatever host the caller names, so they sit behind their own setting.</summary>
+    /// own account to whatever host the caller names, so they sit behind their own setting. <c>get_web_access_groups</c> is a read that
+    /// sits here too (#9642): it reads on the store owner connection, and the store grants those columns to the Viewer's admin and web
+    /// roles only, so it is served only where the group writes are.</summary>
     internal static readonly IReadOnlySet<string> ServerAdminTools = new HashSet<string>(StringComparer.Ordinal)
     {
         "add_servers",
         "remove_server",
         "edit_server",
         "set_server_action",
+        "create_web_access_group",
+        "delete_web_access_group",
+        "rotate_web_access_group_token",
+        "set_advanced_web_access",
+        "update_web_access_group",
+        "get_web_access_groups",
         "mint_personal_token",
         "revoke_personal_token",
         "get_personal_tokens",
@@ -94,6 +102,11 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "create_web_access_group",
+        "delete_web_access_group",
+        "rotate_web_access_group_token",
+        "set_advanced_web_access",
+        "update_web_access_group",
         "mint_personal_token",
         "revoke_personal_token",
         "add_alert_source",
@@ -292,6 +305,12 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "create_web_access_group",
+        "delete_web_access_group",
+        "rotate_web_access_group_token",
+        "set_advanced_web_access",
+        "update_web_access_group",
+        "get_web_access_groups",
         "mint_personal_token",
         "revoke_personal_token",
         /* #9641: a database login is never an agent's to create, change or drop. */

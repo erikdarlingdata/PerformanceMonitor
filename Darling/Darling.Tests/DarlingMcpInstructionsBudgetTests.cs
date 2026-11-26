@@ -34,7 +34,10 @@ public sealed class DarlingMcpInstructionsBudgetTests
        headroom, not a number set a few bytes above today's length: the tests below fail only when the text really
        crosses it. A change that needs more room either shortens something else or raises this number on purpose, in
        the same PR, with the reason. Never trim to land a few bytes under, and never raise it just to merge. */
-    internal const int InstructionsBudget = 8_000;
+    /* Raised from 8,000 to 8,500 on purpose (#9642): the settings paragraph names every server admin tool, so a test can check the text
+       against the set (DarlingMcpWriteGateTextTests), and the set grew by the alert source login tools, the personal token tools and the
+       web access group tools, which put the writes-on text 55 characters over 8,000. */
+    internal const int InstructionsBudget = 8_500;
 
     [Fact]
     public void Instructions_AreWithinTheD2Budget()

@@ -79,7 +79,7 @@ What each role sees:
 
 | Role | Sees | Never sees |
 |---|---|---|
-| `operator` | The reads and the write tools, whatever `mcp.allowWrites` says. The server admin tools (`add_servers`, `edit_server`, `remove_server`, `set_server_action`, `add_alert_source`, `rotate_alert_source` and `remove_alert_source`) only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. | `claim_investigation_request` and `submit_investigation_report`. |
+| `operator` | The reads and the write tools, whatever `mcp.allowWrites` says. The server administration tools (`add_servers`, `edit_server`, `remove_server`, `set_server_action`, `add_alert_source`, `rotate_alert_source` and `remove_alert_source`, and the web access group tools among them) only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. | `claim_investigation_request` and `submit_investigation_report`. |
 | `agent` | The reads, the three investigation tools (`claim_investigation_request`, `submit_investigation_report` and `post_investigation_message`), and the Level 2 action tools through the `agent_action` gate, whatever `mcp.allowInvestigations` says. | Every tool in the never-agent list: the route tools, alert settings, Custom Views, tags, collector and server controls. |
 | `reader` | The read tools only. | Every write tool, the server admin tools, the three investigation tools and the Level 2 action tools. `mcp.allowWrites`, `mcp.allowServerAdmin` and `mcp.allowInvestigations` never widen it. |
 
