@@ -578,9 +578,10 @@ builder.Services.AddSystemd();
 
 /* The rolling file log under %ProgramData%\PerformanceMonitorDarling\logs — the service's PRIMARY
    diagnostic surface (see DarlingFileLoggerProvider remarks). Registered unconditionally: console
-   runs get the same file, which is exactly what an operator collecting a bug report wants. */
+   runs get the same file, which is exactly what an operator collecting a bug report wants. The host disposes the provider on
+   its way out, which writes the lines still buffered, the stop line among them (#9747). */
 var fileLoggerProvider = new DarlingFileLoggerProvider();
-builder.Logging.AddProvider(fileLoggerProvider);
+DarlingProcessServices.AddFileLog(builder.Logging, fileLoggerProvider);
 
 /* #9415: counts the service's own ERROR and WARN lines (and keeps the first of each) for the start history row. It writes nothing. */
 builder.Logging.AddProvider(new ServiceLogTallyProvider(ServiceLogTally.Shared));
