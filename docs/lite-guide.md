@@ -91,7 +91,7 @@ A headless Lite does these things as usual:
 - It sends alerts by email, Slack, Teams and webhook.
 - It runs retention and archiving.
 - It runs the MCP server, if you turned it on. See [Use MCP on a headless Lite](#use-mcp-on-a-headless-lite).
-- It checks for updates. It writes the result to the log. It cannot show a balloon.
+- It checks for updates a few seconds after it starts, and writes one line to the log for the result: no update, an update with its version, or a failed check with the reason. The `check_for_updates_on_startup` setting turns the check off, and Lite then logs one line that says so. It cannot show a balloon.
 
 A headless Lite does not show a window, a tray icon, a balloon or a dialog. Each headless start writes these two lines to the log, at Information level:
 
@@ -302,7 +302,7 @@ A SQL login then needs its password as one line on standard input. There is no p
 
 The command runs the same checks and the same connection test as the Add Server window. It writes `servers.json`, saves the password for the user that runs it, and records the host confirmation for that user. If a server is already in the list, the command replaces its saved password and adds no second entry.
 
-If any entry fails, the command exits with code 1, gives the reason on standard error and changes nothing. When it succeeds, it exits with code 0 and prints the Windows account and the folders it wrote to.
+If any entry fails, the command still tests every entry, lists each failure on standard error with its entry number and host, and exits with code 1. It adds and updates nothing, including the entries that passed, and its last line says so. Fix the failed entries and run the command again with all of them. When it succeeds, it exits with code 0 and prints the Windows account and the folders it wrote to.
 
 Lite keeps the server list in memory and writes it back. If a Lite is running, `--add-server` exits with code 1 and changes nothing. Run `--stop`, run `--add-server`, and start Lite again. Lite collects from the new server from that start. A Microsoft Entra MFA or device code server needs a person to sign in, so add it in the window.
 

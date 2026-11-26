@@ -802,7 +802,8 @@ public partial class App : Application
         SharedConfigDirectory = ResolveSharedConfigDirectory(ConfigDirectory);
         Helpers.MethodProfiler.Initialize(logDirectory);
         Helpers.QueryLogger.Initialize(logDirectory);
-        AppLogger.Info("App", $"Starting PerformanceMonitorLite v{System.Reflection.Assembly.GetExecutingAssembly().GetName().Version}");
+        /* #9745: the informational version names a nightly ("3.14.0-nightly.20261126.750"), which the assembly version (3.14.0.0) cannot tell from the release. */
+        AppLogger.Info("App", $"Starting PerformanceMonitorLite v{PerformanceMonitorLite.Database.BuildHistory.CurrentBuild().FullVersion}");
         AppLogger.Info("App", $"Data directory: {DataDirectory}");
 
         // Register global exception handlers
