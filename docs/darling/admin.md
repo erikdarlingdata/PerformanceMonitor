@@ -161,7 +161,7 @@ To turn one collector off for the whole fleet, run `.\PerformanceMonitor.Darling
 
 ## Upgrade
 
-On Linux under systemd, follow [Upgrade by hand](linux.md#upgrade-by-hand). The steps below are for Windows.
+On Docker Compose, follow [Compose upgrade](#compose-upgrade). On Linux under systemd, follow [Upgrade by hand](linux.md#upgrade-by-hand). The numbered steps below are for Windows.
 
 To upgrade or uninstall without PowerShell, see [Where PowerShell is used, and installing without it](install.md#where-powershell-is-used-and-installing-without-it).
 
@@ -302,6 +302,59 @@ A background copy then moves the older rows into the new table. It starts a few 
 While the copy runs, the store needs about as much free disk space as the old table, because both tables exist. The old table is dropped when the copy ends and the space comes back.
 
 To see the progress, read the one row in `collect.attention_events_legacy_copy`. `next_page` is the next page of the old table to copy and `last_page` is the page count of the old table when the copy began. The copy is done when the row is gone and `collect.attention_events_legacy` no longer exists. A restart resumes at `next_page` and copies no row twice. If the final drop cannot get its lock in 5 seconds, the copy leaves the row and the old table in place and tries the drop again later.
+
+### Compose upgrade
+
+A compose upgrade replaces the folder you run `docker compose` from, and keeps the two volumes. The archive of each release carries its own `docker-compose.yml`, and the file changes between releases. From v3.13.0 to 3.14 it changes the store image tag (`latest-pg17` to a pinned `2.32.1-pg17`), the flags on the store's command line, the `POSTGRES_INITDB_ARGS` line and the `darling` image tag. `POSTGRES_INITDB_ARGS` applies to a new volume only, so an existing store keeps its collation. The release's archive also carries a new `setup.sh` and `secrets/README.md`. An upgrade that keeps the old `docker-compose.yml` runs the old images and the old store flags.
+
+The project name is `performancemonitor-darling` in every release, so the new folder takes over the same containers and the same `darling-store` and `darling-credentials` volumes. Nothing is copied out of a volume.
+
+1. Back up the store and the credentials volume, as in [The Linux compose stack](../darling-store-backup.md#the-linux-compose-stack). The backup is the way back if you roll back past a migration that an older build cannot read.
+2. Download and verify the new archive, as in the [Darling quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804). Extract it next to the old folder, and leave the old folder where it is. It is the rollback copy. In the commands below, `old` is the old folder and `new` is the folder the new archive made:
+
+   ```bash
+   tar -xzf PerformanceMonitorDarling-compose-<new-version>.tar.gz
+   cp -a old/darling.json new/darling.json
+   cp -a old/secrets/. new/secrets/
+   ```
+
+   The `/.` after `old/secrets` matters. The new archive ships `secrets/README.md`, so `new/secrets/` exists. `cp -a old/secrets new/secrets` then copies the old folder inside it, to `new/secrets/secrets/`. Compose does not find the files it mounts, stops with `bind source path does not exist: .../secrets/store_password.txt`, and exits 1. The only line it prints on screen is `Container store Recreate`, so read the whole output if an upgrade fails. `old/secrets/.` copies the files in the folder, and `-a` keeps their modes. A `password_key` file keeps its owner (user 1654) only when `cp` runs as root, so use `sudo cp` if you keep one.
+
+   `setup.sh` is not needed, because every secret file and `darling.json` is already there. The new `darling.sample.json` is for reference only.
+3. Make again in `new/docker-compose.yml` every edit you made in `old/docker-compose.yml`. The new file replaces yours, so the `mcp_token` and TLS secrets, a changed port mapping, a `mem_limit` and any added library in the store's preload list are gone until you make them again. Run `diff old/docker-compose.yml new/docker-compose.yml` to see them next to what the release changed.
+4. From the new folder, pull the images and start the stack. Use `up -d` and not `restart`. `restart` keeps each container as it was made, with the old image, the old flags and the old secrets, and only `up -d` recreates a container whose compose file changed:
+
+   ```bash
+   cd new
+   docker compose pull
+   docker compose up -d
+   ```
+
+5. Check the start. `docker compose ps` shows both services running, with the store `healthy` and `darling` `healthy` after its start period. `docker compose logs darling` has this line once the store's migrations have run:
+
+   ```text
+   Postgres store ready (schema v<version>, <count> migration(s) applied)
+   ```
+
+   `<version>` is the schema version of the new build and `<count>` is how many migrations this start applied. A first start after a long gap applies many, and a restart applies none. To read the version from the store, run:
+
+   ```bash
+   docker compose exec store psql -U darling -d darling -c "SET search_path = collect, config, public; SELECT max(version) FROM darling_schema_version"
+   ```
+
+   If the line does not appear, read `docker compose logs darling` from the start for the reason. `docker compose ps` showing `darling` as `unhealthy` means that startup stopped for good (see the container health note in the [quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804)).
+
+**Rolling back.** The store keeps every migration the newer build applied, and the older build runs against it, as [Rolling back to an older build](#rolling-back-to-an-older-build) says. Read that list for every version between the old build's schema and the new one before you go back, because some entries ask for a step first (for example V275 and V315). Then stop the new stack and start the old folder:
+
+```bash
+cd new
+docker compose down
+cd ../old
+docker compose up -d
+```
+
+`down` without `-v` keeps both volumes. The old folder's compose file names the old images, so `up -d` recreates both containers on them. The older build logs one warning at start that names the migrations it does not know. If the older store image will not open the store, restore the backup from step 1.
+
 ### Upgrading from a build that predates the script
 
 This is a note for very old builds. `upgrade-darling.ps1` was added after 3.5.0, so a build from 3.5.0 or earlier needs this manual procedure once ([#2593](https://github.com/erikdarlingdata/PerformanceMonitor/issues/2593)). It is the same sequence the script automates.

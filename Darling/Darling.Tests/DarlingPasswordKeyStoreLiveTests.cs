@@ -674,7 +674,7 @@ UPDATE config.config_monitored_servers SET host = 'evil-example', encrypted_pass
             {
                 var server = Assert.Single(view.EnabledServers, s => s.Name == name);
                 Assert.Null(server.SecretPin);
-                Assert.Throws<InvalidOperationException>(() => DarlingSecrets.ResolvePassword(server, out _, store.LastRing!, dpapi));
+                Assert.Throws<SavedSecretUnavailableException>(() => DarlingSecrets.ResolvePassword(server, out _, store.LastRing!, dpapi));
             }
 
             bodySucceeded = true;
