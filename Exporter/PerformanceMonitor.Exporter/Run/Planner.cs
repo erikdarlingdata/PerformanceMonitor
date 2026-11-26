@@ -251,6 +251,7 @@ public static class Planner
         if (!string.IsNullOrEmpty(s.PgUser)) a.AddRange(["--pg-user", s.PgUser, "--pg-credential-file", s.PgCredentialFile!]);
         if (!string.IsNullOrEmpty(s.ProcedurePlanReuse)) a.AddRange(["--procedure-plan-reuse", s.ProcedurePlanReuse]);
         if (!string.IsNullOrEmpty(s.QueryStoreSource)) a.AddRange(["--query-store-source", s.QueryStoreSource]);
+        if (s.Verbose) a.Add("--verbose");
         a.RemoveAll(string.IsNullOrEmpty);
         return a;
     }
