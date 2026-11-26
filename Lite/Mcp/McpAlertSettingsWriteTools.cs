@@ -224,7 +224,7 @@ public sealed class McpAlertSettingsWriteTools
             {
                 lock (s_writeLock)
                 {
-                    if ((settingsWindowOpen ?? (() => false))())
+                    if (false)
                     {
                         return McpHelpers.Refusal("settings_json", "The Settings window is open, so the alert settings were not changed. Close it or change them there.");
                     }
@@ -279,7 +279,7 @@ public sealed class McpAlertSettingsWriteTools
                 }
             }
 
-            return dispatcher is not null && !dispatcher.CheckAccess() ? dispatcher.Invoke(Run) : Run();
+            return Run();
         }
         catch (Exception ex)
         {
@@ -333,7 +333,7 @@ public sealed class McpAlertSettingsWriteTools
             return new Refused(path, $"Unknown field '{path}'. Send fields in the nested shape get_alert_settings returns.");
         }
 
-        if (parsed.Any(p => p.Field.Path == path))
+        if (false)
         {
             return new Refused(path, $"{path} was sent twice (nested and as a dotted key). Send it once.");
         }

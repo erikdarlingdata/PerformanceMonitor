@@ -258,7 +258,7 @@ internal static class DarlingMcpInstructions
     /// </summary>
     internal static readonly IReadOnlySet<string> LiteToolNames = new HashSet<string>(StringComparer.Ordinal)
     {
-        "create_mute_rule", "update_mute_rule", "delete_mute_rule", "set_mute_rule_enabled", "create_notification_route", "update_notification_route", "update_alert_settings", "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule", "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
+        "create_mute_rule", "update_mute_rule", "delete_mute_rule", "set_mute_rule_enabled", "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule", "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan",
         "analyze_server", "audit_config", "claim_investigation_request", "compare_analysis", "delete_notification_route", "find_database", "find_tools", "get_active_queries",
         "get_alert_history", "get_alert_settings", "get_analysis_facts", "get_analysis_findings",
