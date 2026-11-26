@@ -13,7 +13,7 @@ if (args.Length > 0 && args[0] == "run")
 
 if (args.Length > 0 && args[0] == "check-config")
 {
-    return RunCheckConfig(args);
+    return await CliVerbs.CheckConfigAsync(args, Console.Out, Console.Error, CancellationToken.None);
 }
 
 if (args.Length > 0 && args[0] == "describe-tables")
@@ -32,80 +32,7 @@ if (args.Length == 0 || args[0] != "export")
     return 1;
 }
 
-try
-{
-    var invocation = ExportCommand.Parse(args[1..], DateTime.UtcNow);
-    DuckDbSession.Configure(invocation.DuckDbMemoryLimit, invocation.DuckDbThreads);
-    return await ExportRunner.RunAsync(invocation.Options, Console.Out, CancellationToken.None).ConfigureAwait(false);
-}
-catch (UsageException ex)
-{
-    Console.Error.WriteLine(ex.Message);
-    return 1;
-}
-catch (Exception ex) when (ex is ConfigException or CredentialException)
-{
-    Console.Error.WriteLine($"Config error: {ex.Message}");
-    return 2;
-}
-catch (Exception ex)
-{
-    // The whole exception (its type, every inner exception and the stack) goes to stdout, which the scheduler keeps in the
-    // run's log, so a failure names the layer that raised it: a bare "The operation has timed out" can come from a
-    // connection open, a read or an upload. stderr stays one line, because the scheduler records it as the family's last
-    // error and the stale alert quotes it, so the line only gains the exception types.
-    Console.Out.WriteLine(ex.ToString());
-    var types = ex.GetType().Name + (ex.InnerException is { } inner ? " <- " + inner.GetType().Name : "");
-    Console.Error.WriteLine($"Export failed: {ex.Message} ({types})");
-    return 1;
-}
-
-// check-config --config F: loads and validates the config, resolves the credential, prints the config with secrets redacted.
-static int RunCheckConfig(string[] args)
-{
-    string? path = null;
-    for (var i = 1; i < args.Length; i++)
-    {
-        if (args[i] == "--config" && i + 1 < args.Length)
-        {
-            path = args[++i];
-        }
-        else
-        {
-            Console.Error.WriteLine($"check-config: unknown argument {args[i]}");
-            return 2;
-        }
-    }
-
-    if (path is null)
-    {
-        Console.Error.WriteLine("Usage: darling-export check-config --config <file>");
-        return 2;
-    }
-
-    try
-    {
-        var config = ConfigLoader.Load(path);
-        var secret = CredentialResolver.Resolve(config.Store.Credential);
-        if (config.Store.ConnectionStringEnv is not null)
-        {
-            // Parse it too, so a malformed connection string is caught here and not at the first export.
-            StoreConnectionFactory.BuildFromConnectionString(
-                ExportOptions.Validate(config.Store.Name, "2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z", config.Paths.Out, null,
-                    config.Store.Host, config.Store.Port, config.Store.Database, config.Store.User, null,
-                    config.Store.StatementTimeoutSeconds, false, true, DateTime.UtcNow, applicationName: config.Store.ApplicationName),
-                secret);
-        }
-
-        Console.Out.WriteLine(ConfigPrinter.Render(config, credentialResolved: true));
-        return 0;
-    }
-    catch (Exception ex) when (ex is ConfigException or CredentialException)
-    {
-        Console.Error.WriteLine($"Config error: {ex.Message}");
-        return 2;
-    }
-}
+return await CliVerbs.ExportAsync(args[1..], Console.Out, Console.Error, CancellationToken.None);
 
 // describe-tables [--json]: kind, time column, keys and grain for every table. No store connection.
 static int RunDescribeTables(string[] args)

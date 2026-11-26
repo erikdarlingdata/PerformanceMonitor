@@ -161,11 +161,15 @@ public static class RunConfigMapping
     }
 
     /// <summary>Loads and maps a config file. Every failure is a <see cref="ConfigException"/>.</summary>
-    public static RunSettings Load(string configPath, bool? isWindows = null)
+    public static RunSettings Load(string configPath, bool? isWindows = null) => LoadWithConfig(configPath, isWindows).Settings;
+
+    /// <summary>Loads a config file and maps it, returning both. Every failure is a <see cref="ConfigException"/>.</summary>
+    public static (RunSettings Settings, ExporterConfig Config) LoadWithConfig(string configPath, bool? isWindows = null)
     {
         try
         {
-            return ToRunSettings(ConfigLoader.Load(configPath, isWindows), configPath);
+            var config = ConfigLoader.Load(configPath, isWindows);
+            return (ToRunSettings(config, configPath), config);
         }
         catch (JsonException ex)
         {
