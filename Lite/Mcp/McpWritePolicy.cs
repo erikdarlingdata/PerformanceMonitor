@@ -49,6 +49,7 @@ internal static class McpWritePolicy
     {
         "add_servers",
         "remove_server",
+        "edit_server",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start logs, built from
@@ -74,6 +75,9 @@ internal static class McpWritePolicy
 
         /* #5991: the query-tag and query-tag-rule writes, Darling's twins. The three reads (list_query_tags,
            list_query_tag_rules, test_query_tag_rule) are ordinary reads. */
+        /* #9640: set_server_excluded_databases is a plain write, as on Darling. */
+        "set_server_excluded_databases",
+
         "create_query_tag",
         "update_query_tag",
         "delete_query_tag",
@@ -83,11 +87,17 @@ internal static class McpWritePolicy
         "update_query_tag_rule",
         "delete_query_tag_rule",
 
-        /* #9640: add_servers and remove_server, served only with mcp_allow_server_admin on as well (ServerAdminTools). */
+        /* #9640: add_servers, remove_server and edit_server are also in ServerAdminTools, which adds mcp_allow_server_admin as a
+           second switch, the shape of Darling's DarlingMcpWritePolicy. */
         "add_servers",
         "remove_server",
+        "edit_server",
+
+        /* #9640: Darling's reset_collector_schedules twin. get_collector_schedules is a read. */
+        "reset_collector_schedules",
     };
 
+    /// <summary>A write, a server administration tool included (every one is also in <see cref="WriteTools"/>).</summary>
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);
 
     internal static bool IsServerAdmin(string toolName) => ServerAdminTools.Contains(toolName);

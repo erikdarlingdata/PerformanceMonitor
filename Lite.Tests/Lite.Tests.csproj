@@ -112,6 +112,8 @@
     <!-- system_health event samples (one per feeder event; shapes per sp_HealthParser xpath) for the
          System Events reader round-trip tests. Mirrors Darling.Tests' Fixtures\SystemHealth set. -->
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- A Lite 3.13.0 store (schema v81) as a script: its DDL, rows, archive files and views, which Lite313StoreUpgradeTests climbs. -->
+    <None Include="Fixtures\StoreV81\*.sql" CopyToOutputDirectory="PreserveNewest" />
     <!-- The three services that build DuckDB COPY/read_parquet path literals, so DataImportPathEscapingTests
          can pin that none of them interpolates a path without EscapeSqlPath. DataImportService was the one
          that had drifted from its siblings, and a forgotten call is only visible in the source. -->
@@ -126,6 +128,9 @@
     <None Include="..\Lite\config\settings.sample.json" Link="Fixtures\settings.sample.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\App.xaml.cs" Link="Fixtures\App.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\Mcp\McpSettings.cs" Link="Fixtures\McpSettings.cs" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #9611: the sample Teams payloads the tools\teams-test-card script posts. TeamsTestCardSampleTests builds the same
+         alerts with the shared builder and compares, so a committed sample cannot drift from what is sent. -->
+    <None Include="..\tools\teams-test-card\*.teams.json" Link="Fixtures\TeamsTestCard\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <!-- Lite's windows name their icon by a root-relative URI, which resolves against the entry assembly, this one, when a test builds a window. -->

@@ -71,7 +71,7 @@ internal interface IGateHost
 /// <para>
 /// The rule, in the order a request meets it. A configuration with no token and the tokenless setting off does not start.
 /// A token in force refuses every request that does not carry it with 401. Then the tool decides: a read is served; a write
-/// is served under the writes arm (the writes setting and a usable token); an investigation state tool is served under the
+/// is served under the writes arm (the writes setting and a usable token), and a server admin tool under the server-admin arm (that and the server-admin setting); an investigation state tool is served under the
 /// investigations arm (its setting, a usable token and the writes setting off); anything else is an unknown tool.
 /// </para>
 /// <para>
@@ -99,7 +99,7 @@ internal static class McpGateParityMatrix
         "analyze_plan_xml", "analyze_procedure_plan", "analyze_query_plan", "analyze_query_store_plan", "analyze_server",
         "audit_config", "compare_analysis", "find_database", "find_tools", "get_active_queries", "get_alert_history", "get_alert_settings",
         "get_analysis_facts", "get_analysis_findings", "get_blocked_process_xml", "get_blocking_stats", "get_blocking_trend",
-        "get_client_timeouts", "get_collection_health", "get_collection_log", "get_cpu_by_database", "get_cpu_scheduler_pressure",
+        "get_client_timeouts", "get_collection_health", "get_collection_log", "get_collector_schedules", "get_cpu_by_database", "get_cpu_scheduler_pressure",
         "get_cpu_utilization", "get_current_waits_trend", "get_daily_summary", "get_daily_summary_range", "get_database_config",
         "get_database_config_changes", "get_database_scoped_config", "get_database_sizes", "get_deadlock_detail", "get_deadlock_trend",
         "get_deadlocks", "get_default_trace_events", "get_file_io_stats", "get_file_io_trend", "get_health_parser_cpu_tasks",
@@ -124,7 +124,13 @@ internal static class McpGateParityMatrix
         "mute_analysis_finding", "unmute_analysis_finding", "set_notification_route_enabled", "delete_notification_route",
         "create_query_tag", "update_query_tag", "delete_query_tag", "assign_query_tag", "unassign_query_tag",
         "create_query_tag_rule", "update_query_tag_rule", "delete_query_tag_rule",
+        "reset_collector_schedules", "set_server_excluded_databases",
     };
+
+    /// <summary>The server admin tools both apps register (#9640): writes served only under the server-admin arm, which needs the
+    /// writes arm as well. Darling's <c>DarlingMcpWritePolicy.IsServerAdmin</c> answers before its <c>IsWrite</c>, and Lite's
+    /// <c>McpWritePolicy.IsServed</c> does the same. Darling also has <c>set_server_action</c> in this set: Lite has no such tool, so it is not a matrix name.</summary>
+    internal static readonly string[] SharedServerAdminTools = { "add_servers", "remove_server", "edit_server" };
 
     /// <summary>The investigation state tools both apps register: served only under the investigations arm.</summary>
     internal static readonly string[] SharedInvestigationTools =
@@ -159,9 +165,10 @@ internal static class McpGateParityMatrix
     /// <summary>Lite's tools with no Darling tool of the same name: a read each. Darling's twin of get_blocked_process_reports is <c>get_blocking</c>; get_store_health (#8788) has none, Darling's store page being #8787.</summary>
     internal static readonly string[] LiteOnlyReads = { "get_blocked_process_reports", "get_store_health", "get_slow_mcp_calls" };
 
-    /// <summary>Every tool name a row calls, in both apps: the 112 shared names and the names one app alone answers.</summary>
+    /// <summary>Every tool name a row calls, in both apps: the shared names and the names one app alone answers.</summary>
     internal static readonly string[] Tools = SharedReads
         .Concat(SharedWrites)
+        .Concat(SharedServerAdminTools)
         .Concat(SharedInvestigationTools)
         .Concat(DarlingInvestigationArmTools)
         .Concat(LiteOnlyReads)
@@ -300,24 +307,25 @@ internal static class McpGateParityMatrix
     /// <summary>The two arms an admitted caller is served under. The stored token follows the switches and needs to clear the
     /// floor; a named token follows its role whatever the switches say: an operator has the writes, an agent the
     /// investigations arm, a reader neither.</summary>
-    internal static (bool Writes, bool Investigations) Arms(GateApp app, GateConfig config, GateCaller caller)
+    internal static (bool Writes, bool ServerAdmin, bool Investigations) Arms(GateApp app, GateConfig config, GateCaller caller)
     {
         switch (caller)
         {
             case GateCaller.OperatorToken:
-                return (true, false);
+                return (true, config.ServerAdmin, false);
             case GateCaller.AgentToken:
-                return (false, true);
+                return (false, false, true);
             case GateCaller.ReaderToken:
-                return (false, false);
+                return (false, false, false);
         }
 
         var usable = TokenInForce(app, config) && config.Token == GateToken.Usable && caller == GateCaller.StoredToken;
-        return (config.Writes && usable, config.Investigations && usable && !config.Writes);
+        return (config.Writes && usable, config.Writes && config.ServerAdmin && usable, config.Investigations && usable && !config.Writes);
     }
 
-    /// <summary>THE rule: what one call answers. The server-admin switch moves no name here, because it serves only tools
-    /// Lite does not have.</summary>
+    /// <summary>THE rule: what one call answers. A server admin tool (#9640) is served under the server-admin arm only: the
+    /// writes setting and the server-admin setting both on, with a usable token. An operator token holds the writes arm whatever
+    /// the writes setting says, and the server admin tools follow the server-admin setting.</summary>
     internal static GateOutcome Expected(GateApp app, GateConfig config, GateCaller caller, string tool)
     {
         if (!Admitted(app, config, caller))
@@ -330,7 +338,7 @@ internal static class McpGateParityMatrix
             return GateOutcome.UnknownTool;
         }
 
-        var (writes, investigations) = Arms(app, config, caller);
+        var (writes, serverAdmin, investigations) = Arms(app, config, caller);
         bool served;
         if (SharedReads.Contains(tool) || LiteOnlyReads.Contains(tool))
         {
@@ -339,6 +347,10 @@ internal static class McpGateParityMatrix
         else if (SharedWrites.Contains(tool))
         {
             served = writes;
+        }
+        else if (SharedServerAdminTools.Contains(tool))
+        {
+            served = serverAdmin;
         }
         else if (SharedInvestigationTools.Contains(tool) || tool == DarlingInvestigationMessageTool)
         {

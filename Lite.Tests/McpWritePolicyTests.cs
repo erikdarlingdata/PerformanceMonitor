@@ -89,7 +89,9 @@ public sealed class McpWritePolicyTests
         Assert.True(registered.Length > 80, "the registered tool set should be the full Lite surface");
 
         var readOnly = McpToolClassification.ReadOnlyTools;
+        /* #9640: the server administration tools are writes too, served by their own switch as well. */
         var writes = McpWritePolicy.WriteTools;
+        Assert.True(McpWritePolicy.ServerAdminTools.IsSubsetOf(writes), "every server admin tool is also a write tool, the shape of Darling's DarlingMcpWritePolicy");
 
         /* #5820: claim and submit are the third set, as on Darling: they change only investigation state, so they are neither
            reads nor WriteTools (which mcp_allow_writes serves). McpInvestigationPolicy serves them by name and McpWritePolicy

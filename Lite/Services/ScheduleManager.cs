@@ -194,6 +194,20 @@ public class ScheduleManager
     }
 
     /// <summary>
+    /// #9640: puts the default schedule back to the shipped defaults and saves it (the MCP <c>reset_collector_schedules</c> with no server).
+    /// A server's own schedule is not touched. The list is replaced under the lock, the way a load replaces it.
+    /// </summary>
+    public void ResetDefaultSchedule()
+    {
+        lock (_lock)
+        {
+            _defaultSchedule = GetDefaultSchedules();
+            SaveSchedules();
+            _logger?.LogInformation("Reset the default schedule to the shipped defaults");
+        }
+    }
+
+    /// <summary>
     /// Detects which preset matches the current default schedule intervals, or returns "Custom".
     /// </summary>
     public string GetActivePreset()

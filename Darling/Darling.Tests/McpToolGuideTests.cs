@@ -62,6 +62,7 @@ public sealed class McpToolGuideTests
     {
         ["add_servers"] = "#9640: Darling's head describes the service and the shared central store, mcp.allowServerAdmin, and per-entry results with PostgreSQL targets. Lite saves all entries or none through --add-server's code, is served by mcp_allow_server_admin, and monitors SQL Server only.",
         ["remove_server"] = "#9640: Darling's head describes the central store's definitions and a sweep of the service. Lite removes through Manage Servers' own removal, is served by mcp_allow_server_admin, and matches the server list.",
+        ["edit_server"] = "#9640: Darling's head names the service, PostgreSQL, the port and the AWS role fields, none of which Lite has, and Lite's names the Edit Server window and the fields only Lite's window sets.",
     };
 
     /// <summary>
@@ -77,6 +78,7 @@ public sealed class McpToolGuideTests
     /// (<see cref="DescriptionLiteral"/>) is only ever needed for Lite's side of a tool BOTH sides already agree
     /// is converted, and every converted description is hand-authored literals a caller can resolve.
     /// </summary>
+
     [Fact]
     public void EverySharedToolName_CarriesTheMarkerOnBothSkus_OrNeither_WithByteIdenticalHeads()
     {
@@ -101,7 +103,7 @@ public sealed class McpToolGuideTests
                 continue;
             }
 
-            /* The marker check above still applies to a name here: only the head comparison is skipped. */
+            /* A head that is false for the other SKU is not copied: the entry says why, and the marker check above still applies. */
             if (SkuSpecificHeads.ContainsKey(tool))
             {
                 continue;

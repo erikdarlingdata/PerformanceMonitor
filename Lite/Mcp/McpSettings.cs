@@ -57,7 +57,7 @@ internal sealed class McpSettings
     public bool AllowWrites { get; set; } = false;
 
     /// <summary>
-    /// #9640: whether the server admin tools (<see cref="McpWritePolicy.ServerAdminTools"/>: add_servers, remove_server) are also
+    /// #9640: whether the server admin tools (<see cref="McpWritePolicy.ServerAdminTools"/>) are also
     /// served. Default OFF. Read from <c>mcp_allow_server_admin</c> (<see cref="McpWritePolicy.ServerAdminSetting"/>) at start, so a
     /// change needs a restart. It does nothing unless <see cref="AllowWrites"/> is on too and a usable token is held: the twin of
     /// Darling's <c>mcp.allowServerAdmin</c>. A file setting only, no Settings window control, like <c>mcp_allow_writes</c>.

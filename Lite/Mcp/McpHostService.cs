@@ -320,6 +320,7 @@ public sealed class McpHostService : BackgroundService
                the subset Gemini/Antigravity accepts — collapsing nullable type unions and
                dropping the default keyword. The companion to stateless transport for issue #1074. */
             .WithGeminiCompatibleTools<McpDiscoveryTools>()
+            .WithGeminiCompatibleTools<McpServerAdminTools>()
             .WithGeminiCompatibleTools<McpHealthTools>()
             /* #8788: get_store_health, the health of Lite's own DuckDB store. */
             .WithGeminiCompatibleTools<McpStoreHealthTools>()
@@ -355,6 +356,8 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpObjectUsageTools>()
             .WithGeminiCompatibleTools<McpLatchSpinlockTools>()
             .WithGeminiCompatibleTools<McpPlanCacheSchedulerTools>()
+            /* #9640: get_collector_schedules and reset_collector_schedules. */
+            .WithGeminiCompatibleTools<McpCollectorScheduleTools>()
             .WithGeminiCompatibleTools<McpConfigHistoryTools>()
             .WithGeminiCompatibleTools<McpDefaultTraceTools>()
             /* #5991: the query-tag and query-tag-rule tools; twin of Darling's DarlingMcpQueryTagTools and DarlingMcpQueryTagRuleTools. */
@@ -451,7 +454,8 @@ public sealed class McpHostService : BackgroundService
     internal static List<(LogLevel Level, string Message)> StartupLines(McpServing serving)
     {
         var lines = new List<(LogLevel, string)>();
-        var writeTools = $"{McpWritePolicy.WriteTools.Count} write tools";
+        /* The server admin tools are in WriteTools too, but this line is about the writes switch alone: they have their own line below. */
+        var writeTools = $"{McpWritePolicy.WriteTools.Count(tool => !McpWritePolicy.IsServerAdmin(tool))} write tools";
         if (serving.Token is null)
         {
             lines.Add((LogLevel.Warning,
@@ -520,6 +524,11 @@ public sealed class McpHostService : BackgroundService
             /* #9640: add_servers and remove_server (served only with mcp_allow_server_admin) use the app's own removal and list refresh. */
             builder.Services.AddSingleton(_serverAdminHooks ?? new McpServerAdminHooks());
             builder.Services.AddSingleton(_muteRuleService);
+            /* #9640: the schedule tools take the one manager the editor and the collection loop use; with none they answer unavailable. */
+            if (_scheduleManager is not null)
+            {
+                builder.Services.AddSingleton(_scheduleManager);
+            }
             /* #4938: get_collection_health shows each collector's run time and next run, from the schedule the sweep reads.
                Registered through the method a test also calls (see RegisterCollectorRunTimes). */
             RegisterCollectorRunTimes(builder.Services, _scheduleManager, _serverManager);
