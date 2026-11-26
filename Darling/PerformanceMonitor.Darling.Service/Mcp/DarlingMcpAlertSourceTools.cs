@@ -231,11 +231,11 @@ public sealed class DarlingMcpAlertSourceTools
         var rotate = verb == "--rotate-alert-source";
         var tool = rotate ? RotateToolName : RemoveToolName;
         var message = rotate
-            ? string.Create(CultureInfo.InvariantCulture,
-                $"Rotating source '{name}' gives its login {source.RoleName} a new password. The old password stops working for new connections at once, and the {sessions} open session(s) of the login are ended. "
+            ? FormattableString.Invariant(
+                $"Rotating source '{name}' gives its login {source.RoleName} a new password. The old password stops working for new connections at once, and the {sessions} open session(s) of the login are ended. ")
                 + "The new password is shown once, in the answer. Nothing was changed. Call again with confirm=true to rotate.")
-            : string.Create(CultureInfo.InvariantCulture,
-                $"Removing source '{name}' drops its login {source.RoleName} and its registry row, deletes its {source.Undelivered} undelivered queued alert(s), and ends the login's {sessions} open session(s). "
+            : FormattableString.Invariant(
+                $"Removing source '{name}' drops its login {source.RoleName} and its registry row, deletes its {source.Undelivered} undelivered queued alert(s), and ends the login's {sessions} open session(s). ")
                 + "There is no undo. Nothing was changed. Call again with confirm=true to remove.");
         return new JsonObject
         {
