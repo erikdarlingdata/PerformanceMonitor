@@ -136,6 +136,8 @@ The collector verbs differ in one case. A managed credential that was never stor
 
 `--auth` takes `windows` (or `integrated`, the same thing), `sql`, `serviceprincipal` or `managedidentity`. The password is never a flag, so it does not land in the process list or the shell history. Add `--config <path>` to name a `darling.json`. The running service picks up the new servers without a restart.
 
+A key in an entry that the verb does not read is dropped, and the entry is still added. Right after the entry's line, the verb prints `Not read, so not applied:` and each key name. When a key looks like one the verb reads, the line says which: `name (did you mean display_name?)`, or `trustServerCertifcate (did you mean trust_server_certificate?)`. A key that starts with `// ` is a note and is never listed. Only key names are printed, never a value, so a password in the entry stays out of the output. The `add_servers` MCP tool and the web dashboard's add route answer the same way, with an `ignored_keys` list of `{ "key", "did_you_mean" }` on the entry's result. An entry with no such key has no `ignored_keys`, and the answer's counters and status words are unchanged.
+
 Re-running the same file is safe. Servers that are already registered do not count as a failure. A server that collides with another one, a batch where nothing was added, and an entry that was rejected all exit `1`.
 
 ```

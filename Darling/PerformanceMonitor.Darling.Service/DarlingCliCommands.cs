@@ -7562,6 +7562,16 @@ public static partial class DarlingCliCommands
                 lines.Add(string.IsNullOrWhiteSpace(detail)
                     ? $"  [{tag}] {server ?? "(unnamed)"}"
                     : $"  [{tag}] {server ?? "(unnamed)"}: {detail}");
+
+                /* #9780: a key the add does not read is dropped, so the entry's line is followed by one line naming each, with the key it
+                   does read that the operator most likely meant. Names only; the answer carries no value. */
+                if (result.TryGetProperty("ignored_keys", out var ignored) && ignored.ValueKind == JsonValueKind.Array && ignored.GetArrayLength() > 0)
+                {
+                    var names = ignored.EnumerateArray().Select(k => (
+                        Key: k.TryGetProperty("key", out var key) ? key.GetString() ?? string.Empty : string.Empty,
+                        DidYouMean: k.TryGetProperty("did_you_mean", out var hint) && hint.ValueKind == JsonValueKind.String ? hint.GetString() : null));
+                    lines.Add($"    Not read, so not applied: {DarlingMcpAddServerKeys.Describe(names)}");
+                }
             }
 
             var added = root.TryGetProperty("added", out var a) ? a.GetInt32() : 0;

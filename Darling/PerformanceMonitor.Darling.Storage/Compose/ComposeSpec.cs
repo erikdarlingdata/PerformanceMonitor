@@ -513,7 +513,7 @@ public static class ComposeSpec
     }
 
     /// <summary>Case-insensitive Levenshtein distance — keys are short, so the O(len²) two-row form is fine.</summary>
-    private static int EditDistance(string a, string b)
+    internal static int EditDistance(string a, string b)
     {
         if (Math.Abs(a.Length - b.Length) > 2)
         {
