@@ -61,8 +61,15 @@ public sealed class DarlingPendingPasswordKeysTests
         var (root, credentials, pending) = Service();
         try
         {
-            Directory.CreateDirectory(pending);
+            // Start from the folder the tool makes, which only the trusted accounts can reach, and add one read-only entry.
+            Assert.True(DarlingPendingPasswordKeys.Create(credentials, keyFromSetting: false, logger: null).Written);
+            foreach (var file in Directory.GetFiles(pending))
+            {
+                File.Delete(file);
+            }
+
             Grant(pending, FileSystemRights.ReadAndExecute, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit);
+            Assert.Null(DarlingFileSecurity.WriteAccessBeyondTrusted(pending));
 
             var outcome = DarlingPendingPasswordKeys.Create(credentials, keyFromSetting: false, logger: null);
 
