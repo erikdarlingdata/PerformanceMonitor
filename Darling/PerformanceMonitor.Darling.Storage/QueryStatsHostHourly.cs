@@ -212,8 +212,11 @@ WHERE server_id = ANY($1::integer[])
     /// How the build folds a value column of its per-text partial rows (<c>p</c>, one row per key and <c>query_text_digest</c>) into the
     /// key's row. Every aggregate of <see cref="ValueColumns"/> splits this way: a count or a sum is the sum of the partials, a minimum or a
     /// maximum is the minimum or maximum of the partials, and <c>digests</c> is the partial rows' own digest, kept where the partial counted
-    /// an interval-honest row and listed in the order <c>array_agg(DISTINCT ...)</c> gives. An aggregate of any other shape has no fold here
-    /// and stops the type from loading, so a new column cannot be built wrong in silence.
+    /// an interval-honest row and listed in the order <c>array_agg(DISTINCT ...)</c> gives. The maximum of a <c>bytea</c> column
+    /// (<c>latest_text_key</c>) is written in the array form of <see cref="ByteaMaxSql"/> (#9802), and its fold is that same form over the
+    /// partials, because PostgreSQL 16 and 17 have no <c>max(bytea)</c> for the partial column either. The form skips a NULL partial, the
+    /// partial of a text none of whose rows carries a text or a digest, as <c>MAX</c> does. An aggregate of any other shape has no fold
+    /// here and stops the type from loading, so a new column cannot be built wrong in silence.
     /// </summary>
     private static string Fold((string Name, string Type, string Aggregate) column) => column switch
     {
@@ -221,6 +224,7 @@ WHERE server_id = ANY($1::integer[])
         _ when column.Aggregate.StartsWith("COUNT(", StringComparison.Ordinal) || column.Aggregate.StartsWith("CAST(SUM(", StringComparison.Ordinal) => $"CAST(SUM(p.{column.Name}) AS bigint)",
         _ when column.Aggregate.StartsWith("MIN(", StringComparison.Ordinal) => $"MIN(p.{column.Name})",
         _ when column.Aggregate.StartsWith("MAX(", StringComparison.Ordinal) => $"MAX(p.{column.Name})",
+        _ when column.Aggregate.StartsWith(ByteaMaxSql.Before, StringComparison.Ordinal) => ByteaMaxSql.Of($"p.{column.Name}"),
         _ => throw new InvalidOperationException($"The host hourly build has no fold for the aggregate of {column.Name}."),
     };
 
