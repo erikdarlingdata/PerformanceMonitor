@@ -131,6 +131,6 @@ internal static class ServerEntryRules
         }
 
         var number = (ex as SqlException ?? ex.InnerException as SqlException)?.Number;
-        _ = number; return text;
+        return StrictEncryptionHint.Append(text, encryptMode, number);
     }
 }
