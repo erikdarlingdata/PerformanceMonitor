@@ -68,13 +68,15 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 ///
 /// <para><b>#9605: the all-servers search reads the newest samples first, and every statement of it is bounded by a row count.</b> The first
 /// statement is a lookup span (<see cref="PlanCacheAllServersLookupSpanSql"/>): the newest <see cref="AllServersSpanRows"/> samples, each sighting's
-/// text tested by its digest, newest first. A pattern many texts contain fills the page there, and the search ends without reading the matched
-/// digests at all, which on a large store is the costly read for such a pattern (the trigram index hands back every candidate text before the cap
-/// can stop it). A page still short reads the matched digests next, inside a savepoint and under a timeout of its own
+/// text tested by its digest, newest first. A pattern many texts contain fills the page there, and a window that holds fewer samples than that is
+/// read whole by it: either way the search ends without reading the matched digests at all, which on a large store is the costly read for a
+/// common pattern (the trigram index hands back every candidate text before the cap can stop it). A page still short, with samples left to
+/// read, reads the matched digests next, inside a savepoint and under a timeout of its own
 /// (<see cref="AllServersMatchShare"/>). At most <see cref="ProbeDigestCap"/> of them: the probe reads the rest of the window by them, in the fixed
 /// spans (<see cref="RawTierSpans"/>). More, or a match read its timeout cut (the savepoint is rolled back and the rows found are kept): the search
-/// goes on in lookup spans, each cut at a row count (<see cref="AllServersSpanRowParts"/>), so no statement reads a whole span of a large store or
-/// matches the whole text table. The spans partition the window newest first and a server, query_hash and database an earlier statement found is
+/// goes on in lookup spans, each sized by a row count and by nothing else (<see cref="AllServersSpanRowParts"/>), so no statement reads a whole
+/// span of a large store or matches the whole text table, and a small store is read in as few statements as its samples fill. The spans
+/// partition the window newest first and a server, query_hash and database an earlier statement found is
 /// not listed again, so a search that finishes lists what the whole-window join (<see cref="PlanCacheAllServersSql"/>) lists, in its order, and a
 /// budget that runs out leaves the rows of the part searched. The reply's <c>plan_cache</c> source says which read served it (<c>sample_read</c>:
 /// <c>lookup</c>, <c>probe</c> or <c>join</c>, see <see cref="SampleReadLookup"/>) and, for the probe, how many texts matched
@@ -136,16 +138,17 @@ public sealed class DarlingMcpFindQueriesByTextTools
         public Func<TimeSpan>? ElapsedClock { get; init; }
 
         /// <summary>#7849 test seam: called on the source's connection, in its transaction, just before the statement that follows a read in the same
-        /// budget (the all-servers sample statement), once its <c>statement_timeout</c> is the remainder, so a test can read the setting back.</summary>
+        /// budget (the all-servers sample statement), once its <c>statement_timeout</c> is the remainder, so a test can read the setting back. It runs
+        /// after <see cref="StatementBound"/>, so a test that models a slow statement can hold this one by the span it binds.</summary>
         public Func<NpgsqlConnection, NpgsqlTransaction, CancellationToken, Task>? BeforeStatement { get; init; }
 
         /// <summary>#8408 test seam: called with the step and the statement's bound parameters just before it runs, so a test can read what
         /// one step carries into the next (the one-server search binds the digests it has judged so far and their verdicts).</summary>
         public Action<int, NpgsqlParameterCollection>? StatementBound { get; init; }
 
-        /// <summary>#9219: how many sample rows an all-servers lookup span reads for each part of its width (at most
-        /// <see cref="AllServersSpanRowParts"/> parts); <see cref="AllServersSpanRows"/> unless a test sets it, so a small store can model a span of
-        /// many digests.</summary>
+        /// <summary>#9219: how many sample rows an all-servers lookup span reads for each of its parts (one for the first two spans, two for the
+        /// third, <see cref="AllServersSpanRowParts"/> after it); <see cref="AllServersSpanRows"/> unless a test sets it, so a small store can
+        /// model a store of more samples than one statement reads.</summary>
         public int SpanRows { get; init; } = AllServersSpanRows;
 
         /// <summary>#9605: the all-servers match read's own timeout, in milliseconds; null is the source's budget divided by
@@ -408,16 +411,16 @@ FROM page AS p
 JOIN query_text_dim AS d ON d.digest = p.query_text_digest
 ORDER BY p.last_collected DESC, p.server_id, p.query_hash, p.database_name";
 
-    /// <summary>#9219: the sample rows a lookup span of the all-servers search reads for each part of its width. A span's width in time says nothing
+    /// <summary>#9219: the sample rows a lookup span of the all-servers search reads for each of its parts. A span's width in time says nothing
     /// about its work: on a large store the newest hour held about 972,000 rows and 30,000 digests, each digest one cold random read of a text
     /// table of 1.5 million pages, more than the whole budget. A span ends at the sample this many rows, times its parts, back from its newest
-    /// edge (or at its time width, when that is nearer), so the work of each statement is bounded by a count and the search widens while time
-    /// remains.</summary>
+    /// edge, or at the window's floor when fewer are left, so the work of each statement is bounded by a count, the search widens while time
+    /// remains, and a store that holds less than one allotment is read whole by the first statement.</summary>
     internal const int AllServersSpanRows = 20000;
 
-    /// <summary>#9605: the most parts of its width a lookup span reads <see cref="AllServersSpanRows"/> rows for. The spans are 1, 1, 2, 4, 8 and
-    /// then <see cref="RawTierSpanMaxParts"/> parts wide, and a span reads rows for at most this many of them, so no statement reads more than
-    /// 80,000 samples however wide its span is in time.</summary>
+    /// <summary>#9605: the most parts a lookup span reads <see cref="AllServersSpanRows"/> rows for. The spans read 1, 1 and 2 parts and then this
+    /// many each, so no statement reads more than 80,000 samples (and those that share the oldest one's collection time) whatever the store
+    /// holds, and the row count alone sizes a span.</summary>
     internal const int AllServersSpanRowParts = 4;
 
     /// <summary>#9605: the all-servers match read's share of the source's budget: its timeout is the budget divided by this (2 s of 4 s), or what
@@ -678,7 +681,7 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
 
     [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "find_queries_by_text"), Description(
-        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. The text is not indexed unless the operator turns an index on, so each source has a 4 second budget. One server's Query Store text is read through its opt-in trigram index when that index is ready (darling.json queryStoreTextTrigramIndexEnabled; get_store_metrics query_store_text_index says its state), which makes a rare pattern fast. One server's plan-cache text is read through the plan-cache text index when that one is ready (queryTextTrigramIndexEnabled): its source then says sample_read probe (the matching texts were found first; matched_texts says how many) or plain (more than 1000 texts matched, or finding them was slow, so each span's texts were tested). A source that runs out is reported stopped with the rows it had found by then (the plan-cache text is searched newest first, in spans of the raw window, so those rows are the newest matches and the message says how much of the window was searched; name a server, and a database, to narrow it). The plan-cache source also carries searched: the servers, the raw window it covers (window_from to window_to) and the part of it the page is the exact answer for (searched_from to searched_to, null when none is; complete says whether the page is the whole-window answer): a search that finished is, even when it stopped reading because the page was full (spans run newest first, so older spans cannot change a full page, and truncated says more matches exist), and a search the budget cut is the answer for the newest spans it finished only. Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. It reads the newest samples first and tests each one's text: a page that fills there is the answer (sample_read lookup, matched_texts null). Otherwise the trigram index finds the matching texts and the samples are read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks. A pattern more than 1000 texts contain (sample_read join), or one whose matching texts were not found in time (sample_read lookup), is searched on newest first in spans of a bounded number of samples, each sample's text tested, which on a large store can reach the 4 second budget and report stopped with the newest part searched. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete), not_searched (the all-servers scope does not search that source, Query Store text) or not_collected (a PostgreSQL target has neither SQL Server source: both sources say so and nothing was searched; read PostgreSQL statement text with get_pg_top_queries, full_text true). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
+        "Finds statements whose text contains a piece of text (a table name, a fragment of SQL), and returns the keys the other query reads take: query_id and database for get_query_store_query_history, query_hash for get_query_trend. pattern is a literal substring, case-insensitive (% and _ match themselves), at least 3 characters. Name a server with server_name: database_name narrows it and makes the search much faster. Two sources, each reported separately with its own horizon: Query Store text and the plan-cache text of the raw tier. The text is not indexed unless the operator turns an index on, so each source has a 4 second budget. One server's Query Store text is read through its opt-in trigram index when that index is ready (darling.json queryStoreTextTrigramIndexEnabled; get_store_metrics query_store_text_index says its state), which makes a rare pattern fast. One server's plan-cache text is read through the plan-cache text index when that one is ready (queryTextTrigramIndexEnabled): its source then says sample_read probe (the matching texts were found first; matched_texts says how many) or plain (more than 1000 texts matched, or finding them was slow, so each span's texts were tested). A source that runs out is reported stopped with the rows it had found by then (the plan-cache text is searched newest first, in spans of the raw window, so those rows are the newest matches and the message says how much of the window was searched; name a server, and a database, to narrow it). The plan-cache source also carries searched: the servers, the raw window it covers (window_from to window_to) and the part of it the page is the exact answer for (searched_from to searched_to, null when none is; complete says whether the page is the whole-window answer): a search that finished is, even when it stopped reading because the page was full (spans run newest first, so older spans cannot change a full page, and truncated says more matches exist), and a search the budget cut is the answer for the newest spans it finished only. Leave server_name out to search the plan-cache text of every server: that is served only when the opt-in trigram index is ready (darling.json queryTextTrigramIndexEnabled; get_store_metrics query_text_index says its state), is refused with the state otherwise, and does not search Query Store text, which is searched one server at a time. It reads the newest samples first and tests each one's text: a page that fills there, or a raw tier with no more samples than that read takes, is the answer (sample_read lookup, matched_texts null). Otherwise the trigram index finds the matching texts and the samples are read by those texts' digests (sample_read probe, with matched_texts saying how many matched), which a second index the same option builds on query_stats serves on uncompressed chunks. A pattern more than 1000 texts contain (sample_read join), or one whose matching texts were not found in time (sample_read lookup), is searched on newest first in spans of a bounded number of samples, each sample's text tested, which on a large store can reach the 4 second budget and report stopped with the newest part searched. Each source in the reply carries a status: ok (rows found), empty (searched, nothing matched), stopped (the budget ran out, so the rows listed may be incomplete), not_searched (the all-servers scope does not search that source, Query Store text) or not_collected (a PostgreSQL target has neither SQL Server source: both sources say so and nothing was searched; read PostgreSQL statement text with get_pg_top_queries, full_text true). Refused when mcp.dataDetail hides statement text, because a search on hidden text would reveal it. Rows carry a ~300 character excerpt around the first match, never the whole text; a statement the sensitive-statement filter withholds is listed with the withheld marker in place of the excerpt.")]
     public static Task<string> FindQueriesByText(
         NpgsqlDataSource postgres,
         [Description("Text to find in the statement. A literal substring, matched ignoring case; % and _ match themselves. At least 3 characters.")] string pattern,
@@ -1078,19 +1081,19 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
 
                     if (pending is null)
                     {
-                        /* #9219: a lookup span's time width is the fixed one (1, 1, 2, 4, 8 and then RawTierSpanMaxParts parts), and it ends no
-                           further back than the sample SpanRows rows, times its parts up to AllServersSpanRowParts, from its newest edge, so its
-                           probes are bounded by a count. The cut-off read runs inside this call, before the source arms the statement timeout for
-                           the statement that follows, so it is armed here to what is left of the budget by the source's clock. With nothing left
-                           it is not run: the source reads the same clock at its gate after this call and stops there, so the statement of a span
-                           that was not cut never runs. */
-                        var part = (now - floor) / RawTierSpanParts;
-                        var width = lookupIndex == 0 ? 1 : Math.Min(1 << Math.Min(lookupIndex - 1, 8), RawTierSpanMaxParts);
-                        var spanFloor = reached - floor < part * (width + 1) ? floor : reached - part * width;
+                        /* #9605: a lookup span is sized by rows alone. It ends at the sample SpanRows rows back from its newest edge, times its
+                           parts (1, 1, 2 and then AllServersSpanRowParts), or at the window's floor when fewer samples than that are left, so a
+                           store that holds less than one allotment is read whole by its first statement and the search ends there. A width in
+                           time is no bound on a statement's work and no help on a small store, where it only repeats the statement for each
+                           slice of the window. The cut-off read runs inside this call, before the source arms the statement timeout for the
+                           statement that follows, so it is armed here to what is left of the budget. With nothing left it is not run and the
+                           span is not cut: the source reads the same elapsed time at its gate after this call and stops there, so that
+                           statement never runs. */
+                        var parts = lookupIndex == 0 ? 1 : Math.Min(1 << Math.Min(lookupIndex - 1, 8), AllServersSpanRowParts);
+                        var spanFloor = floor;
                         if (Left() is > 0 and var floorLeft)
                         {
-                            spanFloor = await ReadRowFloorAsync(
-                                connection, transaction, spanFloor, ceiling, planCacheBudget.SpanRows * Math.Min(width, AllServersSpanRowParts), floorLeft, ct);
+                            spanFloor = await ReadRowFloorAsync(connection, transaction, floor, ceiling, planCacheBudget.SpanRows * parts, floorLeft, ct);
                         }
 
                         pending = (spanFloor, ceiling);
@@ -1429,15 +1432,15 @@ ORDER BY p.last_collected DESC, p.query_hash, p.database_name";
                     await arm.ExecuteNonQueryAsync(cancellationToken);
                 }
 
+                await using var command = new NpgsqlCommand(statement.Sql, connection, transaction);
+                command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                statement.Bind(command.Parameters);
+                budget.StatementBound?.Invoke(step, command.Parameters);
                 if (budget.BeforeStatement is not null)
                 {
                     await budget.BeforeStatement(connection, transaction, cancellationToken);
                 }
 
-                await using var command = new NpgsqlCommand(statement.Sql, connection, transaction);
-                command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                statement.Bind(command.Parameters);
-                budget.StatementBound?.Invoke(step, command.Parameters);
 
                 await using (var reader = await command.ExecuteReaderAsync(cancellationToken))
                 {

@@ -200,8 +200,8 @@ public sealed class FindQueriesByTextNewestFirstLiveTests
         Assert.Equal(coveredFrom, searched.GetProperty("searched_from").GetDateTime().ToUniversalTime());
     }
 
-    /// <summary>A rare pattern with room in the budget finishes with the rows of the whole-window join, in its order, over spans cut by row count and
-    /// spans cut by time.</summary>
+    /// <summary>A rare pattern with room in the budget finishes with the rows of the whole-window join, in its order, over spans cut by a row count
+    /// and a last one that takes what is left of the window.</summary>
     [Fact]
     public async Task AFinishedSearch_ListsWhatTheWholeWindowJoinLists()
     {
