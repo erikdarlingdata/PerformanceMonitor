@@ -56,6 +56,12 @@ internal static class McpWritePolicy
         "create_notification_route",
         "update_notification_route",
 
+        /* #9639: the mute-rule writes, Darling's twins. get_mute_rules is a read. */
+        "create_mute_rule",
+        "update_mute_rule",
+        "delete_mute_rule",
+        "set_mute_rule_enabled",
+
         /* #5991: the query-tag and query-tag-rule writes, Darling's twins. The three reads (list_query_tags,
            list_query_tag_rules, test_query_tag_rule) are ordinary reads. */
         "create_query_tag",
@@ -66,6 +72,9 @@ internal static class McpWritePolicy
         "create_query_tag_rule",
         "update_query_tag_rule",
         "delete_query_tag_rule",
+
+        /* #9639: the alert-settings update, Darling's twin. get_alert_settings is a read. */
+        "update_alert_settings",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);
