@@ -441,6 +441,8 @@ CREATE TRIGGER fail_second_slice BEFORE DELETE ON collect.query_store_clutter_pl
         Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
         Assert.True(result.Built > 0, logger.Joined);
         Assert.Equal(0, result.Failed);
+        Assert.StartsWith("pruning hours ", result.PruneFailure);
+        Assert.Contains("the second slice is made to fail", result.PruneFailure);
         Assert.Equal(1L, result.Removed);
         Assert.Equal(1L, await CountAsync(store, "SELECT count(*) FROM collect.query_store_clutter_plan_hourly WHERE hour_utc IN (@first, @second)", ct, ("first", first), ("second", second)));
         Assert.Equal(1L, await CountAsync(store, "SELECT count(*) FROM collect.query_store_clutter_hour_built WHERE hour_utc = @second", ct, ("second", second)));

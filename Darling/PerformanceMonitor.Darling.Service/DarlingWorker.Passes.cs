@@ -1379,6 +1379,19 @@ public sealed partial class DarlingWorker
     }
 
     /// <summary>
+    /// #9690: the step row for one closed-day tick. A prune slice that failed counts as one failure and its text leads the detail, ahead of the deferred
+    /// text: the tick goes on to the builds, but a prune that fails every tick must show as a failed step and not as an ok one.
+    /// </summary>
+    internal static StorePassSteps.StepCounts QueryStoreClosedDayStepCounts(QueryStoreClosedDayRollup.TickResult tick)
+    {
+        var deferred = DeferredText(tick.Deferred + tick.HoursDeferred);
+        var detail = tick.PruneFailure is null ? deferred : deferred is null ? tick.PruneFailure : $"{tick.PruneFailure}. {deferred}";
+        return new StorePassSteps.StepCounts(
+            Built: tick.Built + tick.HoursBuilt + tick.ClutterDaysFolded, Removed: tick.DaysRemoved + tick.HoursRemoved,
+            Failed: tick.Failed + tick.HoursFailed + (tick.PruneFailure is null ? 0 : 1), Detail: detail);
+    }
+
+    /// <summary>
     /// The closed-day rollup pass of the hourly store-maintenance tick (#9111), with its own catch so a failure leaves the passes before it
     /// standing. The hourly clutter step follows the retention <c>query_store_stats</c>' raw rows are purged on (#9173), taken from
     /// <see cref="DarlingRetention.QueryStoreStatsPurgeRetentionDays"/> so the clutter step and the purge agree (#9221).
@@ -1394,9 +1407,7 @@ public sealed partial class DarlingWorker
                     DarlingRetention.QueryStoreStatsPurgeRetentionDays(_scheduleOverrides),
                     _logger, stoppingToken,
                     async token => new AttentionLegacyCopyPacer(await RetentionWalPacer.CreateAsync(_postgres!, _logger, token)));
-                return new StorePassSteps.StepCounts(
-                    Built: tick.Built + tick.HoursBuilt + tick.ClutterDaysFolded, Removed: tick.DaysRemoved + tick.HoursRemoved,
-                    Failed: tick.Failed + tick.HoursFailed, Detail: DeferredText(tick.Deferred + tick.HoursDeferred));
+                return QueryStoreClosedDayStepCounts(tick);
             });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

@@ -747,7 +747,7 @@ ORDER BY day_utc;";
     /// <summary>What one tick did.</summary>
     public readonly record struct TickResult(
         int Built, int Failed, long DaysRemoved, int Deferred, int HoursBuilt = 0, int HoursFailed = 0, long HoursRemoved = 0, int HoursDeferred = 0,
-        int ClutterDaysFolded = 0);
+        int ClutterDaysFolded = 0, string? PruneFailure = null);
 
     /// <summary>The whole built UTC days a read takes from the rollups: <c>[Start, End)</c>, both at midnight.</summary>
     public readonly record struct ServedDays(DateTime Start, DateTime End);
@@ -1523,6 +1523,6 @@ WHERE b.server_id = f.server_id
         var deferred = plan.Count - started;
         logger.LogInformation("Query Store closed-day rollups: built {Built}, failed {Failed}, deferred {Deferred}, removed {Removed} day(s), unstamped {Unstamped} empty clutter day(s), {ElapsedMs} ms",
             built, failed, deferred, removed, unstamped, (long)elapsed().TotalMilliseconds);
-        return new TickResult(built, failed, removed, deferred, hours.Built, hours.Failed, hours.Removed, hours.Deferred, folded.Built);
+        return new TickResult(built, failed, removed, deferred, hours.Built, hours.Failed, hours.Removed, hours.Deferred, folded.Built, hours.PruneFailure);
     }
 }

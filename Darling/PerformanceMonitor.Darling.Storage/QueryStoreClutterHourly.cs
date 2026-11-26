@@ -343,8 +343,8 @@ ORDER BY b.hour_utc;";
     /// <summary>One planned build.</summary>
     public readonly record struct Build(int ServerId, DateTime Hour);
 
-    /// <summary>What the hourly step of one tick did.</summary>
-    public readonly record struct TickResult(int Built, int Failed, long Removed, int Deferred);
+    /// <summary>What the hourly step of one tick did. <paramref name="PruneFailure"/> is the one-line text of the prune slice that failed (its hours and the error), or null when the prune did not fail: the step's outcome carries it, because a prune that fails every tick leaves the rollup growing past its horizon.</summary>
+    public readonly record struct TickResult(int Built, int Failed, long Removed, int Deferred, string? PruneFailure = null);
 
     private static DateTime Unspecified(DateTime value) => DateTime.SpecifyKind(value, DateTimeKind.Unspecified);
 
@@ -585,11 +585,13 @@ ORDER BY b.hour_utc;";
     /// <see cref="MaxPruneDuration"/>: the hours left wait for the next tick. After each commit the WAL the slice wrote goes to the pacer
     /// <paramref name="pacerFactory"/> builds (null runs unpaced), which is the retention purge's. A slice that fails (it rolled back, so its hours
     /// are untouched) is logged with its hours and ends this prune, and the rows the earlier slices removed are still returned: the next tick starts at
-    /// the same slice, and a failure there must not stop the hourly builds that follow the prune.
+    /// the same slice, and a failure there must not stop the hourly builds that follow the prune. <paramref name="onSliceFailed"/> receives the failed
+    /// slice's hours and error as one line, so the caller can report it in the step's outcome.
     /// </summary>
     public static async Task<long> PruneAsync(
         NpgsqlConnection connection, DateTime nowUtc, int horizonDays, int sliceHours, Func<TimeSpan> elapsed,
-        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory, ILogger logger, CancellationToken cancellationToken)
+        Func<CancellationToken, Task<IBatchWalPacer?>>? pacerFactory, ILogger logger, CancellationToken cancellationToken,
+        Action<string>? onSliceFailed = null)
     {
         ArgumentNullException.ThrowIfNull(connection);
         ArgumentNullException.ThrowIfNull(elapsed);
@@ -616,6 +618,7 @@ ORDER BY b.hour_utc;";
             {
                 logger.LogWarning(ex, "Query Store hourly clutter rollups: pruning hours {From:yyyy-MM-dd HH} to {To:yyyy-MM-dd HH} failed, the prune stops for this tick and the builds go on: {Message}",
                     slice.From, slice.To, ex.Message);
+                onSliceFailed?.Invoke(FormattableString.Invariant($"pruning hours {slice.From:yyyy-MM-dd HH} to {slice.To:yyyy-MM-dd HH} failed: {ex.Message.ReplaceLineEndings(" ")}"));
                 break;
             }
 
@@ -725,7 +728,8 @@ ORDER BY b.hour_utc;";
 
         await HeartbeatAsync(connection, nowUtc, logger, cancellationToken);
         var horizonDays = await RawHeldDaysAsync(connection, rawRetentionDays, cancellationToken) ?? rawRetentionDays;
-        var removed = await PruneAsync(connection, nowUtc, horizonDays, PruneSliceHours, elapsed, pacerFactory, logger, cancellationToken);
+        string? pruneFailure = null;
+        var removed = await PruneAsync(connection, nowUtc, horizonDays, PruneSliceHours, elapsed, pacerFactory, logger, cancellationToken, failure => pruneFailure = failure);
         removed += await UnstampBeforeFloorAsync(connection, horizonDays, cancellationToken);
         var plan = await PlanBuildsAsync(connection, nowUtc, horizonDays, cancellationToken);
 
@@ -753,6 +757,6 @@ ORDER BY b.hour_utc;";
 
         var deferred = plan.Count - started;
         logger.LogInformation("Query Store hourly clutter rollups: built {Built}, failed {Failed}, deferred {Deferred}, removed {Removed} row(s)", built, failed, deferred, removed);
-        return new TickResult(built, failed, removed, deferred);
+        return new TickResult(built, failed, removed, deferred, pruneFailure);
     }
 }
