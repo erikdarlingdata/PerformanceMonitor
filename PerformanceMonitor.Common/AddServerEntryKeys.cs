@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 
 namespace PerformanceMonitor.Common;
 
@@ -59,10 +61,38 @@ internal sealed class AddServerEntryKeys
                 continue;
             }
 
-            unread.Add(new UnreadServerKey(key, Suggest(key)));
+            unread.Add(new UnreadServerKey(Printable(key), Suggest(key)));
         }
 
         return unread;
+    }
+
+    /// <summary>The most characters of an unread key the answer carries. A longer key is cut there and ends in <c>...</c>.</summary>
+    internal const int MaxPrintedKeyLength = 64;
+
+    /// <summary>
+    /// An unread key as the answer carries it. The key comes from the caller's JSON and is printed on a console by the verb, so a control
+    /// or format character in it (a line feed, an escape, a right-to-left override, U+2028, U+2029) is written as <c>.</c> and the key is cut
+    /// at <see cref="MaxPrintedKeyLength"/> characters. A key cannot start a line of its own, recolour the console, or fill the answer.
+    /// </summary>
+    internal static string Printable(string key)
+    {
+        var printed = new StringBuilder();
+        var count = 0;
+        foreach (var rune in key.EnumerateRunes())
+        {
+            if (count == MaxPrintedKeyLength)
+            {
+                return printed.Append("...").ToString();
+            }
+
+            var category = Rune.GetUnicodeCategory(rune);
+            var hidden = Rune.IsControl(rune) || category is UnicodeCategory.Format or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator;
+            printed.Append(hidden ? "." : rune.ToString());
+            count++;
+        }
+
+        return printed.ToString();
     }
 
     /// <summary>The key the parse reads that <paramref name="key"/> is a spelling of, or null. Case, underscores and hyphens are not

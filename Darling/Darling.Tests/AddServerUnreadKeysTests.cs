@@ -224,6 +224,22 @@ public sealed class AddServerUnreadKeysTests
     }
 
     [Fact]
+    public async Task AnUnreadKeyWithAControlCharacter_PrintsAsADot_AndALongKeyIsCut()
+    {
+        var longKey = new string('k', 200);
+        var (answer, _) = await AddAsync(
+            "[" + SqlEntry(",\"a\\u001b[31mb\\nc\\u202ed\":1,\"" + longKey + "\":1") + "]");
+
+        var ignored = ResultOf(answer, 0)["ignored_keys"]!.AsArray().Select(k => k!["key"]!.GetValue<string>()).ToList();
+        Assert.Equal(["a.[31mb.c.d", new string('k', AddServerEntryKeys.MaxPrintedKeyLength) + "..."], ignored);
+
+        var (lines, _) = DarlingCliCommands.FormatAddServerOutcome(answer);
+        var noted = Assert.Single(lines, l => l.Contains("Not read", StringComparison.Ordinal));
+        Assert.Contains("a.[31mb.c.d", noted, StringComparison.Ordinal);
+        Assert.DoesNotContain(lines, l => l.Contains('\u001b') || l.Contains('\n') || l.Contains('\u202e') || l.Contains(longKey, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void TheVerbPrintsNothingExtra_ForAnAnswerWithNoIgnoredKeys()
     {
         var (lines, _) = DarlingCliCommands.FormatAddServerOutcome(
