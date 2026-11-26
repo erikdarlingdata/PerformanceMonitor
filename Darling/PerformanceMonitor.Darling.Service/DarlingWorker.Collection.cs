@@ -626,6 +626,19 @@ public sealed partial class DarlingWorker
            a segment's catch above is what makes its steps' absence visible in this count. */
         LogStoreObjectConvergence(startupConvergence, startupConvergenceClock.ElapsedMilliseconds, startup: true);
 
+        /* #9698: what a non-superuser store login lacks, said once per start after the convergence pass has built what it can: the aggregates it could not
+           build, the pg_wal size and the store's own log, each with the grant that fixes it for this login. Reads the catalog on its own connection and never
+           fails the start. A superuser login, or one that holds all three, logs nothing. */
+        try
+        {
+            await using var readinessConnection = await postgres.OpenConnectionAsync(StoreSessionNames.Startup, stoppingToken);
+            await StoreLoginReadiness.LogMissingPrivilegesAsync(readinessConnection, _timescaleAvailable, _logger, stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "The store login's privilege line was skipped: the store could not be reached");
+        }
+
         /* Restart continuity: re-seed delta baselines from the store (the Postgres twin of Lite's
            DuckDB seeding) so the first cycle after a service restart produces real deltas instead
            of zeroes. A seed failure logs a warning and collection proceeds with first-cycle-zero. */

@@ -4071,7 +4071,7 @@ BEGIN
         RETURN;
     END IF;
 
-    EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyHashIndexName + @" ON %s (query_hash, bucket DESC)', v_mat_oid);
+    EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyHashIndexName + @" ON %I.%I (query_hash, bucket DESC)', 'collect', '" + QueryStoreStatsCorrectedHourlyView + @"');
 END $$;";
 
     /// <summary>The name of the covering (server_id, bucket DESC) index on <see cref="QueryStoreStatsCorrectedHourlyView"/>'s materialization (#9215, V291).</summary>
@@ -4141,7 +4141,7 @@ BEGIN
     END IF;
 
     IF NOT v_has_covering THEN
-        EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyServerCoveringIndexName + @" ON %s (server_id, bucket DESC) INCLUDE (" + QueryStoreTrendIncludeColumns + @")', v_mat_oid);
+        EXECUTE format('CREATE INDEX IF NOT EXISTS " + QueryStoreCorrectedHourlyServerCoveringIndexName + @" ON %I.%I (server_id, bucket DESC) INCLUDE (" + QueryStoreTrendIncludeColumns + @")', 'collect', '" + QueryStoreStatsCorrectedHourlyView + @"');
     END IF;
 
     FOR v_plain IN
@@ -4175,10 +4175,12 @@ END $$;";
     /// <c>(query_hash, bucket DESC) INCLUDE (<paramref name="includeColumns"/>)</c> under <paramref name="indexName"/>. The fleet summary filters on
     /// the hash alone across every server, so it read one heap page per matching hourly row through a plain (query_hash, bucket) index. With the
     /// columns it sums in the index, the planner answers from the index alone. The block is a catalog read when the covering index is already there
-    /// (an index with included columns, found by name, has more attributes than key attributes), and it asks for no lock then. Otherwise it builds
-    /// the covering index under a temporary name first, drops a narrow index of the same name (V246's, on the Query Store rollup), and renames the
-    /// new one, so the narrow index stays available to readers until the covering one is built and the exclusive lock of the DROP lasts only to the
-    /// commit. A store without TimescaleDB, or without the view, returns before touching anything.
+    /// (an index with included columns, found by name, has more attributes than key attributes), and it asks for no lock then. With no index of that
+    /// name it builds the covering index under its own name. With a narrow index of that name (V246's, on the Query Store rollup) it builds the
+    /// covering index under a temporary name first, drops the narrow one, and renames the new one, so the narrow index stays available to readers
+    /// until the covering one is built and the exclusive lock of the DROP lasts only to the commit. Every build is issued against the aggregate's
+    /// view, which TimescaleDB routes to the materialization, so the owner of a database needs no privilege on <c>_timescaledb_internal</c> (#9691).
+    /// A store without TimescaleDB, or without the view, returns before touching anything.
     /// </summary>
     private static string FleetSummaryCoveringIndexBlock(string view, string indexName, string includeColumns) => $@"
 DO $$
@@ -4211,16 +4213,18 @@ BEGIN
         RETURN;
     END IF;
 
-    EXECUTE format('CREATE INDEX IF NOT EXISTS {indexName}_new ON %s (query_hash, bucket DESC) INCLUDE ({includeColumns})', v_mat_oid);
-
     SELECT i.indexrelid::regclass INTO v_old
     FROM pg_index i
     JOIN pg_class c ON c.oid = i.indexrelid
     WHERE i.indrelid = v_mat_oid AND c.relname = '{indexName}';
 
-    IF v_old IS NOT NULL THEN
-        EXECUTE format('DROP INDEX %s', v_old);
+    IF v_old IS NULL THEN
+        EXECUTE format('CREATE INDEX IF NOT EXISTS {indexName} ON %I.%I (query_hash, bucket DESC) INCLUDE ({includeColumns})', 'collect', '{view}');
+        RETURN;
     END IF;
+
+    EXECUTE format('CREATE INDEX IF NOT EXISTS {indexName}_new ON %I.%I (query_hash, bucket DESC) INCLUDE ({includeColumns})', 'collect', '{view}');
+    EXECUTE format('DROP INDEX %s', v_old);
 
     SELECT i.indexrelid::regclass INTO v_new
     FROM pg_index i
@@ -7336,6 +7340,15 @@ WITH NO DATA";
 
         return dropped;
     }
+
+    /// <summary>The view of every continuous aggregate <see cref="EnsureContinuousAggregatesAsync"/> builds, frozen rollups included, in its order.
+    /// Read on demand: <see cref="OffGridAggregates"/> is declared further down the file than any static initializer that could hold this list.</summary>
+    public static IReadOnlyList<string> DeclaredContinuousAggregateViews => HourlyAggregates.Select(a => a.View)
+        .Concat(DailyAggregates.Select(a => a.View))
+        .Concat(BaselineAggregates.Select(a => a.View))
+        .Concat(OffGridAggregates.Select(a => a.View))
+        .Concat(FrozenRollupAggregates.Select(a => a.View))
+        .ToArray();
 
     /// <summary>
     /// Creates the continuous aggregates and attaches each one's refresh policy
@@ -14912,22 +14925,18 @@ WITH NO DATA";
     /// column, so a view keeping two (the hourly pair's <c>server_id</c> and <c>server_name</c>) gets two
     /// separate statements concatenated by <see cref="KeptIndexesSql(string, string[])"/>.
     ///
-    /// <para><b>Why an unnamed <c>CREATE INDEX</c> resolved onto the materialization from the catalog, not
-    /// a hand-typed name.</b> The <c>DO</c> block below issues its <c>CREATE INDEX</c> directly against the
-    /// materialization OID it just resolved (<c>v_mat_oid</c>), not against the view — TimescaleDB's own
-    /// <c>create_group_indexes</c> is what issues an unnamed index against the continuous aggregate's VIEW
-    /// and lets PostgreSQL route it to the materialization, which names it by ITS OWN default-naming rule
-    /// (<c>&lt;table&gt;_&lt;column&gt;_bucket_idx</c>, truncated to 63 bytes with PostgreSQL's own
-    /// de-duplicating suffix if that truncation collides) — the same result this code reaches, never a string this
-    /// code builds. A hand-built name matching that pattern for five of the six views would still be WRONG
-    /// for the sixth: <c>query_store_stats_interval_daily</c>'s materialization name is itself a generated
-    /// <c>_materialized_hypertable_N</c>, wider than the fixed views' own table names, so a name built from
-    /// the VIEW's name would drift from what PostgreSQL actually assigns the materialization's copy — the
-    /// exact bug #4503's PR body traces on the upgrade side (<see cref="PgMigrations"/>'s V152 remarks) and
-    /// the reason this resolves the materialization from the catalog and lets PostgreSQL name the index,
-    /// the same as an upgraded store's survivor. <c>bucket DESC</c>, never ASC, for the same reason: an
-    /// upgraded store's survivor was built DESC, and an index with a different sort order is a DIFFERENT
-    /// index to <see cref="PgSchemaGeneratorTests"/>'s fresh-vs-upgraded comparison.</para>
+    /// <para><b>Why an unnamed <c>CREATE INDEX</c> issued against the aggregate's view, not a hand-typed name.</b>
+    /// The <c>DO</c> block below issues its <c>CREATE INDEX</c> against the continuous aggregate's VIEW (<c>collect.&lt;view&gt;</c>), the same
+    /// statement TimescaleDB's own <c>create_group_indexes</c> issues, and lets TimescaleDB route it to the materialization, which names it by
+    /// ITS OWN default-naming rule (<c>&lt;table&gt;_&lt;column&gt;_bucket_idx</c>, truncated to 63 bytes with PostgreSQL's own
+    /// de-duplicating suffix if that truncation collides), never a string this code builds. A hand-built name matching that pattern for five of
+    /// the six views would still be WRONG for the sixth: <c>query_store_stats_interval_daily</c>'s materialization name is itself a generated
+    /// <c>_materialized_hypertable_N</c>, wider than the fixed views' own table names, so a name built from the VIEW's name would drift from
+    /// what PostgreSQL actually assigns the materialization's copy, the exact bug #4503's PR body traces on the upgrade side
+    /// (<see cref="PgMigrations"/>'s V152 remarks). Going through the view also keeps the statement inside what the aggregate's owner may do:
+    /// naming <c>_timescaledb_internal._materialized_hypertable_N</c> needs CREATE on that schema, which a login that owns its database and is
+    /// not a superuser lacks (#9691). <c>bucket DESC</c>, never ASC, for the same reason: an upgraded store's survivor was built DESC, and an
+    /// index with a different sort order is a DIFFERENT index to <c>CaggGroupIndexDropLiveTests</c>'s fresh-vs-upgraded comparison.</para>
     ///
     /// <para><b>Idempotent by a catalog read, not by <c>IF NOT EXISTS</c></b> (an unnamed <c>CREATE INDEX</c>
     /// has no name to guard with one — a second unnamed <c>CREATE INDEX</c> on the same columns would create
@@ -14962,7 +14971,7 @@ BEGIN
         AND   a1.attname = '{column}'
         AND   a2.attname = 'bucket'
     ) THEN
-        EXECUTE format('CREATE INDEX ON %s ({column}, bucket DESC)', v_mat_oid);
+        EXECUTE format('CREATE INDEX ON %I.%I ({column}, bucket DESC)', 'collect', '{view}');
     END IF;
 END $$;";
 
