@@ -28,7 +28,11 @@ namespace PerformanceMonitorLite.Tests;
 /// (<see cref="ObjectUsageChainHistory"/>: growth, two restarts, a lone index clear, a failover to a second node and back, an object that is never
 /// used, one dropped, one created late, a 12 day gap) is read both ways at many window starts, built in one call and one snapshot per call, and
 /// carried through a store that was written before the chain existed.
+///
+/// <para>The class runs alone, in the <c>timing</c> collection. Its held-read test keeps the process-wide store lock in read mode through a whole
+/// build, and a write from a class running beside it would wait behind that read and hold up the builder's next read, so neither would finish.</para>
 /// </summary>
+[Collection("timing")]
 public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, IDisposable
 {
     private const string ServerName = "ObjectUsageChainSrv";
