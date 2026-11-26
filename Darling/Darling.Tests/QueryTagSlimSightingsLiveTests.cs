@@ -267,4 +267,122 @@ public sealed class QueryTagSlimSightingsLiveTests
             Assert.Equal($"0xAA|{reports},0xBB|{reports}", await MapAsync(env));
         });
     }
+
+    /* Every column of every map row of the server, ordered, so two rebuilds can be compared whole. */
+    private static Task<string> WholeMapAsync(Env env) =>
+        ScalarAsync(env,
+            "SELECT COALESCE(string_agg(concat_ws('|', key_kind, key, tag_id, source, rule_id, matched_field, matched_value), ',' ORDER BY key_kind, key), '') "
+            + "FROM config.query_tag_map WHERE server_id = " + Server);
+
+    /*
+     * A server whose keys span several rebuild pages, in both tables. 0xP05 is the key a page end lands inside: it has two
+     * sightings (AppA, AppB) and two slim rows (AppY, AppZ), and the rule that wins it matches only AppZ, its last row. The
+     * rule after it matches AppA, so a page that held only part of 0xP05 would tag it Front, or twice.
+     */
+    private static async Task<(int Last, int Front, int Sales)> SeedPagedServerAsync(Env env)
+    {
+        int last = await NewTagAsync(env, "Last");
+        int front = await NewTagAsync(env, "Front");
+        int sales = await NewTagAsync(env, "SalesDb");
+        await NewRuleAsync(env, last, "application", "AppZ");
+        await NewRuleAsync(env, front, "application", "AppA");
+        await NewRuleAsync(env, sales, "database", "Sales");
+
+        /* The rows that end in the slim table: 0xP05 under two older callers, and three keys seen only long ago. */
+        await SightAsync(env, HashSightings("0xP05", "AppY"), HashSightings("0xP05", "AppZ"),
+            HashSightings("0xP02", "Old"), HashSightings("0xP07", "Old"), HashSightings("0xP11", "Old"));
+        await ExecAsync(env, $"UPDATE collect.query_tag_sightings SET first_seen = now() - interval '{SightingsDays + 5} days', last_seen = now() - interval '{SightingsDays + 5} days'");
+        await PurgeAsync(env);
+        Assert.Equal(string.Empty, await SightedKeysAsync(env));
+
+        /* The rows that stay sightings: 0xP05 again under two new callers, 0xP07 again, and keys before and after them. */
+        await SightAsync(env, HashSightings("0xP05", "AppA"), HashSightings("0xP05", "AppB"), HashSightings("0xP07", "Old"),
+            HashSightings("0xP01", "New"), HashSightings("0xP03", "New"), HashSightings("0xP04", "New", database: "Other"), HashSightings("0xP06", "New"),
+            HashSightings("0xP08", "New"), HashSightings("0xP09", "New"), HashSightings("0xP10", "New", database: "Other"), HashSightings("0xP12", "New"));
+        return (last, front, sales);
+    }
+
+    [Fact]
+    public async Task ARebuildReadInPages_BuildsTheMapOfAOnePageRead_AndAKeyWhoseCallersSitOnAPageEndIsResolvedFromAllOfThem()
+    {
+        await WithStoreAsync(async env =>
+        {
+            var (last, _, sales) = await SeedPagedServerAsync(env);
+
+            /* One page holds the whole server: the read is one statement for each kind of key. */
+            Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source, rebuildPageRows: 1_000_000)));
+            string onePage = await WholeMapAsync(env);
+            Assert.Contains($"hash|0xP05|{last}|rule|", onePage, StringComparison.Ordinal);
+            Assert.Contains($"hash|0xP11|{sales}|rule|", onePage, StringComparison.Ordinal);
+            Assert.DoesNotContain("0xP04", onePage, StringComparison.Ordinal);
+            Assert.Equal(10, onePage.Split(',').Length);
+
+            /* Every page size puts a page end at a different row of 0xP05, in the sightings table or in the slim one. A tag
+               write bumps the rules version, so each pass rebuilds the map from nothing. */
+            foreach (int pageRows in new[] { 1, 2, 3, 4, 5, 6, 7, 8, 9 })
+            {
+                await NewTagAsync(env, "Bump" + pageRows.ToString(CultureInfo.InvariantCulture));
+                Assert.True(await PassAsync(env, new QueryTagMapBuilder(env.Source, rebuildPageRows: pageRows)), $"the rebuild with pages of {pageRows} rows failed");
+                Assert.Equal(onePage, await WholeMapAsync(env));
+            }
+        });
+    }
+
+    [Fact]
+    public async Task ARebuildPage_EndsOnAKey_HoldsEveryRowOfItsKeysFromBothTables_AndIsNeverMuchMoreThanThePageSize()
+    {
+        await WithStoreAsync(async env =>
+        {
+            await SeedPagedServerAsync(env);
+            const int pageRows = 3;
+            const int mostRowsOfOneKey = 4;
+
+            var pages = new List<List<List<QueryTagSighting>>>();
+            string after = string.Empty;
+            while (true)
+            {
+                string? through = await QueryTagMapStore.ReadRebuildPageBoundAsync(env.Store, Server, "hash", after, pageRows, env.Ct);
+                var page = new List<List<QueryTagSighting>>();
+                await foreach (var key in QueryTagMapStore.ReadRebuildPageByKeyAsync(env.Store, Server, "hash", after, through, env.Ct))
+                {
+                    page.Add(key);
+                }
+
+                pages.Add(page);
+                if (through is null)
+                {
+                    break;
+                }
+
+                Assert.Equal(through, page[^1][0].Key);
+                after = through;
+            }
+
+            /* 16 rows of 12 keys in pages of 3: several pages, each a whole number of keys, no key twice. */
+            Assert.True(pages.Count >= 4, $"expected several pages, got {pages.Count}");
+            var keys = pages.SelectMany(page => page.Select(key => key[0].Key)).ToList();
+            Assert.Equal(new[] { "0xP01", "0xP02", "0xP03", "0xP04", "0xP05", "0xP06", "0xP07", "0xP08", "0xP09", "0xP10", "0xP11", "0xP12" }, keys);
+            Assert.Equal(16, pages.Sum(page => page.Sum(key => key.Count)));
+            foreach (var page in pages.Take(pages.Count - 1))
+            {
+                int rows = page.Sum(key => key.Count);
+                Assert.InRange(rows, pageRows, pageRows + mostRowsOfOneKey - 1);
+            }
+
+            Assert.True(pages[^1].Sum(key => key.Count) < pageRows);
+
+            /* The key on a page end: its two sightings, then its two slim rows, which carry no text sample. */
+            var boundary = pages.SelectMany(page => page).Single(key => key[0].Key == "0xP05");
+            Assert.Equal(new[] { "AppA", "AppB", "AppY", "AppZ" }, boundary.Select(s => s.Application));
+            Assert.Equal(new[] { true, true, false, false }, boundary.Select(s => s.TextSample is not null));
+
+            /* A key in both tables under one caller reads its sighting first. */
+            var both = pages.SelectMany(page => page).Single(key => key[0].Key == "0xP07");
+            Assert.Equal(new[] { "Old", "Old" }, both.Select(s => s.Application));
+            Assert.Equal(new[] { true, false }, both.Select(s => s.TextSample is not null));
+
+            /* The other kinds have no rows on this server: one empty last page each. */
+            Assert.Null(await QueryTagMapStore.ReadRebuildPageBoundAsync(env.Store, Server, "object", string.Empty, pageRows, env.Ct));
+        });
+    }
 }
