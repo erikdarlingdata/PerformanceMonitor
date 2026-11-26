@@ -39,8 +39,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// An hour is built again only when the ledger no longer equals the <c>ledger_rows</c> of its last build, which is what a late row does,
 /// since the collector adds its batch to the ledger in the same transaction as the row. A build whose <c>raw_rows</c> equals its
 /// <c>ledger_rows</c> is final until the ledger moves (#9457). Only a build that counted a different number of raw rows than the ledger
-/// held, which is rows an older writer stored without counting them, is built once more (<see cref="SettleAfter"/>). One transaction builds one hour for every server that is due in it, so the scan of the hour is shared
-/// instead of repeated for each server. A tick builds the newest hours first, at most <see cref="MaxHoursPerTick"/> of them and not past
+/// held, which is rows an older writer stored without counting them, is built once more (<see cref="SettleAfter"/>). One transaction builds one hour for every server that is due in it, so the read of the hour is shared
+/// instead of repeated for each server, and that read takes the hour's heap pages in physical order and groups them with a hash aggregate
+/// (<see cref="BuildHourSql"/>). A tick builds the newest hours first, at most <see cref="MaxHoursPerTick"/> of them and not past
 /// <see cref="MaxTickDuration"/>, and the next tick takes the rest.</para>
 ///
 /// <para><b>Coverage.</b> <see cref="IncompleteHoursAsync"/> says which hours of a range the table does not hold whole for a server: the
@@ -201,19 +202,56 @@ WHERE server_id = ANY($1::integer[])
   AND bucket = $2::timestamp;";
 
     /// <summary>
-    /// Fills one hour of the rollup for a set of servers from raw, in one scan of the hour. $1 server ids, $2 hour. The rows of the hour
+    /// How the build folds a value column of its per-text partial rows (<c>p</c>, one row per key and <c>query_text_digest</c>) into the
+    /// key's row. Every aggregate of <see cref="ValueColumns"/> splits this way: a count or a sum is the sum of the partials, a minimum or a
+    /// maximum is the minimum or maximum of the partials, and <c>digests</c> is the partial rows' own digest, kept where the partial counted
+    /// an interval-honest row and listed in the order <c>array_agg(DISTINCT ...)</c> gives. An aggregate of any other shape has no fold here
+    /// and stops the type from loading, so a new column cannot be built wrong in silence.
+    /// </summary>
+    private static string Fold((string Name, string Type, string Aggregate) column) => column switch
+    {
+        { Name: "digests" } => "array_agg(p.query_text_digest ORDER BY p.query_text_digest) FILTER (WHERE p.raw_rows > 0 AND p.query_text_digest IS NOT NULL)",
+        _ when column.Aggregate.StartsWith("COUNT(", StringComparison.Ordinal) || column.Aggregate.StartsWith("CAST(SUM(", StringComparison.Ordinal) => $"CAST(SUM(p.{column.Name}) AS bigint)",
+        _ when column.Aggregate.StartsWith("MIN(", StringComparison.Ordinal) => $"MIN(p.{column.Name})",
+        _ when column.Aggregate.StartsWith("MAX(", StringComparison.Ordinal) => $"MAX(p.{column.Name})",
+        _ => throw new InvalidOperationException($"The host hourly build has no fold for the aggregate of {column.Name}."),
+    };
+
+    /// <summary>
+    /// Fills one hour of the rollup for a set of servers from raw, in one read of the hour. $1 server ids, $2 hour. The rows of the hour
     /// are those whose <c>collection_time</c> is in it, the hour the ledger counts them under.
+    ///
+    /// <para>The statement has three levels so that no level needs the hour's raw rows in order. The innermost reads the hour and nothing
+    /// else, behind <c>OFFSET 0</c>, so its scan is planned for the cheapest read of those rows and not for a sort order the grouping
+    /// above could use: on a large store that is a bitmap heap scan, which reads the hour's heap pages in physical order and in combined
+    /// requests, where an index scan in (server, time) order reads them one page at a time. The middle level groups by the key and
+    /// <c>query_text_digest</c> with plain aggregates only, so it can be a hash aggregate. The outer level folds those partial rows, a
+    /// small fraction of the raw rows, into one row per key (<see cref="Fold"/>). A single level cannot do this: its
+    /// <c>array_agg(DISTINCT query_text_digest)</c> rules out a hash aggregate, so every raw row of the hour is sorted by the key, and the
+    /// planner then prefers the index scan because it arrives sorted by server.</para>
     /// </summary>
     public static readonly string BuildHourSql = $@"
 INSERT INTO collect.query_stats_host_hourly (server_id, bucket, database_name, query_hash, host_object_name, {string.Join(", ", ValueColumns.Select(c => c.Name))})
 SELECT
-    server_id, $2::timestamp, database_name, query_hash, host_object_name,
-    {Lines(ValueColumns.Select(c => c.Aggregate))}
-FROM collect.query_stats
-WHERE server_id = ANY($1::integer[])
-  AND collection_time >= $2::timestamp
-  AND collection_time < $2::timestamp + interval '1 hour'
-GROUP BY server_id, database_name, query_hash, host_object_name;";
+    p.server_id, $2::timestamp, p.database_name, p.query_hash, p.host_object_name,
+    {Lines(ValueColumns.Select(Fold))}
+FROM
+(
+    SELECT
+        server_id, database_name, query_hash, host_object_name, query_text_digest,
+        {string.Join(",\n        ", ValueColumns.Where(c => c.Name != "digests").Select(c => $"{c.Aggregate} AS {c.Name}"))}
+    FROM
+    (
+        SELECT *
+        FROM collect.query_stats
+        WHERE server_id = ANY($1::integer[])
+          AND collection_time >= $2::timestamp
+          AND collection_time < $2::timestamp + interval '1 hour'
+        OFFSET 0
+    ) AS r
+    GROUP BY server_id, database_name, query_hash, host_object_name, query_text_digest
+) AS p
+GROUP BY p.server_id, p.database_name, p.query_hash, p.host_object_name;";
 
     /// <summary>
     /// Records the build of one hour for a set of servers, in the build's own snapshot: the raw rows it counted and what the ledger held. A

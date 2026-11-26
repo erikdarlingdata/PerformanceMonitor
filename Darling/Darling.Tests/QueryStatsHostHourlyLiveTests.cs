@@ -234,6 +234,53 @@ WHERE (SELECT count(DISTINCT q.query_text_digest) FILTER (WHERE {Honest}) FROM c
     }
 
     /// <summary>
+    /// One build folds every text of a key into the key's one row, for two servers in one statement, where raw is a plain table and where
+    /// it is a hypertable. The seed holds what the fold has to keep apart: a text with interval-honest and zero-interval rows under one
+    /// key, a text that only a zero-interval row carries (not one of the key's texts, yet its row is the key's newest), a text two keys
+    /// share, an honest row with no digest, and a key of NULLs whose texts arrive in descending order. Every column equals the raw
+    /// aggregate, each key has one row, and <c>digests</c> is the key's honest texts in ascending order.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task OneBuild_FoldsEveryTextOfAKey_IntoOneRow(bool tiered) =>
+        WithStoreAsync(tiered, async (scratch, connection, ct) =>
+        {
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var seeder = new RawSeeder(connection, ct);
+            foreach (var serverId in new[] { ServerId, OtherServerId })
+            {
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(1), "DbA", "0xF1", null, digest: 3, cpu: 10);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(2), "DbA", "0xF1", null, digest: 1, cpu: 20);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(3), "DbA", "0xF1", null, digest: 1, interval: 0, cpu: 30, extreme: true);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(4), "DbA", "0xF1", null, digest: 1, cpu: 40);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(5), "DbA", "0xF1", null, digest: null, cpu: 50);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(55), "DbA", "0xF1", null, digest: 2, interval: 0, cpu: 60, extreme: true);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(6), "DbA", "0xF2", "procX", digest: 3, cpu: 70);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(7), null, null, null, digest: 9, cpu: 80);
+                await seeder.InsertAsync(serverId, Hour9.AddMinutes(8), null, null, null, digest: 8, cpu: 90);
+            }
+
+            await QueryStatsLedgerSeed.SeedAsync(connection, Hour9, Hour9.AddHours(1), ct);
+            var result = await QueryStatsHostHourly.RunTickAsync(postgres, TickNow, RetentionDays, NullLogger.Instance, ct);
+            Assert.Equal(0, result.Failed);
+
+            Assert.Equal(2 * 3, await AssertRollupEqualsRawAsync(connection, ct));
+            Assert.Equal(6L, await ScalarAsync<long>(connection, "SELECT count(*) FROM collect.query_stats_host_hourly", ct));
+
+            // The first byte of each digest, in the order the row stores them.
+            const string texts = "array_to_string(ARRAY(SELECT get_byte(u.d, 0) FROM unnest(h.digests) WITH ORDINALITY AS u(d, i) ORDER BY u.i), ',')";
+            foreach (var serverId in new[] { ServerId, OtherServerId })
+            {
+                Assert.Equal("1,3", await ScalarAsync<string>(connection, $"SELECT {texts} FROM collect.query_stats_host_hourly AS h WHERE h.server_id = @id AND h.query_hash = '0xF1'", ct, ("id", serverId)));
+                Assert.Equal("3", await ScalarAsync<string>(connection, $"SELECT {texts} FROM collect.query_stats_host_hourly AS h WHERE h.server_id = @id AND h.query_hash = '0xF2'", ct, ("id", serverId)));
+                Assert.Equal("8,9", await ScalarAsync<string>(connection, $"SELECT {texts} FROM collect.query_stats_host_hourly AS h WHERE h.server_id = @id AND h.query_hash IS NULL", ct, ("id", serverId)));
+                Assert.Equal(4L, await ScalarAsync<long>(connection, "SELECT raw_rows FROM collect.query_stats_host_hourly WHERE server_id = @id AND query_hash = '0xF1'", ct, ("id", serverId)));
+                Assert.Equal(Hour9.AddMinutes(55), await ScalarAsync<DateTime>(connection, "SELECT last_execution_time FROM collect.query_stats_host_hourly WHERE server_id = @id AND query_hash = '0xF1'", ct, ("id", serverId)));
+            }
+        });
+
+    /// <summary>
     /// A raw row that arrives for an hour after it was built makes the hour incomplete (its build counted fewer rows than the ledger holds
     /// now), the next tick builds it again with no help from the settle rule, and the hour is complete and equal to raw once more.
     /// </summary>
