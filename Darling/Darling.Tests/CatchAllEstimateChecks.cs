@@ -110,8 +110,7 @@ AND   object_kind IN ('{StoreSelfMetrics.OtherObjectKind}', '{StoreSelfMetrics.S
         await ExecAsync(connection, $"CREATE TABLE {GrowerTable} (id integer NOT NULL, pad text NOT NULL)", ct);
         await ExecAsync(connection, $"INSERT INTO {GrowerTable} VALUES (0, 'x')", ct);
         await ExecAsync(connection, $"VACUUM {GrowerTable}", ct);
-        var pagesBefore = await ReadCatchAllRelationPagesAsync(connection, timescale, ct);
-        await StoreSelfMetrics.SweepAsync(connection, timescale, baselineTime, null, null, null, ct);
+        var pagesBefore = await SweepAndReadCatchAllRelationPagesAsync(connection, timescale, baselineTime, ct);
         var before = await ReadAsync(connection, baselineTime, ct);
 
         await ExecAsync(connection, $"CREATE TABLE {SeedTable} (id integer PRIMARY KEY, payload text NOT NULL)", ct);
@@ -157,8 +156,7 @@ SELECT oid::bigint, pg_relation_size(oid, 'main')::bigint, part FROM rels", conn
         await ExecAsync(connection,
             $"INSERT INTO {GrowerTable} SELECT g, repeat('x', 200) FROM generate_series(1, 2000) AS g", ct);
         await ExecAsync(connection, $"VACUUM {GrowerTable}", ct);
-        var pagesAfter = await ReadCatchAllRelationPagesAsync(connection, timescale, ct);
-        await StoreSelfMetrics.SweepAsync(connection, timescale, next, null, null, null, ct);
+        var pagesAfter = await SweepAndReadCatchAllRelationPagesAsync(connection, timescale, next, ct);
         var after = await ReadAsync(connection, next, ct);
 
         var other = StoreSelfMetrics.OtherObjectKind;
@@ -167,7 +165,7 @@ SELECT oid::bigint, pg_relation_size(oid, 'main')::bigint, part FROM rels", conn
         var delta = after[other].TotalBytes - before[other].TotalBytes;
         /* #7303: the estimate is the whole bucket, so it also moves when any OTHER relation in it gains or loses a page of
            relpages between the two sweeps (an autovacuum or autoanalyze on a table the test does not control: CI saw exactly
-           one 8192-byte page over). Measure those relations right before each sweep and take their change out, so the
+           one 8192-byte page over). Measure those relations in each sweep's own snapshot and take their change out, so the
            comparison stays exact for the seeded relation instead of allowing a band around it. */
         var blockSize = await ReadBlockSizeAsync(connection, ct);
         var otherChanges = new List<string>();
@@ -203,10 +201,28 @@ SELECT oid::bigint, pg_relation_size(oid, 'main')::bigint, part FROM rels", conn
     }
 
     /// <summary>
+    /// #9707: reads the catch-all relations' <c>relpages</c> and runs the sweep in ONE <c>REPEATABLE READ</c> transaction, so
+    /// the test's read and the sweep's own estimate statement see the same <c>pg_class</c> snapshot. Read in separate
+    /// statements (the sweep is a dozen statements long) an autovacuum or autoanalyze that finishes on any relation between the
+    /// two moves its pages in the sweep's figure but not in the read, and the exact comparison missed by 11 pages once in the
+    /// nightly build. Nothing in the sweep depends on the isolation level, and the seeded relation is still compared by file
+    /// size, so the check stays exact for it.
+    /// </summary>
+    private static async Task<Dictionary<long, RelationPages>> SweepAndReadCatchAllRelationPagesAsync(
+        NpgsqlConnection connection, bool timescale, DateTime metricTime, CancellationToken ct)
+    {
+        await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, ct);
+        var pages = await ReadCatchAllRelationPagesAsync(connection, timescale, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescale, metricTime, null, null, null, ct);
+        await transaction.CommitAsync(ct);
+        return pages;
+    }
+
+    /// <summary>
     /// The relations the catch-all estimate adds up for the non-system row, with their <c>relpages</c> as the estimate reads
     /// them: the census relations by the product's own predicates, their TOAST tables, and the indexes of both (the same
-    /// four arms <c>UnenumeratedEstimateInsertSql</c> unions). Read in one statement right before a sweep so the two
-    /// reads differ only by what changed between the sweeps.
+    /// four arms <c>UnenumeratedEstimateInsertSql</c> unions). Read in one statement inside the sweep's own
+    /// transaction (<see cref="SweepAndReadCatchAllRelationPagesAsync"/>) so the two reads differ only by what changed between the sweeps.
     /// </summary>
     private static async Task<Dictionary<long, RelationPages>> ReadCatchAllRelationPagesAsync(
         NpgsqlConnection connection, bool timescale, CancellationToken ct)
