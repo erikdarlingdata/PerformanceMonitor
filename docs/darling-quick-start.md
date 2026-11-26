@@ -104,15 +104,7 @@ sudo chmod 700 /usr/share/PerformanceMonitorDarling/logs
 
 `darling-keys` is where the service keeps its secret key pair (the `password-key` file) and its log-hash key (the `log-hash-key` file). It sits beside `darling.json`, so if your config is not in `/etc/darling`, create the folder next to it. The service checks that the folder is owner-only and that the user owns the files in it, and it keeps its keys there across restarts, so back it up (see [Security](darling/security.md)). The file log goes to `/usr/share/PerformanceMonitorDarling/logs/darling-service_yyyyMMdd.log`. Without that folder the service still runs, but it writes no log file and says `File logging is disabled` at start.
 
-The tarball's `darling.sample.json` is the Windows sample. It sets `postgres.managed` to `true`, which needs Windows, and it has no connection string. On Linux write a minimal `/etc/darling/darling.json` for your own PostgreSQL:
-
-```json
-{"postgres":{"managed":false,"connectionString":"file:/etc/darling/store_connection"},"servers":[]}
-```
-
-`/etc/darling/store_connection` holds the store's full connection string on one line, for example `Host=localhost;Port=5432;Username=darling;Password=<password>;Database=darling`. A trailing newline is fine. The `darling` user must be able to read it, so give it that owner and mode 600 (`sudo chown darling:darling /etc/darling/store_connection` and `sudo chmod 600 /etc/darling/store_connection`). Leave `servers` empty and add monitored servers from the Viewer or with `dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --add-server`.
-
-The unit, saved as `/etc/systemd/system/darling.service` (drop `postgresql.service` from `After=` if your PostgreSQL runs on another host):
+The unit:
 
 ```ini
 [Unit]
@@ -130,9 +122,5 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 ```
-
-Then `sudo systemctl daemon-reload` and `sudo systemctl enable --now darling`. `Type=notify` makes systemd wait for the service to say it has started. The service says so when its host starts, before the store is ready, so `systemctl start` returning does not mean the store is ready. A failure that stops collection for good, such as a rejected `darling.json`, leaves the service running on purpose (as in the container paragraph above), so `Restart=on-failure` does not fire for it. Read the journal to see which state you are in.
-
-**Check that it is running.** `systemctl status darling` should show `active (running)`. `journalctl -u darling` shows what it did. Two lines mean the service is ready: "Postgres store ready" and then "PerformanceMonitor Darling collection loop started". If they are missing after a minute, the lines above them say why. With the web dashboard, MCP and the heartbeat all off (the defaults), those lines are the only sign inside the box. For a check from outside, set `heartbeat.url` to a dead-man's-switch URL (see [Watching the service from outside](darling/operations.md#watching-the-service-from-outside)), and your check alerts when the pings stop.
 
 Use the same `env:`/`file:` secret references (systemd `LoadCredential=` pairs naturally with `file:`), and note `Microsoft.Data.SqlClient` needs `libgssapi-krb5-2` installed (`apt-get install libgssapi-krb5-2`) — the container image carries it already.
