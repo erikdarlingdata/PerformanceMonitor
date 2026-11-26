@@ -1,3 +1,4 @@
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Models;
 
 namespace PerformanceMonitorLite.Mcp;
