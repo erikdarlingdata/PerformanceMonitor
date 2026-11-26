@@ -60,6 +60,16 @@ internal static class DarlingMcpWritePolicy
         "set_server_action",
         "mint_personal_token",
         "revoke_personal_token",
+        "get_personal_tokens",
+    };
+
+    /// <summary>The personal token tools (#9643): make, revoke and list a person's MCP token. They are server admin tools, and a call made with a
+    /// personal token is never offered them, so a token can never make, revoke or list tokens (<see cref="Effective.PersonalToken"/>).</summary>
+    internal static readonly IReadOnlySet<string> PersonalTokenTools = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "mint_personal_token",
+        "revoke_personal_token",
+        "get_personal_tokens",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
@@ -212,6 +222,7 @@ internal static class DarlingMcpWritePolicy
     /// </summary>
     internal static readonly IReadOnlySet<string> NeverAgentTools = new HashSet<string>(StringComparer.Ordinal)
     {
+        "get_personal_tokens",
         "update_alert_settings",
         "mute_analysis_finding",
         "unmute_analysis_finding",
@@ -299,7 +310,7 @@ internal static class DarlingMcpWritePolicy
     /// <summary>What the host actually offers, after the settings and the token are reconciled. <see cref="TokenName"/> is the
     /// name of the named token (#6542) a request presented, or null for the legacy single token and for the start-wide policy: an
     /// agent token's name is its identity, and an operator token's name is what its route journal rows record.</summary>
-    internal readonly record struct Effective(bool Writes, bool ServerAdmin, bool Investigations = false, string? TokenName = null)
+    internal readonly record struct Effective(bool Writes, bool ServerAdmin, bool Investigations = false, string? TokenName = null, bool PersonalToken = false)
     {
         internal static readonly Effective Off = new(false, false);
 
@@ -334,6 +345,9 @@ internal static class DarlingMcpWritePolicy
                 return true;
             if (Investigations && ChangeWindowTools.Contains(toolName))
                 return true;
+            /* #9643: a call made with a personal token is never offered the personal token tools, so a token cannot make, revoke or list tokens. */
+            if (PersonalToken && PersonalTokenTools.Contains(toolName))
+                return false;
             if (IsServerAdmin(toolName))
                 return ServerAdmin;
             if (IsWrite(toolName))

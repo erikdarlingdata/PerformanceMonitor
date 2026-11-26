@@ -122,7 +122,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains(
             $"This server exposes {served.Count} of its {catalog.Count} tools: the write tools are off, so the {writes + admin} that change " +
-            $"monitoring configuration are not served (`mcp.allowWrites` with a token adds {writes}, `mcp.allowServerAdmin` {admin} more); " +
+            $"monitoring configuration or list personal tokens are not served (`mcp.allowWrites` with a token adds {writes}, `mcp.allowServerAdmin` {admin} more); " +
             $"`mcp.allowInvestigations` with a token adds the {investigations} investigation tools. " +
             $"{shared} are the same names Lite exposes. The remaining {served.Count - shared} are unique to Darling: {postgres} are the " +
             "PostgreSQL reads (`get_pg_*`), plus the Custom Views, custom-alert-rule and query-tag reads and the investigation-wait tool, and central-store-only reads",
@@ -143,7 +143,7 @@ public sealed class DarlingMcpInstructionsBudgetTests
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
         Assert.Contains(
             $"This server exposes {served.Count} of its {catalog.Count} tools: `mcp.allowServerAdmin` is off, so the " +
-            $"{catalog.Count(DarlingMcpWritePolicy.IsServerAdmin)} tools that add, edit and remove monitored servers, switch agent actions, or make and revoke personal tokens, are not served; " +
+            $"{catalog.Count(DarlingMcpWritePolicy.IsServerAdmin)} tools that add, edit and remove monitored servers, switch agent actions, or make, revoke and list personal tokens, are not served; " +
             $"the {catalog.Count(DarlingMcpWritePolicy.IsInvestigation)} investigation tools stay off while `mcp.allowWrites` is on (one token " +
             $"cannot tell an agent from a person). {shared} are the same names Lite exposes. The remaining " +
             $"{served.Count - shared} are unique to Darling: {postgres} are the PostgreSQL reads (`get_pg_*`), plus Custom Views, " +

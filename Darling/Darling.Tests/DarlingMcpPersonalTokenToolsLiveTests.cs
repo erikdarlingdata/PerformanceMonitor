@@ -14,7 +14,9 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Protocol;
 using Npgsql;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
@@ -85,7 +87,8 @@ public sealed class DarlingMcpPersonalTokenToolsLiveTests : IClassFixture<Person
         }
     }
 
-    private static PersonalTokenSettings Settings(string adminRole = McpTokenEntry.OperatorRole, int cap = 5) => new(30, cap, adminRole, null);
+    private static PersonalTokenSettings Settings(string adminRole = McpTokenEntry.OperatorRole, int cap = 5, McpDataDetail? detail = null,
+        McpDataDetail serviceDetail = McpDataDetail.Full) => new(30, cap, adminRole, detail, serviceDetail);
 
     private static string KeyFor(string label) => DarlingWebSeat.ComputeOwnerKey("https://idp.example.test", label)!;
 
@@ -101,8 +104,19 @@ public sealed class DarlingMcpPersonalTokenToolsLiveTests : IClassFixture<Person
         return id;
     }
 
-    private static Task<string> MintAsync(Rig rig, string person, string name, int days = 7, string role = McpTokenEntry.ReaderRole, CancellationToken ct = default) =>
-        DarlingMcpPersonalTokenTools.MintAsync(rig.Source, rig.Seat, rig.Log, person, name, days, role, Caller, TimeProvider.System, ct);
+    private static Task<string> MintAsync(Rig rig, string person, string name, int days = 7, string role = McpTokenEntry.ReaderRole,
+        McpDataDetail callerDetail = McpDataDetail.Full, CancellationToken ct = default) =>
+        DarlingMcpPersonalTokenTools.MintAsync(rig.Source, rig.Seat, rig.Log, person, name, days, role, Caller, TimeProvider.System, callerDetail, ct);
+
+    /// <summary>The code of a refusal (its <c>status</c> is <c>refused</c>), else the status of an answer that is not one.</summary>
+    private static string? CodeOrStatus(string answer)
+    {
+        var body = JsonNode.Parse(answer)!;
+        return (string?)body["code"] ?? (string?)body["status"];
+    }
+
+    private static string WriteOutcome(string answer) =>
+        McpToolLatencyFilter.WriteOutcomeOf(new CallToolResult { Content = [new TextContentBlock { Text = answer }] });
 
     private static async Task<string> ScalarAsync(NpgsqlDataSource source, string sql, string? parameter, CancellationToken ct)
     {
@@ -199,14 +213,14 @@ public sealed class DarlingMcpPersonalTokenToolsLiveTests : IClassFixture<Person
 
         Assert.Equal("revoked", (string?)JsonNode.Parse(first)!["status"]);
         Assert.Equal(PersonalTokenOutcome.Dead, rig.Snapshot.Check(token, DateTimeOffset.UtcNow).Outcome);
-        Assert.Equal("not_found", (string?)JsonNode.Parse(second)!["status"]);
+        Assert.Equal("not_found", CodeOrStatus(second));
         Assert.DoesNotContain(rig.Log.Lines, line => line.Contains(token, StringComparison.Ordinal));
         var listed = JsonNode.Parse(await DarlingMcpPersonalTokenTools.ListAsync(rig.Seat, TimeProvider.System, ct))!["tokens"]!.AsArray()
             .Single(r => (string?)r!["id"] == id)!;
         Assert.Equal("revoked", (string?)listed["state"]);
         Assert.Equal(Caller, (string?)listed["revoked_by"]);
-        Assert.Equal("not_found", (string?)JsonNode.Parse(
-            await DarlingMcpPersonalTokenTools.RevokeAsync(rig.Seat, rig.Log, "not-a-token-id", Caller, TimeProvider.System, ct))!["status"]);
+        Assert.Equal("not_found", CodeOrStatus(
+            await DarlingMcpPersonalTokenTools.RevokeAsync(rig.Seat, rig.Log, "not-a-token-id", Caller, TimeProvider.System, ct)));
     }
 
     [Fact]
@@ -222,7 +236,7 @@ public sealed class DarlingMcpPersonalTokenToolsLiveTests : IClassFixture<Person
         var disabled = await AddPersonAsync(readerOnly.Source, "Gone Person", KeyFor("gone-person"), ct);
         Assert.True((await PersonDirectory.SetPersonEnabledAsync(readerOnly.Source, disabled, false, Admin, ServerActionSurfaces.Viewer, ct)).Succeeded);
 
-        async Task<string?> StatusOf(Task<string> call) => (string?)JsonNode.Parse(await call)!["status"];
+        async Task<string?> StatusOf(Task<string> call) => CodeOrStatus(await call);
 
         Assert.Equal("person_not_found", await StatusOf(MintAsync(readerOnly, "Nobody At All", "t1", ct: ct)));
         Assert.Equal("person_disabled", await StatusOf(MintAsync(readerOnly, "Gone Person", "t1", ct: ct)));
@@ -240,22 +254,97 @@ public sealed class DarlingMcpPersonalTokenToolsLiveTests : IClassFixture<Person
         Assert.Equal("1", await ScalarAsync(readerOnly.Source, "SELECT count(*) FROM config.mcp_personal_token WHERE owner_key = $1", key, ct));
     }
 
+    /* #9643: the service does not store a person's role, so this tool makes readers only, even when the settings let an admin's web page make operators. */
     [Fact]
-    public async Task Mint_OperatorRole_IsMadeWhenTheSettingsAllowIt_AndDuplicateNameIsRefused()
+    public async Task Mint_OperatorRole_IsRefusedEvenWhenTheSettingsAllowOperators_AndAReaderIsMade_AndDuplicateNameIsRefused()
     {
         var connectionString = _store.ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the personal token tool live tests.");
         var ct = TestContext.Current.CancellationToken;
         await using var rig = new Rig(connectionString!, Settings());
-        await AddPersonAsync(rig.Source, "Operator Person", KeyFor("operator-person"), ct);
+        var key = KeyFor("operator-person");
+        await AddPersonAsync(rig.Source, "Operator Person", key, ct);
 
-        var made = JsonNode.Parse(await MintAsync(rig, "Operator Person", "op", role: McpTokenEntry.OperatorRole, ct: ct))!;
+        var refused = JsonNode.Parse(await MintAsync(rig, "Operator Person", "op", role: McpTokenEntry.OperatorRole, ct: ct))!;
+        Assert.Equal("refused", (string?)refused["status"]);
+        Assert.Equal("role_not_allowed", (string?)refused["code"]);
+        Assert.Null(refused["token"]);
+        Assert.Equal("0", await ScalarAsync(rig.Source, "SELECT count(*) FROM config.mcp_personal_token WHERE owner_key = $1", key, ct));
+
+        var made = JsonNode.Parse(await MintAsync(rig, "Operator Person", "op", ct: ct))!;
         var again = JsonNode.Parse(await MintAsync(rig, "Operator Person", "op", ct: ct))!;
 
-        Assert.Equal("operator", (string?)made["record"]!["role"]);
-        Assert.Equal("operator", rig.Snapshot.Check((string)made["token"]!, DateTimeOffset.UtcNow).Row!.Role);
-        Assert.Equal("name_taken", (string?)again["status"]);
+        Assert.Equal("reader", (string?)made["record"]!["role"]);
+        Assert.Equal("reader", rig.Snapshot.Check((string)made["token"]!, DateTimeOffset.UtcNow).Row!.Role);
+        Assert.Equal("name_taken", (string?)again["code"]);
         Assert.Null(again["token"]);
+    }
+
+    /* #9643: a caller narrowed to metadataOnly cannot make a token that reads at the service's own level. */
+    [Fact]
+    public async Task Mint_ByACallerWhoseDataDetailIsStricterThanTheNewTokens_IsRefused_AndASameOrWiderCallerMakesIt()
+    {
+        var connectionString = _store.ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the personal token tool live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        var key = KeyFor("detail-person");
+        await using var open = new Rig(connectionString!, Settings());
+        await AddPersonAsync(open.Source, "Detail Person", key, ct);
+
+        var refused = await MintAsync(open, "Detail Person", "narrow", callerDetail: McpDataDetail.MetadataOnly, ct: ct);
+        Assert.Equal("data_detail_wider", CodeOrStatus(refused));
+        Assert.Equal("refused", (string?)JsonNode.Parse(refused)!["status"]);
+        Assert.Equal("0", await ScalarAsync(open.Source, "SELECT count(*) FROM config.mcp_personal_token WHERE owner_key = $1", key, ct));
+
+        Assert.Equal("data_detail_wider", CodeOrStatus(await MintAsync(open, "Detail Person", "mask", callerDetail: McpDataDetail.MaskLiterals, ct: ct)));
+        Assert.Equal("minted", CodeOrStatus(await MintAsync(open, "Detail Person", "full", callerDetail: McpDataDetail.Full, ct: ct)));
+
+        /* Tokens served at metadataOnly (by the personal setting, or because the whole service is), so the narrowed caller reads no less. */
+        await using var narrowTokens = new Rig(connectionString!, Settings(detail: McpDataDetail.MetadataOnly));
+        Assert.Equal("minted", CodeOrStatus(await MintAsync(narrowTokens, "Detail Person", "same", callerDetail: McpDataDetail.MetadataOnly, ct: ct)));
+        await using var narrowService = new Rig(connectionString!, Settings(serviceDetail: McpDataDetail.MetadataOnly));
+        Assert.Equal("minted", CodeOrStatus(await MintAsync(narrowService, "Detail Person", "service", callerDetail: McpDataDetail.MetadataOnly, ct: ct)));
+    }
+
+    /* #9643: the tool names a token's subject by the person's display name, the web page by the sign-in principal. A display name that is another
+       sign-in's subject is refused, and the person's own earlier tokens do not count as a clash. */
+    [Fact]
+    public async Task Mint_ForAPersonWhoseDisplayNameIsAnotherSignInsSubject_IsRefused()
+    {
+        var connectionString = _store.ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the personal token tool live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = new Rig(connectionString!, Settings());
+        var key = KeyFor("clash-person");
+        await AddPersonAsync(rig.Source, "Clash Person", key, ct);
+        var other = PersonalTokenFormat.Mint();
+        await PersonalTokenStore.InsertAsync(rig.Source, other.TokenId, other.SecretSha256, KeyFor("someone-else"), "Clash Person", "web-made", McpTokenEntry.ReaderRole,
+            DateTimeOffset.UtcNow, 7, 5, Caller, ct);
+
+        Assert.Equal("subject_clash", CodeOrStatus(await MintAsync(rig, "Clash Person", "t1", ct: ct)));
+        Assert.Equal("0", await ScalarAsync(rig.Source, "SELECT count(*) FROM config.mcp_personal_token WHERE owner_key = $1", key, ct));
+
+        var own = PersonalTokenFormat.Mint();
+        await PersonalTokenStore.InsertAsync(rig.Source, own.TokenId, own.SecretSha256, KeyFor("own-person"), "Own Person", "first", McpTokenEntry.ReaderRole,
+            DateTimeOffset.UtcNow, 7, 5, Caller, ct);
+        await AddPersonAsync(rig.Source, "Own Person", KeyFor("own-person"), ct);
+        Assert.Equal("minted", CodeOrStatus(await MintAsync(rig, "Own Person", "second", ct: ct)));
+    }
+
+    /* #9643: the write log reads a refusal as refused, which needs the answer's status to say so. */
+    [Fact]
+    public async Task EveryRefusal_AnswersStatusRefused_SoTheWriteLogCallsItRefused_AndAMintIsCompleted()
+    {
+        var connectionString = _store.ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the personal token tool live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = new Rig(connectionString!, Settings());
+        await AddPersonAsync(rig.Source, "Outcome Person", KeyFor("outcome-person"), ct);
+
+        Assert.Equal("refused", WriteOutcome(await MintAsync(rig, "Outcome Person", "web", ct: ct)));
+        Assert.Equal("refused", WriteOutcome(await MintAsync(rig, "Nobody At All", "t1", ct: ct)));
+        Assert.Equal("refused", WriteOutcome(await DarlingMcpPersonalTokenTools.RevokeAsync(rig.Seat, rig.Log, "not-a-token-id", Caller, TimeProvider.System, ct)));
+        Assert.Equal("completed", WriteOutcome(await MintAsync(rig, "Outcome Person", "ok", ct: ct)));
     }
 
     [Fact]
@@ -267,10 +356,10 @@ public sealed class DarlingMcpPersonalTokenToolsLiveTests : IClassFixture<Person
         await using var rig = new Rig(connectionString!, settings: null);
         await AddPersonAsync(rig.Source, "Off Person", KeyFor("off-person"), ct);
 
-        Assert.Equal("not_served", (string?)JsonNode.Parse(await MintAsync(rig, "Off Person", "t1", ct: ct))!["status"]);
-        Assert.Equal("not_served", (string?)JsonNode.Parse(
-            await DarlingMcpPersonalTokenTools.RevokeAsync(rig.Seat, rig.Log, "pt_" + new string('a', 20), Caller, TimeProvider.System, ct))!["status"]);
-        Assert.Equal("not_served", (string?)JsonNode.Parse(await DarlingMcpPersonalTokenTools.ListAsync(rig.Seat, TimeProvider.System, ct))!["status"]);
+        Assert.Equal("not_served", CodeOrStatus(await MintAsync(rig, "Off Person", "t1", ct: ct)));
+        Assert.Equal("not_served", CodeOrStatus(
+            await DarlingMcpPersonalTokenTools.RevokeAsync(rig.Seat, rig.Log, "pt_" + new string('a', 20), Caller, TimeProvider.System, ct)));
+        Assert.Equal("not_served", CodeOrStatus(await DarlingMcpPersonalTokenTools.ListAsync(rig.Seat, TimeProvider.System, ct)));
         Assert.Equal("0", await ScalarAsync(rig.Source, "SELECT count(*) FROM config.mcp_personal_token WHERE owner_key = $1", KeyFor("off-person"), ct));
     }
 }

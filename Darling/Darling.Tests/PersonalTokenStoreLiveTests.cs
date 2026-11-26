@@ -315,12 +315,29 @@ public sealed class PersonalTokenStoreLiveTests : IClassFixture<PersonalTokenSto
         Assert.Equal(Actor, await ScalarAsync(connection, "SELECT actor FROM config.investigation_journal WHERE event = 'mcp_personal_token_created'", ct));
         var detailText = await ScalarAsync(connection, "SELECT detail::text FROM config.investigation_journal WHERE event = 'mcp_personal_token_created'", ct);
         var detail = JsonNode.Parse(detailText)!.AsObject();
-        Assert.Equal(["reason", "role", "token_id", "token_name"], detail.Select(p => p.Key).Order(StringComparer.Ordinal).ToArray());
+        Assert.Equal(["owner_key", "reason", "role", "subject", "token_id", "token_name"], detail.Select(p => p.Key).Order(StringComparer.Ordinal).ToArray());
         Assert.Equal(minted.TokenId, (string?)detail["token_id"]);
         Assert.Equal("laptop", (string?)detail["token_name"]);
         Assert.Equal("operator", (string?)detail["role"]);
+        /* #9643: the row names whose token it is. */
+        Assert.Equal("s", (string?)detail["subject"]);
+        Assert.Equal("k1", (string?)detail["owner_key"]);
         Assert.DoesNotContain(minted.Value, detailText, StringComparison.Ordinal);
         Assert.DoesNotContain(Convert.ToHexString(minted.SecretSha256), detailText, StringComparison.OrdinalIgnoreCase);
+    });
+
+    [Fact]
+    public Task Revoke_JournalRowNamesWhoseTokenItWas() => WithStoreAsync(async (connection, owner, ct) =>
+    {
+        var now = DateTimeOffset.UtcNow;
+        var minted = PersonalTokenFormat.Mint();
+        await PersonalTokenStore.InsertAsync(owner, minted.TokenId, minted.SecretSha256, "k9", "Jo Person", "laptop", "reader", now, 30, 5, Actor, ct);
+        Assert.True(await PersonalTokenStore.RevokeAsync(owner, minted.TokenId, null, null, "owner", "admin", Actor, now.AddMinutes(1), ct));
+        var detail = JsonNode.Parse(await ScalarAsync(connection,
+            "SELECT detail::text FROM config.investigation_journal WHERE event = 'mcp_personal_token_revoked'", ct))!.AsObject();
+        Assert.Equal("Jo Person", (string?)detail["subject"]);
+        Assert.Equal("k9", (string?)detail["owner_key"]);
+        Assert.Equal(minted.TokenId, (string?)detail["token_id"]);
     });
 
     [Fact]

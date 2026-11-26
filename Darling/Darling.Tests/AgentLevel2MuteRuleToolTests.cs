@@ -101,7 +101,7 @@ public sealed class AgentLevel2ToolPolicyTests
         var writes = catalog.Count(n => DarlingMcpWritePolicy.IsWrite(n) && !DarlingMcpWritePolicy.IsServerAdmin(n));
         var admin = catalog.Count(DarlingMcpWritePolicy.IsServerAdmin);
         var text = DarlingMcpInstructions.Build(DarlingPeerDirectory.Snapshot.Empty, catalog, served);
-        Assert.Contains($"the write tools are off, so the {writes + admin - ActionTools.Length - DarlingMcpWritePolicy.ChangeWindowTools.Count} that change monitoring configuration are not served", text, StringComparison.Ordinal);
+        Assert.Contains($"the write tools are off, so the {writes + admin - ActionTools.Length - DarlingMcpWritePolicy.ChangeWindowTools.Count} that change monitoring configuration or list personal tokens are not served", text, StringComparison.Ordinal);
         Assert.Contains($"the {ActionTools.Length} mute, custom-rule, threshold override, signature merge, plan force, plan evict, session kill, recompile and plan guide tools are served only to an agent with an `agent_action` (Level 2; the last five listed need Level 3 and the server's own switch), except the four mute rule tools, which an agent token (named, or the unnamed one under `mcp.allowInvestigations`) may also call without one for {DarlingMcpInstructions.DirectMuteLimits} (reason and expires_at required)", text, StringComparison.Ordinal);
     }
 

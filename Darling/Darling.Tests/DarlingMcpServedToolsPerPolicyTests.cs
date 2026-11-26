@@ -250,7 +250,7 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
         "get_people 11111 FanOut",
         "get_perfmon_stats 11111 FanOut server_name",
         "get_perfmon_trend 11111 FanOut server_name",
-        "get_personal_tokens 11111 FanOut",
+        "get_personal_tokens 00100 StoreRequired",
         "get_pg_autovacuum_health 11111 FanOut server_name",
         "get_pg_blocking 11111 FanOut server_name",
         "get_pg_buffer_usage 11111 FanOut server_name",

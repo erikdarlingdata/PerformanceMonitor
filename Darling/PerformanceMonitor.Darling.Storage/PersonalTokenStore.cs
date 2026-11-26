@@ -87,25 +87,25 @@ SET revoked_at = $2,
     revoked_by = CASE WHEN owner_key = $4 THEN $5 ELSE $6 END,
     revoke_reason = CASE WHEN owner_key = $4 THEN $7 ELSE $8 END
 WHERE token_id = $1 AND revoked_at IS NULL AND expires_at > $2 AND ($3::text IS NULL OR owner_key = $3)
-RETURNING token_name, role, revoke_reason";
+RETURNING token_name, role, revoke_reason, subject, owner_key";
 
     private const string RevokeForOwnerSql = @"
 UPDATE config.mcp_personal_token
 SET revoked_at = $2, revoked_by = $3, revoke_reason = $4
 WHERE owner_key = $1 AND revoked_at IS NULL AND expires_at > $2 AND ($5 = false OR role = 'operator')
-RETURNING token_id, token_name, role";
+RETURNING token_id, token_name, role, subject, owner_key";
 
     private const string RevokeOperatorsSql = @"
 UPDATE config.mcp_personal_token
 SET revoked_at = $1, revoked_by = $2, revoke_reason = $3
 WHERE revoked_at IS NULL AND expires_at > $1 AND role = 'operator'
-RETURNING token_id, token_name, role";
+RETURNING token_id, token_name, role, subject, owner_key";
 
     private const string CutExpirySql = @"
 UPDATE config.mcp_personal_token
 SET expires_at = created_at + make_interval(hours => 24 * $2)
 WHERE revoked_at IS NULL AND expires_at > $1 AND expires_at > created_at + make_interval(hours => 24 * $2)
-RETURNING token_id, token_name, role";
+RETURNING token_id, token_name, role, subject, owner_key";
 
     private const string TouchSql = @"
 UPDATE config.mcp_personal_token AS t
@@ -192,7 +192,7 @@ WHERE t.token_id = v.token_id";
                 await command.ExecuteNonQueryAsync(ct);
             }
 
-            await JournalAsync(connection, transaction, PersonalTokenEvents.Created, actor, tokenId, tokenName, role, null, ct);
+            await JournalAsync(connection, transaction, PersonalTokenEvents.Created, actor, tokenId, tokenName, role, null, subject, ownerKey, ct);
             return (PersonalTokenCreateOutcome.Created, true);
         }, ct);
     }
@@ -256,7 +256,7 @@ WHERE t.token_id = v.token_id";
         ArgumentNullException.ThrowIfNull(owner);
         return await RunAsync(owner, actor, async (connection, transaction) =>
         {
-            string name, role, reason;
+            string name, role, reason, subject, ownerKey;
             await using (var command = Command(connection, transaction, RevokeSql, Text(tokenId), Time(now.ToUniversalTime()), NullableText(requiredOwnerKey),
                 NullableText(callerOwnerKey), Text(ownerRevokedBy), Text(adminRevokedBy), Text(RevokedByOwnerReason), Text(RevokedByAdminReason)))
             await using (var reader = await command.ExecuteReaderAsync(ct))
@@ -269,9 +269,11 @@ WHERE t.token_id = v.token_id";
                 name = reader.GetString(0);
                 role = reader.GetString(1);
                 reason = reader.GetString(2);
+                subject = reader.GetString(3);
+                ownerKey = reader.GetString(4);
             }
 
-            await JournalAsync(connection, transaction, PersonalTokenEvents.Revoked, actor, tokenId, name, role, reason, ct);
+            await JournalAsync(connection, transaction, PersonalTokenEvents.Revoked, actor, tokenId, name, role, reason, subject, ownerKey, ct);
             return (true, true);
         }, ct);
     }
@@ -286,20 +288,20 @@ WHERE t.token_id = v.token_id";
         ArgumentNullException.ThrowIfNull(owner);
         return await RunAsync(owner, revokedBy, async (connection, transaction) =>
         {
-            var revoked = new List<(string Id, string Name, string Role)>();
+            var revoked = new List<(string Id, string Name, string Role, string Subject, string OwnerKey)>();
             await using (var command = Command(connection, transaction, RevokeForOwnerSql, Text(ownerKey), Time(now.ToUniversalTime()), Text(revokedBy), Text(reason),
                 new NpgsqlParameter<bool> { TypedValue = operatorOnly, NpgsqlDbType = NpgsqlDbType.Boolean }))
             await using (var reader = await command.ExecuteReaderAsync(ct))
             {
                 while (await reader.ReadAsync(ct))
                 {
-                    revoked.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+                    revoked.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)));
                 }
             }
 
-            foreach (var (id, name, role) in revoked)
+            foreach (var (id, name, role, subject, ownerKey) in revoked)
             {
-                await JournalAsync(connection, transaction, PersonalTokenEvents.Revoked, revokedBy, id, name, role, reason, ct);
+                await JournalAsync(connection, transaction, PersonalTokenEvents.Revoked, revokedBy, id, name, role, reason, subject, ownerKey, ct);
             }
 
             return (revoked.Count, revoked.Count > 0);
@@ -321,37 +323,37 @@ WHERE t.token_id = v.token_id";
         {
             await EnsureTableAsync(connection, transaction, ct);
             var utcNow = now.ToUniversalTime();
-            var revoked = new List<(string Id, string Name, string Role)>();
+            var revoked = new List<(string Id, string Name, string Role, string Subject, string OwnerKey)>();
             if (!operatorAllowed)
             {
                 await using var command = Command(connection, transaction, RevokeOperatorsSql, Time(utcNow), Text(actor), Text(OperatorsDisabledReason));
                 await using var reader = await command.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
                 {
-                    revoked.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+                    revoked.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)));
                 }
             }
 
-            foreach (var (id, name, role) in revoked)
+            foreach (var (id, name, role, subject, ownerKey) in revoked)
             {
-                await JournalAsync(connection, transaction, PersonalTokenEvents.Revoked, actor, id, name, role, OperatorsDisabledReason, ct);
+                await JournalAsync(connection, transaction, PersonalTokenEvents.Revoked, actor, id, name, role, OperatorsDisabledReason, subject, ownerKey, ct);
             }
 
-            var cut = new List<(string Id, string Name, string Role)>();
+            var cut = new List<(string Id, string Name, string Role, string Subject, string OwnerKey)>();
             await using (var command = Command(connection, transaction, CutExpirySql, Time(utcNow),
                 new NpgsqlParameter<int> { TypedValue = maxLifetimeDays, NpgsqlDbType = NpgsqlDbType.Integer }))
             await using (var reader = await command.ExecuteReaderAsync(ct))
             {
                 while (await reader.ReadAsync(ct))
                 {
-                    cut.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+                    cut.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)));
                 }
             }
 
             var cutReason = "max_lifetime_days=" + maxLifetimeDays.ToString(CultureInfo.InvariantCulture);
-            foreach (var (id, name, role) in cut)
+            foreach (var (id, name, role, subject, ownerKey) in cut)
             {
-                await JournalAsync(connection, transaction, PersonalTokenEvents.ExpiryCut, actor, id, name, role, cutReason, ct);
+                await JournalAsync(connection, transaction, PersonalTokenEvents.ExpiryCut, actor, id, name, role, cutReason, subject, ownerKey, ct);
             }
 
             return ((revoked.Count, cut.Count), revoked.Count + cut.Count > 0);
@@ -419,9 +421,14 @@ WHERE t.token_id = v.token_id";
     }
 
     private static async Task JournalAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, string journalEvent, string actor,
-        string tokenId, string tokenName, string role, string? reason, CancellationToken ct)
+        string tokenId, string tokenName, string role, string? reason, string subject, string ownerKey, CancellationToken ct)
     {
-        var detail = new JsonObject { ["token_id"] = tokenId, ["token_name"] = tokenName, ["role"] = role, ["reason"] = reason };
+        /* #9643: the row says whose token it is. The subject (the name the person is shown by) and the owner key (the sign-in the token acts as)
+           are not secrets, and without them a token name alone cannot be traced to a person. */
+        var detail = new JsonObject
+        {
+            ["token_id"] = tokenId, ["token_name"] = tokenName, ["role"] = role, ["reason"] = reason, ["subject"] = subject, ["owner_key"] = ownerKey,
+        };
         await using var command = Command(connection, transaction, PersonDirectory.JournalSql,
             new NpgsqlParameter<int?> { TypedValue = null, NpgsqlDbType = NpgsqlDbType.Integer }, Text(journalEvent), Text(actor), Text(detail.ToJsonString()));
         await command.ExecuteScalarAsync(ct);
