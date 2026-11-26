@@ -86,6 +86,8 @@ public sealed class McpServerRegistryTools
         "only \"sqlserver\" (Lite monitors SQL Server only, so Darling's port, aws_role_arn, aws_external_id and query_store_replica are not read). " +
         "The password travels to this endpoint in the request. Returns {status:\"ok\", requested, added, updated, results:[{server, host, database, " +
         "status:\"added\"|\"updated\"}]}, or {status:\"refused\", message, requested, added, updated} (added and updated count what stayed saved, and are 0 when nothing was). " +
+        "An entry key this tool does not read (name for display_name, a misspelt key, or one of Darling's) is dropped and the entry is still processed: a saved row adds " +
+        "ignored_keys:[{key, did_you_mean}] (key names only; did_you_mean is the key it reads that was likely meant, or null), and a refusal message names them. " +
         "An entry with Windows authentication (the default) and trust_server_certificate true or encrypt_mode Optional is refused before any connection is tried, as " +
         "{status:\"invalid\", message (naming each such entry), hints:{parameter:\"servers_json\"}} with nothing saved: Windows authentication would present Lite's own Windows account " +
         "to a host the connection does not verify. Use auth \"SQL\", or leave trust_server_certificate false and use encrypt_mode Mandatory or Strict; " +
@@ -143,7 +145,7 @@ public sealed class McpServerRegistryTools
 
         if (unverified.Count > 0)
         {
-            return McpHelpers.Refusal("servers_json", string.Join(" ", unverified) + " Nothing was saved.");
+            return McpHelpers.Refusal("servers_json", string.Join(" ", unverified.Concat(AddServerCommand.UnreadNotes(entries))) + " Nothing was saved.");
         }
 
         var hostFolder = Path.Combine(
@@ -161,6 +163,12 @@ public sealed class McpServerRegistryTools
         var exit = await AddServerCommand.SaveEntriesAsync(entries, errors, env, saved);
         if (exit != AddServerCommand.ExitAdded)
         {
+            /* #9780: a key the parse did not read can be why the entry was refused (a misspelt trust_server_certificate), so the refusal names it. */
+            foreach (var note in AddServerCommand.UnreadNotes(entries))
+            {
+                errors.WriteLine(note);
+            }
+
             /* The entries saved before a failed write stay saved (AddServerCommand's live undo), so the list may have changed. */
             if (saved.Count > 0)
             {
@@ -185,9 +193,32 @@ public sealed class McpServerRegistryTools
             requested = entries.Count,
             added = saved.Count(row => !row.Updated),
             updated = saved.Count(row => row.Updated),
-            results = saved.Select(row => new { server = row.DisplayName, host = row.Host, database = row.Database, status = row.Updated ? "updated" : "added" }),
+            results = saved.Select(ResultRow),
             note = "A password is stored for the Windows account Lite runs as and is never returned. The new server is collected from the next collection pass.",
         }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// One saved entry of the answer's <c>results</c>. An entry whose keys the parse did not all read carries <c>ignored_keys</c> (#9780):
+    /// <c>[{key, did_you_mean}]</c>, each a key name and the key the parse reads that it most likely meant (null when none is near). A clean entry has no
+    /// such field. Names only, never a value.
+    /// </summary>
+    private static object ResultRow(AddServerCommand.Saved row)
+    {
+        var status = row.Updated ? "updated" : "added";
+        if (row.UnreadKeys is not { Count: > 0 } keys)
+        {
+            return new { server = row.DisplayName, host = row.Host, database = row.Database, status };
+        }
+
+        return new
+        {
+            server = row.DisplayName,
+            host = row.Host,
+            database = row.Database,
+            status,
+            ignored_keys = keys.Select(k => new { key = k.Key, did_you_mean = k.DidYouMean }),
+        };
     }
 
     /// <summary>The command's messages talk about stdin, where a client passed the argument.</summary>

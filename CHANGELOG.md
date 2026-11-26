@@ -98,6 +98,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Lite's MCP server gains `update_alert_settings`** ([#9658])
 - **The exporter's `run` command uploads to S3-compatible stores and Azure Blob Storage** ([#9647])
 - **A Linux systemd install page** ([#9712], [#9719])
+- **`--set-login-password` saves one login's password again for every server that uses it** ([#9748])
 
 ### Changed
 
@@ -238,6 +239,14 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **A new install's logs no longer read like a store in trouble** ([#9715])
 - **Self-hosted PostgreSQL log readers ask for EXECUTE on the read functions, not `pg_read_server_files`** ([#9727])
 - **The exporter can send 20 more store tables, among them `query_snapshots`, `waiting_tasks`, `object_usage_snapshots` and the query tag tables** ([#9736])
+- **Lite `--add-server` tests every entry and reports every refusal with its number and host** ([#9756])
+- **Lite names its full version at start and logs one line for each update check outcome** ([#9758])
+- **Darling signs in at start with the custom alert evaluator's configured login and names it in the ready line** ([#9763])
+- **A missing or mismatched password key names the folder it was looked for in, and Darling `--add-server` takes `--port`** ([#9775])
+- **A saved password this host cannot open logs one Error that says it keeps failing until fixed** ([#9777])
+- **Lite's and the Darling Viewer's log files indent continuation lines and write control characters as dots** ([#9781])
+- **Lite says in its log why a server is left out of FinOps and which servers the Scheduler skips** ([#9782])
+- **`add_servers` and `--add-server` name each key they do not read, with the key that was likely meant** ([#9785])
 
 ### Fixed
 
@@ -307,6 +316,18 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Lite and the Viewer come back from the tray, or a second launch, in the state they had before they were minimized** ([#9737])
 - **The Lite guide and the missing-password warning say a Do not store password task reads saved passwords only while its user is signed in** ([#9739])
 - **The Linux docs cover the unit check on upgrade, journal levels and the pg_dump warning, and a key folder failure names the container variable** ([#9738])
+- **The alert docs say a Teams webhook comes from Workflows** ([#9612])
+- **The agent dispatch page states which Level 3 actions need approval and which can be undone** ([#9649])
+- **The Linux file log writes its buffered lines when the host stops** ([#9754])
+- **A refused blocked process threshold change is logged once per server with its platform remedy** ([#9755])
+- **A fresh Lite install no longer migrates its schedule file on the first start** ([#9757])
+- **The Lite headless docs cover a PowerShell scheduled task, `--add-server` with no desktop, the AWS RDS certificate and a download check** ([#9759])
+- **The Linux docs cover a pg_dump password file, the CREATEROLE owner, a copy of the role script, a quiet run and a settings compare on upgrade** ([#9764])
+- **The Linux upgrade by hand steps remove an old rollback copy, compare the unit and give a local pg_dump line** ([#9767])
+- **Lite keeps a `servers.json` it cannot read as a rejected copy and never writes an empty list over it** ([#9770])
+- **The Lite guide covers upgrading, rolling back and checking the build of a headless portable install** ([#9771])
+- **The Darling install pages say to download each release into its own folder** ([#9774])
+- **`--add-server` reads a piped password with the strict reader `--set-login-password` uses** ([#9784])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8485,6 +8506,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9600]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9600
 [#9609]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9609
 [#9610]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9610
+[#9612]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9612
 [#9619]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9619
 [#9620]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9620
 [#9621]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9621
@@ -8498,6 +8520,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9645]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9645
 [#9646]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9646
 [#9647]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9647
+[#9649]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9649
 [#9650]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9650
 [#9653]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9653
 [#9654]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9654
@@ -8540,3 +8563,22 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9737]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9737
 [#9738]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9738
 [#9739]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9739
+[#9748]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9748
+[#9754]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9754
+[#9755]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9755
+[#9756]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9756
+[#9757]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9757
+[#9758]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9758
+[#9759]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9759
+[#9763]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9763
+[#9764]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9764
+[#9767]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9767
+[#9770]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9770
+[#9771]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9771
+[#9774]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9774
+[#9775]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9775
+[#9777]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9777
+[#9781]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9781
+[#9782]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9782
+[#9784]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9784
+[#9785]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9785
