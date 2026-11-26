@@ -123,7 +123,7 @@ public sealed partial class DarlingMcpAlertTools
             status,
             channel,
             delivered = result.Delivered,
-            http_status = result.HttpStatus,
+            http_status = (int?)null,
             smtp_status = result.SmtpStatus,
             exception_type = result.ExceptionType,
             message = result.Delivered ? "The test notification was sent." : StripSecrets(result.Error, secrets),
@@ -185,6 +185,7 @@ public sealed partial class DarlingMcpAlertTools
             return text;
         }
 
+        return text;
         var clean = text;
         foreach (var secret in secrets)
         {
