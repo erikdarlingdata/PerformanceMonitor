@@ -1012,9 +1012,17 @@ public class ScheduleManager
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Failed to load collection_schedule.json, attempting backup restore");
+            /* #9772: the file exists and could not be read as a schedule config. The user's copy is kept before anything can
+               write collection_schedule.json: the next save writes the schedules Lite is running on over it, and a fresh start
+               with no usable backup runs on the default schedules. collection_schedule.json itself is never written here (not
+               by the load, and not by the delta-cadence clamp on a restored backup), so a file the user can still fix by hand
+               is not replaced by the defaults. A successful read that upgrades a v1 file is not a rejected read and is saved
+               in the try block above. */
+            var keptCopy = RejectedConfigCopy.Keep(_schedulePath);
 
-            /* Try to restore from backup */
+            _defaultSchedule = GetDefaultSchedules();
+            _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
+            var runningOn = "the default schedules (there is no collection_schedule.json.bak)";
             var bakPath = _schedulePath + ".bak";
             if (File.Exists(bakPath))
             {
@@ -1023,24 +1031,29 @@ public class ScheduleManager
                     string bakJson = File.ReadAllText(bakPath);
                     if (TryLoadV2(bakJson))
                     {
-                        _logger?.LogInformation("Restored schedules from backup file");
-                        SanitizeDeltaFrequencies();
-                        return;
+                        runningOn = $"the {_defaultSchedule.Count} default collectors and {_serverOverrides.Count} server override(s) in collection_schedule.json.bak";
+                    }
+                    else
+                    {
+                        var bakConfig = JsonSerializer.Deserialize<ScheduleConfigV1>(bakJson);
+                        _defaultSchedule = bakConfig?.Collectors ?? GetDefaultSchedules();
+                        _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
+                        runningOn = $"the {_defaultSchedule.Count} collectors in collection_schedule.json.bak (v1 format)";
                     }
 
-                    var bakConfig = JsonSerializer.Deserialize<ScheduleConfigV1>(bakJson);
-                    _defaultSchedule = bakConfig?.Collectors ?? GetDefaultSchedules();
-                    _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
-                    _logger?.LogInformation("Restored v1 schedules from backup file");
-                    SanitizeDeltaFrequencies();
-                    return;
+                    SanitizeDeltaFrequencies(save: false);
                 }
-                catch { /* backup also corrupt, fall through to defaults */ }
+                catch (Exception bakEx)
+                {
+                    _defaultSchedule = GetDefaultSchedules();
+                    _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
+                    runningOn = $"the default schedules (collection_schedule.json.bak could not be read either: {bakEx.GetType().Name})";
+                }
             }
 
-            _defaultSchedule = GetDefaultSchedules();
-            _serverOverrides = new Dictionary<string, ServerScheduleOverride>();
-            SaveSchedules();
+            _logger?.LogWarning(
+                "Lite could not read {File}: {Error} (JSON path {JsonPath}). Lite is running on {RunningOn}. The rejected file is kept as {KeptCopy}, and collection_schedule.json is left as it is until the next save.",
+                _schedulePath, $"{ex.GetType().Name}: {ex.Message}", (ex as JsonException)?.Path ?? "none", runningOn, keptCopy);
         }
     }
 
@@ -1176,9 +1189,10 @@ public class ScheduleManager
     /// write APIs refuse such a cadence, but a hand-edited or pre-fix collection_schedule.json can still
     /// carry one, and honoring it would fabricate permanent quiet (every cycle past the gap policy
     /// re-baselines and stores a zero delta). Load-time has no user to bounce the value back to, so it
-    /// clamps and logs instead of refusing. Saves when anything changed.
+    /// clamps and logs instead of refusing. Saves when anything changed and <paramref name="save"/> is set; the load of a
+    /// rejected file clamps the backup in memory without saving, so the user's file is not written (#9772).
     /// </summary>
-    private void SanitizeDeltaFrequencies()
+    private void SanitizeDeltaFrequencies(bool save = true)
     {
         var changed = false;
 
@@ -1205,7 +1219,7 @@ public class ScheduleManager
             }
         }
 
-        if (changed)
+        if (changed && save)
         {
             SaveSchedules();
         }

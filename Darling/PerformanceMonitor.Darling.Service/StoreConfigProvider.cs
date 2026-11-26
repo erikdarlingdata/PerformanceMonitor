@@ -2073,7 +2073,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                ordinary state and resolves to the parent row exactly. */
             var routes = await ReadNotificationRoutesAsync(connection, _logger, cancellationToken);
 
-            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins, waiting);
+            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins, pinsWaiting: waiting);
 
             /* #6583: a SQL Server registry row that holds a port, which is ignored. Once per change in the warnings, not once per reload. */
             var portWarnings = SqlServerPortAdvice.Warnings(servers);
@@ -2607,7 +2607,7 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
     /// that has no worker behind it leaves it false, so an old-format password with no pin is a refusal that needs an operator.</summary>
     internal static async Task<IReadOnlyList<MonitoredServer>> ReadMonitoredServersAsync(
         NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct,
-        IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>? pins = null, bool pinsWaiting = false)
+        IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>? pins = null, ISet<int>? disabledServerIds = null, bool pinsWaiting = false)
     {
         pins ??= await ReadLegacyPinsAsync(connection, ct);
         var servers = new List<MonitoredServer>();
@@ -2620,13 +2620,21 @@ SELECT name, host, database, auth, username, encrypted_password, encrypt_mode, t
        read_only_intent, multi_subnet_failover, excluded_databases, monthly_cost_usd, alert_delivery_mode_override,
        engine, port, server_id, plan_force_bot_enabled, remediation_username, remediation_encrypted_password,
        aws_role_arn, aws_external_id, hypothetical_index_username, hypothetical_index_encrypted_password,
-       query_store_replica, capture_plans, xe_session_databases
-FROM config_monitored_servers WHERE is_enabled = TRUE
+       query_store_replica, capture_plans, xe_session_databases, is_enabled
+FROM config_monitored_servers WHERE is_enabled = TRUE OR $1
 ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoopSeconds };
+        /* Only a caller that hands in a set (--set-login-password, #9689) gets the disabled rows, and its set names them. The
+           service and every other caller read the enabled servers alone. */
+        command.Parameters.AddWithValue(disabledServerIds is not null);
         using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            servers.Add(BuildServerFromRow(reader, bootstrap));
+            var server = BuildServerFromRow(reader, bootstrap);
+            servers.Add(server);
+            if (!reader.GetBoolean(26))
+            {
+                disabledServerIds?.Add(server.ServerId);
+            }
         }
 
         /* #5366: the pins taken when this service was upgraded, matched to each server by id and slot. */
