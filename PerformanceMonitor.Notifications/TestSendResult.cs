@@ -24,6 +24,6 @@ public sealed record TestSendResult(
     bool NotConfigured = false)
 {
     /// <summary>A send that went nowhere: the channel is not set up, or the values it needs did not pass the checks a real send makes.</summary>
-    public static TestSendResult Refused(string error, bool notConfigured = false) =>
+    public static TestSendResult Refused(string? error, bool notConfigured = false) =>
         new(false, null, error, null, NotConfigured: notConfigured);
 }
