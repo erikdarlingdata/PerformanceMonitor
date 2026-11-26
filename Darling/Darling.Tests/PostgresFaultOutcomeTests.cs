@@ -121,12 +121,14 @@ public class PostgresFaultOutcomeTests
     /// names the setting and the two fixes instead of sending the operator after grants the login may already hold.
     /// </summary>
     [Theory]
-    [InlineData("pg_deadlocks")]
-    [InlineData("pg_plan_capture")]
-    public void ARelativeLogDirectoryOutsideTheDataDirectory_NamesTheSetting_NotTheExecuteGrant(string collectorName)
+    [InlineData("pg_deadlocks", "path must be in or below the data directory")]
+    [InlineData("pg_plan_capture", "path must be in or below the data directory")]
+    [InlineData("pg_deadlocks", "path must be in or below the current directory")]
+    [InlineData("pg_plan_capture", "path must be in or below the current directory")]
+    public void ARelativeLogDirectoryOutsideTheDataDirectory_NamesTheSetting_NotTheExecuteGrant(string collectorName, string refusal)
     {
-        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(
-            Pg("42501", "path must be in or below the data directory"), collectorName, "appdb");
+        /* PostgreSQL 16 says "data directory" and PostgreSQL 13 says "current directory", both measured. */
+        var (status, explanation) = DarlingWorker.PostgresFaultOutcome(Pg("42501", refusal), collectorName, "appdb");
 
         Assert.Equal("PERMISSIONS", status);
         Assert.Contains("log_directory is a relative path that leads out of the data directory", explanation, StringComparison.Ordinal);

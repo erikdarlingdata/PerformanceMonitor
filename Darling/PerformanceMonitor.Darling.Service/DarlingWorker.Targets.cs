@@ -2247,6 +2247,11 @@ LIMIT 1";
         => CollectorCatalog.Find(collectorName)?.RunsPerDatabase(
             new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql }) == true;
 
+    /// <summary>The start of the words PostgreSQL's file read refuses a relative path outside the data directory with
+    /// (genfile.c), for a role without pg_read_server_files: "path must be in or below the data directory" on PostgreSQL 16,
+    /// "path must be in or below the current directory" on PostgreSQL 13, both measured. A target can run either.</summary>
+    internal const string TargetLogRelativePathRefusalPrefix = "path must be in or below the ";
+
     /// <summary>
     /// The self-hosted log readers (#3239; three since #3601). Their dispatch entries send Aurora and RDS to
     /// the log-API ingestors, so a target-side PostgresException under any of the names comes from the
@@ -2254,10 +2259,6 @@ LIMIT 1";
     /// Consulted by two arms: the 42501 grant-pair sentence (#3239) and the 58P01 missing-file sentence
     /// (#3410), which is why it names the ROUTE rather than either fault.
     /// </summary>
-    /// <summary>The words PostgreSQL's file read refuses a relative path outside the data directory with (genfile.c), for a
-    /// role without pg_read_server_files.</summary>
-    internal const string RelativePathOutsideDataDirectoryRefusal = "path must be in or below the data directory";
-
     private static bool ReadsServerLogWithPgReadFile(string collectorName)
         => collectorName is "pg_deadlocks" or "pg_plan_capture" or "pg_log_events";
 
@@ -2627,7 +2628,7 @@ LIMIT 1";
                that leads out of the data directory (genfile.c's "path must be in or below the data
                directory"), and it gets its own arm. */
             CollectorTargetFault.Permissions when ReadsServerLogWithPgReadFile(collectorName)
-                && ex.MessageText.Contains(RelativePathOutsideDataDirectoryRefusal, StringComparison.Ordinal) => ("PERMISSIONS",
+                && ex.MessageText.Contains(TargetLogRelativePathRefusalPrefix, StringComparison.Ordinal) => ("PERMISSIONS",
                 $"{ex.MessageText} (SQLSTATE {ex.SqlState}): this collector reads the server log under "
                 + "log_directory, and on this server log_directory is a relative path that leads out of the "
                 + "data directory. PostgreSQL reads a file there only for a role that holds "
