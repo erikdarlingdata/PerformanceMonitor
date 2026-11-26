@@ -169,11 +169,11 @@ public sealed partial class DarlingMcpServerAdminTools
     [McpServerTool(Name = "edit_server"), Description(
         "Edits one monitored server's settings in place, no confirm step: name, address, database, authentication, " +
         "TLS, cost, plan capture or alert delivery. The server keeps its id, tags and history. A change to how it is reached is " +
-        "probed first and saved only if the server answers; the service applies it within one sweep. Engine, " +
+        "probed first and saved only if the server answers. Engine, " +
         "enabled state and excluded databases cannot change here (see disable_server, enable_server, set_server_excluded_databases, set_server_xe_session_databases). Returns updated, unchanged, or " +
         "invalid/not_found/ambiguous/conflict/collides/connection_failed with nothing written." +
         "<<GUIDE>>" +
-        "SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
+        "The service applies a saved change within one sweep. SERVING: edit_server is served only when the operator sets mcp.allowServerAdmin (with mcp.allowWrites), like add_servers and remove_server. A change that points Windows authentication at a connection whose server identity is not verified (trust_server_certificate true, or encrypt_mode Optional) is refused as add_servers refuses it, with nothing probed or saved. " +
         "A change to where the server connects (host, port, database or read_only_intent) is answered refused while a route with an agent setting (Off included) is scoped to the server, by its id, one of its tags or a tag above one (a route with no scope does not count): that is changed in the Viewer or on the web dashboard. The display name and the other settings stay open. " +
         "The machine is also recognised by the name its server reports for itself (a SQL Server's own name, a PostgreSQL cluster's identifier and port), so one machine reached under another host name is held the same way, and so is a change to another connection field that reaches it, and two machines that report the same name (cloned images, containers sharing a hostname, a PostgreSQL replica and its primary) are treated as one machine: register those in the Viewer or on the web dashboard. " +
         "Changes ONLY the fields named in changes_json, a JSON object. Keys: display_name, host, port (PostgreSQL), " +
