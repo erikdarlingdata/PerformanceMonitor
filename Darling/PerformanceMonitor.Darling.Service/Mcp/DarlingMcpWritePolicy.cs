@@ -27,7 +27,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <item><see cref="McpConfig.AllowWrites"/> (<c>mcp.allowWrites</c>) offers the tools that change alerting,
 /// mutes, custom alert rules and Custom Views, and the analysis mute.</item>
 /// <item><see cref="McpConfig.AllowServerAdmin"/> (<c>mcp.allowServerAdmin</c>) additionally offers
-/// <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c> and <c>set_server_action</c>. It does nothing unless <c>mcp.allowWrites</c> is also on.</item>
+/// <c>add_servers</c>, <c>edit_server</c>, <c>remove_server</c>, <c>set_server_action</c> and the web access tools (<c>create_web_access_group</c>, <c>update_web_access_group</c>, <c>rotate_web_access_group_token</c>, <c>delete_web_access_group</c>, <c>set_advanced_web_access</c>, #9642). It does nothing unless <c>mcp.allowWrites</c> is also on.</item>
 /// </list>
 /// A write that is not allowed is ABSENT from the served tool collection, not merely hidden from
 /// <c>tools/list</c>: the SDK's <c>tools/call</c> dispatch consults the same collection, so the call fails as an
@@ -58,6 +58,11 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "create_web_access_group",
+        "delete_web_access_group",
+        "rotate_web_access_group_token",
+        "set_advanced_web_access",
+        "update_web_access_group",
     };
 
     /// <summary>The server admin tools by name, in ordinal order and joined with "/", for the instructions and the start
@@ -78,6 +83,11 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        "create_web_access_group",
+        "delete_web_access_group",
+        "rotate_web_access_group_token",
+        "set_advanced_web_access",
+        "update_web_access_group",
         "mute_analysis_finding",
         "unmute_analysis_finding",
         "create_mute_rule",

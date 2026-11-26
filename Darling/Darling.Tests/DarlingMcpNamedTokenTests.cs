@@ -101,10 +101,10 @@ public sealed class DarlingMcpNamedTokenTests
     private static List<string> ToolsPointedAtIn(string text, IEnumerable<string> catalog) =>
         catalog.Where(n => text.Contains("`" + n + "`", StringComparison.Ordinal)).OrderBy(n => n, StringComparer.Ordinal).ToList();
 
-    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action" };
+    private static readonly string[] ServerAdminToolNames = { "add_servers", "edit_server", "remove_server", "set_server_action", "create_web_access_group", "update_web_access_group", "rotate_web_access_group_token", "delete_web_access_group", "set_advanced_web_access" };
 
     [Fact]
-    public void ServerAdminToolsList_IsTheFourToolsTheDocsName()
+    public void ServerAdminToolsList_IsTheToolsTheDocsName()
     {
         Assert.Equal(ServerAdminToolNames.OrderBy(n => n, StringComparer.Ordinal), DarlingMcpWritePolicy.ServerAdminTools.OrderBy(n => n, StringComparer.Ordinal));
     }
