@@ -262,7 +262,8 @@ public static class OptionalTableRunner
 
                     entries.Add(BuildQuerySnapshotsEntry(
                         table, "query_snapshots", qsResult.FactOutputPath, qsResult.FactRowCount, part: null,
-                        timeColumn: table.TimeColumn, kind: "window", unparsedPlanRows: qsResult.UnparsedPlanRows));
+                        timeColumn: table.TimeColumn, kind: "window", unparsedPlanRows: qsResult.UnparsedPlanRows,
+                        policyVersion: ColumnPolicies.For(table.Name)?.Version));
                     entries.Add(BuildQuerySnapshotsEntry(
                         table, DimensionTables.PlanShape, qsResult.PlanOutputPath, qsResult.PlanRowCount, QuerySnapshotsExporter.Part,
                         timeColumn: "last_seen", kind: "dimension", unparsedPlanRows: null));
@@ -687,7 +688,7 @@ public static class OptionalTableRunner
     /// </summary>
     internal static ManifestTableEntry BuildQuerySnapshotsEntry(
         OptionalTable table, string outputTable, string outputPath, long rowCount, string? part,
-        string? timeColumn, string kind, long? unparsedPlanRows)
+        string? timeColumn, string kind, long? unparsedPlanRows, int? policyVersion = null)
     {
         var byteSize = File.Exists(outputPath) ? new FileInfo(outputPath).Length : 0;
         var sha256 = File.Exists(outputPath) ? ComputeSha256(outputPath) : string.Empty;
@@ -706,6 +707,7 @@ public static class OptionalTableRunner
             Kind = kind,
             KeyColumns = null,
             UnparsedPlanRows = unparsedPlanRows,
+            PolicyVersion = policyVersion,
         };
     }
 
@@ -805,7 +807,7 @@ public static class OptionalTableRunner
     private static async Task<List<DiscoveredColumn>> DiscoverColumnsAsync(NpgsqlConnection connection, OptionalTable table, CancellationToken ct)
     {
         var columns = new List<DiscoveredColumn>();
-        await using var command = new NpgsqlCommand(SqlBuilder.OptionalColumnDiscoverySql, connection);
+        await using var command = new NpgsqlCommand(SqlBuilder.OptionalColumnDiscoverySqlFor(table), connection);
         command.Parameters.AddWithValue("schema", table.Schema);
         command.Parameters.AddWithValue("table", table.Name);
 
