@@ -282,7 +282,7 @@ internal static class ExternalAlertSourceAdmin
 
         /* #5654: a new password governs new connections only, so the sessions the login already holds are ended once the new
            password is committed (ending them first would let a client log straight back in with the old one before the commit). */
-        var (ended, endSql, failure) = await EndSessionsAfterCommitAsync(owner, "a.usename = $1", registered, BuildEndSessionsSqlForDba(registered), registered, ct);
+        var (ended, endSql, failure) = await EndSessionsAfterCommitAsync(owner, "a.usename = $1", registered, BuildEndSessionsSqlForDba(registered), registered, CancellationToken.None);
         return new Result(Outcome.Done, registered, password,
             SessionsEnded: ended, EndSessionsSqlForDba: endSql, ServerLogSettingsOn: loggingOn, FollowUpFailure: failure);
     }
@@ -362,7 +362,7 @@ internal static class ExternalAlertSourceAdmin
         if (dropped)
         {
             (ended, endSql, failure) = await EndSessionsAfterCommitAsync(owner, "a.usesysid = $1::pg_catalog.oid", (long)loginOid,
-                $"SELECT pg_catalog.pg_terminate_backend(a.pid) FROM pg_catalog.pg_stat_activity AS a WHERE a.usesysid = {loginOid};", registered, ct);
+                $"SELECT pg_catalog.pg_terminate_backend(a.pid) FROM pg_catalog.pg_stat_activity AS a WHERE a.usesysid = {loginOid};", registered, CancellationToken.None);
         }
 
         return new Result(dbaSql is null ? Outcome.Done : Outcome.NeedsDbaSql, registered, DbaSql: dbaSql,
@@ -396,6 +396,17 @@ ORDER BY s.source_id", owner);
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// How many sessions a source's login holds open right now (#9641): what a rotate or a remove would end, told to the caller
+    /// before it confirms. The login name column of pg_stat_activity is readable to every role.
+    /// </summary>
+    public static async Task<long> CountOpenSessionsAsync(NpgsqlConnection owner, string role, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity AS a WHERE a.usename = $1", owner);
+        command.Parameters.Add(new NpgsqlParameter { Value = role });
+        return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 
     /// <summary>

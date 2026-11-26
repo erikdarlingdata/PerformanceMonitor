@@ -7845,7 +7845,7 @@ public static partial class DarlingCliCommands
         {
             try
             {
-                groupExtras = await (readGroupExtras ?? DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync)(connection, cancellationToken);
+                groupExtras = await (readGroupExtras ?? DarlingManagedRoles.ReadAlertSourceGroupExtrasAsync)(connection, CancellationToken.None);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -7863,7 +7863,7 @@ public static partial class DarlingCliCommands
         if (postgres is { Managed: true } && groupExtras is { Count: > 0 })
         {
             lineDropFailure = await DarlingManagedPostgres.DropAlertSourcePgHbaLineAsync(
-                DarlingManagedPostgres.ResolveDataDirectory(postgres), connection, cancellationToken);
+                DarlingManagedPostgres.ResolveDataDirectory(postgres), connection, CancellationToken.None);
         }
 
         return new AlertSourceChange(result, groupExtras, lineDropFailure);

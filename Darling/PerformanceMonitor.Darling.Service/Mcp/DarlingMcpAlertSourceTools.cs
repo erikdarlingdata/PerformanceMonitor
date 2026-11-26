@@ -55,7 +55,7 @@ public sealed class DarlingMcpAlertSourceTools
     [McpServerTool(Name = "add_alert_source"), Description(
         "Creates an EXTERNAL ALERT SOURCE: a database login of its own that can do one thing, call config.submit_external_alert, plus its registry row, the same as the command line's --add-alert-source. Changes shared monitoring configuration and creates a database login. " +
         "<<GUIDE>>" +
-        "THE ANSWER HOLDS THE NEW LOGIN'S PASSWORD, in the connection strings inside report, shown ONCE: Darling keeps no copy, nothing logs it, and a lost one is replaced with rotate_alert_source. Do not repeat it in notes, tickets or chat. " +
+        "THE ANSWER HOLDS THE NEW LOGIN'S PASSWORD, in the connection strings inside report, shown ONCE: Darling keeps no copy, nothing logs it, and a lost one is replaced with rotate_alert_source. Do not repeat it in notes, tickets or chat. The password enters this client's transcript, and when the mcp block has no TLS block the network listener is plain HTTP, so it crosses the network unencrypted, as the bearer token does. " +
         "name is 2 to 31 characters, a lower-case letter first, then lower-case letters, digits or underscores. The login is darling_src_<name>. A name already registered, or a login that already exists and is not a registered source, is refused and nothing is changed. " +
         "Answer: {status:\"added\", source, login, report} when the login was created, or {status:\"needs_dba_sql\", source, login, report} when the store's owner may not create logins: the source is registered, the password is in report, and report holds the statements a database administrator runs before it works. " +
         "notes, when present, names a step after the commit that did not finish, and the change stands. A refusal is {status:\"refused\", reason, message}. Undo: remove_alert_source. " +
@@ -72,18 +72,20 @@ public sealed class DarlingMcpAlertSourceTools
     [McpServerTool(Name = "rotate_alert_source"), Description(
         "Gives a registered EXTERNAL ALERT SOURCE a new password, the same as the command line's --rotate-alert-source. The old password stops working for a new connection at once, and the login's open sessions are ended when the store owner may end them. Changes a database login. " +
         "<<GUIDE>>" +
-        "THE ANSWER HOLDS THE NEW PASSWORD, in the connection strings inside report, shown ONCE: Darling keeps no copy and nothing logs it. Do not repeat it in notes, tickets or chat. " +
+        "THE ANSWER HOLDS THE NEW PASSWORD, in the connection strings inside report, shown ONCE: Darling keeps no copy and nothing logs it. Do not repeat it in notes, tickets or chat. The password enters this client's transcript, and when the mcp block has no TLS block the network listener is plain HTTP, so it crosses the network unencrypted, as the bearer token does. " +
         "name is a source list_alert_sources shows. A name no source has, or a source whose login is missing or was not made by add_alert_source, is refused and nothing is changed. " +
         "Answer: {status:\"rotated\", source, login, report}, or {status:\"needs_dba_sql\", source, login, report} when the store's owner may not change logins: nothing is changed yet, and report holds the statements a database administrator runs. " +
+        "Without confirm=true nothing is changed: the answer is {status:\"confirm_required\", source, login, open_sessions, message}, which says which login gets a new password and how many open sessions end. Call again with confirm=true to rotate. " +
         "A refusal is {status:\"refused\", reason, message}. " +
         "Needs mcp.allowWrites AND mcp.allowServerAdmin.")]
     public static Task<string> RotateAlertSource(
         StoreOwnerSource owner,
         PostgresConfig postgres,
         [Description("The source's name, as list_alert_sources shows it.")] string name,
+        [Description("false (the default) changes nothing and answers {status:\"confirm_required\"} with what rotate would do. Pass true to rotate.")] bool confirm = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ChangeAsync(RotateToolName, "--rotate-alert-source", owner.Read(), postgres, name, logger, cancellationToken);
+        ChangeAsync(RotateToolName, "--rotate-alert-source", owner.Read(), postgres, name, logger, cancellationToken, confirm);
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "remove_alert_source"), Description(
@@ -91,15 +93,17 @@ public sealed class DarlingMcpAlertSourceTools
         "<<GUIDE>>" +
         "name is a source list_alert_sources shows. A name no source has is refused and nothing is changed. " +
         "Answer: {status:\"removed\", source, login, report}, where report says whether the login was dropped, how many queued alert rows went with the source and how many of them were not yet delivered, or {status:\"needs_dba_sql\", source, login, report} when the store's owner may not drop logins: the registry row is gone and report holds the statements a database administrator runs. " +
+        "Without confirm=true nothing is changed: the answer is {status:\"confirm_required\", source, login, undelivered_alerts, open_sessions, message}, which says which login and row go, how many undelivered queued alerts are deleted with them and how many open sessions end. Call again with confirm=true to remove. " +
         "A refusal is {status:\"refused\", reason, message}. There is no undo: add_alert_source makes a new login with a new password. " +
         "Needs mcp.allowWrites AND mcp.allowServerAdmin.")]
     public static Task<string> RemoveAlertSource(
         StoreOwnerSource owner,
         PostgresConfig postgres,
         [Description("The source's name, as list_alert_sources shows it.")] string name,
+        [Description("false (the default) changes nothing and answers {status:\"confirm_required\"} with what remove would do. Pass true to remove.")] bool confirm = false,
         ILogger? logger = null,
         CancellationToken cancellationToken = default) =>
-        ChangeAsync(RemoveToolName, "--remove-alert-source", owner.Read(), postgres, name, logger, cancellationToken);
+        ChangeAsync(RemoveToolName, "--remove-alert-source", owner.Read(), postgres, name, logger, cancellationToken, confirm);
 
     [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "list_alert_sources"), Description(
@@ -154,7 +158,8 @@ public sealed class DarlingMcpAlertSourceTools
     /// code branches on.
     /// </summary>
     internal static async Task<string> ChangeAsync(
-        string toolName, string verb, NpgsqlDataSource? ownerSource, PostgresConfig? postgres, string? name, ILogger? logger, CancellationToken cancellationToken)
+        string toolName, string verb, NpgsqlDataSource? ownerSource, PostgresConfig? postgres, string? name, ILogger? logger, CancellationToken cancellationToken,
+        bool confirm = true)
     {
         if (!ExternalAlertSourceAdmin.IsValidName(name))
         {
@@ -170,6 +175,13 @@ public sealed class DarlingMcpAlertSourceTools
         try
         {
             await using var connection = await ownerSource.OpenConnectionAsync(cancellationToken);
+            if (!confirm && verb != "--add-alert-source" && await ConfirmRequiredAsync(verb, connection, name!, cancellationToken) is { } required)
+            {
+                return required;
+            }
+
+            /* The commit is the point of no return, and the new password exists only in the answer. Every step after it runs to its end
+               whatever the caller does, so a cancel can never swallow a password the login already has (ExternalAlertSourceAdmin, DarlingCliCommands). */
             var change = await DarlingCliCommands.ChangeAlertSourceAsync(verb, connection, name!, cancellationToken, postgres);
             using var output = new StringWriter(CultureInfo.InvariantCulture);
             using var error = new StringWriter(CultureInfo.InvariantCulture);
@@ -200,6 +212,41 @@ public sealed class DarlingMcpAlertSourceTools
             logger?.LogWarning("Alert source {Source}: {Tool} failed ({ErrorType})", name, toolName, ex.GetType().Name);
             return McpHelpers.FormatError(toolName, ex);
         }
+    }
+
+    /// <summary>
+    /// What a rotate or a remove would do, as the <c>confirm_required</c> answer, or null when the source is not registered (the change
+    /// itself then refuses with the usual text, and nothing is changed either way). Reads only.
+    /// </summary>
+    private static async Task<string?> ConfirmRequiredAsync(string verb, NpgsqlConnection connection, string name, CancellationToken cancellationToken)
+    {
+        var sources = await ExternalAlertSourceAdmin.ListAsync(connection, cancellationToken);
+        var source = sources?.FirstOrDefault(row => string.Equals(row.Name, name, StringComparison.Ordinal));
+        if (source is null)
+        {
+            return null;
+        }
+
+        var sessions = await ExternalAlertSourceAdmin.CountOpenSessionsAsync(connection, source.RoleName, cancellationToken);
+        var rotate = verb == "--rotate-alert-source";
+        var tool = rotate ? RotateToolName : RemoveToolName;
+        var message = rotate
+            ? string.Create(CultureInfo.InvariantCulture,
+                $"Rotating source '{name}' gives its login {source.RoleName} a new password. The old password stops working for new connections at once, and the {sessions} open session(s) of the login are ended. "
+                + "The new password is shown once, in the answer. Nothing was changed. Call again with confirm=true to rotate.")
+            : string.Create(CultureInfo.InvariantCulture,
+                $"Removing source '{name}' drops its login {source.RoleName} and its registry row, deletes its {source.Undelivered} undelivered queued alert(s), and ends the login's {sessions} open session(s). "
+                + "There is no undo. Nothing was changed. Call again with confirm=true to remove.");
+        return new JsonObject
+        {
+            ["status"] = "confirm_required",
+            ["tool"] = tool,
+            ["source"] = name,
+            ["login"] = source.RoleName,
+            ["undelivered_alerts"] = rotate ? null : source.Undelivered,
+            ["open_sessions"] = sessions,
+            ["message"] = message,
+        }.ToJsonString(McpHelpers.JsonOptions);
     }
 
     private static string ReasonOf(ExternalAlertSourceAdmin.Outcome outcome) => outcome switch

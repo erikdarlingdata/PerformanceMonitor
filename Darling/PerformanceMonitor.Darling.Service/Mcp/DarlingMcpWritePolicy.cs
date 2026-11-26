@@ -275,6 +275,10 @@ internal static class DarlingMcpWritePolicy
         "remove_server",
         "edit_server",
         "set_server_action",
+        /* #9641: a database login is never an agent's to create, change or drop. */
+        "add_alert_source",
+        "rotate_alert_source",
+        "remove_alert_source",
         "undo_plan_change",
         "write_investigation_note",
         "approve_investigation_note",

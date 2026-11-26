@@ -106,6 +106,10 @@ An MCP client manages the sources with `add_alert_source`, `rotate_alert_source`
 
 The answers of `add_alert_source` and `rotate_alert_source` hold the new password once, in the connection strings of `report`. Darling keeps no copy, and no log line, error message or store row has it. Whoever reads the answer holds the password, including the MCP client and any transcript it keeps, so treat the answer as a secret. A lost password is replaced with `rotate_alert_source`.
 
+The password also goes into the MCP client's transcript, because the answer is part of the conversation. Without a `tls` block in `mcp.network`, the network listener is plain HTTP, so the answer crosses the network unencrypted, as the bearer token does. `rotate_alert_source` and `remove_alert_source` change nothing until they are called with `confirm=true`. Without it, each answers `confirm_required` and says which login is affected, how many undelivered queued alerts a remove deletes and how many open sessions end.
+
+A deployment that already has `mcp.allowServerAdmin` on gains login creation, change and removal for the three tools when it upgrades, with no new setting to turn on. To keep them off, turn `mcp.allowServerAdmin` off, which also removes `add_servers` and the other server admin tools.
+
 ### Alert sources on another machine
 
 Every source login is a member of `darling_alert_sources`, a NOLOGIN group role that holds no privilege on anything. The service creates it, marks it, and on every start makes the registered source logins its only members (on PostgreSQL 16 and later the membership is granted `WITH INHERIT FALSE, SET FALSE`). A role of that name that Darling did not create stops provisioning; it is never taken over.
