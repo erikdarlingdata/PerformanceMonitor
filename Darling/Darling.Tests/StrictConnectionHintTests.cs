@@ -121,6 +121,15 @@ public sealed class StrictConnectionHintTests : IDisposable
     private sealed class EmptyDefinitions : Core.IServerDefinitions
     {
         public Task<List<Core.RegisteredTarget>> LoadTargetsAsync(CancellationToken cancellationToken) => Task.FromResult(new List<Core.RegisteredTarget>());
+
+        public Task<int?> ScopedAgentRouteAsync(int serverId, CancellationToken cancellationToken) => Task.FromResult<int?>(null);
+
+        public Task<List<string>> LoadStorageKeysAsync(CancellationToken cancellationToken) => Task.FromResult(new List<string>());
+
+        public Task<string?> ReadStorageKeyAsync(int serverId, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
+
+        public Task<int> InsertAsync(Core.ParsedServerEntry entry, string? encryptedPassword, string? actualStorageKey, Core.HeldCheck? heldCheck, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("a server that could not be reached must not be written");
     }
 
     private static async Task<string> AddAgainstClosedPortAsync(string mode)
