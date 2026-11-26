@@ -723,6 +723,7 @@ public static partial class DarlingCliCommands
         || IsGrantScriptVerb(arg)
         || IsPrepareProvisionRolesVerb(arg)
         || IsResetPasswordKeyVerb(arg)
+        || IsSetLoginPasswordVerb(arg)
         || IsNewPasswordKeyVerb(arg)
         || IsSelfCheckPasswordKeyVerb(arg)
         || IsSelfCheckLaunchMemoryVerb(arg);
@@ -815,6 +816,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed. Same platform rule as --backfill-rollups." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim [--free-space <size>]  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store; --free-space gives the free space you checked on the store host when the store is on another host)." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape) or one server from flags (--host, --name, --auth, --username, --engine, --database; a SQL login is asked for its password, hidden); the running service picks them up without a restart." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --set-login-password --username <login> [--dry-run] [--config <path>]   Save one password, read from stdin, for every server that uses the login, disabled servers included (after a store move or a password key reset). --dry-run lists what would change." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-alert-source <name> [--config <path>]      Make a source for external alerts: a login that can send alerts and do nothing else. Prints its connection string ONCE; Darling keeps no copy. <name> is 2-31 characters: a letter, then lower-case letters, digits or underscores." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --rotate-alert-source <name> [--config <path>]   Give a source a new password and print its connection string once. The old password stops working." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --remove-alert-source <name> [--config <path>]   Drop a source's login and remove it, along with any alerts of its that are still queued. Alerts it already sent stay in the history." + Environment.NewLine +

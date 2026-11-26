@@ -178,7 +178,7 @@ That lets the role read any file in the data directory and in an absolute `log_d
 
 ## Step 4: Download and verify
 
-Each release on the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) has `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. Download both into one folder. The checksum file lists the compose archive too, so tell `sha256sum` to skip the file that you did not download:
+Each release on the [release page](https://github.com/erikdarlingdata/PerformanceMonitor/releases) has `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` and `SHA256SUMS-linux.txt`. Download both into a new, empty folder for this release. Every release names its checksum file `SHA256SUMS-linux.txt`, so a download into the folder of an earlier release replaces that release's file, and its archive can no longer be checked. The checksum file lists the compose archive too, so tell `sha256sum` to skip the file that you did not download:
 
 ```bash
 sha256sum -c --ignore-missing SHA256SUMS-linux.txt
@@ -412,6 +412,7 @@ In this table `darling-verb` stands for the whole command above. The [command li
 | `--enable-collector`, `--disable-collector`, `--set-collector-run-at`, `--set-collector-frequency`, `--set-collector-retention` | The same verbs after `darling-verb`. See [Collector settings](cli.md#collector-settings) |
 | `.\PerformanceMonitor.Darling.Service.exe --backfill-rollups` | `darling-verb --backfill-rollups`. Add `--dry-run` to see the plan first |
 | `.\PerformanceMonitor.Darling.Service.exe --reset-password-key` | `darling-verb --reset-password-key`, then `sudo systemctl restart darling` |
+| `.\PerformanceMonitor.Darling.Service.exe --set-login-password --username <login>` | `<command that prints the password> \| darling-verb --set-login-password --username <login>`. Add `--dry-run` first. A sudo policy that records input (`log_input`) records the piped password: see [Set-login-password](cli.md#--set-login-password) |
 | `.\PerformanceMonitor.Darling.Service.exe --diagnostics-bundle` | `darling-verb --diagnostics-bundle`. See [Diagnostics Bundle](cli.md#diagnostics-bundle) |
 | `--add-alert-source`, `--rotate-alert-source`, `--remove-alert-source`, `--list-alert-sources` | The same verbs after `darling-verb` |
 | `--encrypt-password` | Windows only. Use a `file:` or `env:` reference in `darling.json` |
@@ -447,7 +448,12 @@ The `network` block of each surface (`listen`, `allowFrom`, `token`) is read fro
 There is no upgrade script for Linux ([#9688](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9688)). The config, the secrets and the keys are in `/etc/darling`, outside the service folder, so an upgrade replaces only `/opt/darling`.
 
 1. Read the release notes, and [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) for anything that an older build reads differently.
-2. Back up the store. See [Back up, restore and move the store](../darling-store-backup.md).
+2. Back up the store, as in [Your own PostgreSQL](../darling-store-backup.md#your-own-postgresql). For a store on this host, the `postgres` OS user can run the dump without a password. This writes the dump to the current folder:
+
+   ```bash
+   sudo -u postgres pg_dump --format=custom --no-owner --no-acl darling > darling-store.dump
+   ```
+
 3. Compare the store settings with the block in [Settings](#settings), because a release can add a setting. The file is `/etc/postgresql/18/main/conf.d/darling.conf` on a Debian or Ubuntu package install. A store set up from an earlier quick start can lack `pg_stat_statements.track_utility = off` and `timescaledb.telemetry_level = off`, and the service then warns about `track_utility` at every start. Add what is missing and reload PostgreSQL. A reload is enough for these two. A change to the preload list or the worker settings needs a restart, as [Settings](#settings) says.
 
    ```bash
@@ -455,18 +461,26 @@ There is no upgrade script for Linux ([#9688](https://github.com/erikdarlingdata
    ```
 
 4. Download and verify the new tarball, as in [step 4](#step-4-download-and-verify).
-5. Replace the service files and keep the old ones. The service stays stopped until step 6:
+5. Replace the service files and keep the old ones as the rollback copy. An earlier upgrade can leave an older `/opt/darling.previous`, so the block removes it first. Without that, `mv` moves the folder inside the old copy and reports no error. With `-T`, `mv` stops with an error instead. The service stays stopped until step 6:
 
    ```bash
    sudo systemctl stop darling
-   sudo mv /opt/darling /opt/darling.previous
+   sudo rm -rf /opt/darling.previous
+   sudo mv -T /opt/darling /opt/darling.previous
    sudo mkdir -p /opt/darling
    sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling --no-same-owner
    ```
 
-6. Compare `/etc/systemd/system/darling.service` with the unit in step 8, because a release can change it. For example, 3.14.0 adds `Type=notify`, `postgresql.service` in `After=` and `Wants=network-online.target`. If the files differ, save the unit from step 8 over yours. Then reload systemd and start the service:
+6. Compare `/etc/systemd/system/darling.service` with the unit in step 8, because a release can change it. For example, 3.14.0 adds `Type=notify`, `postgresql.service` in `After=` and `Wants=network-online.target`. To compare them, save the unit from step 8 as `/tmp/darling.service.new`, then run the command below. No output means that the files are the same:
 
    ```bash
+   diff /etc/systemd/system/darling.service /tmp/darling.service.new
+   ```
+
+   If the files differ, install the new unit over yours. Then reload systemd and start the service:
+
+   ```bash
+   sudo install -m 644 /tmp/darling.service.new /etc/systemd/system/darling.service
    sudo systemctl daemon-reload
    sudo systemctl start darling
    ```
