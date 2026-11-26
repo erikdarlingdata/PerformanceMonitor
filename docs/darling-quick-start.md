@@ -23,7 +23,7 @@ For a PostgreSQL server as a monitored target, set `"engine": "postgres"` on its
 
 ## Turn on the web dashboard or MCP
 
-Both surfaces are off by default. After the service collects, turn them on with `--enable-web` (the browser dashboard on port 5153) or `--enable-mcp` (the MCP endpoint on port 5152). Both take effect live, with no restart. The steps and proof points are in [The web dashboard](darling/web-dashboard.md) and [MCP server](mcp-server.md#darling).
+Both surfaces are off by default. On Windows, after the service collects, turn them on with `--enable-web` (the browser dashboard on port 5153) or `--enable-mcp` (the MCP endpoint on port 5152). Both take effect live, with no restart. On Linux, set `web.enabled` or `mcp.enabled` in `darling.json` before the first start, or change the store's switch after it, as [Run on Linux](#run-on-linux-docker-compose-or-systemd-1804) says for MCP on Docker Compose. The steps and proof points are in [The web dashboard](darling/web-dashboard.md) and [MCP server](mcp-server.md#darling).
 
 ## Install on Linux
 
@@ -44,6 +44,10 @@ Each shape needs a different file from the [release page](https://github.com/eri
 - **Docker Compose, release 3.10.0 or earlier:** these releases have no compose file of their own. Download the release's "Source code" archive instead. It extracts to a `PerformanceMonitor-<version>` folder, and the same files are in its `Darling/compose/` folder. Those releases have no `setup.sh`, so make the secret files by hand from the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
 - **systemd:** download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz`.
 
+The Docker Compose shape needs Docker Engine with the Compose plugin, so that `docker compose` works. The older `docker-compose` command is not enough. On Ubuntu 24.04 the `docker.io` package has no Compose plugin, and `docker compose` fails with `unknown command`. Install it with `sudo apt-get install -y docker-compose-v2`. The systemd shape needs no Docker.
+
+To upgrade a compose install, follow [Compose upgrade](darling/admin.md#compose-upgrade).
+
 **Compose (the whole stack as one deployment).** The files are in the compose archive, or in [`Darling/compose/`](../Darling/compose) of a source checkout:
 
 ```bash
@@ -60,7 +64,24 @@ The script ends with the dashboard address. To read the web token, run `cat secr
 
 The service runs as user 1654, not root. A fresh install needs nothing; an install that ran as root needs a one-off step before the new image starts; the steps, the rollback and a Kubernetes example are in [Container user](darling/security.md#container-user).
 
-MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, uncomment `mcp_token` in the two places in `docker-compose.yml`, and set `mcp.enabled` to `true` in `darling.json`. To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
+MCP is off in the sample, so compose does not mount `mcp_token`. To turn MCP on, do both of these:
+
+1. Uncomment `mcp_token` in the two places in `docker-compose.yml`, then run `docker compose up -d`. A `docker compose restart` does not mount a secret that the container was made without, so MCP does not start. `up -d` recreates the container. Run `docker compose up -d` after every edit to `docker-compose.yml`.
+2. Turn the switch on. Where it lives depends on whether the service has started before:
+   - **Before the first start**, set `mcp.enabled` to `true` in `darling.json`. The first start copies the value into the store.
+   - **After the first start**, the store holds the switch, and `mcp.enabled` in `darling.json` does nothing. The service logs `MCP configuration disagrees across the two planes and the CONTROL PLANE WINS` at start. Set the switch in the store, through psql in the store container:
+
+     ```bash
+     docker compose exec store psql -U darling -d darling -c "UPDATE config.config_service SET mcp_enabled = true WHERE id = 1"
+     ```
+
+     No restart is needed. The service reads the store's switch on each collection sweep and starts the MCP listener when it changes. Wait for the next sweep before you test the port.
+
+`--enable-web` and `--enable-mcp` are Windows only, so they do not run in the container. The same `UPDATE` with `web_enabled` turns the web dashboard on after the first start.
+
+To restart the service on compose, run `docker compose restart darling`. Do not restart the store with it. A plain `docker compose restart` stops both services at once, and the service logs warnings because the store goes away under it. To restart both in order, run `docker compose down` and then `docker compose up -d`. A restart does not change the container's image, its mounted secrets or its command line. Only `up -d` does.
+
+To make the secret files by hand instead of with `setup.sh`, follow the list in [`compose/secrets/README.md`](../Darling/compose/secrets/README.md).
 
 The compose file in the compose archive names the image tag of its own release, for example `ghcr.io/erikdarlingdata/performancemonitor-darling:<version>`. It pulls the release it came from. The copy in the source tree names `:latest`, which is the newest release. To pin a release in that copy, change the `darling` service's `image:` line to that version's tag, for example `ghcr.io/erikdarlingdata/performancemonitor-darling:3.12.0`. Always write the full `ghcr.io/erikdarlingdata/` name. Without it, Docker looks on Docker Hub and the pull fails.
 
@@ -84,7 +105,7 @@ Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:51
 
 The compose file sets no TLS on the store, so this connection is not encrypted. Set up TLS on the store yourself and use `SSL Mode=VerifyFull` with a `Root Certificate`, or keep the link on a network that you trust.
 
-**A container that has stopped collecting reports unhealthy** ([#4733](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4733)). After a startup failure that stops collection for good (a rejected `darling.json`, a step that can never apply, a refused login), the `darling` container stays up on purpose and its healthcheck reports `unhealthy` in `docker compose ps`, rather than restarting it in a loop. `docker compose logs darling` says why, and so does `/api/ping` when the web dashboard is enabled. A failure the service is still retrying does not count as a stop. This needs the current `docker-compose.yml`: the healthcheck and `DARLING_STOPPED_MARKER` are set there, not in the image, so an older compose file has neither.
+**A container that has stopped collecting reports unhealthy** ([#4733](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4733)). After a startup failure that stops collection for good (a rejected `darling.json`, a step that can never apply, a refused login), the `darling` container stays up on purpose and its healthcheck reports `unhealthy` in `docker compose ps`, rather than restarting it in a loop. `docker compose logs darling` says why, and so does `/api/ping` for a signed-in session when the web dashboard is enabled. A failure the service is still retrying does not count as a stop. This needs the current `docker-compose.yml`: the healthcheck and `DARLING_STOPPED_MARKER` are set there, not in the image, so an older compose file has neither.
 
 **The store keeps its own log files** ([#9333](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9333)). PostgreSQL's own log is in the `log` folder of the store volume, one file for each weekday, and `docker compose logs` for the PostgreSQL container shows only its startup lines.
 
