@@ -64,7 +64,7 @@ public sealed class AddServerUnreadKeysTests
     private static JsonObject ResultOf(string answer, int index) => (JsonObject)JsonNode.Parse(answer)!["results"]![index]!;
 
     private static string SqlEntry(string extra) =>
-        "{\"host\":\"sql-lab-01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"" + RealPassword + "\"" + extra + "}";
+        "{\"host\":\"sql-test-01\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"" + RealPassword + "\"" + extra + "}";
 
     [Fact]
     public async Task Name_IsNamedWithTheDisplayNameHint_AndTheServerIsStillAddedUnderItsHost()
@@ -78,7 +78,7 @@ public sealed class AddServerUnreadKeysTests
         Assert.Equal("display_name", ignored["did_you_mean"]!.GetValue<string>());
 
         /* The entry is warned about, not refused: it is written under its host name, the key having been dropped. */
-        Assert.Equal("sql-lab-01", Assert.Single(definitions.Written).DisplayName);
+        Assert.Equal("sql-test-01", Assert.Single(definitions.Written).DisplayName);
 
         /* The answer's counters and status words are unchanged. */
         var root = JsonNode.Parse(answer)!;
@@ -127,12 +127,12 @@ public sealed class AddServerUnreadKeysTests
     {
         var roles = AwsRoleAllowlist.From(["123456789012"]);
         var sqlServer =
-            "{\"host\":\"sql-lab-01\",\"display_name\":\"Lab One\",\"database\":\"Orders\",\"engine\":\"sqlserver\",\"auth\":\"SQL\"," +
+            "{\"host\":\"sql-test-01\",\"display_name\":\"Lab One\",\"database\":\"Orders\",\"engine\":\"sqlserver\",\"auth\":\"SQL\"," +
             "\"username\":\"monitor\",\"password\":\"" + RealPassword + "\",\"encrypt_mode\":\"Optional\",\"trust_server_certificate\":true," +
-            "\"read_only_intent\":true,\"multi_subnet_failover\":true,\"query_store_replica\":\"sql-lab-02\"," +
+            "\"read_only_intent\":true,\"multi_subnet_failover\":true,\"query_store_replica\":\"sql-test-02\"," +
             "\"capture_plans\":false,\"alert_delivery_mode_override\":\"Summary\"}";
         var postgres =
-            "{\"host\":\"pg-lab-01\",\"engine\":\"postgres\",\"port\":5433,\"auth\":\"SQL\",\"username\":\"monitor\"," +
+            "{\"host\":\"pg-test-01\",\"engine\":\"postgres\",\"port\":5433,\"auth\":\"SQL\",\"username\":\"monitor\"," +
             "\"password\":\"" + RealPassword + "\",\"aws_role_arn\":\"arn:aws:iam::123456789012:role/darling-monitor\",\"aws_external_id\":\"ext-lab-1\"}";
 
         var (answer, _) = await AddAsync("[" + sqlServer + "," + postgres + "]", roles);
@@ -149,10 +149,10 @@ public sealed class AddServerUnreadKeysTests
     public void ARemovedServersUndoEntry_IsReadWholeByTheAdd()
     {
         var row = new Core.ServerEditRow(
-            ServerId: 41, Name: "Lab Postgres", Host: "pg-lab-01", Port: 5433, Database: "orders", ReadOnlyIntent: true, Engine: "postgres",
+            ServerId: 41, Name: "Lab Postgres", Host: "pg-test-01", Port: 5433, Database: "orders", ReadOnlyIntent: true, Engine: "postgres",
             Auth: "sql", Username: "monitor", EncryptMode: "Optional", TrustServerCertificate: true, MultiSubnetFailover: false,
             MonthlyCostUsd: 10m, ModifiedAt: new DateTime(2026, 10, 5, 12, 0, 0, DateTimeKind.Unspecified), AwsRoleArn: "arn:aws:iam::123456789012:role/darling-monitor",
-            AwsExternalIdSet: true, QueryStoreReplica: "pg-lab-02", CapturePlans: true, AlertDeliveryModeOverride: "PerEvent");
+            AwsExternalIdSet: true, QueryStoreReplica: "pg-test-02", CapturePlans: true, AlertDeliveryModeOverride: "PerEvent");
         var resolved = Core.ToDefinition(row.ServerId, row.Name, row.Host, row.Database, row.ReadOnlyIntent, row.Engine, row.Port, everConnected: true);
 
         var removed = JsonNode.Parse(Core.RemovedAnswer(resolved, "exact", row))!;
@@ -179,7 +179,7 @@ public sealed class AddServerUnreadKeysTests
     [Fact]
     public async Task AnInvalidEntry_StillNamesItsUnreadKeys_SoTheMisspeltHostIsFound()
     {
-        var (answer, definitions) = await AddAsync("[{\"Host\":\"sql-lab-01\",\"auth\":\"SQL\"}," + SqlEntry(",\"name\":\"lab one\"") + "]");
+        var (answer, definitions) = await AddAsync("[{\"Host\":\"sql-test-01\",\"auth\":\"SQL\"}," + SqlEntry(",\"name\":\"lab one\"") + "]");
 
         var invalid = ResultOf(answer, 0);
         Assert.Equal("invalid", invalid["status"]!.GetValue<string>());
@@ -205,7 +205,7 @@ public sealed class AddServerUnreadKeysTests
     {
         var (answer, _) = await AddAsync(
             "[" + SqlEntry(",\"name\":\"lab one\",\"trustServerCertifcate\":true,\"owner\":\"" + MisplacedPassword + "\"") + "," +
-            "{\"host\":\"sql-lab-02\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"" + RealPassword + "\"}]");
+            "{\"host\":\"sql-test-02\",\"auth\":\"SQL\",\"username\":\"monitor\",\"password\":\"" + RealPassword + "\"}]");
 
         var (lines, exit) = DarlingCliCommands.FormatAddServerOutcome(answer);
 
@@ -217,7 +217,7 @@ public sealed class AddServerUnreadKeysTests
         Assert.DoesNotContain("owner (did you mean", noted, StringComparison.Ordinal);
 
         /* The line sits right under its entry, and the clean entry has none. */
-        var firstEntry = lines.ToList().FindIndex(l => l.Contains("[ADDED] sql-lab-01", StringComparison.Ordinal));
+        var firstEntry = lines.ToList().FindIndex(l => l.Contains("[ADDED] sql-test-01", StringComparison.Ordinal));
         Assert.Equal(lines[firstEntry + 1], noted);
         Assert.DoesNotContain(lines, l => l.Contains(MisplacedPassword, StringComparison.Ordinal) || l.Contains(RealPassword, StringComparison.Ordinal));
         Assert.Contains(lines, l => l.Contains("2 added, 0 already registered, 0 collided, 0 failed.", StringComparison.Ordinal));
