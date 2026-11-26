@@ -46,7 +46,7 @@ namespace PerformanceMonitor.Ui
         /// </summary>
         internal static WindowState RestoreTarget(WindowState current, WindowState? lastNonMinimized)
         {
-            return current == WindowState.Minimized ? WindowState.Normal : current;
+            return current == WindowState.Minimized ? lastNonMinimized ?? WindowState.Maximized : current;
         }
     }
 }
