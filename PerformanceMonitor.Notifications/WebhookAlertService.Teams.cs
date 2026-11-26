@@ -239,14 +239,20 @@ public partial class WebhookAlertService
     /// A marker counts only when white space or the end of the line follows it, so <c>#1</c>, <c>-5</c>, <c>3.5</c> and <c>==</c> are text.
     /// </summary>
     private static readonly Regex TeamsLineStartMarker = new(
-        @"^(?<indent>[ \t]*)(?<marker>#+|[-+]|[0-9]+[.)]|-{3,}|={3,})(?=\s|$)",
+        @"^(?<marker>#+|[-+]|[0-9]+[.)]|-{3,}|={3,})(?=\s|$)",
         RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The spaces and tabs a line of Teams markdown opens with. Teams shows a line without them, and a markdown reader that
+    /// follows CommonMark reads a line indented four or more columns as a code block, so a line is sent without them.
+    /// </summary>
+    private static readonly Regex TeamsLineIndent = new(@"^[ \t]+", RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// Backslash-escapes the marker at the start of each line of already-escaped Teams prose, so a line that a source wrote as
     /// <c>- 5 retries left</c> or <c># of failed rows: 3</c> shows with its marker. Every punctuation character of a marker is
-    /// escaped (<c>\#\#</c>, <c>\-\-\-</c>), the digits of a number stay as they are (<c>1\.</c>), and the indentation stays in
-    /// front of the escape. Markdown reads a backslash before ASCII punctuation as an escape, as it does for the escapes in
+    /// escaped (<c>\#\#</c>, <c>\-\-\-</c>), and the digits of a number stay as they are (<c>1\.</c>). A line's indentation is
+    /// dropped first (<see cref="TeamsLineIndent"/>), so a marker after it is at the line start. Markdown reads a backslash before ASCII punctuation as an escape, as it does for the escapes in
     /// <see cref="TeamsEscape"/>. A marker in the middle of a line is not at a line start and is left alone.
     /// </summary>
     internal static string TeamsEscapeLineStarts(string escaped)
@@ -256,10 +262,10 @@ public partial class WebhookAlertService
             return escaped;
         }
 
-        return TeamsLineStartMarker.Replace(escaped, match =>
+        return TeamsLineStartMarker.Replace(TeamsLineIndent.Replace(escaped, string.Empty), match =>
         {
             var marker = match.Groups["marker"].Value;
-            var builder = new StringBuilder(match.Groups["indent"].Value);
+            var builder = new StringBuilder();
             foreach (var ch in marker)
             {
                 if (ch is >= '0' and <= '9')
@@ -374,8 +380,8 @@ public partial class WebhookAlertService
     /// <summary>
     /// The blocks under the <c>Details</c> heading for already-escaped prose, cut by <see cref="CapTeamsProse"/>. An engine
     /// alert's prose is one <c>TextBlock</c> as it is. An external alert's detail has its line-start markers escaped
-    /// (<see cref="TeamsEscapeLineStarts"/>) and its lines set in <paramref name="form"/>. Markdown drops a line's leading spaces
-    /// and shows a run of spaces as one in either form.
+    /// (<see cref="TeamsEscapeLineStarts"/>), each line is sent without its leading spaces and tabs, and its lines are set in
+    /// <paramref name="form"/>. Markdown shows a run of spaces inside a line as one in either form.
     /// </summary>
     internal static List<object> TeamsDetailBlocks(string escapedProse, bool external, TeamsDetailLines form)
     {

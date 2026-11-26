@@ -240,9 +240,10 @@ public class TeamsAdaptiveCardTests
             context: External(), detailText: "Nightly report\nrows *failed*: 3 <b>&\n\nNotes:\n  indented   gap", displayName: "Nightly report", nowUtc: Now));
 
         Assert.EndsWith(@" — \[External: billing\] Nightly report", card.Title, StringComparison.Ordinal);
-        /* Each line feed is a paragraph break, the text is escaped, and the spaces are sent as the source wrote them. */
+        /* Each line feed is a paragraph break, the text is escaped, a line is sent without its leading spaces, and the spaces
+           inside a line are sent as the source wrote them. */
         Assert.Equal(
-            ["Nightly report\n\nrows \\*failed\\*: 3 &lt;b&gt;&amp;\n\n\n\nNotes:\n\n  indented   gap"],
+            ["Nightly report\n\nrows \\*failed\\*: 3 &lt;b&gt;&amp;\n\n\n\nNotes:\n\nindented   gap"],
             card.Section("Details").Texts);
         Assert.DoesNotContain(card.Facts, f => f.Title == "Threshold");
     }
@@ -255,9 +256,9 @@ public class TeamsAdaptiveCardTests
             context: External(), detailText: "Notes\n- retry queue is 14\n  + 2 added\n# of failed rows: 3\n1. rerun the job", displayName: "Report", nowUtc: Now));
 
         /* #9607: a TextBlock reads a line that opens with "- ", "+ ", "# " or "1. " as a list item or a heading, so the marker
-           is escaped, after any indentation, and the line shows as the source wrote it. */
+           is escaped, after the line's indentation is dropped, and the marker shows as the source wrote it. */
         Assert.Equal(
-            ["Notes\n\n\\- retry queue is 14\n\n  \\+ 2 added\n\n\\# of failed rows: 3\n\n1\\. rerun the job"],
+            ["Notes\n\n\\- retry queue is 14\n\n\\+ 2 added\n\n\\# of failed rows: 3\n\n1\\. rerun the job"],
             card.Section("Details").Texts);
     }
 
@@ -278,12 +279,31 @@ public class TeamsAdaptiveCardTests
 
         using var document = JsonDocument.Parse(JsonSerializer.Serialize(blocks));
         var sent = document.RootElement.EnumerateArray().ToList();
-        Assert.Equal(["Report", "  rows: 120", "\\- 3 failed"], sent.Select(block => block.GetProperty("text").GetString()));
+        Assert.Equal(["Report", "rows: 120", "\\- 3 failed"], sent.Select(block => block.GetProperty("text").GetString()));
         Assert.All(sent, block =>
         {
             Assert.Equal("TextBlock", block.GetProperty("type").GetString());
             Assert.True(block.GetProperty("wrap").GetBoolean());
         });
+    }
+
+    [Fact]
+    public void AnExternalDetailLineIndentedFourOrMoreColumns_IsSentWithoutItsIndent_InEitherForm()
+    {
+        /* A markdown reader that follows CommonMark reads a line indented four or more columns as a code block, both after a
+           blank line (the doubled line feed) and as the first line of a TextBlock (one block per line). */
+        foreach (var form in new[] { WebhookAlertService.TeamsDetailLines.DoubledLineFeed, WebhookAlertService.TeamsDetailLines.BlockPerLine })
+        {
+            var blocks = WebhookAlertService.TeamsDetailBlocks(
+                "Report\n    column  one\n        - deeper\n\t\ttabbed", external: true, form);
+
+            using var document = JsonDocument.Parse(JsonSerializer.Serialize(blocks));
+            var lines = document.RootElement.EnumerateArray()
+                .SelectMany(block => block.GetProperty("text").GetString()!.Split('\n'))
+                .Where(line => line.Length > 0)
+                .ToList();
+            Assert.Equal(["Report", "column  one", "\\- deeper", "tabbed"], lines);
+        }
     }
 
     [Fact]

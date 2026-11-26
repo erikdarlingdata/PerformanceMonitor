@@ -93,12 +93,12 @@ public class ExternalAlertDetailBreaksTests
     }
 
     [Fact]
-    public void Teams_AMarkerAfterIndentation_IsEscapedAfterTheIndentation()
+    public void Teams_AnIndentedLine_IsSentWithoutItsIndent_AndAMarkerAfterTheIndentIsEscaped()
     {
         var details = TeamsDetails("Report\n  - one\n  ## two\n    + three\n  2) four\n==== five\n-\n#", External());
 
         Assert.Equal(
-            "Report\n\n  \\- one\n\n  \\#\\# two\n\n    \\+ three\n\n  2\\) four\n\n\\=\\=\\=\\= five\n\n\\-\n\n\\#",
+            "Report\n\n\\- one\n\n\\#\\# two\n\n\\+ three\n\n2\\) four\n\n\\=\\=\\=\\= five\n\n\\-\n\n\\#",
             details);
     }
 

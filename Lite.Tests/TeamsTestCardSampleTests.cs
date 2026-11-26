@@ -95,7 +95,7 @@ public class TeamsTestCardSampleTests
         Assert.EndsWith(@"\[External: sample-source\] Nightly report", externalCard.Title, StringComparison.Ordinal);
         var lines = Assert.Single(externalCard.Section("Details").Texts).Split("\n\n");
         Assert.Equal(3, lines.Length);
-        Assert.StartsWith("  ", lines[1], StringComparison.Ordinal);
+        Assert.Equal("rows loaded: 120", lines[1]);
         Assert.EndsWith("- 3 rows failed", lines[2], StringComparison.Ordinal);
         Assert.Null(externalCard.Action);
 
