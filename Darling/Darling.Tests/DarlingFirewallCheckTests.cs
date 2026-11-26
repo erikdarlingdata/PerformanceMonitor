@@ -14,6 +14,7 @@ using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
+using static Darling.Tests.DarlingInstallerConfigStepTests;
 using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
@@ -751,122 +752,87 @@ public class DarlingFirewallCheckTests
         Assert.StartsWith(DarlingFirewallCheck.RuleNamePrefix, DarlingWebHostService.WebFirewallRuleName(5153), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The uninstaller removes every Darling rule by one DisplayName wildcard. The function runs under Windows PowerShell with the two
+    /// firewall cmdlets stood in by a list of rule names: the real builders' names for several ports (an old port included) go, a rule
+    /// that is not Darling's stays, and a removal that throws is reported with the command to run by hand rather than stopping the
+    /// uninstall.
+    /// </summary>
     [Fact]
-    public void UninstallScript_SweepsByTheSharedPrefix()
+    public void Uninstall_RemovesEveryRuleTheBuildersName_ForAnyPort_AndNothingElse()
     {
-        /* Uninstall removes rules by "<prefix>*" so a rule from a PREVIOUS port is cleared too. That literal
-           lives in PowerShell, where no compiler checks it against the C# builders — this is that check. */
-        var script = ReadRepoFile(Path.Combine("Darling", "tools", "uninstall-darling.ps1"));
+        var darling = new[]
+        {
+            DarlingManagedPostgres.StoreFirewallRuleName(5641), DarlingManagedPostgres.StoreFirewallRuleName(6000),
+            DarlingMcpHostService.McpFirewallRuleName(5152), DarlingMcpHostService.McpFirewallRuleName(5999),
+            DarlingWebHostService.WebFirewallRuleName(5153),
+        };
+        var rules = string.Join(", ", darling.Concat(["Some Other App (port 5152)", "PerformanceMonitor Lite MCP"]).Select(n => $"'{n}'"));
+        const string Stubs = """
+            $ErrorActionPreference = 'Stop'
+            function Get-NetFirewallRule { [CmdletBinding()] param([string]$DisplayName)
+                @($script:rules | Where-Object { $_ -like $DisplayName } | ForEach-Object { [pscustomobject]@{ DisplayName = $_ } }) }
+            function Remove-NetFirewallRule { [CmdletBinding()] param([string]$DisplayName)
+                if ($script:refuse) { throw 'Access is denied' }
+                $script:removed = @($script:rules | Where-Object { $_ -like $DisplayName })
+                $script:rules = @($script:rules | Where-Object { $_ -notlike $DisplayName }) }
+            """;
+        var lines = RunWindowsPowerShell(
+            ExtractFunction(ReadRepoFile("Darling", "tools", "uninstall-darling.ps1"), "Remove-DarlingFirewallRules") + "\n" + Stubs + "\n"
+            + $"$script:rules = @({rules})\n$script:refuse = $false\n"
+            + "'said=' + ((Remove-DarlingFirewallRules 6>&1 | Out-String).Trim())\n"
+            + "'removed=' + (($script:removed | Sort-Object) -join '|')\n"
+            + "'left=' + ($script:rules -join '|')\n"
+            + "'again=' + ((Remove-DarlingFirewallRules 6>&1 | Out-String).Trim())\n"
+            + $"$script:rules = @({rules})\n$script:refuse = $true\n"
+            + "$refused = (Remove-DarlingFirewallRules 6>&1 | Out-String)\n"
+            + "'refused-says-access=' + ($refused -match 'Access is denied')\n"
+            + "'refused-gives-command=' + $refused.Contains(\"Remove-NetFirewallRule -DisplayName 'PerformanceMonitor Darling *'\")\n"
+            + "'refused-left=' + $script:rules.Count\n");
 
-        Assert.Contains($"Remove-NetFirewallRule -DisplayName '{DarlingFirewallCheck.RuleNamePrefix}*'", script, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void InstallScript_ActuallyInvokesTheFirewallVerb()
-    {
-        /* If the installer stops calling the verb, nothing creates the rules and #1771 is back — with the
-           runtime no longer even attempting it either.
-           This pins the INVOCATION, not a mention: the script also names --configure-firewall in its help
-           block and in the "re-run this by hand" error message, so a `Contains("--configure-firewall")` stays
-           green with the real call deleted. A mutation run caught exactly that, which is why the assertion is
-           the exact invocation form plus proof the wrapper is called somewhere other than its own definition. */
-        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
-
-        Assert.Contains("& $serviceExe --configure-firewall", script, StringComparison.Ordinal);
+        Assert.Equal($"said=Removed {darling.Length} scoped firewall rule(s).", lines[0]);
+        Assert.Equal("removed=" + string.Join("|", darling.OrderBy(n => n, StringComparer.OrdinalIgnoreCase)), lines[1]);
+        Assert.Equal("left=Some Other App (port 5152)|PerformanceMonitor Lite MCP", lines[2]);
+        Assert.Equal("again=No Darling firewall rules to remove.", lines[3]);
+        Assert.Equal(["refused-says-access=True", "refused-gives-command=True", "refused-left=7"], lines.Skip(4));
     }
 
     /// <summary>
-    /// #2436: the THIRD call, and the one whose absence is silent. The pre-start reconcile runs with the
-    /// service stopped, and on a managed install the store is a child of the service — so on an UPGRADE the
-    /// verb has nothing to ask and falls back to darling.json's seed, which is the wrong port on a box whose
-    /// port was later moved in the Viewer. This call is what asks the store once it can answer.
-    /// <para>Pinned by its GUARD as well as its presence. Running it unconditionally would fire it during a
-    /// fresh install's ~2-minute first start, where the store cannot answer either and the file port is
-    /// correct by definition — a second copy of the fallback disclosure about a port that is not wrong. The
-    /// guard is the difference between narrowing the window by construction and hoping the timing works
-    /// out.</para>
+    /// The installer's firewall step runs the exe with the verb the service dispatches, says nothing when the verb succeeds, and when it
+    /// fails (any nonzero exit) warns with the exit code and the exact command to re-run by hand. The exe is a stand-in that records its
+    /// arguments, and the recorded verb is then classified by the service's own dispatcher.
     /// </summary>
     [Fact]
-    public void InstallScript_ReReconcilesAfterTheFirstStart_ButOnlyOnAnUpgrade()
+    public void InstallScript_FirewallStep_RunsTheVerbTheServiceDispatches_AndWarnsOnAFailedExit()
     {
-        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
-        var branch = ExtractBracedBlock(script, "if ($isUpgrade) {");
-
-        Assert.Contains("Invoke-FirewallReconcile", branch, StringComparison.Ordinal);
-
-        /* And it is genuinely AFTER the start, or it is just the pre-start call with extra steps. */
-        var start = script.IndexOf("Start-Service -Name $serviceName", StringComparison.Ordinal);
-        var guard = script.IndexOf("if ($isUpgrade) {", StringComparison.Ordinal);
-        Assert.True(start >= 0, "install-darling.ps1 no longer starts the service");
-        Assert.True(guard > start, "the upgrade reconcile must run AFTER Start-Service, not before");
-    }
-
-    [Fact]
-    public void InstallScript_ReReconcilesInsideTheNetworkWizardBranch()
-    {
-        /* The SECOND call, pinned by its REASON rather than by counting occurrences. -Network runs
-           --configure-network AFTER the pre-start reconcile, and the wizard rewrites the very exposure that
-           reconcile acted on: a newly exposed endpoint has no rule yet, and one turned back off has a stale
-           one. Losing this call silently reproduces a subset of #1771 on every networked install.
-           A count-based pin does not hold here. The design carries a definition plus TWO calls, so "at least
-           two occurrences" stays GREEN with this one deleted - the exact hole a reviewer caught, and the same
-           vacuous-pin shape as the earlier Contains() that matched the help text. */
-        var script = ReadRepoFile(Path.Combine("Darling", "tools", "install-darling.ps1"));
-        var branch = ExtractBracedBlock(script, "if ($Network) {");
-
-        Assert.Contains("--configure-network", branch, StringComparison.Ordinal);
-        Assert.Contains("Invoke-FirewallReconcile", branch, StringComparison.Ordinal);
-    }
-
-    /// <summary>Returns the body of the first brace-balanced block introduced by <paramref name="header"/>.</summary>
-    private static string ExtractBracedBlock(string script, string header)
-    {
-        var start = script.IndexOf(header, StringComparison.Ordinal);
-        Assert.True(start >= 0, $"expected '{header}' in the script");
-
-        var open = script.IndexOf('{', start);
-        var depth = 0;
-        for (var i = open; i < script.Length; i++)
+        var folder = Directory.CreateTempSubdirectory("darling-fw-step-").FullName;
+        try
         {
-            if (script[i] == '{')
+            var passing = Path.Combine(folder, "passing.cmd");
+            var failing = Path.Combine(folder, "failing.cmd");
+            File.WriteAllText(passing, "@echo off\r\necho %*> \"%~dp0passing.args\"\r\nexit /b 0\r\n");
+            File.WriteAllText(failing, "@echo off\r\necho %*> \"%~dp0failing.args\"\r\nexit /b 3\r\n");
+            var lines = RunWindowsPowerShell(
+                // A native child started from a UNC working directory (a build served over a share) prints a complaint to stderr.
+                $"Set-Location -LiteralPath '{folder}'\n"
+                + ExtractFunction(ReadRepoFile("Darling", "tools", "install-darling.ps1"), "Invoke-FirewallReconcile") + "\n"
+                + $"$serviceExe = '{passing}'\n'passing-said=' + ((Invoke-FirewallReconcile 6>&1 | Out-String).Trim())\n"
+                + $"$serviceExe = '{failing}'\n$said = (Invoke-FirewallReconcile 6>&1 | Out-String)\n"
+                + "'failing-names-exit=' + ($said -match 'exit 3')\n"
+                + $"'failing-gives-command=' + $said.Contains('& \"{failing}\" --configure-firewall')\n");
+
+            Assert.Equal(["passing-said=", "failing-names-exit=True", "failing-gives-command=True"], lines);
+            foreach (var recorded in new[] { "passing.args", "failing.args" })
             {
-                depth++;
-            }
-            else if (script[i] == '}' && --depth == 0)
-            {
-                return script[(open + 1)..i];
+                var args = File.ReadAllText(Path.Combine(folder, recorded)).Trim();
+                Assert.True(DarlingCliCommands.IsConfigureFirewallVerb(args), $"the installer passed '{args}', which is not the firewall verb");
+                Assert.Equal(StartupAction.RunKnownVerb, DarlingCliCommands.ClassifyStartupArgs([args]));
             }
         }
-
-        Assert.Fail($"unbalanced braces after '{header}'");
-        return "";
-    }
-
-    [Theory]
-    [InlineData("DarlingMcpHostService.cs")]
-    [InlineData("DarlingWebHostService.cs")]
-    public void RuntimeHosts_VerifyTheFirewall_AndNeverWriteIt(string fileName)
-    {
-        /* The regression this whole change exists to prevent: a host that goes back to issuing the write it
-           cannot perform, producing access-denied on every start of every hardened install. */
-        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "Mcp", fileName));
-
-        Assert.Contains("DarlingFirewallCheck.CheckAsync", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("BuildFirewallEnableCommand", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("BuildFirewallDisableCommand", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("ReconcileFirewallAsync", source, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void TheStoreBootstrap_VerifiesTheFirewall_AndNeverWritesItAtRuntime()
-    {
-        /* DarlingManagedPostgres still OWNS the pure command builders (the elevated verb calls them), so this
-           pins the runtime CALL SITE rather than the file's vocabulary: the bootstrap checks, and the old
-           "try to configure it myself" entry point is gone. */
-        var source = ReadRepoFile(Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingManagedPostgres.cs"));
-
-        Assert.Contains("CheckStoreFirewallAsync", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("TryConfigureStoreFirewallAsync", source, StringComparison.Ordinal);
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+        }
     }
 
     [Fact]
