@@ -414,6 +414,39 @@ CREATE TRIGGER fail_hourly_unstamp BEFORE DELETE ON collect.query_store_clutter_
     }
 
     /// <summary>
+    /// #9721: a clutter day fold that fails reaches the tick result as a failure, so the step reads failed, and the hourly step is untouched. The
+    /// day's stamp is removed with its hours built, so only a fold writes it again, and a trigger fails that insert.
+    /// </summary>
+    [Fact]
+    public async Task ATickWhoseClutterDayFoldFailed_ReportsTheFailure_AndTheHourlyStepStillRan()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, false, ct);
+        var day = DateOnly.FromDateTime(E.AddDays(-1));
+        var dayArgs = new (string Name, object Value)[] { ("server_id", A), ("day", day) };
+
+        await TickAsync(store, FoldNow, ct);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_plan_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_collections_daily WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+        await ExecuteAsync(store, "DELETE FROM collect.query_store_clutter_day_built WHERE server_id = @server_id AND day_utc = @day", ct, dayArgs);
+
+        await ExecuteAsync(store, @"
+CREATE FUNCTION collect.fail_day_fold() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the day fold is made to fail'; END $$;
+CREATE TRIGGER fail_day_fold BEFORE INSERT ON collect.query_store_clutter_day_built FOR EACH ROW EXECUTE FUNCTION collect.fail_day_fold();", ct);
+        var failed = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(0, failed.ClutterDaysFolded);
+        Assert.True(failed.ClutterDaysFailed >= 1, $"the fold failed, so the tick must report a failure: {failed}");
+        Assert.Equal(0, failed.HoursFailed);
+
+        await ExecuteAsync(store, "DROP TRIGGER fail_day_fold ON collect.query_store_clutter_day_built; DROP FUNCTION collect.fail_day_fold();", ct);
+        var next = await TickAsync(store, FoldNow.AddHours(1), ct);
+        Assert.Equal(1, next.ClutterDaysFolded);
+        Assert.Equal(0, next.ClutterDaysFailed);
+    }
+
+    /// <summary>
     /// #9708: a prune slice that fails does not stop the tick. The first slice is the same oldest slice every tick, so a slice that cannot finish (the
     /// statement timeout on a cold cache) would otherwise fail the hourly step every tick and no hour would be built. Two old hours are stamped with a
     /// plan row each and a trigger fails the delete of the second: the first slice commits and counts, the second rolls back and is logged once, and
