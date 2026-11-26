@@ -387,7 +387,7 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
                 var answer = JsonNode.Parse(document.RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!)!;
 
                 /* The one-time token reaches a caller narrowed to maskLiterals: the data detail filter masks query text, not this credential. */
-                Assert.Equal("created", (string)answer["status"]!);
+                Assert.True((string)answer["status"]! == "created", answer.ToJsonString());
                 var token = (string)answer["token"]!;
                 Assert.True(token.Length >= 32);
                 var id = Guid.Parse((string)answer["group"]!["group_id"]!);
