@@ -126,6 +126,8 @@
          it. A hand-maintained key list here would be a third thing to keep in sync, and would rot
          exactly the way the sample it guards did. -->
     <None Include="..\Lite\config\settings.sample.json" Link="Fixtures\settings.sample.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #9744: the schedule file the zip ships and a fresh install seeds into its config folder. ShippedScheduleFileTests loads it through ScheduleManager. -->
+    <None Include="..\Lite\config\collection_schedule.json" Link="Fixtures\collection_schedule.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\App.xaml.cs" Link="Fixtures\App.xaml.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Lite\Mcp\McpSettings.cs" Link="Fixtures\McpSettings.cs" CopyToOutputDirectory="PreserveNewest" />
     <!-- #9611: the sample Teams payloads the tools\teams-test-card script posts. TeamsTestCardSampleTests builds the same
