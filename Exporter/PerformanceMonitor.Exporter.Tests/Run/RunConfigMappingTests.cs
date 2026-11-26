@@ -154,8 +154,8 @@ public class RunConfigMappingTests
     }
 
     [Theory]
-    [InlineData("""{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "c", "auth": { "method": "default_credential" } }""", "destination.type")]
-    [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "http://minio:9000" }""", "destination")]
+    [InlineData("""{ "type": "azure_blob", "account_url": "https://a.blob.core.windows.net", "container": "exports", "auth": { "method": "shared_key" } }""", "destination.auth.method")]
+    [InlineData("""{ "type": "s3", "bucket": "b", "endpoint_url": "http://minio:9000", "hive_store_folder": true }""", "destination.hive_store_folder")]
     [InlineData("""{ "type": "s3" }""", "destination.bucket")]
     public void Destinations_run_cannot_pass_are_a_config_error(string destination, string key)
     {
