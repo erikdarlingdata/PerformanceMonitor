@@ -2209,11 +2209,11 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     /// <summary>The V75 plan-content horizon clamps (#2316) — 0 (and any negative) means DISABLED
     /// (the fact-coupled dimension horizon stands alone); an enabled value clamps to [7,365], because a
     /// sub-week horizon would age plan XML out from under the viewer's default history windows.</summary>
-    internal const int MinPlanContentRetentionDays = 7;
-    internal const int MaxPlanContentRetentionDays = 365;
+    internal const int MinPlanContentRetentionDays = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.PlanContentRetentionDaysMin;
+    internal const int MaxPlanContentRetentionDays = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.PlanContentRetentionDaysMax;
 
     internal static int ClampPlanContentRetentionDays(int value) =>
-        value <= 0 ? 0 : Math.Clamp(value, MinPlanContentRetentionDays, MaxPlanContentRetentionDays);
+        PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ClampPlanContentRetentionDays(value);
 
     /* #2357: the compose statement_timeout bounds WORK -- a LIMIT bounds output, a group-by scans and sorts
        before it -- so it is clamped rather than trusted. A floor of 5s keeps the backstop meaningful; a
@@ -2225,11 +2225,11 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
     internal static int ClampQueryStoreFetchTopN(int value) =>
         value <= 0 ? 0 : Math.Min(value, QueryStoreFetchSelection.MaxTopN);
 
-    internal const int MinComposeStatementTimeoutSeconds = 5;
-    internal const int MaxComposeStatementTimeoutSeconds = 600;
+    internal const int MinComposeStatementTimeoutSeconds = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ComposeStatementTimeoutSecondsMin;
+    internal const int MaxComposeStatementTimeoutSeconds = PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ComposeStatementTimeoutSecondsMax;
 
     internal static int ClampComposeStatementTimeoutSeconds(int value) =>
-        Math.Clamp(value <= 0 ? 60 : value, MinComposeStatementTimeoutSeconds, MaxComposeStatementTimeoutSeconds);
+        PerformanceMonitor.Darling.Storage.ServiceFlagLimits.ClampComposeStatementTimeoutSeconds(value);
 
     /// <summary>#2171: unknown values normalize to 'gzip' (fail to the shipped default) so a hand-edited
     /// row cannot switch the writer into an undefined mode; the V62 CHECK constraint enforces the same
@@ -3210,7 +3210,8 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         /* #2357's effective timeout is NOT taken from here: startup role provisioning reads
            config_service.compose_statement_timeout_seconds straight out of the store and bakes it into
            ALTER ROLE viewer/mcp SET statement_timeout, so a change reaches the live roles on the next
-           service start, not on this reload. The assignment is still required: it is the only scalar in
+           service start. Since #2918 a reload also re-asserts it on a managed or compose store (see
+           ReloadFromStoreAsync); any other store's roles are the operator's. The assignment is still required: it is the only scalar in
            StoreConfigView with a same-named DarlingConfig property, and leaving it out left the held
            value pinned to darling.json forever while the store said otherwise -- a future reader of
            config.ComposeStatementTimeoutSeconds would have silently gotten the file value. */

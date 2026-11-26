@@ -39,6 +39,38 @@ public sealed class ServiceFlagLimitsTests
     public void FetchTopN_BoundsAreZeroAndOneHundredThousand(int value, bool valid) =>
         Assert.Equal(valid, ServiceFlagLimits.FetchTopNError(value) is null);
 
+    [Theory]
+    [InlineData(-1, false)]
+    [InlineData(0, true)]
+    [InlineData(6, false)]
+    [InlineData(7, true)]
+    [InlineData(365, true)]
+    [InlineData(366, false)]
+    public void PlanContentRetentionDays_AreOffOrSevenToThreeHundredSixtyFive(int value, bool valid) =>
+        Assert.Equal(valid, ServiceFlagLimits.PlanContentRetentionDaysError(value) is null);
+
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(4, false)]
+    [InlineData(5, true)]
+    [InlineData(600, true)]
+    [InlineData(601, false)]
+    public void ComposeStatementTimeoutSeconds_BoundsAreFiveAndSixHundred(int value, bool valid) =>
+        Assert.Equal(valid, ServiceFlagLimits.ComposeStatementTimeoutSecondsError(value) is null);
+
+    [Theory]
+    [InlineData("gzip", "gzip")]
+    [InlineData(" None ", "none")]
+    [InlineData("GZIP", "gzip")]
+    [InlineData("zstd", null)]
+    [InlineData("", null)]
+    [InlineData(null, null)]
+    public void PlanXmlCompression_IsGzipOrNone_AnyCase_AndNothingElse(string? mode, string? stored)
+    {
+        Assert.Equal(stored, ServiceFlagLimits.NormalizePlanXmlCompression(mode));
+        Assert.Equal(stored is null, ServiceFlagLimits.PlanXmlCompressionError(mode) is not null);
+    }
+
     [Fact]
     public void TheRefusalTextNamesTheRange()
     {
