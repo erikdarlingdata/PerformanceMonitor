@@ -29,7 +29,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// The writes are served as <c>add_servers</c> is, only while <c>mcp.allowWrites</c> and <c>mcp.allowServerAdmin</c> are both on.
 /// </summary>
 [McpServerToolType]
-public sealed class DarlingMcpWebAccessTools
+public sealed partial class DarlingMcpWebAccessTools
 {
     /// <summary>The journal actor of an MCP change: <c>mcp:</c> plus the caller the request filter worked out.</summary>
     internal static string ActorOf() => DarlingMcpServerActionTools.ActorOf();
@@ -147,7 +147,8 @@ public sealed class DarlingMcpWebAccessTools
         try
         {
             if (owner is null) return NoOwner();
-            if (string.IsNullOrWhiteSpace(name)) return Refuse("invalid", "name is required. Nothing was changed.");
+            if (name is null || !GroupName().IsMatch(name.Trim()))
+                return Refuse("invalid", "name must be 1 to 64 letters, digits, dots, underscores, colons or hyphens. Nothing was changed.");
             if (!TryScope(scope, out var parsed)) return Refuse("invalid", "scope must be tags or all_servers. Nothing was changed.");
             var tags = tagIds ?? [];
             if (parsed == WebAccessGroupScope.Tags && tags.Length == 0)
@@ -326,6 +327,10 @@ public sealed class DarlingMcpWebAccessTools
 
     private static string NoOwner() =>
         Refuse("no_owner_source", "The service has not published its store owner connection yet, so web access cannot be managed. Nothing was changed.");
+
+    /* The store's own rule for a group name (a CHECK on config.web_access_groups), said before the write so the refusal names it. */
+    [System.Text.RegularExpressions.GeneratedRegex("^[A-Za-z0-9._:-]{1,64}$")]
+    private static partial System.Text.RegularExpressions.Regex GroupName();
 
     private static string Clip(string text) => text.Length <= 80 ? text : text[..80];
 

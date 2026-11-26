@@ -128,6 +128,7 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
             Assert.Equal("invalid", Code(await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "x", "tags", null, Actor, null, ct)));
             Assert.Equal("invalid", Code(await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "x", "all_servers", [1], Actor, null, ct)));
             Assert.Equal("invalid", Code(await DarlingMcpWebAccessTools.CreateAsync(owner, ring, " ", "all_servers", null, Actor, null, ct)));
+            Assert.Equal("invalid", Code(await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "has space", "all_servers", null, Actor, null, ct)));
             Assert.Equal("key_unavailable", Code(await DarlingMcpWebAccessTools.CreateAsync(owner, TestKeyRings.NotReady, "x", "all_servers", null, Actor, null, ct)));
             Assert.Equal("key_unavailable", Code(await DarlingMcpWebAccessTools.CreateAsync(owner, null, "x", "all_servers", null, Actor, null, ct)));
             Assert.Equal("no_owner_source", Code(await DarlingMcpWebAccessTools.CreateAsync(null, ring, "x", "all_servers", null, Actor, null, ct)));
@@ -136,13 +137,13 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
 
             /* A tag the store does not know is the store's own refusal, reported in the Viewer's words and with no SQL state. */
             var unknownTag = await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "x", "tags", [987654], Actor, null, ct);
-            Assert.Contains("Check the group name and selected tags", unknownTag, StringComparison.Ordinal);
+            Assert.True(unknownTag.Contains("Check the group name and selected tags", StringComparison.Ordinal), unknownTag);
             Assert.DoesNotContain("WG400", unknownTag, StringComparison.Ordinal);
             Assert.Empty(await store.ListAsync(ct));
 
             await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "dup", "all_servers", null, Actor, null, ct);
             var duplicate = await DarlingMcpWebAccessTools.CreateAsync(owner, ring, "dup", "all_servers", null, Actor, null, ct);
-            Assert.Contains("A group with this name already exists", duplicate, StringComparison.Ordinal);
+            Assert.True(duplicate.Contains("A group with this name already exists", StringComparison.Ordinal), duplicate);
             Assert.Single(await store.ListAsync(ct));
         });
     }

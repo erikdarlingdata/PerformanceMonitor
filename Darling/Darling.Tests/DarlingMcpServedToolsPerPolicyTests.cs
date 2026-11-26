@@ -351,7 +351,7 @@ public sealed class DarlingMcpServedToolsPerPolicyTests
         "get_wait_trend 11111 FanOut server_name",
         "get_wait_types 11111 FanOut server_name",
         "get_waiting_tasks 11111 FanOut server_name",
-        "get_web_access_groups 11111 StoreRequired",
+        "get_web_access_groups 11111 FanOut",
         "kill_session 01111 StoreRequired server_name",
         "list_custom_alert_rules 11111 FanOut",
         "list_custom_alert_templates 11111 AnyOneStore",
