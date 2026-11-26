@@ -120,14 +120,14 @@ On the new machine:
    Start-Service 'PerformanceMonitor Darling'
    ```
 
-6. Enter the saved SQL login passwords again. The key that opens them, `password-key.dpapi`, cannot move between machines. The service reports the key as mismatched or missing. Run `PerformanceMonitor.Darling.Service.exe --reset-password-key` and restart the service. Then run [`--set-login-password`](darling/cli.md#--set-login-password) once for each login. It reads the password from stdin and saves it for every enabled server that uses that login. Run it with `--dry-run` first to see the list.
+6. Enter the saved SQL login passwords again. The key that opens them, `password-key.dpapi`, cannot move between machines. The service reports the key as mismatched or missing. Run `PerformanceMonitor.Darling.Service.exe --reset-password-key` and restart the service. Then run [`--set-login-password`](darling/cli.md#--set-login-password) once for each login. It reads the password from stdin and saves it for every server that uses that login, disabled servers included. Run it with `--dry-run` first to see the list, the store it reaches and the key it seals to.
 
    ```powershell
    PerformanceMonitor.Darling.Service.exe --set-login-password --username monitor --dry-run
    PerformanceMonitor.Darling.Service.exe --set-login-password --username monitor
    ```
 
-   When the new machine runs Linux, run the verbs in their Linux form (see [Service verbs on Linux](darling/linux.md#service-verbs-on-linux)) and restart with `sudo systemctl restart darling`. The Viewer does not run on Linux, and you do not need it for this step. Pipe the password in, so that it is never in the command line or the shell history.
+   When the new machine runs Linux, run the verbs in their Linux form (see [Service verbs on Linux](darling/linux.md#service-verbs-on-linux)) and restart with `sudo systemctl restart darling`. The Viewer does not run on Linux, and you do not need it for this step. Pipe the password in, so that it is never in the command line or the shell history. A host whose sudo policy records input (`Defaults log_input`, or `LOG_INPUT` on a command) writes the piped password into its sudo I/O log: run the verb as the `darling` user from a shell that user owns, or use a policy that does not log this command's input.
 
    ```bash
    sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --reset-password-key
@@ -136,7 +136,7 @@ On the new machine:
    <command that prints the password> | sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --set-login-password --username monitor
    ```
 
-   A server whose password is an `env:` or `file:` reference is listed as `skip` and keeps its reference. To enter one server's password alone, use the Viewer on Windows, the web dashboard's Admin page or the MCP `edit_server` tool.
+   A server whose password is an `env:` or `file:` reference, or one that darling.json supplies, is listed as `skip` and keeps it. To enter one server's password alone, use the Viewer on Windows, the web dashboard's Admin page or the MCP `edit_server` tool.
 7. Run `PerformanceMonitor.Darling.Service.exe --check-settings`. It prints the store size and the TimescaleDB version.
 
 Restore into the same PostgreSQL major version or a newer one. The managed bundle is PostgreSQL 18. A dump from a compose store (PostgreSQL 17) restores into it. A dump from the managed store does not restore into the compose store.
