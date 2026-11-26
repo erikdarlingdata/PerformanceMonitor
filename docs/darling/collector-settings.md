@@ -149,7 +149,7 @@ The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collecto
 
 ## Set the service flags from MCP (#6393)
 
-`update_service_flags` sets the collection flags the Viewer's Settings window saves under Data Collection, and the two trigram text index options. It needs `mcp.allowWrites` on (and a token), or an `operator` token in `mcp.tokens`. Send only the ones to change; an omitted argument keeps the stored value.
+`update_service_flags` sets the collection flags the Viewer's Settings window saves under Data Collection, the two trigram text index options, and the three settings that `darling.json` only seeds: the plan content retention, the compose statement timeout and the plan XML compression. It needs `mcp.allowWrites` on (and a token), or an `operator` token in `mcp.tokens`. Send only the ones to change; an omitted argument keeps the stored value.
 
 | Argument | Meaning | Range |
 |---|---|---|
@@ -160,15 +160,22 @@ The `mcp` database role gets `INSERT, UPDATE, DELETE` on `config.config_collecto
 | `query_store_fetch_top_n` | Plans per database-hour and metric the Query Store collector fetches. | 0 to 100000 (0 = every new plan) |
 | `query_text_trigram_index_enabled` | The trigram index on the plan-cache text ([`queryTextTrigramIndexEnabled`](configuration.md#querytexttrigramindexenabled)). | true or false |
 | `query_store_text_trigram_index_enabled` | The trigram index on the Query Store text ([`queryStoreTextTrigramIndexEnabled`](configuration.md#querystoretexttrigramindexenabled)). | true or false |
+| `plan_content_retention_days` | Days a stored plan XML outlives its last sighting before the next purge may drop it ([`planContentRetentionDays`](configuration.md)). | 0 (off), or 7 to 365 |
+| `compose_statement_timeout_seconds` | The `statement_timeout` on the `viewer` and `mcp` roles ([`composeStatementTimeoutSeconds`](configuration.md)). | 5 to 600 |
+| `plan_xml_compression` | How new plans are stored ([`planXmlCompression`](configuration.md)). | `gzip` or `none` |
 | `reset_to_file` | Trigram index options to clear, so darling.json governs them again. | `query_text_trigram_index_enabled`, `query_store_text_trigram_index_enabled` |
 
-The ranges are the Settings window's: both call one class (`ServiceFlagLimits`). An out-of-range value answers `invalid`, names the argument and its range, and changes nothing, including the other flags in the same call. The answer carries all seven values before and after. The running service reloads on its next sweep.
+The ranges are the Settings window's: both call one class (`ServiceFlagLimits`). An out-of-range value answers `invalid`, names the argument and its range, and changes nothing, including the other flags in the same call. The answer carries all ten values before and after. The running service reloads on its next sweep. Three of the values act later than that, and the answer says so when you change one:
+
+- `plan_content_retention_days` applies at the next purge, the daily one or `purge_now`.
+- `compose_statement_timeout_seconds` is set on the `viewer` and `mcp` roles, not read per query. The service sets it on its next sweep where it provisioned those roles (a managed store, or the compose store). A role uses the new value from its next session, so a query already running keeps the old one. On a store whose roles you provisioned yourself, the service does not touch them, so run `ALTER ROLE ... SET statement_timeout` by hand.
+- `plan_xml_compression` applies to plans written from then on. Plans already stored keep the format they were written in, and every reader takes the text first and the gzip bytes second, row by row, so a change never strands an old plan.
 
 The two trigram index options are empty (`null`) until set, and an empty option follows darling.json's key. A value set here wins over the file until `reset_to_file` clears it. A call that names an option in `reset_to_file` and also sends a value for it, or names anything else there, answers `invalid` and changes nothing. The index pass reads the option at every pass (every 30 minutes), so the build or the drop starts at the next pass with no restart; `get_store_metrics` shows the state and `option_source` (`store` or `file`).
 
-The MCP on/off flag and port, the web on/off flag and port, and pause are not settable from MCP: turning MCP off from MCP would lock the admin out, and the `mcp` role's column grant covers only these seven columns. Change those in the Viewer. Like the schedule tools, `update_service_flags` is never offered to an investigation agent. Lite's MCP server has no write tools, so none of this applies to Lite.
+The MCP on/off flag and port, the web on/off flag and port, and pause are not settable from MCP: turning MCP off from MCP would lock the admin out, and the `mcp` role's column grant covers only these ten columns. Change those in the Viewer. Like the schedule tools, `update_service_flags` is never offered to an investigation agent. Lite's MCP server has no write tools, so none of this applies to Lite.
 
-The service grants the `mcp` role `UPDATE` on exactly those seven `config.config_service` columns when it provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add that grant; until then `update_service_flags` answers `error` with a permission failure from the store.
+The service grants the `mcp` role `UPDATE` on exactly those ten `config.config_service` columns when it provisions roles (every start). A bring-your-own store needs `tools/provision-roles.sql` run again to add that grant; until then `update_service_flags` answers `error` with a permission failure from the store.
 
 ## Drop the Extended Events sessions a removed server left behind (`--drop-xe-sessions`)
 
