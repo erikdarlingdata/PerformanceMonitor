@@ -412,7 +412,6 @@ public sealed class DarlingMcpWebAccessToolsLiveTests
         var builder = DarlingMcpHostService.CreateHostBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.ClearProviders();
-        builder.Logging.SetMinimumLevel(LogLevel.Trace);
         builder.Logging.AddProvider(new FixedLoggerProvider(logger));
         builder.Services.AddSingleton(NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling"));
         builder.Services.AddSingleton(ownerSource);
