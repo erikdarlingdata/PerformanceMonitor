@@ -36,7 +36,8 @@ namespace PerformanceMonitorLite.Tests;
 /// DuckDbInitializer, ArchiveService and RetentionService built over three servers and ten days of rows: its DDL, two rows per table,
 /// one row per archive file (rebuilt here with COPY, so each file carries v81's columns) and its views. The tests climb a copy to
 /// <see cref="DuckDbInitializer.CurrentSchemaVersion"/> and hold it to a fresh store of this build loaded with the same rows:
-/// the same tables, columns in the same order and indexes; no migration step logged as non-fatal (#2748); every row kept; every
+/// the same tables, columns in the same order, indexes and views, with neither store holding an object the other lacks; no migration
+/// step logged as non-fatal (#2748); every row kept; every
 /// LocalDataService read and every MCP read tool that answers on the fresh store answering on the upgraded one with the same row
 /// counts; and the housekeeping passes (archival, retention, the purges, the size reset) leaving the two stores alike.
 /// <para>Set <c>LITE_UPGRADE_STORE_DIR</c> to a folder holding a real store (monitor.duckdb, archive, config) to run the same checks
@@ -162,15 +163,23 @@ public sealed class Lite313StoreUpgradeTests : IDisposable
             run.Climb.Add($"initializer logged {level}: {message}");
         foreach (var (table, columns) in freshShape.Columns)
         {
-            if (!after.Columns.TryGetValue(table, out var have))
-                run.Climb.Add($"table {table} is missing from the upgraded store");
-            else if (!have.SequenceEqual(columns))
+            if (after.Columns.TryGetValue(table, out var have) && !have.SequenceEqual(columns))
                 run.Climb.Add($"table {table} columns differ: upgraded [{string.Join(", ", have)}] fresh [{string.Join(", ", columns)}]");
         }
-        foreach (var index in freshShape.Indexes.Except(after.Indexes))
+        /* Both directions: an object the upgraded store lacks is a migration that did not run, and one it holds that a fresh store does
+           not is a v81 table, index or view the climb should have dropped or renamed. */
+        foreach (var table in freshShape.Columns.Keys.Except(after.Columns.Keys, StringComparer.OrdinalIgnoreCase))
+            run.Climb.Add($"table {table} is missing from the upgraded store");
+        foreach (var table in after.Columns.Keys.Except(freshShape.Columns.Keys, StringComparer.OrdinalIgnoreCase))
+            run.Climb.Add($"table {table} is on the upgraded store and not on a fresh one");
+        foreach (var index in freshShape.Indexes.Except(after.Indexes, StringComparer.OrdinalIgnoreCase))
             run.Climb.Add($"index {index} is missing from the upgraded store");
-        foreach (var view in freshShape.Views.Keys.Except(after.Views.Keys))
+        foreach (var index in after.Indexes.Except(freshShape.Indexes, StringComparer.OrdinalIgnoreCase))
+            run.Climb.Add($"index {index} is on the upgraded store and not on a fresh one");
+        foreach (var view in freshShape.Views.Keys.Except(after.Views.Keys, StringComparer.OrdinalIgnoreCase))
             run.Climb.Add($"view {view} is missing from the upgraded store");
+        foreach (var view in after.Views.Keys.Except(freshShape.Views.Keys, StringComparer.OrdinalIgnoreCase))
+            run.Climb.Add($"view {view} is on the upgraded store and not on a fresh one");
         foreach (var (table, rows) in before.Tables)
         {
             if (InitializerTables.Contains(table)) continue;
