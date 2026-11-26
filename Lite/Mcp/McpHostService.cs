@@ -338,6 +338,8 @@ public sealed class McpHostService : BackgroundService
             .WithGeminiCompatibleTools<McpObjectUsageTools>()
             .WithGeminiCompatibleTools<McpLatchSpinlockTools>()
             .WithGeminiCompatibleTools<McpPlanCacheSchedulerTools>()
+            /* #9640: get_collector_schedules and reset_collector_schedules. */
+            .WithGeminiCompatibleTools<McpCollectorScheduleTools>()
             .WithGeminiCompatibleTools<McpConfigHistoryTools>()
             .WithGeminiCompatibleTools<McpDefaultTraceTools>()
             /* #5991: the query-tag and query-tag-rule tools; twin of Darling's DarlingMcpQueryTagTools and DarlingMcpQueryTagRuleTools. */
@@ -484,6 +486,11 @@ public sealed class McpHostService : BackgroundService
             builder.Services.AddSingleton(_dataService);
             builder.Services.AddSingleton(_serverManager);
             builder.Services.AddSingleton(_muteRuleService);
+            /* #9640: the schedule tools take the one manager the editor and the collection loop use; with none they answer unavailable. */
+            if (_scheduleManager is not null)
+            {
+                builder.Services.AddSingleton(_scheduleManager);
+            }
             /* #4938: get_collection_health shows each collector's run time and next run, from the schedule the sweep reads.
                Registered through the method a test also calls (see RegisterCollectorRunTimes). */
             RegisterCollectorRunTimes(builder.Services, _scheduleManager, _serverManager);

@@ -62,6 +62,9 @@ internal static class McpWritePolicy
         "create_query_tag_rule",
         "update_query_tag_rule",
         "delete_query_tag_rule",
+
+        /* #9640: Darling's reset_collector_schedules twin. get_collector_schedules is a read. */
+        "reset_collector_schedules",
     };
 
     internal static bool IsWrite(string toolName) => WriteTools.Contains(toolName);
