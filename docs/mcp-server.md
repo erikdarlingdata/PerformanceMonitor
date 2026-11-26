@@ -181,7 +181,7 @@ The write tools and the investigation tools need the token, and every request mu
 
 #### Named tokens and the switches
 
-With `mcp.tokens` set, each named token is served the tools of its role, and the switches above do not change that. A named `operator` token gets the write tools while `mcp.allowWrites` is `false`. It gets the four server administration tools only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. A named `agent` token gets the investigation tools and the agent action tools while `mcp.allowInvestigations` is `false`. A named `reader` token gets the read tools and nothing else. The token floor applies to each named token. See [Named tokens](darling-agent-dispatch.md#named-tokens-an-operator-agents-and-readers-on-one-service).
+With `mcp.tokens` set, each named token is served the tools of its role, and the switches above do not change that. A named `operator` token gets the write tools while `mcp.allowWrites` is `false`. It gets the server administration tools, the web access group tools among them, only when `mcp.allowWrites` and `mcp.allowServerAdmin` are both on. A named `agent` token gets the investigation tools and the agent action tools while `mcp.allowInvestigations` is `false`. A named `reader` token gets the read tools and nothing else. The token floor applies to each named token. See [Named tokens](darling-agent-dispatch.md#named-tokens-an-operator-agents-and-readers-on-one-service).
 
 #### Personal tokens
 
