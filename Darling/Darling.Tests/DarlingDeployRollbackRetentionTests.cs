@@ -74,6 +74,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// the first place, and a disagreement is silent in both directions: the service starts warning 46 times
     /// again, or the script stops pruning a shape it made.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScriptAndTheService_AgreeOnWhatARollbackBackupIsCalled()
     {
@@ -119,6 +121,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// is the one the filesystem can vouch for: #2525's box carries more than one stamp spelling, and a
     /// deploy from a box whose clock or naming changed must still prune the genuinely old copies.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_KeepsTheNewestN_AndSelectsOnlyTheOldestRestToPrune()
     {
@@ -157,6 +161,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// so the one input that must not be expressible is the one that selects everything — a zero from a
     /// typo, a variable that never got set, a future caller doing arithmetic. Asking for zero keeps one.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_NeverSelectsEveryBackup_EvenWhenAskedToKeepNone()
     {
@@ -193,6 +199,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// backup at all. The two errors are not symmetric. A spare backup costs 120 MB the next prune reclaims;
     /// a missing one costs the rollback the whole procedure exists to provide.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_ReusesARecentBackup_ButNeverOneDatedInTheFuture()
     {
@@ -233,6 +241,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// upgrade finished and this run needs its own backup. A missing, unreadable or older manifest keeps the
     /// reuse, which is the safe side.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_ReusesARecentBackupOnlyWhenTheUpgradeThatTookItDidNotFinish()
     {
@@ -303,6 +313,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// throws and its line never prints, so the sequence comes back short; after it, the producer is a real
     /// empty array, nothing is recent, and nothing is selected for prune.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_WithNoBackupsAtAll_DoesNotCrashAndReportsNothingRecent()
     {
@@ -348,6 +360,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// is not a backup. <c>Protect-DarlingRollbackBackupFolder</c> and <c>Warn</c> are recording stubs, so the
     /// assertion is on the exact calls the loop makes.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheKeptBackupStep_PassesEachBackupFolderToThePermissionStepOnItsOwn()
     {
@@ -618,6 +632,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// exactly as hard as any other application would. Excusing it would let the copy walk into the locked
     /// file this guard exists to prevent.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_ExcusesOnlyWhatTheServiceStopActuallyCloses()
     {
@@ -668,6 +684,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// <para>Run as shipped, see <see cref="RunPreStopGuard"/>: the guard's own statements run against a
     /// process list the test supplies, so no real process has to exit at the right moment.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreStopGuard_LetsThroughAManagedBackendThatExitsAfterItIsListed()
     {
@@ -684,6 +702,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// #8537: a process the service stop would not close, which has exited by the time the guard decides,
     /// is dropped. It holds no file, so there is nothing for an operator to close.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreStopGuard_DropsAProcessOutsideTheServiceThatHasExitedByTheDecision()
     {
@@ -700,6 +720,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// refuses the upgrade, and so does one whose exit state cannot be read. Only a process known to have
     /// exited is dropped. The service and the bundled PostgreSQL are not listed.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreStopGuard_StillRefusesARunningProcessTheServiceStopWillNotClose()
     {
@@ -721,6 +743,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// which executable under the install tree it is. A backend that exited after it was listed is not
     /// among them.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreStopGuard_NamesEachProcessItRefusesOn_WithThePathItRead()
     {
@@ -746,6 +770,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// of the install tree refuses the run, the bundled PostgreSQL included, and an empty tree passes. One
     /// process is the count that matters: a lone object is not a list, and the check counts what it is given.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePostStopCheck_StillRefusesOnASingleProcessLeftUnderTheInstallTree()
     {
@@ -765,6 +791,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// refuses to run from one and names the 64-bit shell. A 64-bit shell, and a 32-bit shell on 32-bit
     /// Windows, go on to the listing.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheStopGuard_RefusesToRunFromA32BitShellOn64BitWindows()
     {
@@ -792,6 +820,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// without it refuses the upgrade whatever kept it out. With the service stopped there is no such
     /// process to ask for, and the same listing passes.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreStopGuard_RefusesWhenTheServiceIsRunningAndTheListingDoesNotContainIt()
     {
@@ -817,6 +847,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// lists under the registered folder as well, judges each process against the spelling it was found
     /// under, and lists each one once.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreStopGuard_SeesAProcessUnderTheRegisteredFolder_WhenInstallRootIsAnotherSpellingOfIt()
     {
@@ -851,6 +883,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// #8546: the check after the stop lists under the registered folder too, so a process left running
     /// from it refuses the run when <c>-InstallRoot</c> spells that folder another way.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePostStopCheck_SeesAProcessUnderTheRegisteredFolder_WhenInstallRootIsAnotherSpellingOfIt()
     {
@@ -871,6 +905,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// PostgreSQL, and a Viewer started that way still refuses the upgrade. The refusal gives the path as
     /// the process reports it.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePreStopGuard_FindsProcessesStartedByAShortSpellingOfTheInstallFolder()
     {
@@ -900,6 +936,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// #8546: the check after the stop finds a process started by a short (8.3) spelling of the install
     /// folder, so a postmaster that outlived the stop on an install registered that way refuses the run.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ThePostStopCheck_FindsAProcessStartedByAShortSpellingOfTheInstallFolder()
     {
@@ -915,6 +953,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// #8546: a service in any state but Stopped has a process, and the stop acts on every such state. So
     /// the pre-stop guard asks for the service's process in each of them, not only while it is Running.
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("StartPending")]
     [InlineData("StopPending")]
@@ -1206,6 +1246,8 @@ public sealed class DarlingDeployRollbackRetentionTests
     /// <c>ImagePath</c> and a hand-typed <c>-InstallRoot</c> routinely differ by exactly those, and a
     /// comparison that called them different would refuse every correct upgrade.</para>
     /// </summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDeployScript_ComparesPathsOneWay_AndToleratesTheWaysPeopleTypeThem()
     {

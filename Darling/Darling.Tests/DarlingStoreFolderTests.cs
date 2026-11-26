@@ -1831,6 +1831,8 @@ public sealed class DarlingStoreContentsGateTests
         }
     }
 
+    // #9686: Needs Windows path rules (drive letters, UNC shares, the long-path prefix), which .NET applies on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheRefusalsRepairCommands_AreFourInOrder_AndCoverTheFolderAndEverythingBelowIt()
     {

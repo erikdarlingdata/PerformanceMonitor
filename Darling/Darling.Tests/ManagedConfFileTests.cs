@@ -901,6 +901,8 @@ public sealed class ManagedConfFileTests
         }
     }
 
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void WriteManagedConfFile_FreshDirectory_WritesFileAndAppendsIncludeLine()
     {
@@ -950,6 +952,8 @@ public sealed class ManagedConfFileTests
     /// The file is first written with the key, as the build before this change did, so the heal of an existing
     /// managed file is covered too.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void WriteManagedConfFile_OperatorLineAboveTheInclude_StaysInForce_AndTheKeyIsLeftOut()
     {
@@ -1002,6 +1006,8 @@ public sealed class ManagedConfFileTests
     /// <summary>The post-start Legacy Step A gathers its inputs through the same method as the start path's write and
     /// never calls <c>WriteManagedConfFile</c>, so the log line comes from the gather: once per call, with the key, the
     /// value and the line.</summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void GatherManagedConfRenderInputs_OperatorLineAboveTheInclude_LogsOnceAndPinsTheKey()
     {
@@ -1030,6 +1036,8 @@ public sealed class ManagedConfFileTests
         }
     }
 
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void WriteManagedConfFile_NoOperatorLine_StillGetsTheManagedValues()
     {
@@ -1123,6 +1131,8 @@ public sealed class ManagedConfFileTests
         Assert.Equal(1, outside["random_page_cost"].Line);
     }
 
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void WriteManagedConfFile_HandEditedFile_IsNeverOverwritten()
     {

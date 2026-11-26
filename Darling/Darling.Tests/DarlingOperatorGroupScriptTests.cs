@@ -199,6 +199,8 @@ public sealed class DarlingOperatorGroupScriptTests
     /// path that changes nothing, so this creates nothing. The group is one of this machine's own accounts when it has
     /// one; otherwise a built-in group is looked up under the BUILTIN domain in place of the machine name, which
     /// exercises the same code on a machine with no local group of its own.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("install-darling.ps1")]
     [InlineData("upgrade-darling.ps1")]
@@ -275,6 +277,8 @@ public sealed class DarlingOperatorGroupScriptTests
     /// <summary>Nothing answered (Enter) is No: the prompt names the account and the group, the group is not touched, the
     /// closing text still says who to add and that a person signs out and back in, and the step reports that no one was
     /// added. It also says why the Viewer needs the group (what members get, and that the Viewer uses the admin role).</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheOperatorQuestionDefaultsToNo_AndAddsNoOne()
     {
@@ -290,6 +294,8 @@ public sealed class DarlingOperatorGroupScriptTests
     }
 
     /// <summary>Anything that is not a yes is a no, including a word that only starts like a no.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("'n'")]
     [InlineData("'no'")]
@@ -305,6 +311,8 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>A yes adds the account to the group and gives it the direct grant, both for the account that was named in the
     /// prompt, and prints the one line that says it also has a direct grant and how to remove it.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("'y'")]
     [InlineData("'Yes'")]
@@ -323,6 +331,8 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>The person signed in to the session and the account the script runs as are not always the same one (someone
     /// elevated with another administrator account). The prompt names the signed-in person, and says so when they differ.</summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void WhenTheSignedInAccountIsNotTheAccountTheScriptRunsAs_ThePromptSaysSo_AndStillDefaultsToNo()
     {
@@ -338,6 +348,8 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>When no desktop shell is found for the session the prompt names the account the script runs as, and has no
     /// "different account" sentence to say.</summary>
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void WhenTheSignedInAccountIsTheAccountTheScriptRunsAs_ThePromptHasNoDifferentAccountWording()
     {
@@ -349,6 +361,8 @@ public sealed class DarlingOperatorGroupScriptTests
     }
 
     /// <summary>-NoOperatorPrompt never asks and never adds, and prints the existing closing text.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void NoOperatorPromptNeverAsks()
     {
@@ -360,6 +374,8 @@ public sealed class DarlingOperatorGroupScriptTests
     }
 
     /// <summary>-AddOperator adds the named account without asking, and gives it the direct grant.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void AddOperatorAddsTheNamedAccountWithoutAsking()
     {
@@ -373,6 +389,8 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>A host nobody can answer on is never waited on: the answer is No, the group is not touched and the closing
     /// text prints.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void AHostThatCannotTakeAnAnswerIsTreatedAsNo()
     {
@@ -385,6 +403,8 @@ public sealed class DarlingOperatorGroupScriptTests
     }
 
     /// <summary>The real host check, under a console started with -NonInteractive, says no.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheHostCheckSaysNoUnderNonInteractive()
     {
@@ -398,6 +418,8 @@ public sealed class DarlingOperatorGroupScriptTests
     /// would hang. The remoting check says yes for the remote host name and for a set $PSSenderInfo (either alone is enough),
     /// and no for an ordinary console. The real host check is then run with the sender info set, so it answers No whatever
     /// the console around it looks like.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ARemotingSessionIsTreatedAsAHostThatCannotAnswer()
     {
@@ -419,6 +441,8 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>The real account check: a person's own account resolves to its SID, and the names that would put every user
     /// inside the boundary (Everyone, BUILTIN\Users, Authenticated Users) and a name that resolves to nothing are refused.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void OnlyAUserOrGroupAccountIsAcceptedAsAnOperator()
     {
@@ -446,6 +470,8 @@ public sealed class DarlingOperatorGroupScriptTests
     /// <summary>The direct grant lands on exactly the paths the group gets, with the group's rights: read on darling.json,
     /// traverse only on the store folder, read on the admin and viewer credential files, and nothing else (the mcp and
     /// superuser credentials are not the operators'). A store that is not managed has darling.json alone.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheDirectGrantTargetsAreTheGroupsOwn()
     {
@@ -477,6 +503,8 @@ public sealed class DarlingOperatorGroupScriptTests
     /// every direct Allow entry on those four paths except SYSTEM, Administrators, a service account and the operator group,
     /// and leaves inherited entries and denies alone. Run with stand-ins for the ACL read and for icacls, so no permission on
     /// this machine is changed.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void UninstallRemovesTheDirectGrantFromEveryPathItLands()
     {
@@ -522,6 +550,8 @@ public sealed class DarlingOperatorGroupScriptTests
     /// <summary>When the operator group's own SID cannot be resolved, the function cannot tell the group's entries from a
     /// direct grant, so it removes nothing from any of the four paths and says so by naming the group. The group lookup is made
     /// to throw by naming a group that does not exist; the stand-in ACL still carries entries (one of them the group's own).</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void UninstallRemovesNothingWhenTheOperatorGroupCannotBeResolved()
     {
@@ -600,6 +630,8 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>A group that still has the installer's comment was made by the install, so the purge deletes it with net.exe and
     /// says so.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PurgeRemovesTheGroupTheInstallMade()
     {
@@ -611,6 +643,8 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>A group with any other comment, or none, was made by an administrator and is kept. The line says why and gives
     /// the command to remove it by hand.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Theory]
     [InlineData("Our own operators")]
     [InlineData("")]
@@ -623,6 +657,8 @@ public sealed class DarlingOperatorGroupScriptTests
     }
 
     /// <summary>On a domain controller nothing is looked up or deleted: a group of that name there is a domain group.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PurgeNeverActsOnADomainController()
     {
@@ -634,6 +670,8 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>A group that is not on the machine (an earlier purge, or an install that never made it) is not an error and
     /// prints nothing.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PurgeDoesNothingWhenTheGroupIsAlreadyGone()
     {
@@ -644,6 +682,8 @@ public sealed class DarlingOperatorGroupScriptTests
 
     /// <summary>When net.exe fails the function reports it with the command to run by hand and does not throw, so the rest of
     /// the purge goes on.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void AFailureToRemoveTheGroupIsReported_AndDoesNotThrow()
     {
@@ -690,6 +730,8 @@ public sealed class DarlingOperatorGroupScriptTests
     }
 
     /// <summary>A plain uninstall keeps the group, so a reinstall gets back the same members.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void APlainUninstallKeepsTheGroup()
     {
@@ -699,6 +741,8 @@ public sealed class DarlingOperatorGroupScriptTests
     }
 
     /// <summary>A confirmed purge deletes the store and then the group.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void AConfirmedPurgeRemovesTheStoreAndTheGroup()
     {
@@ -709,6 +753,8 @@ public sealed class DarlingOperatorGroupScriptTests
     }
 
     /// <summary>A purge that was not confirmed leaves the store, so it leaves the group too.</summary>
+    // #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void APurgeThatIsNotConfirmedKeepsTheGroup()
     {

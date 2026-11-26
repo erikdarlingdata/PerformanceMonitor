@@ -23,6 +23,8 @@ namespace Darling.Tests;
 /// rule or registry value is touched. How the phases are stitched into the script's steps is proved by the package's own install
 /// legs on a Windows runner, not here.
 /// </summary>
+// #9686: Starts powershell.exe or cmd.exe to run the Windows install and deploy scripts, and only Windows has them.
+[Trait("Platform", "Windows")]
 public sealed class DarlingMsiPhaseScriptTests
 {
     private static string Install => ReadRepoFile("Darling", "tools", "install-darling.ps1");

@@ -577,6 +577,8 @@ public class DarlingHardenFilesJunctionTests
     /// the only way to create such a name, and both listings (the CLI's and the service's start-up sweep) skip them while the
     /// plain backup name still counts.
     /// </summary>
+    // #9686: Needs Windows path rules (drive letters, UNC shares, the long-path prefix), which .NET applies on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheBackupNameTest_RefusesANameWindowsFolds_InTheNameTestAndBothListings()
     {

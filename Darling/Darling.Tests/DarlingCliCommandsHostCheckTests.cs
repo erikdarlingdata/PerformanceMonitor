@@ -133,6 +133,8 @@ public sealed class DarlingCliCommandsHostCheckTests
         }
     }
 
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task CheckSettingsAsync_ManagedStoreWithAStaleBlock_ReturnsStaleSettingsExitCode_Gated()
     {

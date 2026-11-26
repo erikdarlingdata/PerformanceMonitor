@@ -72,6 +72,8 @@ public sealed class DarlingManagedPostgresTests
             parsed.SearchPath);
     }
 
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void RoleCredentialPaths_BesideTheDataDirectory()
     {
@@ -508,6 +510,8 @@ public sealed class DarlingManagedPostgresTests
     /// re-reads the file for v13, and this proves it: the last live assignment is timescaledb plus the library,
     /// utility tracking is off, and a second heal appends no second v13 block.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void FreshConfHeal_KeepsTimescaleInThePreloadList_AndASecondHealAppendsNoSecondV13()
     {
@@ -544,6 +548,8 @@ public sealed class DarlingManagedPostgresTests
     /// list-replacement hazard <see cref="HealingAConfWithoutV11_AppendsOnlyThatBlock_AndReAppliesNoV1Setting"/>
     /// documents, applied to the one block that has to restate the list.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ExistingConfHeal_KeepsTheOperatorsPreloadLibraries()
     {
@@ -682,6 +688,8 @@ public sealed class DarlingManagedPostgresTests
     /// the block without the library turns statement statistics off. Both are named, per start, with the line
     /// in force; a pristine healed conf says nothing.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void AnEditTheV13BlockOverrides_AndALaterListWithoutTheLibrary_AreBothNamed()
     {
@@ -731,6 +739,8 @@ public sealed class DarlingManagedPostgresTests
     /// list PostgreSQL would actually read, includes followed (a relative include, then an include_dir's
     /// <c>*.conf</c> files in name order, a dot-file and a non-.conf file skipped), and keeps its libraries.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheV13Merge_FollowsIncludes_SoAnIncludedPreloadListIsKept()
     {
@@ -866,6 +876,8 @@ public sealed class DarlingManagedPostgresTests
 
     /// <summary>The v13 heal over an invalid list says so, and writes the list corrected, since the server has
     /// been loading nothing from it.</summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TheV13Heal_OverAnInvalidList_SaysSo_AndWritesItCorrected()
     {
@@ -2088,6 +2100,8 @@ public sealed class DarlingManagedPostgresTests
     /// <c>work_mem</c>. A second heal is a no-op for v8: the fingerprint the first heal just wrote matches
     /// this machine, so nothing is rewritten.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void EnsureConfAppended_ThreeExistingV8Blocks_CollapseToOneOnTheNextHeal()
     {
@@ -2434,6 +2448,8 @@ public sealed class DarlingManagedPostgresTests
     /// through the real <see cref="DarlingManagedPostgres.EnsureConfAppended"/> rather than string
     /// concatenation.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void EnsureConfAppended_AppendsV15Once_AndNotAgainOnANextStart()
     {
@@ -2503,6 +2519,8 @@ public sealed class DarlingManagedPostgresTests
     /// cref="EnsureConfAppended_AppendsV15Once_AndNotAgainOnANextStart"/>), exercised here through the real
     /// <see cref="DarlingManagedPostgres.EnsureConfAppended"/> rather than string concatenation.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void EnsureConfAppended_AppendsV16Once_AndNotAgainOnANextStart()
     {
@@ -2571,6 +2589,8 @@ public sealed class DarlingManagedPostgresTests
     /// cref="EnsureConfAppended_AppendsV16Once_AndNotAgainOnANextStart"/>), exercised here through the real
     /// <see cref="DarlingManagedPostgres.EnsureConfAppended"/> rather than string concatenation.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void EnsureConfAppended_AppendsV17Once_AndNotAgainOnANextStart()
     {
@@ -2696,6 +2716,8 @@ public sealed class DarlingManagedPostgresTests
     /// of the heal predates the v1 and v13 appends), and a second start appends nothing. The Information line
     /// says the library loads at the next start the service owns.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void EnsureConfAppended_AppendsV18LastAndOnce_KeepsTimescaleFirst_AndSaysWhenItLoads()
     {
@@ -2737,6 +2759,8 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>An operator's library on v1's line survives v13 and v18, in order, with auto_explain last.</summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void EnsureConfAppended_V18_KeepsTheOperatorsPreloadLibraries()
     {
@@ -3158,6 +3182,8 @@ public sealed class DarlingManagedPostgresTests
     /// signal the WAL sizing waits for. Asked of the drive letter above it, the same read answers for any path
     /// under the drive, which is how a wrong volume's free space got through.
     /// </summary>
+    // #9686: Reaches kernel32.dll through the code under test, and only Windows has it.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void TryReadDataVolumeSpace_DirectoryThatIsNotThere_IsUnreadable_AndWarnsOnce()
     {
@@ -3407,6 +3433,8 @@ public sealed class DarlingManagedPostgresTests
         Assert.NotEqual(first, second);
     }
 
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void PathConventions_DefaultDataDirectory_AndCredentialBesideIt()
     {
@@ -3423,6 +3451,8 @@ public sealed class DarlingManagedPostgresTests
     /// <summary>Round-1 security review, #4280 Low 3: ResolveDataDirectory itself normalizes a trailing
     /// separator, rather than relying on every caller downstream to trim it before building a quoted "-D"
     /// argument (a trailing backslash there escapes the closing quote).</summary>
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void ResolveDataDirectory_TrimsATrailingSeparator()
     {
@@ -3467,6 +3497,8 @@ public sealed class DarlingManagedPostgresTests
         }
     }
 
+    // #9686: Exercises the managed PostgreSQL store, which the product runs on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public void McpCredentialPath_BesideTheDataDirectory_AndDistinctFile()
     {
@@ -5142,6 +5174,8 @@ public sealed class DarlingManagedPostgresTests
 
     /* Case B, a non-empty folder with neither file: it is moved aside, never deleted, and the credential the next
        initdb overwrites is copied beside it first. */
+    // #9686: Needs the Windows identity and file ACL APIs, which .NET offers on Windows only.
+    [Trait("Platform", "Windows")]
     [Fact]
     public async Task ANonEmptyFailedFolderWithNoEvidenceItHasRun_IsMovedAside_NotDeleted_WithACopyOfTheCredential()
     {
