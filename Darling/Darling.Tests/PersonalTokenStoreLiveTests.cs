@@ -207,6 +207,46 @@ public sealed class PersonalTokenStoreLiveTests : IClassFixture<PersonalTokenSto
         Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.mcp_personal_token", ct));
     });
 
+    /// <summary>#9643: a second owner key cannot take a subject another owner key's token carries, in any case, even when that token is revoked.</summary>
+    [Fact]
+    public Task Create_ForASubjectAnotherOwnerHolds_ReturnsSubjectTaken_InAnyCase_AndTheSameOwnerMayRepeatIt() => WithStoreAsync(async (connection, owner, ct) =>
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = PersonalTokenFormat.Mint();
+        Assert.Equal(PersonalTokenCreateOutcome.Created,
+            await PersonalTokenStore.InsertAsync(owner, first.TokenId, first.SecretSha256, "k1", "Pat Person", "a", "reader", now, 30, 5, Actor, ct));
+
+        var other = PersonalTokenFormat.Mint();
+        Assert.Equal(PersonalTokenCreateOutcome.SubjectTaken,
+            await PersonalTokenStore.InsertAsync(owner, other.TokenId, other.SecretSha256, "k2", "Pat Person", "a", "reader", now, 30, 5, Actor, ct));
+        Assert.Equal(PersonalTokenCreateOutcome.SubjectTaken,
+            await PersonalTokenStore.InsertAsync(owner, other.TokenId, other.SecretSha256, "k2", "pat person", "a", "reader", now, 30, 5, Actor, ct));
+        Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.mcp_personal_token", ct));
+
+        Assert.True(await PersonalTokenStore.RevokeAsync(owner, first.TokenId, "k1", "k1", Actor, "admin:alice", Actor, now, ct));
+        Assert.Equal(PersonalTokenCreateOutcome.SubjectTaken,
+            await PersonalTokenStore.InsertAsync(owner, other.TokenId, other.SecretSha256, "k2", "PAT PERSON", "b", "reader", now, 30, 5, Actor, ct));
+
+        var again = PersonalTokenFormat.Mint();
+        Assert.Equal(PersonalTokenCreateOutcome.Created,
+            await PersonalTokenStore.InsertAsync(owner, again.TokenId, again.SecretSha256, "k1", "PAT PERSON", "c", "reader", now, 30, 5, Actor, ct));
+    });
+
+    /// <summary>#9643: two owner keys minting the same subject at once, in different case, make exactly one token.</summary>
+    [Fact]
+    public Task Create_TwoOwnersAtOnceForOneSubject_OneCreatedOneSubjectTaken() => WithStoreAsync(async (connection, owner, ct) =>
+    {
+        var now = DateTimeOffset.UtcNow;
+        var first = PersonalTokenFormat.Mint();
+        var second = PersonalTokenFormat.Mint();
+        var outcomes = await Task.WhenAll(
+            PersonalTokenStore.InsertAsync(owner, first.TokenId, first.SecretSha256, "k1", "Race Person", "a", "reader", now, 30, 5, Actor, ct),
+            PersonalTokenStore.InsertAsync(owner, second.TokenId, second.SecretSha256, "k2", "race person", "a", "reader", now, 30, 5, Actor, ct));
+        Assert.Equal(1, outcomes.Count(o => o == PersonalTokenCreateOutcome.Created));
+        Assert.Equal(1, outcomes.Count(o => o == PersonalTokenCreateOutcome.SubjectTaken));
+        Assert.Equal("1", await ScalarAsync(connection, "SELECT count(*) FROM config.mcp_personal_token", ct));
+    });
+
     /// <summary>I2: the live cap frees a slot on every revoke, so the creates of the last 24 hours are capped too, revoked ones included.</summary>
     [Fact]
     public Task Create_RecentCeiling_RefusesTheNextCreate_EvenWithEveryEarlierTokenRevoked() => WithStoreAsync(async (connection, owner, ct) =>

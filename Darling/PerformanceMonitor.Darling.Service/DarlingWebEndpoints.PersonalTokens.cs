@@ -281,6 +281,9 @@ public static partial class DarlingWebEndpoints
                         return Refusal("at_cap",
                             string.Create(CultureInfo.InvariantCulture, $"You already have {settings.MaxTokensPerPerson} live tokens. Revoke one first."),
                             StatusCodes.Status409Conflict);
+                    case PersonalTokenCreateOutcome.SubjectTaken:
+                        return Refusal("subject_clash", "Your sign-in name is already the name another person's token acts as, so a token cannot be made for it. Ask an administrator.",
+                            StatusCodes.Status409Conflict);
                     case PersonalTokenCreateOutcome.TooManyRecent:
                         return Refusal("too_many_recent", "You made too many tokens in the last 24 hours. Try again later.",
                             StatusCodes.Status429TooManyRequests);

@@ -331,6 +331,31 @@ public sealed class DarlingMcpPersonalTokenToolsLiveTests : IClassFixture<Person
         Assert.Equal("minted", CodeOrStatus(await MintAsync(rig, "Own Person", "second", ct: ct)));
     }
 
+    /* #9643: the clash is decided in the store whichever mint comes first. A tool mint for one person, then a web-side mint (the shared core the page
+       uses) for another sign-in whose principal is that display name in a different case, is refused, and a tool mint for a case variant of an
+       existing subject is refused too. */
+    [Fact]
+    public async Task Mint_SubjectClash_IsRefusedInEitherOrder_AndInAnyCase()
+    {
+        var connectionString = _store.ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString), "Set DARLING_TEST_PG to run the personal token tool live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = new Rig(connectionString!, Settings());
+        await AddPersonAsync(rig.Source, "Order Person", KeyFor("order-person"), ct);
+        Assert.Equal("minted", CodeOrStatus(await MintAsync(rig, "Order Person", "t1", ct: ct)));
+
+        var webSide = await DarlingPersonalTokenAdmin.MintAsync(rig.Source, rig.Seat.Owner, rig.Seat.Snapshot!, rig.Seat.Settings!, KeyFor("web-signin"), "order person", "t1",
+            McpTokenEntry.ReaderRole, 7, "person:order person", TimeProvider.System, rig.Log, ct, ct);
+        Assert.Equal(PersonalTokenCreateOutcome.SubjectTaken, webSide.Outcome);
+        Assert.Equal("0", await ScalarAsync(rig.Source, "SELECT count(*) FROM config.mcp_personal_token WHERE owner_key = $1", KeyFor("web-signin"), ct));
+
+        var web = await DarlingPersonalTokenAdmin.MintAsync(rig.Source, rig.Seat.Owner, rig.Seat.Snapshot!, rig.Seat.Settings!, KeyFor("case-signin"), "casey@corp", "t1",
+            McpTokenEntry.ReaderRole, 7, "person:casey@corp", TimeProvider.System, rig.Log, ct, ct);
+        Assert.Equal(PersonalTokenCreateOutcome.Created, web.Outcome);
+        await AddPersonAsync(rig.Source, "CASEY@corp", KeyFor("other-casey"), ct);
+        Assert.Equal("subject_clash", CodeOrStatus(await MintAsync(rig, "CASEY@corp", "t1", ct: ct)));
+    }
+
     /* #9643: the write log reads a refusal as refused, which needs the answer's status to say so. */
     [Fact]
     public async Task EveryRefusal_AnswersStatusRefused_SoTheWriteLogCallsItRefused_AndAMintIsCompleted()

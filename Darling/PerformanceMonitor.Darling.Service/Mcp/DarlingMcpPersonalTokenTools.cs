@@ -151,15 +151,6 @@ public sealed class DarlingMcpPersonalTokenTools
                     $"That person has {webIdentities.Count} web identities, and a token needs exactly one (the sign-in it acts as). Nothing was changed."));
             }
 
-            /* A token acts as its subject, and the web page makes subjects from the sign-in principal while this tool uses the display name. A display name
-               that is another sign-in's subject would make two people's tokens read as one in the journal and the logs. */
-            var existing = await PersonalTokenStore.ListAsync(owner, null, clock.GetUtcNow(), ct);
-            if (existing.Rows.Any(r => string.Equals(r.Subject, found.DisplayName, StringComparison.Ordinal)
-                && !string.Equals(r.OwnerKey, webIdentities[0].ExternalId, StringComparison.Ordinal)))
-            {
-                return Refuse("subject_clash", "That display name is already the subject of a token that belongs to a different sign-in. Nothing was changed.");
-            }
-
             var made = await DarlingPersonalTokenAdmin.MintAsync(owner, seat.Owner, snapshot, settings, webIdentities[0].ExternalId, found.DisplayName, name, role,
                 lifetimeDays, actor, clock, logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, ct, CancellationToken.None);
             switch (made.Outcome)
@@ -169,6 +160,8 @@ public sealed class DarlingMcpPersonalTokenTools
                 case PersonalTokenCreateOutcome.AtCap:
                     return Refuse("at_cap", string.Create(CultureInfo.InvariantCulture,
                         $"That person already has {settings.MaxTokensPerPerson} live tokens. Revoke one first. Nothing was changed."));
+                case PersonalTokenCreateOutcome.SubjectTaken:
+                    return Refuse("subject_clash", "That display name is already the subject of a token that belongs to a different sign-in. Nothing was changed.");
                 case PersonalTokenCreateOutcome.TooManyRecent:
                     return Refuse("too_many_recent", "That person's tokens were made too many times in the last 24 hours. Try again later. Nothing was changed.");
             }

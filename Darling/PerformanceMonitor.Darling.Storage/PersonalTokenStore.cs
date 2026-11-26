@@ -34,7 +34,7 @@ public sealed class PersonalTokenTableMissingException : Exception
 /// <summary>A token with the sha256 of its secret, for the MCP snapshot only.</summary>
 public sealed record PersonalTokenSecretRow(PersonalTokenRow Row, byte[] SecretSha256);
 
-public enum PersonalTokenCreateOutcome { Created, NameTaken, AtCap, TooManyRecent }
+public enum PersonalTokenCreateOutcome { Created, NameTaken, AtCap, TooManyRecent, SubjectTaken }
 
 /// <summary>A list of tokens, <see cref="PersonalTokenStore.ListLimit"/> at most, oldest first; <see cref="Truncated"/> when rows were left out: dead rows first, then the oldest live ones.</summary>
 public sealed record PersonalTokenPage(IReadOnlyList<PersonalTokenRow> Rows, bool Truncated);
@@ -50,6 +50,12 @@ public static class PersonalTokenStore
     private const int CommandSeconds = 30;
 
     private const string LockSql = "SELECT pg_advisory_xact_lock(hashtextextended('mcp_personal_token:' || $1, 0))";
+
+    /* #9643: two sign-ins never share a subject. The web page makes subjects from the sign-in principal and the MCP tool from the directory display name,
+       so a mint is checked against every other owner key's rows, in any case, dead rows included (the journal and the logs still name them). */
+    private const string SubjectLockSql = "SELECT pg_advisory_xact_lock(hashtextextended('mcp_personal_token_subject:' || lower($1), 0))";
+
+    private const string SubjectTakenSql = "SELECT EXISTS (SELECT 1 FROM config.mcp_personal_token WHERE lower(subject) = lower($1) AND owner_key <> $2)";
 
     private const string TableExistsSql = "SELECT to_regclass('config.mcp_personal_token') IS NOT NULL";
 
@@ -142,7 +148,8 @@ WHERE t.token_id = v.token_id";
     /// or a live one with the same name (<see cref="PersonalTokenCreateOutcome.NameTaken"/>), or has created <see cref="RecentCreatesPerSlot"/> times
     /// <paramref name="maxPerPerson"/> tokens in the last <see cref="RecentWindow"/>, revoked ones included
     /// (<see cref="PersonalTokenCreateOutcome.TooManyRecent"/>): a revoke frees a live slot at once, and the dead row stays for the retention, so
-    /// without that ceiling a create-and-revoke loop grows the table without bound. The counts and the insert sit in one transaction behind a
+    /// without that ceiling a create-and-revoke loop grows the table without bound. A subject that another owner key's token already carries, compared
+    /// without case and against every such row, is <see cref="PersonalTokenCreateOutcome.SubjectTaken"/>, checked behind a second advisory lock on the subject. The counts and the insert sit in one transaction behind a
     /// transaction-scoped advisory lock on the owner key, so two creates for the same owner at the last slot cannot both pass the count. The name of a
     /// revoked or expired token is free.
     /// </summary>
@@ -158,6 +165,19 @@ WHERE t.token_id = v.token_id";
             await using (var command = Command(connection, transaction, LockSql, Text(ownerKey)))
             {
                 await command.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var command = Command(connection, transaction, SubjectLockSql, Text(subject)))
+            {
+                await command.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var command = Command(connection, transaction, SubjectTakenSql, Text(subject), Text(ownerKey)))
+            {
+                if (await command.ExecuteScalarAsync(ct) is true)
+                {
+                    return (PersonalTokenCreateOutcome.SubjectTaken, false);
+                }
             }
 
             long named, live, recent;
@@ -414,7 +434,9 @@ WHERE t.token_id = v.token_id";
         var (result, commit) = await body(connection, transaction);
         if (commit)
         {
-            await transaction.CommitAsync(ct);
+            /* #9643: the change has run, so the commit does not take the caller's token: a cancel now would roll back a token the caller never
+               gets to learn about, or leave a revoke the caller was told failed. */
+            await transaction.CommitAsync(CancellationToken.None);
         }
 
         return result;
