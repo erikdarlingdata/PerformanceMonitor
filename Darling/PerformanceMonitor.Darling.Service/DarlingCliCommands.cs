@@ -7839,6 +7839,7 @@ public static partial class DarlingCliCommands
         /* The roles besides the source logins that a +darling_alert_sources pg_hba line would admit (#5654): what the
            provisioning step could not revoke, read after it ran. The add and rotate text name each one. The verb has
            committed by now, so a failure here is reported after the result (and its one-time password), never in its place. */
+        /* #9641: this step and the line drop below run on CancellationToken.None, because the change is already committed and a cancel here must not lose the new password. */
         IReadOnlyList<string>? groupExtras = null;
         if (!IsRemoveAlertSourceVerb(verb)
             && result.Outcome is ExternalAlertSourceAdmin.Outcome.Done or ExternalAlertSourceAdmin.Outcome.NeedsDbaSql)

@@ -108,7 +108,7 @@ The answers of `add_alert_source` and `rotate_alert_source` hold the new passwor
 
 The password also goes into the MCP client's transcript, because the answer is part of the conversation. Without a `tls` block in `mcp.network`, the network listener is plain HTTP, so the answer crosses the network unencrypted, as the bearer token does. `rotate_alert_source` and `remove_alert_source` change nothing until they are called with `confirm=true`. Without it, each answers `confirm_required` and says which login is affected, how many undelivered queued alerts a remove deletes and how many open sessions end.
 
-A deployment that already has `mcp.allowServerAdmin` on gains login creation, change and removal for the three tools when it upgrades, with no new setting to turn on. To keep them off, turn `mcp.allowServerAdmin` off, which also removes `add_servers` and the other server admin tools.
+A deployment that already has `mcp.allowServerAdmin` on gains these three tools when it upgrades. It can then create, change and remove logins with no new setting. To keep them off, turn `mcp.allowServerAdmin` off, which also removes `add_servers` and the other server admin tools.
 
 ### Alert sources on another machine
 

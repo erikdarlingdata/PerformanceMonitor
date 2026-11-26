@@ -282,6 +282,7 @@ internal static class ExternalAlertSourceAdmin
 
         /* #5654: a new password governs new connections only, so the sessions the login already holds are ended once the new
            password is committed (ending them first would let a client log straight back in with the old one before the commit). */
+        /* #9641: on CancellationToken.None, so a cancel after the commit cannot lose the new password the login already has. */
         var (ended, endSql, failure) = await EndSessionsAfterCommitAsync(owner, "a.usename = $1", registered, BuildEndSessionsSqlForDba(registered), registered, CancellationToken.None);
         return new Result(Outcome.Done, registered, password,
             SessionsEnded: ended, EndSessionsSqlForDba: endSql, ServerLogSettingsOn: loggingOn, FollowUpFailure: failure);
