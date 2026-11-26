@@ -1,0 +1,296 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor Lite.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using PerformanceMonitor.Common;
+using PerformanceMonitorLite.Mcp;
+using PerformanceMonitorLite.Models;
+using PerformanceMonitorLite.Services;
+using Xunit;
+
+namespace PerformanceMonitorLite.Tests;
+
+/// <summary>
+/// #9640: <c>add_servers</c> and <c>remove_server</c>, Lite's twins of Darling's, and the <c>mcp_allow_server_admin</c> switch that serves them. The
+/// tools run over a real <see cref="ServerManager"/> on a temp folder and an in-memory credential store, and each result is read back through the
+/// server list and the credential store the Add Server and Manage Servers windows use.
+/// </summary>
+public sealed class McpServerAdminToolsTests : IDisposable
+{
+    private const string Secret = "not-a-real-secret-value";
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "McpServerAdminToolsTests_" + Guid.NewGuid().ToString("N"));
+    private readonly InMemoryCredentialStore _store = new();
+
+    public McpServerAdminToolsTests() => Directory.CreateDirectory(_root);
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_root, recursive: true); }
+        catch (IOException) { /* a temp folder left behind is harmless */ }
+    }
+
+    private string HostsFile => Path.Combine(_root, "user", ServerHostBindings.FileName);
+
+    private ServerManager NewManager() => new(_root, null, HostsFile, new CredentialService(_store));
+
+    private sealed class Hooks
+    {
+        public int Changed;
+        public List<string> Removed = [];
+        public McpServerAdminHooks For(ServerManager manager) => new()
+        {
+            ServersChanged = () => Changed++,
+            RemoveServer = server =>
+            {
+                Removed.Add(server.DisplayName);
+                manager.DeleteServer(server.Id);
+                return Task.FromResult(true);
+            },
+        };
+    }
+
+    private static Task<string?> Reachable(ServerConnection server, string? user, string? password, System.Threading.CancellationToken ct) => Task.FromResult<string?>(null);
+
+    private static Func<ServerConnection, string?, string?, System.Threading.CancellationToken, Task<string?>> Unreachable(string failure) =>
+        (_, _, _, _) => Task.FromResult<string?>(failure);
+
+    private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement.Clone();
+
+    private const string OneSqlServer =
+        "[{\"host\":\"sql01\",\"display_name\":\"Primary\",\"auth\":\"sql\",\"username\":\"monitor\",\"password\":\"" + Secret + "\",\"encrypt_mode\":\"Optional\"}]";
+
+    [Fact]
+    public async Task AddServers_SavesTheServerAndItsLogin_WhereTheWindowsReadThem_AndRefreshesTheList()
+    {
+        var manager = NewManager();
+        var hooks = new Hooks();
+
+        var answer = await McpServerAdminTools.AddServersCore(manager, hooks.For(manager), OneSqlServer, Reachable);
+
+        var root = Parse(answer);
+        Assert.Equal("ok", root.GetProperty("status").GetString());
+        Assert.Equal(1, root.GetProperty("added").GetInt32());
+        Assert.DoesNotContain(Secret, answer, StringComparison.Ordinal);
+        Assert.Equal(1, hooks.Changed);
+
+        /* Read back through a second manager over the same folder: what a restart of Lite would load. */
+        var reloaded = NewManager();
+        var saved = Assert.Single(reloaded.GetAllServers());
+        Assert.Equal("sql01", saved.ServerName);
+        Assert.Equal("Primary", saved.DisplayName);
+        Assert.Equal("Optional", saved.EncryptMode);
+        Assert.Equal(AuthenticationTypes.SqlServer, saved.AuthenticationType);
+        Assert.Equal(CredentialReadOutcome.Found, reloaded.CredentialService.TryReadCredential(saved.Id, out var credential, out _));
+        Assert.Equal(("monitor", Secret), credential!.Value);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("  ")]
+    [InlineData("{\"host\":\"sql01\"}")]
+    [InlineData("[]")]
+    [InlineData("[{\"display_name\":\"no host\"}]")]
+    [InlineData("[{\"host\":\"sql01\",\"auth\":\"kerberos\"}]")]
+    [InlineData("[{\"host\":\"sql01\",\"auth\":\"sql\",\"username\":\"monitor\"}]")]
+    [InlineData("[{\"host\":\"sql01\",\"encrypt_mode\":\"sometimes\"}]")]
+    [InlineData("[{\"host\":\"sql01\",\"engine\":\"postgres\"}]")]
+    [InlineData("[{\"host\":\"sql01\",\"trust_server_certificate\":\"yes\"}]")]
+    [InlineData("not json")]
+    public async Task AddServers_Refuses_AndSavesNothing_WhenTheInputBreaksARule(string? serversJson)
+    {
+        var manager = NewManager();
+        var hooks = new Hooks();
+
+        var answer = await McpServerAdminTools.AddServersCore(manager, hooks.For(manager), serversJson, Reachable);
+
+        var root = Parse(answer);
+        Assert.NotEqual("ok", root.GetProperty("status").GetString());
+        Assert.Empty(manager.GetAllServers());
+        Assert.Equal(0, hooks.Changed);
+        Assert.DoesNotContain("stdin", answer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AddServers_AnUnreachableEntry_RefusesTheWholeCall_AndSavesNone()
+    {
+        var manager = NewManager();
+        var json = "[{\"host\":\"sql01\"},{\"host\":\"sql02\",\"auth\":\"sql\",\"username\":\"m\",\"password\":\"" + Secret + "\"}]";
+        var tested = new List<string>();
+
+        var answer = await McpServerAdminTools.AddServersCore(manager, null, json, (server, _, _, _) =>
+        {
+            tested.Add(server.ServerName);
+            return Task.FromResult<string?>(server.ServerName == "sql02" ? "login failed" : null);
+        });
+
+        var root = Parse(answer);
+        Assert.Equal("refused", root.GetProperty("status").GetString());
+        Assert.Contains("sql02", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.Contains("login failed", root.GetProperty("message").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(Secret, answer, StringComparison.Ordinal);
+        Assert.Equal(["sql01", "sql02"], tested);
+        Assert.Empty(NewManager().GetAllServers());
+    }
+
+    [Fact]
+    public async Task AddServers_AListedServer_IsUpdatedInPlace_AndAFailedTestLeavesTheRunningListUntouched()
+    {
+        var manager = NewManager();
+        await McpServerAdminTools.AddServersCore(manager, null, OneSqlServer, Reachable);
+        var listed = Assert.Single(manager.GetAllServers());
+        var id = listed.Id;
+
+        /* The test fails: the instance the running app holds must keep every setting it had, and the list file too. */
+        var refused = await McpServerAdminTools.AddServersCore(manager, null,
+            "[{\"host\":\"sql01\",\"display_name\":\"Renamed\",\"auth\":\"windows\",\"encrypt_mode\":\"Strict\"}]", Unreachable("no route to host"));
+        Assert.Equal("refused", Parse(refused).GetProperty("status").GetString());
+        Assert.Equal("Primary", listed.DisplayName);
+        Assert.Equal("Optional", listed.EncryptMode);
+        Assert.Equal(AuthenticationTypes.SqlServer, listed.AuthenticationType);
+        Assert.Same(listed, Assert.Single(manager.GetAllServers()));
+
+        var updated = await McpServerAdminTools.AddServersCore(manager, null,
+            "[{\"host\":\"sql01\",\"display_name\":\"Renamed\",\"auth\":\"sql\",\"username\":\"monitor\",\"password\":\"another-value\",\"encrypt_mode\":\"Strict\"}]", Reachable);
+        var root = Parse(updated);
+        Assert.Equal(1, root.GetProperty("updated").GetInt32());
+        Assert.Equal(0, root.GetProperty("added").GetInt32());
+        var reloaded = Assert.Single(NewManager().GetAllServers());
+        Assert.Equal(id, reloaded.Id);
+        Assert.Equal("Renamed", reloaded.DisplayName);
+        Assert.Equal("Strict", reloaded.EncryptMode);
+        Assert.Equal(CredentialReadOutcome.Found, manager.CredentialService.TryReadCredential(id, out var credential, out _));
+        Assert.Equal("another-value", credential!.Value.Password);
+    }
+
+    [Fact]
+    public async Task RemoveServer_RunsTheWindowsRemoval_DropsTheLogin_AndAnswersWithAnUndoThatHoldsNoPassword()
+    {
+        var manager = NewManager();
+        await McpServerAdminTools.AddServersCore(manager, null, OneSqlServer, Reachable);
+        var id = Assert.Single(manager.GetAllServers()).Id;
+        var hooks = new Hooks();
+
+        var answer = await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), "primary");
+
+        var root = Parse(answer);
+        Assert.Equal("removed", root.GetProperty("status").GetString());
+        Assert.Equal("exact", root.GetProperty("matched_by").GetString());
+        Assert.Equal(["Primary"], hooks.Removed);
+        Assert.Empty(NewManager().GetAllServers());
+        Assert.NotEqual(CredentialReadOutcome.Found, manager.CredentialService.TryReadCredential(id, out _, out _));
+        Assert.DoesNotContain(Secret, answer, StringComparison.Ordinal);
+        var previous = root.GetProperty("previous");
+        Assert.Equal("sql01", previous.GetProperty("host").GetString());
+        Assert.Equal("monitor", previous.GetProperty("username").GetString());
+        Assert.Equal("<password>", previous.GetProperty("password").GetString());
+        Assert.Contains("<password>", root.GetProperty("undo").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RemoveServer_RemovesNothing_WhenTheNameIsAmbiguousUnknownOrMissing()
+    {
+        var manager = NewManager();
+        await McpServerAdminTools.AddServersCore(manager, null, "[{\"host\":\"sql01a\"},{\"host\":\"sql01b\"}]", Reachable);
+        var hooks = new Hooks();
+
+        var ambiguous = Parse(await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), "sql01"));
+        Assert.Equal("ambiguous", ambiguous.GetProperty("status").GetString());
+        Assert.Equal(2, ambiguous.GetProperty("candidates").GetArrayLength());
+
+        var unknown = Parse(await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), "nowhere"));
+        Assert.Equal("not_found", unknown.GetProperty("status").GetString());
+
+        var blank = Parse(await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), " "));
+        Assert.Contains("server_name", blank.GetProperty("message").GetString(), StringComparison.Ordinal);
+
+        var noRemoval = Parse(await McpServerAdminTools.RemoveServerCore(manager, new McpServerAdminHooks(), "sql01a"));
+        Assert.Equal("error", noRemoval.GetProperty("status").GetString());
+
+        Assert.Empty(hooks.Removed);
+        Assert.Equal(2, NewManager().GetAllServers().Count);
+
+        /* A full storage name picks one registration even when a part of its name fits both. */
+        var exact = Parse(await McpServerAdminTools.RemoveServerCore(manager, hooks.For(manager), "sql01a"));
+        Assert.Equal("removed", exact.GetProperty("status").GetString());
+        Assert.Equal("sql01b", Assert.Single(NewManager().GetAllServers()).ServerName);
+    }
+
+    [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(true, false, true, false)]
+    [InlineData(true, true, true, true)]
+    public void TheServerAdminTools_AreServedOnlyWithBothSwitches(bool writes, bool admin, bool otherWritesServed, bool adminServed)
+    {
+        var all = McpWritePolicyTests.RegisteredTools();
+        var names = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, writes, admin));
+
+        Assert.Equal(otherWritesServed, names.Contains("mute_analysis_finding"));
+        foreach (var tool in McpWritePolicy.ServerAdminTools)
+        {
+            Assert.Equal(adminServed, names.Contains(tool));
+        }
+
+        var applied = McpWritePolicyTests.RegisteredTools();
+        McpWritePolicy.Apply(applied, writes, admin);
+        Assert.Equal(names.Order(StringComparer.Ordinal), McpWritePolicy.ToolNames(applied).Order(StringComparer.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    public void DecideServing_ServesTheServerAdminTools_OnlyWithWritesAndAUsableToken(bool writes, bool admin, bool usableToken)
+    {
+        var token = usableToken ? "abcdefghijklmnopqrstuvwxyz0123456789ABCDEF" : "short";
+        var serving = McpHostService.DecideServing(token, allowTokenlessLoopback: false, allowWrites: writes, allowInvestigations: false, allowServerAdmin: admin);
+
+        Assert.Equal(writes && admin && usableToken, serving.ServerAdmin);
+        Assert.Equal(admin, serving.AskedServerAdmin);
+
+        var lines = McpHostService.StartupLines(serving);
+        Assert.Equal(serving.ServerAdmin, lines.Any(l => l.Level == LogLevel.Warning && l.Message.Contains(McpWritePolicy.ServerAdminSetting, StringComparison.Ordinal)));
+        Assert.Equal(admin && !serving.ServerAdmin, lines.Any(l => l.Level == LogLevel.Critical && l.Message.Contains(McpWritePolicy.ServerAdminSetting, StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void TheSetting_DefaultsOff_IsReadFromSettingsJson_AndAWrongKindIsAProblem()
+    {
+        Assert.False(new McpSettings().AllowServerAdmin);
+        Assert.Equal("mcp_allow_server_admin", McpWritePolicy.ServerAdminSetting);
+        Assert.False(Load(null).AllowServerAdmin);
+        Assert.False(Load("{ \"mcp_enabled\": true }").AllowServerAdmin);
+        Assert.True(Load("{ \"mcp_enabled\": true, \"mcp_allow_server_admin\": true }").AllowServerAdmin);
+
+        var quoted = Load("{ \"mcp_enabled\": true, \"mcp_allow_server_admin\": \"true\" }");
+        Assert.False(quoted.Enabled);
+        Assert.False(quoted.AllowServerAdmin);
+        Assert.Contains("mcp_allow_server_admin", quoted.Problem!, StringComparison.Ordinal);
+
+        Assert.Contains("mcp_allow_server_admin", SettingsImport.McpGateKeys);
+    }
+
+    private McpSettings Load(string? content)
+    {
+        var dir = Path.Combine(_root, "settings_" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        if (content is not null)
+        {
+            File.WriteAllText(Path.Combine(dir, "settings.json"), content);
+        }
+
+        return McpSettings.Load(dir);
+    }
+}

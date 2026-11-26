@@ -41,7 +41,7 @@ namespace PerformanceMonitorLite.Tests;
 [Trait("Stage", "Guard")]
 public sealed class McpWritePolicyTests
 {
-    private static McpServerPrimitiveCollection<McpServerTool> RegisteredTools()
+    internal static McpServerPrimitiveCollection<McpServerTool> RegisteredTools()
     {
         var (tools, _, _) = McpToolsListBudgetTests.BuildServedTools();
         var collection = new McpServerPrimitiveCollection<McpServerTool>();
@@ -227,7 +227,7 @@ public sealed class McpWritePolicyTests
     {
         var all = RegisteredTools();
         var defaultServed = McpWritePolicy.FilterToolCollection(all, allowWrites: false);
-        var writesServed = McpWritePolicy.FilterToolCollection(all, allowWrites: true);
+        var writesServed = McpWritePolicy.FilterToolCollection(all, allowWrites: true, allowServerAdmin: true);
 
         Assert.Equal(all.Count, writesServed.Count);
         Assert.Equal(McpWritePolicy.WriteTools.Count, all.Count - defaultServed.Count);
@@ -268,7 +268,7 @@ public sealed class McpWritePolicyTests
     {
         var all = RegisteredTools();
         var catalog = McpWritePolicy.ToolNames(all);
-        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites: true));
+        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites: true, allowServerAdmin: true));
 
         var text = McpInstructions.Build(catalog, served);
         Assert.Contains(
@@ -336,7 +336,7 @@ public sealed class McpWritePolicyTests
     {
         var all = RegisteredTools();
         var catalog = McpWritePolicy.ToolNames(all);
-        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites));
+        var served = McpWritePolicy.ToolNames(McpWritePolicy.FilterToolCollection(all, allowWrites, allowWrites));
         var text = McpInstructions.Build(catalog, served);
 
         var named = System.Text.RegularExpressions.Regex.Matches(text, "`([a-z][a-z0-9_]*)`")
@@ -382,7 +382,7 @@ public sealed class McpWritePolicyTests
     public void WritesOn_ServesTheMuteAndItsUndo()
     {
         var all = RegisteredTools();
-        var served = McpWritePolicy.FilterToolCollection(all, allowWrites: true);
+        var served = McpWritePolicy.FilterToolCollection(all, allowWrites: true, allowServerAdmin: true);
 
         Assert.Equal(all.Count, served.Count);
         Assert.Contains("mute_analysis_finding", Names(served));

@@ -68,7 +68,17 @@ internal static class AddServerCommand
         Func<bool> LiteIsRunning,
         Func<ServerConnection, string?, string?, Task<string?>> TestConnection,
         string AccountName,
-        string HostRecordFolder);
+        string HostRecordFolder,
+        bool InsideRunningLite = false);
+
+    /// <summary>One server a run added or updated (#9640), as the run reports it: the MCP <c>add_servers</c> tool answers with these rows.</summary>
+    internal sealed record Saved(string DisplayName, string Host, string? Database, bool Updated);
+
+    /// <summary>The rows a run saved, with the path of the server list it wrote them to.</summary>
+    internal sealed class SaveLog : List<Saved>
+    {
+        internal string? ServerListPath { get; set; }
+    }
 
     internal static string AuthWord(string value) => value.Trim().ToLowerInvariant() switch
     {
@@ -387,6 +397,29 @@ internal static class AddServerCommand
             return ExitRefused;
         }
 
+        var saved = new SaveLog();
+        var exit = await SaveEntriesAsync(entries, error, env, saved);
+        if (exit != ExitAdded)
+            return exit;
+
+        foreach (var row in saved)
+            output.WriteLine($"{(row.Updated ? "Updated" : "Added")} {row.DisplayName} ({row.Host}).");
+
+        output.WriteLine($"Credentials were stored for the Windows account {env.AccountName}.");
+        output.WriteLine($"Server list: {saved.ServerListPath}");
+        output.WriteLine($"Host confirmation: {Path.Combine(env.HostRecordFolder, ServerHostBindings.FileName)}");
+        output.WriteLine("Start Lite to collect from these servers. A Lite that is already running does not see them until it is stopped and started again.");
+        return ExitAdded;
+    }
+
+    /// <summary>
+    /// The check and the save of <paramref name="entries"/>, the part of <see cref="RunAsync"/> after the input is read (#9640: the MCP
+    /// <c>add_servers</c> tool runs it over the running Lite's own server manager). Every entry is checked before anything is written, and one
+    /// refused entry ends the run with <see cref="ExitRefused"/>, the reason on <paramref name="error"/> and no change. The servers added or
+    /// updated are appended to <paramref name="saved"/>.
+    /// </summary>
+    internal static async Task<int> SaveEntriesAsync(List<Entry> entries, TextWriter error, Machine env, SaveLog saved)
+    {
         /* The rules that need no server list run first, so a refused entry never even opens (or creates) servers.json. */
         var pending = new List<(Entry Entry, string Label, ServerConnection Candidate)>();
         var number = 0;
@@ -425,6 +458,7 @@ internal static class AddServerCommand
         }
 
         var manager = env.ManagerFactory();
+        saved.ServerListPath = manager.ConfigFilePath;
         var planned = new List<(Entry Entry, ServerConnection Server, bool Exists)>();
         foreach (var (entry, label, candidate) in pending)
         {
@@ -487,7 +521,12 @@ internal static class AddServerCommand
                 }
             }
 
-            var server = existing ?? new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database, ReadOnlyIntent = entry.ReadOnlyIntent ?? false };
+            /* #9640: inside a running Lite the listed entry is the instance the app itself holds, and the lines below change it before the
+               connection test. A refused test would leave those changes in memory, to be saved with the next list write, so the run works on
+               a copy and UpdateServer swaps it in once the test has passed. */
+            var server = existing is null
+                ? new ServerConnection { ServerName = entry.Host, DatabaseName = entry.Database, ReadOnlyIntent = entry.ReadOnlyIntent ?? false }
+                : env.InsideRunningLite ? CopyOf(existing) : existing;
             if (existing is null)
                 server.DisplayName = entry.DisplayName ?? entry.Host;
             else if (entry.DisplayName is not null)
@@ -525,7 +564,6 @@ internal static class AddServerCommand
         /* Everything passed: only now is anything written. The manager saves the list and confirms the host before it writes the
            credential, so a refused or failed credential write part way through would leave a partial result: the run undoes it. */
         var undo = WriteUndo.Take(manager, Path.Combine(env.HostRecordFolder, ServerHostBindings.FileName), planned.Select(p => p.Server).ToList());
-        var results = new List<string>();
         var reached = 0;
         foreach (var (entry, server, exists) in planned)
         {
@@ -545,31 +583,49 @@ internal static class AddServerCommand
             catch (Exception ex)
             {
                 error.WriteLine($"{ManagerLabel(server)}: {ex.Message}");
-                foreach (var line in undo.Restore(reached))
-                    error.WriteLine(line);
+                UndoWrites(error, env, manager, undo, reached, saved, exists ? null : server);
                 return ExitRefused;
             }
 
-            results.Add($"{(exists ? "Updated" : "Added")} {server.DisplayName} ({server.ServerName}).");
+            saved.Add(new Saved(server.DisplayName, server.ServerName, server.DatabaseName, exists));
         }
 
         /* The manager reports a failed write of the host record instead of throwing, and the run would then say Added. */
         if (manager.HostRecordSaveProblem is { } recordProblem)
         {
             error.WriteLine(recordProblem);
-            foreach (var line in undo.Restore(reached))
-                error.WriteLine(line);
+            UndoWrites(error, env, manager, undo, reached, saved, null);
             return ExitRefused;
         }
 
-        foreach (var line in results)
-            output.WriteLine(line);
-
-        output.WriteLine($"Credentials were stored for the Windows account {env.AccountName}.");
-        output.WriteLine($"Server list: {manager.ConfigFilePath}");
-        output.WriteLine($"Host confirmation: {Path.Combine(env.HostRecordFolder, ServerHostBindings.FileName)}");
-        output.WriteLine("Start Lite to collect from these servers. A Lite that is already running does not see them until it is stopped and started again.");
         return ExitAdded;
+    }
+
+    /// <summary>
+    /// Puts back what a failed run wrote. The verb runs with no Lite open, so the files and credentials go back as they were. Inside a running
+    /// Lite (#9640) the server manager holds the list in memory and writes it back on its own changes, so putting the file back would only make
+    /// the file and the list disagree: the entry that failed is removed from the list instead, and the entries saved before it stay saved, and
+    /// the message says which.
+    /// </summary>
+    private static void UndoWrites(TextWriter error, Machine env, ServerManager manager, WriteUndo undo, int reached, SaveLog saved, ServerConnection? failedNew)
+    {
+        if (!env.InsideRunningLite)
+        {
+            foreach (var line in undo.Restore(reached))
+                error.WriteLine(line);
+            return;
+        }
+
+        if (failedNew is not null)
+        {
+            try { manager.DeleteServer(failedNew.Id); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException) { /* the list was written already; the message below still stands */ }
+        }
+
+        error.WriteLine(saved.Count == 0
+            ? "No entry before this one was saved."
+            : $"The {saved.Count} entr{(saved.Count == 1 ? "y" : "ies")} before this one stay saved: "
+              + string.Join(", ", saved.Select(row => $"{row.DisplayName} ({row.Host})")) + ". Remove one with remove_server if it is not wanted.");
     }
 
     /// <summary>
@@ -693,6 +749,17 @@ internal static class AddServerCommand
     }
 
     /// <summary>The storage name reads a blank database as none, so the same-server check does too.</summary>
+    /// <summary>A copy of a listed server through the same JSON the list file holds, plus the connection state the app shows that the file does not.</summary>
+    private static ServerConnection CopyOf(ServerConnection listed)
+    {
+        var copy = JsonSerializer.Deserialize<ServerConnection>(JsonSerializer.Serialize(listed))!;
+        copy.IsOnline = listed.IsOnline;
+        copy.HasCollectorErrors = listed.HasCollectorErrors;
+        copy.UnreachableReason = listed.UnreachableReason;
+        copy.HostChangeNotice = listed.HostChangeNotice;
+        return copy;
+    }
+
     private static string BlankToEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? "" : value;
 
     private static string ManagerLabel(ServerConnection server) => ServerManager.NameForMessage(server);

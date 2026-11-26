@@ -288,6 +288,8 @@ internal static class DarlingMcpInstructions
         /* #5991: Lite's query-tag tools, the same names as Darling's. */
         "assign_query_tag", "create_query_tag", "create_query_tag_rule", "delete_query_tag", "delete_query_tag_rule",
         "list_query_tag_rules", "list_query_tags", "test_query_tag_rule", "unassign_query_tag", "update_query_tag", "update_query_tag_rule",
+        /* #9640: Lite's server admin tools, the same names as Darling's. */
+        "add_servers", "remove_server",
     };
 
     /* A property, not a field: the settings paragraph it carries is built from DarlingMcpWritePolicy's tool sets at run time. */

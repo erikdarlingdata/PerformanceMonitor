@@ -1049,7 +1049,7 @@ public partial class MainWindow : Window
                     $"To serve without a token as before, set {McpSettings.AllowTokenlessLoopbackSetting} to true in settings.json.");
             }
 
-            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, mcpToken, mcpSettings.AllowTokenlessLoopback, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys);
+            _mcpService = new McpHostService(_dataService!, _serverManager, _muteRuleService, _databaseInitializer, mcpSettings.Port, InvestigationStore, mcpToken, mcpSettings.AllowTokenlessLoopback, _scheduleManager, mcpSettings.AllowWrites, mcpSettings.AllowInvestigations, mcpSettings.DataDetail, _pseudonymKeys, mcpSettings.AllowServerAdmin, McpServerAdminHooksFor());
             _mcpDataDetail = mcpSettings.DataDetail;
             _ = _mcpService.StartAsync(_backgroundCts!.Token);
         }
@@ -1058,6 +1058,32 @@ public partial class MainWindow : Window
             AppLogger.Error("MCP", $"Failed to start MCP server: {ex.Message}", ex);
         }
     }
+
+    /// <summary>
+    /// #9640: what the MCP server admin tools borrow from this window. remove_server runs <see cref="RemoveServerAsync"/>, the removal Manage Servers' Delete
+    /// and the sidebar's Remove run, on the UI thread as they do, after closing the server's tab and followed by the same sweep Manage Servers makes
+    /// of the collector health and a refresh of the sidebar. add_servers refreshes the sidebar.
+    /// </summary>
+    private McpServerAdminHooks McpServerAdminHooksFor() => new()
+    {
+        RemoveServer = async server => await await Dispatcher.InvokeAsync(async () =>
+        {
+            CloseServerTab(server.Id);
+            var clean = await RemoveServerAsync(server);
+            if (_collectorService != null)
+            {
+                var currentServerIds = new HashSet<int>(
+                    _serverManager.GetAllServers().Select(s =>
+                        RemoteCollectorService.GetDeterministicHashCode(
+                            RemoteCollectorService.GetServerNameForStorage(s))));
+                _collectorService.ClearHealthExcept(currentServerIds);
+            }
+
+            RefreshServerList();
+            return clean;
+        }),
+        ServersChanged = () => Dispatcher.InvokeAsync(RefreshServerList),
+    };
 
     private async Task StopMcpServerAsync()
     {
