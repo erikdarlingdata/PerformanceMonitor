@@ -200,7 +200,10 @@ public sealed class EditServerSecurityTests
 
         Assert.DoesNotContain("run: ", line, StringComparison.Ordinal);
         Assert.DoesNotContain("(x86)", line, StringComparison.Ordinal);
-        Assert.EndsWith("PerformanceMonitor.Darling.Service.exe --edit-server <server name> followed by --set <field>=<value> for host.", line, StringComparison.Ordinal);
+        /* PowerShell does not run a bare name from the current folder, so the by-hand form is .\name and the sentence says
+           which folder to run it from. */
+        Assert.Contains("from the folder the service is installed in: .\\PerformanceMonitor.Darling.Service.exe --edit-server <server name>", line, StringComparison.Ordinal);
+        Assert.EndsWith(" --edit-server <server name> followed by --set <field>=<value> for host.", line, StringComparison.Ordinal);
     }
 
     /// <summary>A program that writes its arguments, one per line, as base64 of UTF-8, named as the service executable in a
@@ -262,16 +265,17 @@ public sealed class EditServerSecurityTests
         start.ArgumentList.Add("-EncodedCommand");
         /* Each printed command is one line of the script, as it is when it is pasted at the prompt. */
         start.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(string.Join("\n", commands))));
-        Process process;
+        Process? started = null;
         try
         {
-            process = Process.Start(start)!;
+            started = Process.Start(start);
         }
         catch (System.ComponentModel.Win32Exception)
         {
-            Assert.Skip(shell + " is not installed on this machine.");
-            return;
         }
+
+        Assert.SkipWhen(started is null, shell + " is not installed on this machine.");
+        var process = started!;
 
         using (process)
         {
@@ -577,8 +581,8 @@ public sealed class EditServerSecurityTests
 
         var text = target.Describe();
 
-        Assert.Contains("sql01", text, StringComparison.Ordinal);
-        Assert.Contains("login sa\\u2028 (SQL)", text, StringComparison.Ordinal);
+        Assert.Contains("at \"sql01\"", text, StringComparison.Ordinal);
+        Assert.Contains("login \"sa\\u2028\" (SQL)", text, StringComparison.Ordinal);
         Assert.Contains("orders\\u000Ax", text, StringComparison.Ordinal);
         AssertOneLine(text);
     }
@@ -868,5 +872,104 @@ public sealed class EditServerSecurityTests
         Assert.NotNull(withPassword.Passed);
         Assert.True(withoutPassword.Called);
         Assert.Null(withoutPassword.Passed);
+    }
+
+    /* ---- round 3 of the security review ---- */
+
+    [Fact]
+    public void A_backslash_in_a_quoted_value_is_written_as_two_so_it_never_reads_as_the_start_of_an_escape()
+    {
+        /* A value that ends in a backslash and a quote, and a value that holds the six characters of the quote's own escape,
+           are two values and print as two texts. */
+        var backslashThenQuote = StoreConfigProvider.DriftValue("a\\\"");
+        var theEscapeAsText = StoreConfigProvider.DriftValue("a\\u0022");
+        Assert.Equal("\"a\\\\\\u0022\"", backslashThenQuote);
+        Assert.Equal("\"a\\\\u0022\"", theEscapeAsText);
+        Assert.NotEqual(StoreConfigProvider.DriftValue("a\""), theEscapeAsText);
+        Assert.Equal("\"host\\\\inst\"", StoreConfigProvider.DriftValue("host\\inst"));
+    }
+
+    [Fact]
+    public void The_host_and_the_login_on_the_server_line_are_quoted_so_neither_adds_words_to_it()
+    {
+        var target = new DarlingCliCommands.EditServerTarget(7, "s", "orders", "sql01, login \"sa\" (Windows)", 0, "SQL", "x\" (Windows) at \"other", "token");
+
+        var text = target.Describe();
+
+        Assert.Equal("\"orders\" (id 7) at \"sql01, login \\u0022sa\\u0022 (Windows)\", login \"x\\u0022 (Windows) at \\u0022other\" (SQL)", text);
+    }
+
+    [Fact]
+    public void Where_the_password_will_be_sent_names_the_query_store_replica_the_encryption_mode_and_the_certificate_trust()
+    {
+        var stored = Orders with { QueryStoreReplica = "replica01.example.test", EncryptMode = "Mandatory", TrustServerCertificate = false };
+
+        var kept = stored.DescribeAfter(new JsonObject { ["host"] = "new.example.test" });
+        Assert.Contains("encryptMode \"Mandatory\", trustServerCertificate false", kept, StringComparison.Ordinal);
+        Assert.Contains("Query Store replica \"replica01.example.test\"", kept, StringComparison.Ordinal);
+
+        var changed = stored.DescribeAfter(new JsonObject
+        {
+            ["query_store_replica"] = "other-replica.example.test", ["encrypt_mode"] = "Optional", ["trust_server_certificate"] = true,
+        });
+        Assert.Contains("encryptMode \"Optional\", trustServerCertificate true", changed, StringComparison.Ordinal);
+        Assert.Contains("Query Store replica \"other-replica.example.test\"", changed, StringComparison.Ordinal);
+        Assert.DoesNotContain("replica01.example.test", changed, StringComparison.Ordinal);
+
+        /* A change that clears the replica, a server that has none and a PostgreSQL target name no second host. */
+        Assert.DoesNotContain("replica", stored.DescribeAfter(new JsonObject { ["query_store_replica"] = "" }), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("replica", Orders.DescribeAfter(new JsonObject { ["host"] = "new.example.test" }), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("replica", (stored with { IsPostgres = true }).DescribeAfter(new JsonObject { ["host"] = "new.example.test" }), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("env:DARLING_SQL01_PASSWORD")]
+    [InlineData("file:/etc/darling/secrets/sql01")]
+    public async Task A_typed_reference_is_refused_before_it_is_sent_anywhere(string typed)
+    {
+        var sends = new List<string>();
+        var (lines, exitCode) = await DarlingCliCommands.RunEditServerAsync(
+            Parsed("orders", "--set", "host=new.example.test"),
+            json =>
+            {
+                sends.Add(json);
+                return Task.FromResult(Answer(Edit.EditStatus.Invalid, Edit.EditPasswordNeededText));
+            },
+            (_, _) => throw new InvalidOperationException("enabled was not asked for"),
+            _ => typed,
+            Orders);
+
+        Assert.Equal(1, exitCode);
+        Assert.Single(sends);
+        Assert.DoesNotContain(sends, s => s.Contains("password", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(lines, l => l.Contains(typed, StringComparison.Ordinal));
+        Assert.Contains(lines, l => l.Contains("reference", StringComparison.Ordinal) && l.Contains("not sent anywhere", StringComparison.Ordinal));
+    }
+
+    private static readonly PerformanceMonitor.Darling.Service.Mcp.DarlingMcpCollectionStateTools.ServerRow EnabledRow = new(7, "orders", "sql01", "sqlserver", false, [], 0m);
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(0, null)]
+    [InlineData(1, null)]
+    [InlineData(null, null)]
+    public void An_enabled_write_that_changed_no_row_or_finds_the_row_gone_answers_not_found(int? rowsWritten, bool? enabledAfter)
+    {
+        var answer = JsonNode.Parse(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpCollectionStateTools.EnabledAnswer("enable_server", EnabledRow, true, rowsWritten, enabledAfter))!;
+
+        Assert.Equal("refused", answer["status"]!.GetValue<string>());
+        Assert.Equal("not_found", answer["reason"]!.GetValue<string>());
+        Assert.Null(answer["what_changed"]);
+    }
+
+    [Fact]
+    public void An_enabled_write_that_changed_its_row_answers_changed_and_one_that_wrote_nothing_answers_unchanged()
+    {
+        var changed = JsonNode.Parse(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpCollectionStateTools.EnabledAnswer("enable_server", EnabledRow, true, 1, true))!;
+        Assert.Equal("changed", changed["status"]!.GetValue<string>());
+        Assert.True(changed["current"]!["enabled"]!.GetValue<bool>());
+
+        var unchanged = JsonNode.Parse(PerformanceMonitor.Darling.Service.Mcp.DarlingMcpCollectionStateTools.EnabledAnswer("disable_server", EnabledRow, false, null, false))!;
+        Assert.Equal("unchanged", unchanged["status"]!.GetValue<string>());
     }
 }

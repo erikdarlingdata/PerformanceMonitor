@@ -332,8 +332,8 @@ public sealed partial class DarlingMcpServerAdminTools
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* A probe or driver that throws can carry the submitted secret in its message: redact the whole envelope. */
-            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecrets));
+            /* A probe or driver that throws can carry the submitted secret in its message: such a message is withheld whole. */
+            ex = new InvalidOperationException(FailureTextOf(ex, submittedSecrets));
             return McpHelpers.FormatError("edit_server", ex);
         }
     }
@@ -387,7 +387,7 @@ LIMIT 1";
     /// The web edit route's entry (#5240): the core over a store and the real probe, for a row already resolved to
     /// <paramref name="serverId"/>. Pass <c>null</c> for <paramref name="logger"/> when the caller writes its own audit
     /// line (the web route does, with the signed-in principal). A fault that escapes the core becomes the error
-    /// envelope with the submitted secret redacted, because a driver's message can quote it.
+    /// envelope, and a message that repeats the submitted secret is withheld whole, because a driver's message can quote it.
     /// </summary>
     internal static async Task<string> EditServerByIdAsync(
         NpgsqlDataSource postgres, int serverId, string changesJson, ILogger? logger, CancellationToken cancellationToken,
@@ -408,7 +408,7 @@ LIMIT 1";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            ex = new InvalidOperationException(RedactEditSecret(ex.Message, submittedSecrets));
+            ex = new InvalidOperationException(FailureTextOf(ex, submittedSecrets));
             return McpHelpers.FormatError("edit_server", ex);
         }
     }
@@ -477,7 +477,7 @@ LIMIT 1";
         if (webScreen is not null && (plan.ReplicaChanged || plan.ChangedFields.Exists(f => f is "host" or "port" or "auth" or "trust_server_certificate" or "encrypt_mode"))
             && webScreen.Refusal(plan.ProbeConfig) is { } webRefusal)
         {
-            return Outcome(EditStatus.Invalid, RedactEditSecret(webRefusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plan.PlaintextSecret, plan.PlaintextExternalId));
+            return Outcome(EditStatus.Invalid, RuleRefusalText(webRefusal, plan.PlaintextSecret, plan.PlaintextExternalId));
         }
 
         /* #6281: over MCP, where a registration connects is not changed while a route with an agent setting applies to the
@@ -523,7 +523,7 @@ LIMIT 1";
             var refusal = policy?.Refusal(plan.ProbeConfig);
             if (refusal is not null)
             {
-                return Outcome(EditStatus.Invalid, RedactEditSecret(refusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal), plan.PlaintextSecret, plan.PlaintextExternalId));
+                return Outcome(EditStatus.Invalid, RuleRefusalText(refusal, plan.PlaintextSecret, plan.PlaintextExternalId));
             }
 
             var probeResult = await probe(plan.ProbeConfig, cancellationToken);
@@ -742,10 +742,26 @@ LIMIT 1";
     }
 
     /// <summary>The answer for an edit whose connected database another definition already covers: the add refusal's text
-    /// with "Not added" turned into "Not saved", the secret redacted. One shape for the check before the write and the
-    /// check under the lock.</summary>
+    /// with "Not added" turned into "Not saved". A text that repeats a typed secret (a database named like the password) is
+    /// withheld whole. One shape for the check before the write and the check under the lock.</summary>
     private static string ActualCollisionOutcome(string collisionText, params string?[] secrets) =>
-        Outcome(EditStatus.Collides, RedactEditSecret(collisionText.Replace("Not added:", "Not saved:", StringComparison.Ordinal), secrets));
+        Outcome(EditStatus.Collides, RepeatsTypedSecret(collisionText, secrets)
+            ? "Not saved: this connection lands in a database that another monitored server already covers. " + WithheldText("The sentence that names the databases", null)
+            : collisionText.Replace("Not added:", "Not saved:", StringComparison.Ordinal));
+
+    /// <summary>A rule's refusal of the server as it would be saved (the MCP caller's policy, the web route's Windows
+    /// authentication rule), with "Not added" turned into "Not saved". A sentence that repeats a typed secret is withheld whole.</summary>
+    private static string RuleRefusalText(string refusal, params string?[] secrets) =>
+        RepeatsTypedSecret(refusal, secrets)
+            ? "Not saved: a rule of this service refuses the server as it would be saved. " + WithheldText("The rule's sentence", null)
+            : refusal.Replace("Not added:", "Not saved:", StringComparison.Ordinal);
+
+    /// <summary>The message of a fault that escaped the edit: its own text, or the withheld sentence with the failure's kind
+    /// (<see cref="DarlingServerConnector.FailureKindOf"/>) when the text repeats a typed secret.</summary>
+    private static string FailureTextOf(Exception failure, string?[] secrets) =>
+        RepeatsTypedSecret(failure.Message, secrets)
+            ? WithheldText("The failure's text", DarlingServerConnector.FailureKindOf(failure))
+            : failure.Message;
 
     private static string OccupiedAnswer(string storageKey) =>
         JsonSerializer.Serialize(new
@@ -801,19 +817,34 @@ LIMIT 1";
     /// survive a trip through a client that cannot hold them in a date type.</summary>
     internal static string ModifiedAtToken(DateTime modifiedAt) => modifiedAt.ToString("o", CultureInfo.InvariantCulture);
 
-    /// <summary>The text with every typed secret removed: the password and the AWS external ID (#5452).</summary>
-    private static string RedactEditSecret(string text, params string?[] secrets)
+    /// <summary>True when <paramref name="text"/> repeats a typed secret: the password or the AWS external ID (#5452).</summary>
+    internal static bool RepeatsTypedSecret(string? text, params string?[] secrets)
     {
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
         foreach (var secret in secrets)
         {
-            if (!string.IsNullOrEmpty(secret))
+            if (!string.IsNullOrEmpty(secret) && text.Contains(secret, StringComparison.Ordinal))
             {
-                text = text.Replace(secret, "[redacted]", StringComparison.Ordinal);
+                return true;
             }
         }
 
-        return text;
+        return false;
     }
+
+    /// <summary>
+    /// #9693: the sentence that stands in for a text that repeats a typed secret. The text is withheld whole and never
+    /// rewritten: a text with the secret cut out shows which of its words was the secret (a password equal to the login name
+    /// prints the login as the missing word). A text that does not repeat a secret is passed on as it was written.
+    /// <paramref name="kind"/> names the failure without its text: an error number, a SqlState or an exception's type.
+    /// </summary>
+    internal static string WithheldText(string what, string? kind) =>
+        $"{what} is withheld because it repeats the password or the AWS external ID sent with this request"
+        + (string.IsNullOrEmpty(kind) ? "." : $" ({kind}).");
 
     /* ─────────────────────────────── parse (pure) ─────────────────────────────── */
 

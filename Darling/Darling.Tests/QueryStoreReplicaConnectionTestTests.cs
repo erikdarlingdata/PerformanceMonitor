@@ -64,7 +64,7 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
         var server = Server(Replica);
         var opened = new List<string>();
 
-        var (host, error) = await DarlingServerConnector.ProbeQueryStoreReplicaAsync(
+        var (host, error, _) = await DarlingServerConnector.ProbeQueryStoreReplicaAsync(
             server, false, null, CancellationToken.None, connectionString => new RecordingConnection(connectionString, opened, null));
 
         Assert.Equal(Replica, host);
@@ -79,7 +79,7 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
     [Fact]
     public async Task AReplicaThatCannotBeOpened_IsReportedWithItsError_AndDoesNotThrow()
     {
-        var (host, error) = await DarlingServerConnector.ProbeQueryStoreReplicaAsync(
+        var (host, error, _) = await DarlingServerConnector.ProbeQueryStoreReplicaAsync(
             Server(Replica), false, null, CancellationToken.None,
             connectionString => new RecordingConnection(connectionString, [], new InvalidOperationException(DriverText)));
 
@@ -93,7 +93,7 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
         /* The default seam opens a SqlConnection, as collection does. A closed local port refuses at once. */
         var server = Server("127.0.0.1,1");
 
-        var (host, error) = await DarlingServerConnector.ProbeQueryStoreReplicaAsync(server, false, null, CancellationToken.None);
+        var (host, error, _) = await DarlingServerConnector.ProbeQueryStoreReplicaAsync(server, false, null, CancellationToken.None);
 
         Assert.Equal("127.0.0.1,1", host);
         Assert.False(string.IsNullOrWhiteSpace(error));
@@ -105,12 +105,12 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
         var opened = new List<string>();
         Func<string, DbConnection> create = s => new RecordingConnection(s, opened, null);
 
-        Assert.Equal((null, null), await DarlingServerConnector.ProbeQueryStoreReplicaAsync(Server(null), false, null, CancellationToken.None, create));
-        Assert.Equal((null, null), await DarlingServerConnector.ProbeQueryStoreReplicaAsync(Server("   "), false, null, CancellationToken.None, create));
-        Assert.Equal((null, null), await DarlingServerConnector.ProbeQueryStoreReplicaAsync(Server(Replica), true, null, CancellationToken.None, create));
+        Assert.Equal((null, null, null), await DarlingServerConnector.ProbeQueryStoreReplicaAsync(Server(null), false, null, CancellationToken.None, create));
+        Assert.Equal((null, null, null), await DarlingServerConnector.ProbeQueryStoreReplicaAsync(Server("   "), false, null, CancellationToken.None, create));
+        Assert.Equal((null, null, null), await DarlingServerConnector.ProbeQueryStoreReplicaAsync(Server(Replica), true, null, CancellationToken.None, create));
         var postgres = Server(Replica);
         postgres.Engine = "postgres";
-        Assert.Equal((null, null), await DarlingServerConnector.ProbeQueryStoreReplicaAsync(postgres, false, null, CancellationToken.None, create));
+        Assert.Equal((null, null, null), await DarlingServerConnector.ProbeQueryStoreReplicaAsync(postgres, false, null, CancellationToken.None, create));
         Assert.Empty(opened);
     }
 
@@ -214,7 +214,27 @@ public sealed class QueryStoreReplicaConnectionTestTests : IDisposable
 
     /* ---------------- add_servers and edit_server ---------------- */
 
-    private static readonly Core.ServerProbe ReplicaDown = (_, _) => Task.FromResult(Probe(Replica, DriverText + " password=" + Password));
+    /* The replica's driver text does not repeat the typed password, so it is logged as the driver wrote it. */
+    private static readonly Core.ServerProbe ReplicaDown = (_, _) => Task.FromResult(Probe(Replica, DriverText));
+
+    /* #9693: a replica text that repeats the typed password is withheld whole, with the failure's kind in its place. */
+    private static readonly Core.ServerProbe ReplicaDownWithThePassword = (_, _) => Task.FromResult(
+        Probe(Replica, DriverText + " password=" + Password) with { QueryStoreReplicaErrorKind = "SQL Server error 18456" });
+
+    [Fact]
+    public async Task HostCommandLineAdd_AReplicaTextThatRepeatsTheTypedPassword_IsWithheldWhole_InTheNoteAndTheLog()
+    {
+        var log = new CapturingLogger();
+
+        var answer = await Core.AddServersAsync(
+            new SavingDefinitions(), AddBody(), ReplicaDownWithThePassword, CancellationToken.None, ring: TestKeyRings.Healthy, revealConnectError: true, logger: log);
+
+        Assert.DoesNotContain(Password, answer, StringComparison.Ordinal);
+        Assert.DoesNotContain("Distinctive-Replica-Text", answer, StringComparison.Ordinal);
+        Assert.Contains("SQL Server error 18456", AddedResult(answer)["detail"]!.GetValue<string>(), StringComparison.Ordinal);
+        Assert.DoesNotContain(Password, string.Join("\n", log.Lines), StringComparison.Ordinal);
+        Assert.DoesNotContain(log.Lines, l => l.Contains("Distinctive-Replica-Text", StringComparison.Ordinal));
+    }
 
     private sealed class SavingDefinitions : Core.IServerDefinitions
     {

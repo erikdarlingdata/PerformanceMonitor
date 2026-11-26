@@ -1001,7 +1001,7 @@ WHERE status = 'in_progress'
         return ("connection_failed", ErrorJson(strict is null ? error : error + Environment.NewLine + strict));
     }
 
-    private Task ExecuteStoreWriteAsync(CommandPlan plan, CancellationToken cancellationToken) =>
+    private Task<int> ExecuteStoreWriteAsync(CommandPlan plan, CancellationToken cancellationToken) =>
         ExecuteStoreWriteAsync(_postgres, plan, cancellationToken);
 
     /// <summary>
@@ -1010,9 +1010,10 @@ WHERE status = 'in_progress'
     /// toggle verbs execute the SAME plan object <see cref="ResolvePlan"/> hands the running service, against a
     /// data source the verb opened itself — no executor instance, no <see cref="IDarlingCommandHost"/>, and no
     /// second SQL statement anywhere that writes <c>config_collector_schedules</c>. The instance overload above
-    /// is unchanged in behavior; it only forwards its own data source here.
+    /// is unchanged in behavior; it only forwards its own data source here. Returns the number of rows the statement
+    /// wrote, so a caller that wrote by id can tell a row that is gone from a row it changed (#9693).
     /// </summary>
-    internal static async Task ExecuteStoreWriteAsync(NpgsqlDataSource postgres, CommandPlan plan, CancellationToken cancellationToken)
+    internal static async Task<int> ExecuteStoreWriteAsync(NpgsqlDataSource postgres, CommandPlan plan, CancellationToken cancellationToken)
     {
         if (plan.Kind != CommandKind.StoreWrite || plan.Sql is null)
         {
@@ -1032,7 +1033,7 @@ WHERE status = 'in_progress'
             }
         }
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        return await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private async Task ReportAsync(long commandId, CommandOutcome outcome, CancellationToken cancellationToken)

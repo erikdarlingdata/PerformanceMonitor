@@ -323,29 +323,40 @@ public static partial class DarlingCliCommands
     /// while the prompt waited is refused and the password is never used against a server the operator did not see.</summary>
     internal sealed record EditServerTarget(
         int ServerId, string StorageName, string DisplayName, string Host, int Port, string Auth, string? Username, string ModifiedAt,
-        bool IsPostgres = false)
+        bool IsPostgres = false, string? QueryStoreReplica = null, string? EncryptMode = null, bool TrustServerCertificate = false)
     {
-        /// <summary>The server as the operator is shown it. Control characters in a value are escaped.</summary>
+        /// <summary>The server as the operator is shown it. The name, the host and the login are each in quotes with the
+        /// characters that do not print escaped (<see cref="StoreConfigProvider.DriftValue"/>), so none of them can add words
+        /// that read as the line's own.</summary>
         internal string Describe()
         {
-            var where = StoreConfigProvider.DriftText(Host) + (Port > 0 ? ":" + Port.ToString(CultureInfo.InvariantCulture) : "");
-            var login = string.IsNullOrEmpty(Username) ? $"{Auth} authentication" : $"login {StoreConfigProvider.DriftText(Username)} ({Auth})";
+            var where = StoreConfigProvider.DriftValue(Host) + (Port > 0 ? " port " + Port.ToString(CultureInfo.InvariantCulture) : "");
+            var login = string.IsNullOrEmpty(Username) ? $"{Auth} authentication" : $"login {StoreConfigProvider.DriftValue(Username)} ({Auth})";
             return $"{StoreConfigProvider.DriftValue(DisplayName)} (id {ServerId.ToString(CultureInfo.InvariantCulture)}) at {where}, {login}";
         }
 
-        /// <summary>Where the edit connects once <paramref name="changes"/> (an edit_server request) is applied: the host, port,
-        /// authentication and login a typed password is sent to for the connection test. Each value is in quotes with the
-        /// characters that do not print escaped, so a host or a login cannot add words to the line.</summary>
+        /// <summary>Where the edit connects once <paramref name="changes"/> (an edit_server request) is applied: every host a
+        /// typed password is sent to for the connection test, with the port, authentication, login, encryption mode and
+        /// certificate trust it is sent under. The test opens a SQL Server's Query Store replica with the same login and
+        /// password (<see cref="DarlingServerConnector.ProbeQueryStoreReplicaAsync"/>), so a replica the row holds or the change
+        /// sets is named as a second host. Each value is in quotes with the characters that do not print escaped, so a host or
+        /// a login cannot add words to the line.</summary>
         internal string DescribeAfter(JsonObject changes)
         {
             string? Changed(string key) => changes[key] is JsonValue v ? (v.TryGetValue<string>(out var s) ? s : v.ToJsonString()) : null;
 
             var port = changes["port"] is JsonValue p && p.TryGetValue<int>(out var number) ? number : Port;
             var username = changes.ContainsKey("username") ? Changed("username") : Username;
+            var trust = changes["trust_server_certificate"] is JsonValue t && t.TryGetValue<bool>(out var trusted) ? trusted : TrustServerCertificate;
+            var replica = IsPostgres
+                ? null
+                : QueryStoreReplicaSetting.Normalize(changes.ContainsKey("query_store_replica") ? Changed("query_store_replica") : QueryStoreReplica);
             return $"host {StoreConfigProvider.DriftValue(Changed("host") ?? Host)}, "
                 + (port > 0 ? $"port {port.ToString(CultureInfo.InvariantCulture)}, " : "")
                 + $"authentication {StoreConfigProvider.DriftValue(Changed("auth") ?? Auth)}, "
-                + (string.IsNullOrEmpty(username) ? "no login name" : $"login {StoreConfigProvider.DriftValue(username)}");
+                + (string.IsNullOrEmpty(username) ? "no login name" : $"login {StoreConfigProvider.DriftValue(username)}")
+                + $", encryptMode {StoreConfigProvider.DriftValue(Changed("encrypt_mode") ?? EncryptMode)}, trustServerCertificate {(trust ? "true" : "false")}"
+                + (replica is null ? "" : $", and with the same login and settings to the Query Store replica {StoreConfigProvider.DriftValue(replica)}");
         }
     }
 
@@ -397,8 +408,9 @@ public static partial class DarlingCliCommands
     /// the password is used. A server that changed during the connection test is refused by the write, after the password was
     /// sent: <paramref name="passwordWasSent"/> tells the two apart, and without it the line says only that nothing was saved.
     /// When no password comes back, <paramref name="passwordRefusal"/> gives the reader's reason and that reason is the one
-    /// line printed. A password longer than SQL Server takes is refused for a SQL Server target before the second send
-    /// (<see cref="SqlServerPasswordRefusal"/>).
+    /// line printed. A typed <c>env:</c> or <c>file:</c> reference and a password that cannot be stored are refused before the
+    /// second send (<see cref="LoginPasswordRefusal"/>, the rule <c>--set-login-password</c> applies), and so is a password
+    /// longer than SQL Server takes for a SQL Server target (<see cref="SqlServerPasswordRefusal"/>).
     /// The enabled state is applied only after the edit, if there is one, has succeeded. An enabled step that fails keeps the
     /// edit's lines and says the settings were saved. Every line returned has the characters that do not print escaped
     /// (<see cref="StoreConfigProvider.DriftText"/>), whatever a store answer, a server's name or a driver's message holds.
@@ -449,6 +461,14 @@ public static partial class DarlingCliCommands
                     return (lines, 1);
                 }
 
+                /* What was typed is a password or it is refused here, before anything is sent: a typed env: or file: reference
+                   would otherwise go to the server as a password in the connection test and be refused only at the write. */
+                if (LoginPasswordRefusal(typed) is { } unusable)
+                {
+                    lines.Add("  Not changed: " + unusable + " It was not sent anywhere.");
+                    return (lines, 1);
+                }
+
                 if (SqlServerPasswordRefusal(typed, target.IsPostgres) is { } tooLong)
                 {
                     lines.Add("  Not changed: " + tooLong + " It was not sent anywhere.");
@@ -463,7 +483,7 @@ public static partial class DarlingCliCommands
                     lines.Add(passwordWasSent switch
                     {
                         null => "  The server changed after its password was asked for, so the password was not saved.",
-                        var sent when sent() => "  The server changed while the connection was tested. The password was sent for that test, to the host named above, and it was not saved.",
+                        var sent when sent() => "  The server changed while the connection was tested. The password was sent for that test, to every host named above, and it was not saved.",
                         _ => "  The server changed while the password prompt was open, so the password was not used.",
                     });
                 }
@@ -738,6 +758,9 @@ public static partial class DarlingCliCommands
                 DisplayName = row.Name,
                 ModifiedAt = DarlingMcpServerAdminTools.ModifiedAtToken(row.ModifiedAt),
                 IsPostgres = PerformanceMonitor.Collectors.MonitoredEngineKind.ParseConfiguredEngine(row.Engine) == PerformanceMonitor.Collectors.CollectorTargetEngine.PostgreSql,
+                QueryStoreReplica = row.QueryStoreReplica,
+                EncryptMode = row.EncryptMode,
+                TrustServerCertificate = row.TrustServerCertificate,
             };
 
             /* Before the first send and before any prompt: the store and the configuration file this run reaches, the key a typed

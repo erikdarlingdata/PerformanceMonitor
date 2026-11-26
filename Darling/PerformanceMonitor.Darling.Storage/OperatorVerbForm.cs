@@ -76,6 +76,11 @@ public static class OperatorVerbForm
         return ShellWord(installDir.TrimEnd('\\', '/') + "\\" + WindowsEntryPoint, isWindows: true) is { } word ? "& " + word : null;
     }
 
+    /// <summary>The entry point to type by hand when no folder can be printed (#9693). On Windows it is the executable as
+    /// PowerShell runs it from the folder it is in (<c>.\PerformanceMonitor.Darling.Service.exe</c>): PowerShell does not run a
+    /// bare name from the current folder. Everywhere else it is <see cref="PortableEntryPoint"/>.</summary>
+    public static string ByHandEntryPoint(bool isWindows) => isWindows ? ".\\" + WindowsEntryPoint : PortableEntryPoint;
+
     /// <summary><see cref="PasteableEntryPoint"/> for the host this process runs on, from the folder it runs from.</summary>
     public static string? PasteableEntryPointHere() => PasteableEntryPoint(OperatingSystem.IsWindows(), AppContext.BaseDirectory);
 

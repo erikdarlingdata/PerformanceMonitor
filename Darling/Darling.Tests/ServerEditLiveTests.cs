@@ -581,7 +581,8 @@ public sealed partial class ServerEditLiveTests : IDisposable
         try
         {
             await SeedServerAsync(rig.Owner, 5195, "alpha-95", "alpha-95.example.test", "sql", "monitor", "old-sealed-value", ct);
-            var ring = DarlingPasswordKey.FromPrivateKey(PasswordPrivateKey.Generate());
+            var privateKey = PasswordPrivateKey.Generate();
+            var ring = DarlingPasswordKey.FromPrivateKey(privateKey);
             var keyId = ring.Status.KeyId!;
             await ExecAsync(rig.Owner,
                 "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('afb6cecb558a0858', decode(repeat('01', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
@@ -598,7 +599,7 @@ public sealed partial class ServerEditLiveTests : IDisposable
             /* The same edit with the store's current key saves and seals the password to it. */
             await ExecAsync(rig.Owner, "DELETE FROM config.password_key", ct);
             await ExecAsync(rig.Owner,
-                $"INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('{keyId}', decode(repeat('02', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
+                $"INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('{keyId}', decode('{Convert.ToHexString(privateKey.PublicKey.Spki)}', 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
             var saved = Parse(await Edit.EditServerCoreAsync(
                 new DarlingCliCommands.KeyCheckedEditStore(new Edit.PostgresServerEditStore(rig.Owner), ring), 5195, changes, Reachable, ring, null, ct));
             Assert.Equal("updated", saved["status"]!.GetValue<string>());

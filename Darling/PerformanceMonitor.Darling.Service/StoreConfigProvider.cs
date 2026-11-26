@@ -751,6 +751,9 @@ public sealed class StoreConfigProvider
                leaves the server without a command. */
             var configWord = configPath is null ? null : CommandWord(configPath, powershell);
             var configPrintable = configPath is null || configWord is not null;
+            /* A Windows folder that cannot be printed leaves only the executable's name, which PowerShell runs from the current
+               folder only as .\name, so the sentence says where to run it. */
+            var byHandFromFolder = powershell && entryPoint is null;
             var remedy = "";
             if (args.Count > 0 && entryPoint is not null && !words.Contains(null) && configPrintable)
             {
@@ -763,7 +766,8 @@ public sealed class StoreConfigProvider
                     + (words.Contains(null) ? "a value holds characters"
                         : entryPoint is null ? "the folder the service is installed in holds characters"
                         : "the path of the service's configuration file holds characters")
-                    + $" that cannot be pasted safely. Run --edit-server by hand{(powershell ? " in PowerShell" : "")}: {entryPoint ?? OperatorVerbForm.EntryPoint(powershell, null)} --edit-server <server name>"
+                    + $" that cannot be pasted safely. Run --edit-server by hand{(powershell ? " in PowerShell" : "")}{(byHandFromFolder ? ", from the folder the service is installed in" : "")}:"
+                    + $" {entryPoint ?? OperatorVerbForm.ByHandEntryPoint(powershell)} --edit-server <server name>"
                     + $" followed by --set <field>=<value> for {string.Join(", ", server.Fields.Where(f => DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field))}"
                     + (configPath is null ? "." : $", then --config and the path of the configuration file the service is using ({DriftValue(configPath)}).");
             }
@@ -868,9 +872,10 @@ public sealed class StoreConfigProvider
     }
 
     /// <summary>A value between double quotes in a drift line: <see cref="DriftText"/>, with a double quote in the value written
-    /// as <c>\u0022</c>, so the value ends at the closing quote and nothing in it reads as the line's own words (#9693).</summary>
+    /// as <c>\u0022</c> and a backslash in the value written as two, so the value ends at the closing quote, nothing in it reads
+    /// as the line's own words, and a backslash the value holds is never read as the start of an escape (#9693).</summary>
     internal static string DriftValue(string? value) =>
-        "\"" + DriftText(value).Replace("\"", "\\u0022", StringComparison.Ordinal) + "\"";
+        "\"" + DriftText(value?.Replace("\\", "\\\\", StringComparison.Ordinal)).Replace("\"", "\\u0022", StringComparison.Ordinal) + "\"";
 
     /// <summary>One side of a drifted field: <see cref="DriftValue"/>, or the bare <c>(none)</c> for a value that is not set, so
     /// a value that is set is always the one in quotes.</summary>

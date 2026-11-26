@@ -233,9 +233,11 @@ public sealed class AwsRoleEditTests
             new ConnectionProbeResult(false, 0, 0, null, false, false, false, false, "refused with " + TypedId)));
         var answer = await Edit.EditServerCoreAsync(store, 41, body, failing, TestKeyRings.Healthy, logger, CancellationToken.None);
         Assert.DoesNotContain(TypedId, answer, StringComparison.Ordinal);
-        /* The reply names the host and carries no driver text; the driver's text, with the typed ID removed, is in the log. */
+        /* The reply names the host and carries no driver text. The driver's text repeats the typed ID, so the log line withholds
+           the whole text (#9693) and names the target. */
         Assert.Contains("Could not connect to pg-02.example.test", answer, StringComparison.Ordinal);
-        Assert.Contains(logger.Lines, l => l.Contains("refused with [redacted]", StringComparison.Ordinal));
+        Assert.Contains(logger.Lines, l => l.Contains("pg-02.example.test", StringComparison.Ordinal) && !l.Contains("refused with", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, l => l.Contains(TypedId, StringComparison.Ordinal));
 
         var ok = await Edit.EditServerCoreAsync(store, 41, body, Reachable, TestKeyRings.Healthy, logger, CancellationToken.None);
         Assert.DoesNotContain(TypedId, ok, StringComparison.Ordinal);
