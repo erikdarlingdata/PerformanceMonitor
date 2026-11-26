@@ -2063,7 +2063,10 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
 
             /* #5366: the pins taken at upgrade for the old-format passwords, read once for the SMTP slot and every server. */
             var pins = await ReadLegacyPinsAsync(connection, cancellationToken);
+            /* #5456, #9749: read once, so the resolver's refusal and the re-enter line below say the same thing about the pin step. */
+            var waiting = LegacyPinsWaiting?.Invoke() == true;
             smtp.SecretPin = pins.GetValueOrDefault((0, "smtp"));
+            smtp.SecretPinWaiting = waiting;
             MarkSmtpTheFileDeclares(smtp, bootstrap);
 
             /* #3598 (V131): the routes layered over that row, read on the same privileged connection for the
@@ -2071,7 +2074,7 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                ordinary state and resolves to the parent row exactly. */
             var routes = await ReadNotificationRoutesAsync(connection, _logger, cancellationToken);
 
-            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins);
+            var servers = await ReadMonitoredServersAsync(connection, bootstrap, cancellationToken, pins, pinsWaiting: waiting);
 
             /* #6583: a SQL Server registry row that holds a port, which is ignored. Once per change in the warnings, not once per reload. */
             var portWarnings = SqlServerPortAdvice.Warnings(servers);
@@ -2090,7 +2093,6 @@ ON CONFLICT (server_id) DO NOTHING", connection, transaction) { CommandTimeout =
                #5456: while the one-time pin step is waiting to run, the same count is a different message (do not enter
                them again yet), so the line is repeated once when that changes. */
             var enterAgain = CountPasswordsToEnterAgain(servers, smtp, LegacyDpapi.Current);
-            var waiting = LegacyPinsWaiting?.Invoke() == true;
             if ((enterAgain, waiting) != _lastReenterLogged)
             {
                 var line = ReenterLine(enterAgain, waiting);
@@ -2602,10 +2604,11 @@ FROM config_notification WHERE id = 1", connection) { CommandTimeout = ServiceCo
 
     /// <summary>Internal, not private (#4214): <c>--validate-config</c>'s registry-based pre-flight calls this
     /// directly with its own connection, rather than the file's darling.json list, so it tests the servers the
-    /// store will actually collect from.</summary>
+    /// store will actually collect from. <paramref name="pinsWaiting"/> is whether the one-time pin step is waiting to run (#9749); a caller
+    /// that has no worker behind it leaves it false, so an old-format password with no pin is a refusal that needs an operator.</summary>
     internal static async Task<IReadOnlyList<MonitoredServer>> ReadMonitoredServersAsync(
         NpgsqlConnection connection, DarlingConfig bootstrap, CancellationToken ct,
-        IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>? pins = null, ISet<int>? disabledServerIds = null)
+        IReadOnlyDictionary<(int ServerId, string Slot), LegacyPin>? pins = null, ISet<int>? disabledServerIds = null, bool pinsWaiting = false)
     {
         pins ??= await ReadLegacyPinsAsync(connection, ct);
         var servers = new List<MonitoredServer>();
@@ -2640,6 +2643,7 @@ ORDER BY name", connection) { CommandTimeout = ServiceCommandDeadlines.SerialLoo
         {
             server.SecretPin = pins.GetValueOrDefault((server.ServerId, "server"));
             server.RemediationPin = pins.GetValueOrDefault((server.ServerId, "remediation"));
+            server.SecretPinWaiting = pinsWaiting;
         }
 
         return servers;
