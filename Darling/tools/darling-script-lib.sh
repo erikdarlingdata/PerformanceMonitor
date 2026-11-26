@@ -10,6 +10,11 @@ FAILED_ROOT=/opt/darling.failed
 STAGING_ROOT=/opt/darling.staging
 STAGED_BUILD=/opt/darling.staging/build
 STAGED_TARBALL=/opt/darling.staging/source.tar.gz
+# The copy of the installed build that becomes the rollback copy, the installed build once it is replaced, and the
+# copy of the rollback copy that a rollback puts back.
+STAGED_PREVIOUS=/opt/darling.staging/previous
+STAGED_REPLACED=/opt/darling.staging/replaced
+STAGED_RESTORE=/opt/darling.staging/restore
 CONFIG_DIR=/etc/darling
 CONFIG_FILE=/etc/darling/darling.json
 KEY_DIR=/etc/darling/darling-keys
@@ -71,11 +76,19 @@ root_only_path() {
     done
 }
 
-# Makes a build folder root's own and closed to group and other writes, whatever owners its files record. A build that
-# was extracted by hand from an older tarball can belong to the uid of the machine that built it, and an account of
-# this host with that uid could then change what a rollback starts (#9688).
-make_root_owned() {
-    chown -R root:root "$1" && chmod -R go-w "$1"
+# Copies the build folder $1 onto new files that root creates, as $2 in the staging folder, root's own and closed to
+# group and other writes. A build that was extracted by hand from an older tarball can belong to the uid of the machine
+# that built it. A rename keeps those files, and a process of that uid that holds one open for writing could still
+# change it after a chown. A copy leaves such a handle on the old file. No mode gets wider, so a file that was closed
+# to other accounts stays closed in the copy. Fails for a folder that holds a device node, a FIFO or a socket (#9688).
+fresh_copy() {
+    local from="$1" to="$2"
+    ensure_staging
+    rm -rf "${to}"
+    mkdir -m 755 "${to}" || return 1
+    cp -R "${from}/." "${to}/" || return 1
+    [ -z "$(find "${to}" ! -type f ! -type d ! -type l -print -quit)" ] || return 1
+    chown -R root:root "${to}" && chmod -R go-w "${to}"
 }
 
 # Stops when the path is a symbolic link, or exists and is not a folder. The install script creates its folders with
@@ -117,10 +130,10 @@ resolve_source() {
         SOURCE_KIND=folder
         [ -f "${SOURCE_PATH}/${SERVICE_DLL}" ] || die "The folder '${SOURCE_PATH}' holds no ${SERVICE_DLL}, so it is not an extracted Darling tarball."
         [ "${SOURCE_PATH}" != "${INSTALL_ROOT}" ] || die "The source is the install folder ${INSTALL_ROOT} itself. Extract the tarball to another folder and run the script from there, or pass --source with the tarball."
-        root_only_path "${SOURCE_PATH}" || die "The source folder '${SOURCE_PATH}' or a folder above it is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner), or pass --source with the tarball."
+        root_only_path "${SOURCE_PATH}" || die "The source folder '${SOURCE_PATH}' or a folder above it is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner --no-same-permissions), or pass --source with the tarball."
         # The same for what the folder holds. A link has no mode of its own, and the folder that holds it is checked.
         open_entry="$(find "${SOURCE_PATH}" \( ! -user 0 -o -perm /022 \) ! -type l -print -quit)"
-        [ -z "${open_entry}" ] || die "'$(printf '%s' "${open_entry}" | printable)' in the source folder is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner), or pass --source with the tarball."
+        [ -z "${open_entry}" ] || die "'$(printf '%s' "${open_entry}" | printable)' in the source folder is not owned by root, or its group or other users can write it, so another account could change the build while root installs it. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner --no-same-permissions), or pass --source with the tarball."
     else
         SOURCE_KIND=tarball
     fi
@@ -196,7 +209,7 @@ stage_source() {
         [ "${SOURCE_KIND}" = folder ] && [ -f "${STAGED_BUILD}/${name}" ] && [ ! -L "${STAGED_BUILD}/${name}" ] && from="${STAGED_BUILD}/${name}"
         [ -f "${from}" ] && [ ! -L "${from}" ] || continue
         # Root installs the unit as a root unit, so the file beside the script passes the check its folder passed.
-        root_only_writable "${from}" || die "${from} is not owned by root, or its group or other users can write it, so it was not installed. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner) and run the script from there."
+        root_only_writable "${from}" || die "${from} is not owned by root, or its group or other users can write it, so it was not installed. Extract the tarball as root into a new folder under /opt (sudo mkdir, then sudo tar -xzf <tarball> -C <folder> --no-same-owner --no-same-permissions) and run the script from there."
         install -m 644 "${from}" "${STAGING_ROOT}/${name}"
         case "${name}" in darling.service) SHIPPED_UNIT="${STAGING_ROOT}/${name}" ;; *) SHIPPED_SAMPLE="${STAGING_ROOT}/${name}" ;; esac
     done

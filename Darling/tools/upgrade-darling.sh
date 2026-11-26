@@ -13,9 +13,9 @@
 #      the source and its SHA256, the new build's --version as the service user, and a refusal when any process
 #      other than the service runs from /opt/darling. --check stops here, and nothing is changed.
 #   2. Stops the service, and checks that no process is left that runs from /opt/darling.
-#   3. Moves /opt/darling to /opt/darling.previous, the rollback copy, makes that copy root's own, and moves the new
-#      build into /opt/darling. Both moves are renames, so /opt/darling never holds a mix of two builds. /etc/darling
-#      (the config, the secret files and the keys) is not touched, and the script checks that afterwards.
+#   3. Copies /opt/darling onto new files that root owns, as /opt/darling.previous, the rollback copy, and puts the
+#      new build in /opt/darling with a rename, so /opt/darling never holds a mix of two builds. /etc/darling (the
+#      config, the secret files and the keys) is not touched, and the script checks that afterwards.
 #   4. Starts the service and runs the health check.
 #   5. When the start or the health check fails: stops the service, moves the new build to /opt/darling.failed, moves
 #      /opt/darling.previous back, starts the old build and checks it too. The exit code is 1 either way.
@@ -50,7 +50,7 @@ if [ "$(id -u)" -eq 0 ]; then
     for trusted in "${trusted_paths[@]}"; do
         case "$(stat -L -c '%u %A' -- "${trusted}" 2>/dev/null || true)" in
             "0 "?????-??-?) ;;
-            *) echo "ERROR: ${trusted} is not owned by root, or its group or other users can write it. Extract the new tarball as root into a new folder under /opt (sudo mkdir <folder>, then sudo tar -xzf <tarball> -C <folder> --no-same-owner) and run the script from there." >&2; exit 1 ;;
+            *) echo "ERROR: ${trusted} is not owned by root, or its group or other users can write it. Extract the new tarball as root into a new folder under /opt (sudo mkdir <folder>, then sudo tar -xzf <tarball> -C <folder> --no-same-owner --no-same-permissions) and run the script from there." >&2; exit 1 ;;
         esac
     done
 fi
@@ -115,9 +115,10 @@ RESTORED=0
 restore_previous() {
     RESTORED=0
     systemctl stop "${UNIT_NAME}" 2>/dev/null || true
-    # A rollback copy that this script did not make can hold files of another account, so it is made root's first.
-    if ! make_root_owned "${PREVIOUS_ROOT}"; then
-        HEALTH_REASON="could not make ${PREVIOUS_ROOT} root's own, so no build was moved"
+    # A rollback copy that this script did not make can hold files of another account, so what goes back is a copy
+    # of it on new files.
+    if ! fresh_copy "${PREVIOUS_ROOT}" "${STAGED_RESTORE}"; then
+        HEALTH_REASON="could not copy ${PREVIOUS_ROOT} onto new files, so no build was moved"
         return 1
     fi
     if [ -d "${INSTALL_ROOT}" ]; then
@@ -127,10 +128,11 @@ restore_previous() {
             return 1
         fi
     fi
-    if ! mv -T "${PREVIOUS_ROOT}" "${INSTALL_ROOT}"; then
-        HEALTH_REASON="could not move ${PREVIOUS_ROOT} to ${INSTALL_ROOT}, so ${INSTALL_ROOT} holds no build"
+    if ! mv -T "${STAGED_RESTORE}" "${INSTALL_ROOT}"; then
+        HEALTH_REASON="could not move the copy of ${PREVIOUS_ROOT} into ${INSTALL_ROOT}, so ${INSTALL_ROOT} holds no build"
         return 1
     fi
+    rm -rf "${PREVIOUS_ROOT}"
     RESTORED=1
     if [ "${unit_replaced}" = 1 ]; then
         cp -p "${UNIT_PATH}.previous" "${UNIT_PATH}"
@@ -206,9 +208,11 @@ fi
 # -T on each move of a whole folder: when the target is still there, the move fails, where a plain mv would put the
 # folder inside it.
 rm -rf "${PREVIOUS_ROOT}" || die "Could not remove the old rollback copy ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
-mv -T "${INSTALL_ROOT}" "${PREVIOUS_ROOT}" || die "Could not move ${INSTALL_ROOT} to ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
-# The rollback copy is root's own before anything can start from it, whatever owners the old build's files record.
-make_root_owned "${PREVIOUS_ROOT}" || die "Could not make ${PREVIOUS_ROOT} root's own. The service is STOPPED, ${old_version} is in ${PREVIOUS_ROOT} and ${INSTALL_ROOT} holds no build. Fix the cause, then run this script again: it puts that build back first."
+# The rollback copy is a copy on new files that root owns, whatever owners the old build's files record and whoever
+# holds one of them open. The old files go into the staging folder, which goes when the script ends.
+fresh_copy "${INSTALL_ROOT}" "${STAGED_PREVIOUS}" || die "Could not copy ${INSTALL_ROOT} onto new files for the rollback copy, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+mv -T "${STAGED_PREVIOUS}" "${PREVIOUS_ROOT}" || die "Could not move the rollback copy to ${PREVIOUS_ROOT}, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
+mv -T "${INSTALL_ROOT}" "${STAGED_REPLACED}" || die "Could not move ${INSTALL_ROOT} out of the way, so nothing was replaced. The service is STOPPED and the install is intact: start it with 'systemctl start darling'."
 mv -T "${STAGED_BUILD}" "${INSTALL_ROOT}" || die "Could not move the new build into ${INSTALL_ROOT}. The service is STOPPED, ${old_version} is in ${PREVIOUS_ROOT} and ${INSTALL_ROOT} holds no build. Fix the cause, then run this script again: it puts that build back first."
 note "The rollback copy of ${old_version} is ${PREVIOUS_ROOT}."
 

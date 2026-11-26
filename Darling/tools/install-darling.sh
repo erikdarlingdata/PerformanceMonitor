@@ -45,7 +45,7 @@ if [ "$(id -u)" -eq 0 ]; then
     for trusted in "${trusted_paths[@]}"; do
         case "$(stat -L -c '%u %A' -- "${trusted}" 2>/dev/null || true)" in
             "0 "?????-??-?) ;;
-            *) echo "ERROR: ${trusted} is not owned by root, or its group or other users can write it. Extract the tarball as root into a new folder under /opt (sudo mkdir <folder>, then sudo tar -xzf <tarball> -C <folder> --no-same-owner) and run the script from there." >&2; exit 1 ;;
+            *) echo "ERROR: ${trusted} is not owned by root, or its group or other users can write it. Extract the tarball as root into a new folder under /opt (sudo mkdir <folder>, then sudo tar -xzf <tarball> -C <folder> --no-same-owner --no-same-permissions) and run the script from there." >&2; exit 1 ;;
         esac
     done
 fi

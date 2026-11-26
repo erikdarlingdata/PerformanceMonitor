@@ -26,7 +26,7 @@ The tarball has `install-darling.sh`, `upgrade-darling.sh`, `darling.service` an
 
 ```bash
 sudo mkdir /opt/darling-new
-sudo tar -xzf PerformanceMonitorDarling-linux-x64-<version>.tar.gz -C /opt/darling-new --no-same-owner
+sudo tar -xzf PerformanceMonitorDarling-linux-x64-<version>.tar.gz -C /opt/darling-new --no-same-owner --no-same-permissions
 sudo /opt/darling-new/install-darling.sh
 ```
 
@@ -35,21 +35,21 @@ sudo /opt/darling-new/install-darling.sh
 - A config that is already in `/etc/darling` is kept, and so is a unit that is already installed. `--replace-unit` installs the tarball's unit over yours and keeps yours as `darling.service.previous`.
 - `--check` runs the checks and changes nothing. `--source <tarball>` installs from a tarball that you did not extract, and checks it against the `SHA256SUMS-linux.txt` beside it.
 - A `SHA256SUMS-linux.txt` beside the tarball shows that the tarball is whole. It does not show where the tarball came from, because whoever can replace the tarball can replace the file beside it. `--sha256 <hash>`, with a hash that you took from the release page yourself, is the check that does. Both arguments are for a tarball: with a folder as the source the scripts refuse `--sha256` and `--skip-hash-check`.
-- The scripts run as root, so they refuse to run from a folder that root does not own or that its group or other users can write. The same goes for every folder above it up to `/`, for the script, for `darling-script-lib.sh` and for the `darling.service` and `darling.linux.sample.json` beside it. They refuse a `--source` folder like that too, and one that holds a file or a folder like that. The commands above make a folder that passes: `/opt` is root's on a stock host, and a folder in your home directory is not.
+- The scripts run as root, so they refuse to run from a folder that root does not own or that its group or other users can write. The same goes for every folder above it up to `/`, for the script, for `darling-script-lib.sh` and for the `darling.service` and `darling.linux.sample.json` beside it. They refuse a `--source` folder like that too, and one that holds a file or a folder like that. The commands above make a folder that passes: `/opt` is root's on a stock host, and a folder in your home directory is not. `--no-same-permissions` lets root's umask set the modes, so a tarball that was built with group-writable files still extracts closed to group writes.
 - The service user gets only the folders it writes. `/usr/share/PerformanceMonitorDarling` stays root's, and the script takes it back when an older install gave it to `darling`. It refuses, and changes no owner, when `logs` or `darling-keys` is a symbolic link.
 
 **Upgrade.** Read the release notes and back up the store first, as [Upgrade by hand](#upgrade-by-hand) says. The script does not read or change the store's PostgreSQL settings, so the compare of the store's settings file with the [Settings](#settings) block stays with you: it is step 3 of [Upgrade by hand](#upgrade-by-hand). Then extract the new tarball into a new folder and run the upgrade script that came out of it:
 
 ```bash
 sudo rm -rf /opt/darling-new && sudo mkdir /opt/darling-new
-sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling-new --no-same-owner
+sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling-new --no-same-owner --no-same-permissions
 sudo /opt/darling-new/upgrade-darling.sh --check
 sudo /opt/darling-new/upgrade-darling.sh
 ```
 
 - It refuses, and changes nothing, while a process other than the service runs from `/opt/darling`, such as a `--backfill-rollups` that has not finished. That holds for any process under `/opt/darling/`, whichever account started it, and the message names its PID.
 - It stops the service and checks that no process is left that runs from `/opt/darling`.
-- It moves `/opt/darling` to `/opt/darling.previous`, the rollback copy, and moves the new build into `/opt/darling`. The rollback copy becomes root's own (`chown -R root:root`, `chmod -R go-w`) whatever owners the old build's files had, and `--rollback` does the same before it starts a copy. `/etc/darling` is not touched, and the script checks that the config, the secret files and the keys are as they were. When that check cannot run, the script says so and does not say that they are as they were.
+- It moves `/opt/darling` to `/opt/darling.previous`, the rollback copy, and moves the new build into `/opt/darling`. The rollback copy is a copy on new files that root owns, not the old files renamed, so an account that owned the old files or holds one open cannot change it. `--rollback` puts back a copy made the same way. `/etc/darling` is not touched, and the script checks that the config, the secret files and the keys are as they were. When that check cannot run, the script says so and does not say that they are as they were.
 - It starts the service and runs the health check. When the start or the check fails, it puts the old build back, starts it, and exits with code `1`. The build that failed stays in `/opt/darling.failed`. Nothing uses that folder, and a later upgrade that succeeds reminds you to remove it. When the rollback cannot move a build, the script does not say "rolled back": it says that the rollback did not finish and why, and it leaves the service stopped with the old build still in `/opt/darling.previous`.
 - An upgrade to the version that is already installed says so and goes on.
 - `--rollback` goes back to `/opt/darling.previous` by hand. The store is not rolled back: read [Rolling back to an older build](admin.md#rolling-back-to-an-older-build) first.
@@ -234,11 +234,11 @@ sha256sum -c --ignore-missing SHA256SUMS-linux.txt
 
 ## Step 5: Extract, and create the user and folders
 
-The tarball has no top-level folder, so make the folder first. Its files are owned by root ([#9701](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9701)). `--no-same-owner` keeps root the owner of everything that is extracted, whatever an archive records.
+The tarball has no top-level folder, so make the folder first. Its files are owned by root ([#9701](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9701)). `--no-same-owner` keeps root the owner of everything that is extracted, whatever an archive records, and `--no-same-permissions` lets root's umask set the modes, so nothing extracts group-writable.
 
 ```bash
 sudo mkdir -p /opt/darling
-sudo tar -xzf PerformanceMonitorDarling-linux-x64-<version>.tar.gz -C /opt/darling --no-same-owner
+sudo tar -xzf PerformanceMonitorDarling-linux-x64-<version>.tar.gz -C /opt/darling --no-same-owner --no-same-permissions
 ```
 
 Create the service user and the folders it writes. The unit runs as that user, and it cannot create folders under `/etc` or `/usr/share` itself.
@@ -516,7 +516,7 @@ The `network` block of each surface (`listen`, `allowFrom`, `token`) is read fro
    sudo rm -rf /opt/darling.previous
    sudo mv -T /opt/darling /opt/darling.previous
    sudo mkdir -p /opt/darling
-   sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling --no-same-owner
+   sudo tar -xzf PerformanceMonitorDarling-linux-x64-<new-version>.tar.gz -C /opt/darling --no-same-owner --no-same-permissions
    ```
 
 6. Compare `/etc/systemd/system/darling.service` with the unit in step 8, because a release can change it. For example, 3.14.0 adds `Type=notify`, `postgresql.service` in `After=` and `Wants=network-online.target`. To compare them, save the unit from step 8 as `/tmp/darling.service.new`, then run the command below. No output means that the files are the same:
