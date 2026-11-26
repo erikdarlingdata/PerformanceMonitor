@@ -34,6 +34,7 @@ The examples on this page use the Windows form, `.\PerformanceMonitor.Darling.Se
 | `--diagnostics-bundle`, `--diag-bundle` | Writes one aliased file to attach to a bug report. | yes on the store host | either | `0` to `5` | [Diagnostics bundle](#diagnostics-bundle) |
 | `--encrypt-password` | Encrypts a SQL login password for `darling.json`. Windows only. | no | no | `0`, `1` | [Configure darling.json](install.md#configure-darlingjson) |
 | `--add-server`, `--add-servers` | Registers one or more monitored servers. | no | either (1) | `0`, `1` | [Add-server](#--add-server) |
+| `--edit-server` | Changes the settings of a server that is already registered. | no | either (1) | `0`, `1` | [Edit-server](#--edit-server) |
 | `--grant-script` | Prints the T-SQL that grants Darling its access on a monitored server. | no | either (1) | `0`, `1` | [Permissions](../permissions.md) |
 | `--print-viewer-connection` | Prints a connection string for a remote Viewer. Windows only. | no | either | `0`, `1` | [Connect a remote Viewer](viewer.md#manual-configuration-fallback) |
 | `--export-viewer-config` | Writes a ready-to-copy folder for a remote Viewer. Windows only. | no | either | `0`, `1` | [Export the handoff folder](viewer.md#1-export-the-handoff-folder-on-the-service-host) |
@@ -77,7 +78,7 @@ Most verbs use two numbers:
 
 These verbs use only `0` and `1`:
 
-`--test-connection`, `--validate-config`, `--encrypt-password`, `--add-server`, `--grant-script`, `--print-viewer-connection`, `--export-viewer-config`, `--print-mcp-token`, `--print-web-token`, `--configure-network`, `--configure-firewall`, `--harden-files`, `--grant-cert-key-access`, `--new-password-key`, `--enable-mcp`, `--disable-mcp`, `--enable-web`, `--disable-web`, `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim`.
+`--test-connection`, `--validate-config`, `--encrypt-password`, `--add-server`, `--edit-server`, `--grant-script`, `--print-viewer-connection`, `--export-viewer-config`, `--print-mcp-token`, `--print-web-token`, `--configure-network`, `--configure-firewall`, `--harden-files`, `--grant-cert-key-access`, `--new-password-key`, `--enable-mcp`, `--disable-mcp`, `--enable-web`, `--disable-web`, `--backfill-rollups`, `--collapse-legacy-slices` and `--recompress-plan-dim`.
 
 `--help` and `--version` always exit `0`.
 
@@ -156,6 +157,32 @@ PerformanceMonitor.Darling.Service.exe --grant-cert-key-access <thumbprint> [--a
 ```
 
 Adds one Read entry for one account to the private key of the certificate the thumbprint names, and keeps every existing entry. It handles a legacy CryptoAPI key too, such as one from the `Microsoft RSA SChannel Cryptographic Provider`: it changes the access list of the key file under `MachineKeys`. If that file is missing, it prints the `icacls` command with that path. A smart card or a hardware module may stop Windows from opening the key's provider without a prompt. Then the command opens no card or PIN prompt. It stops, prints the provider's own message, and shows how to find the key file with `certutil`. The account is the one the service is registered under unless `--account` names another. The location and the store name default as they do in `darling.json`: `LocalMachine` and `My`. It grants to one account and refuses every group except the local Administrators group, whatever `--account` names: it asks Windows what the account is, and refuses a group, a computer or an account it cannot identify. It accepts a user (a domain user, a local user, a group managed service account) and these service identities: LocalSystem, LocalService, NetworkService, a per-service virtual account (`NT SERVICE\<name>`, only when a service with that name is registered on this machine), an IIS application pool identity and the local Administrators group. An empty `--account` or `--store-name`, and a `--store-name` with a backslash or a slash in it, are refused. It needs an elevated prompt for `LocalMachine`, and says so and changes nothing without one. An account that already has Read gets `Already granted`. Restart the service after it. The rules and the failures are in [Certificate from the Windows certificate store](network-endpoints.md#certificate-from-the-windows-certificate-store).
+
+### `--edit-server`
+
+```
+PerformanceMonitor.Darling.Service.exe --edit-server <server name> --set <field>=<value> [--set <field>=<value> ...] [--config <path to darling.json>]
+```
+
+`--edit-server` changes the settings of a server that is already registered. After the first start the registry lives in the store, so editing `servers` in `darling.json` does nothing for a registered server. The verb is the way to change one on a headless host, where the Viewer (Windows only), the web dashboard and MCP are not available. It runs the same code as the MCP `edit_server` tool, so it makes the same checks. It runs as the store owner, as `--add-server` does. It needs Windows only for a managed store. A store you bring yourself (`postgres.connectionString`) works on any platform. With no arguments, the verb prints the usage and the field list.
+
+The fields are `name`, `host`, `port` (PostgreSQL servers only), `database`, `auth`, `username`, `encryptMode`, `trustServerCertificate`, `readOnlyIntent`, `multiSubnetFailover`, `queryStoreReplica`, `monthlyCostUsd` and `enabled`. They are the `darling.json` key spellings, matched without regard to case, and the snake_case keys of the `edit_server` MCP tool are accepted too. `auth` takes `windows` (or `integrated`, the same thing), `sql`, `serviceprincipal` or `managedidentity`. `encryptMode` takes `Optional`, `Mandatory` or `Strict`. `trustServerCertificate`, `readOnlyIntent`, `multiSubnetFailover` and `enabled` take `true` or `false`. `enabled` goes through the same path as the MCP `enable_server` and `disable_server` tools, and the verb applies it after the other fields succeed.
+
+The verb does not set a password, `engine`, `excludedDatabases`, `xeSessionDatabases`, the AWS role and external ID, plan capture or the alert delivery override. `--set password=...` is refused, because a password is never an argument. Change the others in the Viewer, on the web dashboard's Admin page or through MCP.
+
+A saved password is only ever sent to the server it was saved for. So a change to how a server with a saved password (SQL or service-principal authentication) is reached needs that password again. That covers `host`, `port`, `database`, `auth`, `username`, `encryptMode`, `trustServerCertificate`, `readOnlyIntent`, `multiSubnetFailover` and `queryStoreReplica`. The verb asks for the password at a hidden prompt on a console, or reads one line from stdin when input is redirected. It tests the connection with the new settings and saves only if the server answers. A failed test saves nothing. Windows and managed-identity servers need no password, and neither do changes to `name`, `monthlyCostUsd` or `enabled`.
+
+The verb works while the service runs. The running service applies the change on its next config poll, within one sweep, with no restart.
+
+Exit code `0` means the server was changed or already had the values. Exit code `1` means nothing was written. Causes include a bad argument, a server that is not found or matches more than one, and a failed connection test.
+
+```
+PerformanceMonitor.Darling.Service.exe --edit-server sql01 --set trustServerCertificate=true
+```
+
+At start-up the service compares the `servers` entry in `darling.json` with the registry for each enabled registered server. For each server that differs, it logs one WARN line, up to 10, then one line that names the rest. The line names each differing field with the file's value and the store's value, and gives the exact `--edit-server "<name>" --set field=value ...` command that applies the file's values. A field the verb does not set is named with where to change it. When the file and the store match, there is no line. No password appears in it, because passwords are never compared.
+
+On Linux, run it as the service's user: see [Service verbs on Linux](linux.md#service-verbs-on-linux).
 
 ### Collector settings
 

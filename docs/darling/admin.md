@@ -8,7 +8,7 @@ The commands on this page are written for Windows. On Linux, [Service verbs on L
 
 ## Read this first: `darling.json` is only a seed for the server list
 
-The service reads the `servers` array in `darling.json` on the first start only. After that, the store holds the server list. If you edit the array later, nothing happens.
+The service reads the `servers` array in `darling.json` on the first start only. After that, the store holds the server list. If you edit the array later, the store ignores the change. At start-up the service logs one WARN line for each enabled server whose entry in the file differs from the store. The line names each differing field with the file's value and the store's value, and gives the `--edit-server` command that applies the file's values.
 
 To change the list, use one of these:
 
@@ -18,6 +18,7 @@ To change the list, use one of these:
 - The `new_password_key` and `reset_password_key` MCP tools, which change the key that seals the saved passwords. They need the same two settings.
 - The `mint_personal_token` and `revoke_personal_token` MCP tools, which make and revoke a personal MCP token for a person named in `get_people`. `mint_personal_token` makes reader tokens only: an operator token is made on the web dashboard's token page, where the person signs in. They need `mcp.allowWrites` and `mcp.allowServerAdmin`, and personal tokens on. `get_personal_tokens` lists the tokens, is served under the same two settings, and never shows a token value. A call made with a personal token is never offered any of the three.
 - The `--add-server` command line verb. It can add a server. It cannot remove one.
+- The `--edit-server` command line verb. It changes the settings of a server that is already registered, on a host that has no Viewer, web dashboard or MCP. See [`--edit-server`](cli.md#--edit-server).
 
 The web Admin page can edit a server that already exists. It cannot add, remove, enable or disable one. The page says so itself. For the full list of what the file still controls, see [`darling.json` is only a seed](install.md#darlingjson-is-only-a-seed).
 
@@ -154,6 +155,7 @@ To pause one server:
 
 1. In the Viewer, open **Manage Servers**, right-click the server and click **Enable / Disable Collection**.
 2. Or call `disable_server` through MCP, and `enable_server` to bring it back.
+3. Or, on a host with neither, run `.\PerformanceMonitor.Darling.Service.exe --edit-server <server-name> --set enabled=false`. Run it with `--set enabled=true` to bring the server back.
 
 The server's definition and history stay.
 

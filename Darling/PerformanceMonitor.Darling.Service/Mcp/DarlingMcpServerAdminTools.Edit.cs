@@ -119,6 +119,32 @@ public sealed partial class DarlingMcpServerAdminTools
 
     internal const string EditPasswordNeededText = ServerConnectionRule.PasswordNeededOnMoveText;
 
+    /// <summary>The refusal when an edit switches a server to SQL authentication and sends no password.</summary>
+    internal const string EditSwitchToSqlNeedsPasswordText = "Switching to SQL authentication needs the password.";
+
+    /// <summary>The refusal when an edit switches a server to service-principal authentication and sends no client secret.</summary>
+    internal const string EditSwitchToServicePrincipalNeedsSecretText = "Switching to ServicePrincipal authentication needs the client secret as password.";
+
+    /// <summary>
+    /// True when <paramref name="answerJson"/> is an edit refused only because it sent no password: a change to how a SQL or
+    /// service-principal server is reached, or a switch into one of those modes. Nothing was probed or written. The
+    /// <c>--edit-server</c> verb (#9693) reads this to ask for the password and send the same edit again with it.
+    /// </summary>
+    internal static bool IsPasswordNeededAnswer(string answerJson)
+    {
+        try
+        {
+            return JsonNode.Parse(answerJson) is JsonObject answer
+                && answer["status"] is JsonValue status && status.TryGetValue<string>(out var statusText) && statusText == EditStatus.Invalid
+                && answer["message"] is JsonValue message && message.TryGetValue<string>(out var text)
+                && text is EditPasswordNeededText or EditSwitchToSqlNeedsPasswordText or EditSwitchToServicePrincipalNeedsSecretText;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>The answer when the store refuses a password that is a reference (env: or file:): the store takes the
     /// password itself from the viewer, admin and MCP roles. The same words in the store's own trigger and edit function.</summary>
     internal const string EditReferenceRefusedText = ServerConnectionRule.ReferenceRefusedText;
@@ -1291,9 +1317,7 @@ LIMIT 1";
         if (secretMode && c.Password is null && (authSwitched || connectionChanged))
         {
             return (null, authSwitched
-                ? (isSp
-                    ? "Switching to ServicePrincipal authentication needs the client secret as password."
-                    : "Switching to SQL authentication needs the password.")
+                ? (isSp ? EditSwitchToServicePrincipalNeedsSecretText : EditSwitchToSqlNeedsPasswordText)
                 : EditPasswordNeededText);
         }
 

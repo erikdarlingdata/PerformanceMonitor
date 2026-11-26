@@ -688,24 +688,11 @@ public sealed class StoreConfigProvider
         var live = drifted.Where(d => d.IsEnabled).ToList();
         var paused = drifted.Where(d => !d.IsEnabled).ToList();
 
-        if (live.Count > 0)
+        /* #9693: one line per server, each with the --edit-server command that applies the file's values, so a host with no
+           Viewer, web dashboard or MCP still has a way to make the registry agree. */
+        foreach (var line in BuildSettingDriftWarnings(live, MaxDriftedServersLogged, OperatorVerbForm.EntryPointHere()))
         {
-            var connectionCaveat = live.Any(d => d.Fields.Any(f => f.AffectsConnection))
-                ? " Note --test-connection reads darling.json, so it probes the FILE's settings and can report "
-                  + "PASS for a connection the service will never make."
-                : "";
-            var passwordNote = DescribePasswordNotUsed(live, MaxDriftedServersLogged);
-
-            _logger?.LogWarning(
-                "darling.json disagrees with the registry about {Count} monitored server(s), and the registry is "
-                + "what the service uses: {Details}. The store is authoritative after the first seed, so editing a "
-                + "registered server's settings in the file changes nothing and a restart cannot change that — "
-                + "edit them in the Viewer's Manage Servers window (the MCP add_servers tool cannot: an "
-                + "already-registered server is skipped as a duplicate).{ConnectionCaveat}{PasswordNote}",
-                live.Count,
-                FormatSettingDrift(live, MaxDriftedServersLogged),
-                connectionCaveat,
-                passwordNote);
+            _logger?.LogWarning("{DriftLine}", line);
         }
 
         if (paused.Count > 0)
@@ -719,6 +706,78 @@ public sealed class StoreConfigProvider
                 FormatSettingDrift(paused, MaxDriftedServersLogged));
         }
     }
+
+    /// <summary>
+    /// The start-up warnings for enabled servers whose darling.json entry disagrees with the registry (#2552, #9693): one line
+    /// per server, naming every field that differs with both values and the <c>--edit-server</c> command that applies the
+    /// file's values. A field the verb does not set is named with where it is changed instead. At most
+    /// <paramref name="maxServers"/> servers get a line of their own, and one more line names the rest. No password is in a
+    /// line: the comparison never reads one, so a field list cannot carry it. Pure, so a test reads the lines.
+    /// </summary>
+    internal static IReadOnlyList<string> BuildSettingDriftWarnings(IReadOnlyList<ServerSettingDrift> live, int maxServers, string entryPoint)
+    {
+        var lines = new List<string>();
+        if (live is null || live.Count == 0)
+        {
+            return lines;
+        }
+
+        var shown = maxServers > 0 && live.Count > maxServers ? maxServers : live.Count;
+        foreach (var server in live.Take(shown))
+        {
+            var fields = string.Join(", ", server.Fields.Select(f => $"{f.Field} (file={f.FileValue}, store={f.StoreValue})"));
+            var other = server.Fields.Where(f => !DarlingCliCommands.IsEditServerSettable(f.Field)).Select(f => f.Field).ToList();
+            var args = EditServerArgsFor(server);
+            var remedy = args.Count == 0
+                ? ""
+                : $" To apply the file's values, run: {entryPoint} --edit-server {string.Join(" ", args.Select(CommandWord))}";
+            var otherNote = other.Count == 0
+                ? ""
+                : $" --edit-server does not set {string.Join(", ", other)}: change that in the Viewer's Manage Servers window, on the web dashboard's Admin page or over MCP.";
+            var connectionCaveat = server.Fields.Any(f => f.AffectsConnection)
+                ? " Note --test-connection reads darling.json, so it probes the FILE's settings and can report PASS for a connection the service will never make."
+                : "";
+            lines.Add(
+                $"darling.json disagrees with the registry about monitored server '{server.Server}', and the registry is what the service uses: {fields}. "
+                + "The store is authoritative after the first seed, so editing a registered server's settings in the file changes nothing and a restart cannot change that."
+                + remedy + otherNote + connectionCaveat + DescribePasswordNotUsed([server], 1));
+        }
+
+        if (shown < live.Count)
+        {
+            lines.Add(
+                $"darling.json also disagrees with the registry about {live.Count - shown} more monitored server(s): "
+                + string.Join(", ", live.Skip(shown).Select(d => d.Server))
+                + ". Fix the ones listed above and restart to see these, or compare them in the Viewer's Manage Servers window or on the web dashboard's Admin page.");
+        }
+
+        return lines;
+    }
+
+    /// <summary>The arguments after <c>--edit-server</c> that apply a drifted server's darling.json values (#9693): the registered name,
+    /// then one <c>--set</c> per field the verb sets. Empty when it sets none of the fields that differ.</summary>
+    internal static IReadOnlyList<string> EditServerArgsFor(ServerSettingDrift server)
+    {
+        var args = new List<string>();
+        foreach (var field in server.Fields.Where(f => DarlingCliCommands.IsEditServerSettable(f.Field)))
+        {
+            args.Add("--set");
+            args.Add(field.Field + "=" + (field.FileValue == NoneText ? "" : field.FileValue));
+        }
+
+        if (args.Count > 0)
+        {
+            args.Insert(0, server.Server);
+        }
+
+        return args;
+    }
+
+    /// <summary>One word of a printed command: as it is when it is plain, in double quotes when it is empty or holds anything a shell would split or read.</summary>
+    private static string CommandWord(string text) =>
+        text.Length > 0 && text.All(c => char.IsAsciiLetterOrDigit(c) || "._-=,:/\\@".Contains(c, StringComparison.Ordinal))
+            ? text
+            : "\"" + text.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
 
     /// <summary>
     /// The clause for the drift warning about a password: a server whose darling.json entry carries a password or a
@@ -1211,7 +1270,10 @@ FROM config_monitored_servers", connection) { CommandTimeout = ServiceCommandDea
 
     private static string Trimmed(string? value) => value?.Trim() ?? "";
 
-    private static string NoneIfBlank(string value) => string.IsNullOrEmpty(value) ? "(none)" : value;
+    /// <summary>What a blank value prints as in a drift line.</summary>
+    private const string NoneText = "(none)";
+
+    private static string NoneIfBlank(string value) => string.IsNullOrEmpty(value) ? NoneText : value;
 
     private static string Json(bool value) => value ? "true" : "false";
 
