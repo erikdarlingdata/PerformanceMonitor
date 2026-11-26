@@ -320,7 +320,7 @@ public partial class LocalDataService
         var window = new ObjectUsageWindow();
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        command.CommandText = ObjectUsageWindowRead.Sql;
+        command.CommandText = ObjectUsageWindowRead.SqlInCollectionIdOrder;
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = databaseName });
         command.Parameters.Add(new DuckDBParameter { Value = DateTime.SpecifyKind(windowStartUtc, DateTimeKind.Unspecified) });

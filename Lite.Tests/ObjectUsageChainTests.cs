@@ -305,7 +305,7 @@ public sealed class ObjectUsageChainTests : IClassFixture<SharedDuckDbFixture>, 
             + "ORDER BY collection_time, collection_id", _serverId, Database, Start(3));
         Assert.True(expected.Count > 8);
 
-        var actual = await QueryAsync(ObjectUsageWindowRead.Sql, _serverId, Database, Start(3));
+        var actual = await QueryAsync(ObjectUsageWindowRead.SqlInCollectionIdOrder, _serverId, Database, Start(3));
         Assert.Equal(expected.Count, actual.Count);
         for (var i = 0; i < expected.Count; i++)
         {
