@@ -1618,7 +1618,7 @@ REVOKE UPDATE (paused) ON {config}.config_service FROM {mcp};
 -- #6393: update_service_flags runs as mcp and sets exactly these service flags (plan capture, Query Store backfill, text budget, max concurrent
 --    sweeps, fetch top N, and #8978 the two trigram text index options): a column list, so mcp still cannot write mcp_enabled, mcp_port, web_enabled, web_port or paused (turning MCP off from MCP
 --    would lock the admin out; those stay Viewer-only). The write fires the config_service self-bump trigger (BEFORE UPDATE, it assigns NEW.config_version and NEW.updated_at), so it needs no further grant.
-GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled) ON {config}.config_service TO {mcp};
+GRANT UPDATE (capture_plans, query_store_backfill_enabled, query_store_text_budget_mb, max_concurrent_sweeps, query_store_fetch_top_n, query_text_trigram_index_enabled, query_store_text_trigram_index_enabled, plan_content_retention_days, compose_statement_timeout_seconds, plan_xml_compression) ON {config}.config_service TO {mcp};
 -- #5085: the fleet server-tag write tools (create/update/delete/assign/unassign_server_tag) run as mcp. The admin
 --    gate is these two single-table grants and nothing else: a role without them gets 42501 on a tag write.
 --    Both tables are non-secret and server_tags.id is GENERATED ALWAYS AS IDENTITY (so no sequence grant). V181 (#5750)
