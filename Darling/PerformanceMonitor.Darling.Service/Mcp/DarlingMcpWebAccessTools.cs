@@ -134,10 +134,12 @@ public sealed partial class DarlingMcpWebAccessTools
         {
             if (owner is null) return NoOwner();
             var store = new WebAccessGroupStore(owner);
-            var before = await store.ReadAdvancedSessionEpochAsync(ct) is not null;
+            /* The store decides the confirm under its row lock and returns the value it held then (#9662). Reading the switch here first would let a
+               switch turned off in between be turned back on with no confirm, and the answer would say unchanged with no undo. */
+            var before = await store.SetAdvancedEnabledAsync(enabled, actor, confirm, ct);
             if (enabled && !before && !confirm)
             {
-                /* Turning the switch on is what lets a group sign in: every enabled group starts again, so the answer names them. */
+                /* The store changed nothing. Turning the switch on is what lets a group sign in: every enabled group starts again, so the answer names them. */
                 var coming = (await store.ListAsync(ct)).Where(g => g.Enabled).ToList();
                 var names = coming.Count == 0
                     ? "no group is enabled, so nobody signs in until one is"
@@ -145,8 +147,7 @@ public sealed partial class DarlingMcpWebAccessTools
                       string.Join(", ", coming.Take(10).Select(g => $"'{Clip(g.Name)}' ({ScopeName(g.Scope)})")) + (coming.Count > 10 ? ", and more" : string.Empty);
                 return Refuse("confirm_required", $"Turning advanced web access on lets web access groups sign in: {names}. Call again with confirm=true to go ahead. Nothing was changed.");
             }
-            await store.SetAdvancedEnabledAsync(enabled, ct);
-            logger?.LogWarning("MCP advanced web access {Before} -> {After}, caller {Caller}", before, enabled, actor);
+            if (before != enabled) logger?.LogWarning("MCP advanced web access {Before} -> {After}, caller {Caller}", before, enabled, actor);
             return new JsonObject
             {
                 ["status"] = before == enabled ? "unchanged" : "set",
