@@ -818,7 +818,7 @@ SELECT @threshold;", connection);
             thresholdCmd.CommandTimeout = 60;
             var result = await thresholdCmd.ExecuteScalarAsync(cancellationToken);
             return result as int? ?? 0;
-        }, IsTransientEnsureFailure);
+        }, ErrorNumbersOf);
 
         if (bootstrap.Outcome == BlockedProcessThresholdOutcome.Configured)
         {

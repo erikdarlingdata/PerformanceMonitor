@@ -8,7 +8,9 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Data.Common;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
@@ -27,10 +29,10 @@ public enum BlockedProcessThresholdOutcome
     /// <summary>The server already had a threshold. The batch changed nothing.</summary>
     AlreadySet,
 
-    /// <summary>The server refused the batch (the login lacks ALTER SETTINGS, or the platform has no sp_configure for it). It is not asked again under these connection settings.</summary>
+    /// <summary>The server answered the batch with a refusal (the login lacks ALTER SETTINGS, or the platform has no sp_configure for it, see <see cref="BlockedProcessThresholdBootstrap.IsRefusal"/>). It is not asked again under these connection settings.</summary>
     Refused,
 
-    /// <summary>The batch failed on a timeout or a dropped connection, which says nothing about the server. It is asked again on the next ensure.</summary>
+    /// <summary>The batch failed with anything that is not the server's refusal: a timeout, a dropped connection, a deadlock victim, a lock timeout. That says nothing about the server's answer, so it is asked again on the next ensure.</summary>
     Transient,
 }
 
@@ -45,21 +47,38 @@ public readonly record struct BlockedProcessThresholdResult(BlockedProcessThresh
 /// one failure carries the remedy for its platform. A server that did not refuse is read on every run: the read is one row of
 /// sys.configurations, and the server behind an unchanged connection string can change under it (an availability group listener
 /// that fails over to a replica whose threshold is 0), so the threshold is checked each time.
+///
+/// <para>Only the server's own answer is remembered. <see cref="IsRefusal"/> lists the SQL Server error numbers that are that answer:
+/// the permission denials <see cref="SqlServerPermissionErrors.IsPermissionDenied"/> reads (15247 from sp_configure without
+/// ALTER SETTINGS, 229, 262, 297 and 300 for an object, database or server permission denied, 916 and 8189), 5812 (RECONFIGURE
+/// refused), 15123 (the option does not exist or is not advanced) and 2812 (sp_configure is not found). AWS RDS answers the batch
+/// with 15247 and 5812. Any other error is a fault of the moment (a deadlock victim 1205, a lock timeout 1222, a command timeout,
+/// a dropped connection such as SNI 64 or 121) and is retried on the next run, because remembering it would switch blocked process
+/// reports off for the server until the process restarts.</para>
 /// </summary>
 public sealed class BlockedProcessThresholdBootstrap
 {
     private readonly ConcurrentDictionary<int, string> _refusedSettings = new();
 
     /// <summary>
+    /// True when the SQL Server error number is the server's answer that it will not take the batch, rather than a fault of the moment.
+    /// The permission denials come from <see cref="SqlServerPermissionErrors.IsPermissionDenied"/>, so this list cannot drift from the
+    /// rest of the product; 5812, 15123 and 2812 are the refusals that are specific to sp_configure and RECONFIGURE.
+    /// </summary>
+    public static bool IsRefusal(int sqlErrorNumber)
+        => SqlServerPermissionErrors.IsPermissionDenied(sqlErrorNumber) || sqlErrorNumber is 5812 or 15123 or 2812;
+
+    /// <summary>
     /// Sends the bootstrap batch to the server unless it already refused it with these connection settings. <paramref name="sendBatch"/>
     /// returns the threshold the server read before the batch ran: 0 means the batch set it to 5 seconds. A server that answers is
-    /// not recorded, so the next run reads its threshold again. A SQL Server error that is not a timeout or a dropped connection
-    /// (<paramref name="isTransient"/> says which each host's own classifier reads that way) counts as the server's refusal: it is
-    /// returned as <see cref="BlockedProcessThresholdOutcome.Refused"/> with the error, and the server is not asked again. Anything
-    /// else (a cancellation, a non-SQL fault) propagates and records nothing.
+    /// not recorded, so the next run reads its threshold again. A SQL Server error that <see cref="IsRefusal"/> lists is the server's
+    /// refusal: it is returned as <see cref="BlockedProcessThresholdOutcome.Refused"/> with the error, and the server is not asked
+    /// again. Any other database error is <see cref="BlockedProcessThresholdOutcome.Transient"/> and records nothing. This project has no
+    /// SqlClient, so <paramref name="errorNumbersOf"/> is each host's reader of the SQL error numbers a failure carries. Anything that is
+    /// not a database error (a cancellation, a non-SQL fault) propagates and records nothing.
     /// </summary>
     public async Task<BlockedProcessThresholdResult> RunAsync(
-        int serverId, string connectionSettings, Func<Task<int>> sendBatch, Func<DbException, bool> isTransient)
+        int serverId, string connectionSettings, Func<Task<int>> sendBatch, Func<DbException, IEnumerable<int>> errorNumbersOf)
     {
         var settingsKey = KeyOf(connectionSettings);
         if (_refusedSettings.TryGetValue(serverId, out var refused) && string.Equals(refused, settingsKey, StringComparison.Ordinal))
@@ -72,7 +91,7 @@ public sealed class BlockedProcessThresholdBootstrap
             var threshold = await sendBatch();
             return new(threshold == 0 ? BlockedProcessThresholdOutcome.Configured : BlockedProcessThresholdOutcome.AlreadySet);
         }
-        catch (DbException ex) when (!isTransient(ex))
+        catch (DbException ex) when (errorNumbersOf(ex).Any(IsRefusal))
         {
             _refusedSettings[serverId] = settingsKey;
             return new(BlockedProcessThresholdOutcome.Refused, ex);

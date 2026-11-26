@@ -141,7 +141,7 @@ SELECT @threshold;", connection);
             thresholdCmd.CommandTimeout = CommandTimeoutSeconds;
             var result = await thresholdCmd.ExecuteScalarAsync(cancellationToken);
             return result as int? ?? 0;
-        }, ex => ex is SqlException sql && RetryHelper.IsTransient(sql));
+        }, ErrorNumbersOf);
 
         if (bootstrap.Outcome == BlockedProcessThresholdOutcome.Configured)
         {
