@@ -304,6 +304,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Retention adopts missing liveness rows in keyset slices under a per-table budget** ([#9669])
 - **A store owned by a login that is not a superuser builds every continuous aggregate, and the service names any right that login lacks** ([#9722])
 - **Lite says in the log when a server's saved password is missing or unreadable under its Windows logon** ([#9731])
+- **Lite and the Viewer come back from the tray, or a second launch, in the state they had before they were minimized** ([#9737])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8534,3 +8535,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9729]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9729
 [#9731]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9731
 [#9736]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9736
+[#9737]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9737
