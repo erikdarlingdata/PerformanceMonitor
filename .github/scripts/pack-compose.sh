@@ -33,7 +33,8 @@ fi
 # script must parse under a POSIX shell, so a bad pack fails the job and not the user's first command.
 chmod 755 "${compose_stage}/${compose_dir}/setup.sh"
 sh -n "${compose_stage}/${compose_dir}/setup.sh"
-tar -C "${compose_stage}" -czf "${archive}" "${compose_dir}"
+# #9701: owned by root, so a root extract does not leave the build machine's uid on the files.
+tar --owner=0 --group=0 --numeric-owner -C "${compose_stage}" -czf "${archive}" "${compose_dir}"
 tar -tzf "${archive}"
 # grep reads the whole listing (no -q): under pipefail, a grep that stops at its first match can make tar fail
 # its next write, and the check then fails on an archive that is fine (#9671).

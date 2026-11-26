@@ -3887,7 +3887,7 @@ public static partial class DarlingCliCommands
                 $"PerformanceMonitor Darling store (port {storePort})", storePort, storeCidr!));
             output.WriteLine("  After the service restarts (which generates the TLS cert), write the remote viewer's");
             output.WriteLine("  whole config folder — darling.json + server.crt + README — with:");
-            output.WriteLine("    PerformanceMonitor.Darling.Service.exe --export-viewer-config");
+            output.WriteLine("    " + OperatorVerbForm.EntryPointHere() + " --export-viewer-config");
             output.WriteLine("  (or --print-viewer-connection for just the paste-ready string + certificate).");
         }
 
@@ -4334,7 +4334,7 @@ public static partial class DarlingCliCommands
             output.WriteLine("To connect Claude Code, run:");
             output.WriteLine("    " + DarlingEndpointClientText.ClaudeMcpAddCommand(portText, scheme));
             output.WriteLine(hasToken
-                ? $"Replace {DarlingEndpointClientText.TokenPlaceholder} with the MCP token. Show it with: PerformanceMonitor.Darling.Service.exe --print-mcp-token (run elevated)."
+                ? $"Replace {DarlingEndpointClientText.TokenPlaceholder} with the MCP token. Show it with: {OperatorVerbForm.EntryPointHere()} --print-mcp-token (run elevated)."
                 : namedTokens
                     ? $"Replace {DarlingEndpointClientText.TokenPlaceholder} with the token of one of the mcp.tokens entries in darling.json."
                     : "darling.json sets no MCP token and mcp.allowTokenlessLoopback is on, so leave the --header part off the command.");
@@ -4344,7 +4344,7 @@ public static partial class DarlingCliCommands
             output.WriteLine("Open the web dashboard at: " + DarlingEndpointClientText.WebDashboardAddress(portText, scheme));
             if (hasToken)
             {
-                output.WriteLine("It asks for the web token. Show it with: PerformanceMonitor.Darling.Service.exe --print-web-token (run elevated).");
+                output.WriteLine("It asks for the web token. Show it with: " + OperatorVerbForm.EntryPointHere() + " --print-web-token (run elevated).");
             }
         }
     }
@@ -7494,8 +7494,8 @@ public static partial class DarlingCliCommands
         "  cmd:         type servers.json | PerformanceMonitor.Darling.Service.exe --add-server" + Environment.NewLine +
         Environment.NewLine +
         "For ONE server, no JSON is needed; give the non-secret fields as flags and a SQL login is asked for its password with nothing echoed:" + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth windows      (integrated means the same)" + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres]" + Environment.NewLine +
+        "  " + OperatorVerbForm.EntryPointHere() + " --add-server --host sql01 --auth windows      (integrated means the same)" + Environment.NewLine +
+        "  " + OperatorVerbForm.EntryPointHere() + " --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres]" + Environment.NewLine +
         "There is no password flag. A Windows-authentication server is tested by the running service, as the account it runs under." + Environment.NewLine +
         Environment.NewLine +
         "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
@@ -8941,7 +8941,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     /// </summary>
     public static string CollectorRunAtUsageText() =>
         "Usage:" + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
+        "  " + OperatorVerbForm.EntryPointHere() + " --set-collector-run-at <collector> <HH:MM|none|default> [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
         Environment.NewLine +
         "<collector> is a collector name as collection health reports it, one that runs once a day or less often." + Environment.NewLine +
         "HH:MM is a 24-hour time of day, 00:00 to 23:59, on the monitored server's own clock (server time): the collector starts in" + Environment.NewLine +
@@ -9228,7 +9228,7 @@ ORDER BY rt.server_id NULLS FIRST, server_label, rt.server_id";
     {
         var frequency = column == CollectorScheduleColumn.FrequencyMinutes;
         return "Usage:" + Environment.NewLine +
-            $"  PerformanceMonitor.Darling.Service.exe {ColumnVerb(column)} <collector> {ColumnValueLabel(column)} [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
+            $"  {OperatorVerbForm.EntryPointHere()} {ColumnVerb(column)} <collector> {ColumnValueLabel(column)} [--server <server>] [--config <path to darling.json>]" + Environment.NewLine +
             Environment.NewLine +
             "<collector> is a collector name as collection health reports it." + Environment.NewLine +
             (frequency

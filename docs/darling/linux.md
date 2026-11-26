@@ -166,7 +166,7 @@ sha256sum -c --ignore-missing SHA256SUMS-linux.txt
 
 ## Step 5: Extract, and create the user and folders
 
-The tarball has no top-level folder, so make the folder first. Its files carry the build machine's numeric owner ([#9701](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9701)). `--no-same-owner` makes root the owner of everything that is extracted.
+The tarball has no top-level folder, so make the folder first. Its files are owned by root ([#9701](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9701)). `--no-same-owner` keeps root the owner of everything that is extracted, whatever an archive records.
 
 ```bash
 sudo mkdir -p /opt/darling
@@ -280,9 +280,11 @@ Save this as `/etc/systemd/system/darling.service`:
 ```ini
 [Unit]
 Description=PerformanceMonitor Darling
-After=network-online.target
+After=network-online.target postgresql.service
+Wants=network-online.target
 
 [Service]
+Type=notify
 ExecStart=/usr/bin/dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll
 Environment=DARLING_CONFIG=/etc/darling/darling.json
 User=darling
@@ -302,9 +304,9 @@ systemctl status darling
 
 Know these limits of the unit ([#9702](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9702)):
 
-- **systemd calls the service ready when the host process starts, before the store is ready.** `active (running)` is true while the service is still migrating the store or retrying its connection. The journal also shows `Application started. Press Ctrl+C to shut down.` before the store is reached. The real readiness signal is the `Postgres store ready` line, followed by `PerformanceMonitor Darling collection loop started`.
+- **The service tells systemd it is ready when its host starts, before the store is ready.** With `Type=notify` the service sends the ready signal itself, and it sends it at host start. `active (running)` is true while the service is still migrating the store or retrying its connection. The real readiness signal is the `Postgres store ready` line, followed by `PerformanceMonitor Darling collection loop started`.
 - **`Restart=on-failure` restarts a process that exits.** It does nothing for a service that runs and has stopped collecting. Watch for that with the store check in step 9.
-- **Nothing orders the unit after a PostgreSQL on the same host.** At boot the service can start first, and it then retries the store until PostgreSQL answers.
+- **`After=postgresql.service` orders the unit after a local PostgreSQL only under that unit name.** That is the name on Debian and Ubuntu. Another name, such as `postgresql-16.service` from the PostgreSQL packages for RHEL, goes on the `After=` line instead. With the store on another host the line does nothing. In every case the service retries the store until PostgreSQL answers.
 
 ## Step 9: Proof that it collects
 
@@ -373,7 +375,7 @@ Run a verb as the service's user, with `DARLING_CONFIG` set, so that it reads th
 sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll <verb>
 ```
 
-The apphost, `/opt/darling/PerformanceMonitor.Darling.Service <verb>`, is the same program and finds `dotnet` by itself. Messages from the service that name `PerformanceMonitor.Darling.Service.exe` mean this command ([#9703](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9703)).
+The apphost, `/opt/darling/PerformanceMonitor.Darling.Service <verb>`, is the same program and finds `dotnet` by itself. A message from the service that tells you to run a verb names it in this form, with the folder the service runs from, for example `dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --backfill-rollups` ([#9703](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9703)). The `--help` text still writes `PerformanceMonitor.Darling.Service.exe`, and on Linux that means this command.
 
 In this table `darling-verb` stands for the whole command above. The [command line reference](cli.md) has every verb with its exit codes.
 
