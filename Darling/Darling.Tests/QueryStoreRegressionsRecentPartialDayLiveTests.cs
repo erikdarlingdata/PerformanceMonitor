@@ -216,53 +216,65 @@ ON CONFLICT (server_id) DO UPDATE SET filled_since = EXCLUDED.filled_since, appl
         await using var connection = await postgres.OpenConnectionAsync(ct);
         for (var day = partialDay; day <= day0.AddDays(1); day = day.AddDays(1))
         {
-            NpgsqlCommand Statement(string sql, NpgsqlTransaction transaction)
-            {
-                var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = 300 };
-                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = ServerId });
-                command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date, Value = DateOnly.FromDateTime(day) });
-                return command;
-            }
-
-            NpgsqlParameter Time(DateTime value) => new() { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = value };
-
-            await using var transaction = await connection.BeginTransactionAsync(ct);
-            await using (var ensure = Statement(PlanRegressionDaily.EnsureBuiltSql, transaction))
-            {
-                await ensure.ExecuteNonQueryAsync(ct);
-            }
-
-            long seq;
-            await using (var read = Statement("SELECT late_seq FROM collect.plan_regression_daily_built WHERE server_id = $1::integer AND day = $2::date FOR UPDATE", transaction))
-            {
-                seq = Convert.ToInt64(await read.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
-            }
-
-            await using (var delete = Statement(PlanRegressionDaily.DeleteDaySql, transaction))
-            {
-                await delete.ExecuteNonQueryAsync(ct);
-            }
-
-            long rows;
-            await using (var insert = Statement(PlanRegressionDaily.BuildDaySql, transaction))
-            {
-                insert.Parameters.Add(Time(day.AddDays(1)));
-                insert.Parameters.Add(Time(day.AddDays(-1)));
-                insert.Parameters.Add(Time(through));
-                rows = Convert.ToInt64(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
-            }
-
-            await using (var mark = Statement(PlanRegressionDaily.MarkBuiltSql, transaction))
-            {
-                mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = seq });
-                mark.Parameters.Add(Time(now));
-                mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = rows });
-                mark.Parameters.Add(Time(through));
-                Assert.Equal(1, await mark.ExecuteNonQueryAsync(ct));
-            }
-
-            await transaction.CommitAsync(ct);
+            await BuildPartialDayAsync(connection, ServerId, day, through, now, ct);
         }
+    }
+
+    /// <summary>
+    /// One day of <paramref name="serverId"/> built as the builder builds an open day whose watermark is
+    /// <paramref name="through"/>, by the builder's own statements in the builder's order
+    /// (<see cref="PlanRegressionDaily.BuildDayAsync"/>): the day's <c>late_seq</c> is read, the totals are deleted and inserted
+    /// again with the watermark as their bound, and the build is stamped with that <c>late_seq</c> and watermark, which makes
+    /// it a partial build.
+    /// </summary>
+    internal static async Task BuildPartialDayAsync(NpgsqlConnection connection, int serverId, DateTime day, DateTime through, DateTime now, CancellationToken ct)
+    {
+        NpgsqlCommand Statement(string sql, NpgsqlTransaction transaction)
+        {
+            var command = new NpgsqlCommand(sql, connection, transaction) { CommandTimeout = 300 };
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = serverId });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date, Value = DateOnly.FromDateTime(day) });
+            return command;
+        }
+
+        NpgsqlParameter Time(DateTime value) => new() { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp, Value = value };
+
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        await using (var ensure = Statement(PlanRegressionDaily.EnsureBuiltSql, transaction))
+        {
+            await ensure.ExecuteNonQueryAsync(ct);
+        }
+
+        long seq;
+        await using (var read = Statement("SELECT late_seq FROM collect.plan_regression_daily_built WHERE server_id = $1::integer AND day = $2::date FOR UPDATE", transaction))
+        {
+            seq = Convert.ToInt64(await read.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+        }
+
+        await using (var delete = Statement(PlanRegressionDaily.DeleteDaySql, transaction))
+        {
+            await delete.ExecuteNonQueryAsync(ct);
+        }
+
+        long rows;
+        await using (var insert = Statement(PlanRegressionDaily.BuildDaySql, transaction))
+        {
+            insert.Parameters.Add(Time(day.AddDays(1)));
+            insert.Parameters.Add(Time(day.AddDays(-1)));
+            insert.Parameters.Add(Time(through));
+            rows = Convert.ToInt64(await insert.ExecuteScalarAsync(ct), CultureInfo.InvariantCulture);
+        }
+
+        await using (var mark = Statement(PlanRegressionDaily.MarkBuiltSql, transaction))
+        {
+            mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = seq });
+            mark.Parameters.Add(Time(now));
+            mark.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint, Value = rows });
+            mark.Parameters.Add(Time(through));
+            Assert.Equal(1, await mark.ExecuteNonQueryAsync(ct));
+        }
+
+        await transaction.CommitAsync(ct);
     }
 
     internal static async Task<QueryStoreRegressionBaseline.Plan> ResolveAsync(Store s, CancellationToken ct)

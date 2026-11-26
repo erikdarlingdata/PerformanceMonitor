@@ -58,6 +58,21 @@ public sealed class QueryStoreRegressionsDailyBaselineLiveTests
     /// days ago (and yesterday, once the builder's watermark passed today's midnight) lie inside it.</summary>
     private static DateTime RecentStart(DateTime today) => today.AddDays(-4).AddHours(6);
 
+    /// <summary>
+    /// The scenario's today: the UTC day of the earlier of the test clock (<see cref="LiveClock.Now"/>) and the real clock. The
+    /// builder closes a day by the store's own clock (<see cref="PlanRegressionDaily.PartialWatermarkLagHours"/> hours behind
+    /// the store's hour), which <see cref="LiveClock.OverrideVariable"/> does not move. A test clock on the UTC day after the
+    /// real clock's (the pinned 00:30 pass) would name the store's yesterday D-2, and until that lag has passed since midnight
+    /// the store holds that day as a partial build, which is no run day. On the earlier of the two clocks D-2 ended at least a
+    /// day before the store's hour, so it is a whole build at any hour.
+    /// </summary>
+    private static DateTime ScenarioToday()
+    {
+        var testNow = LiveClock.Now();
+        var realNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        return (testNow < realNow ? testNow : realNow).Date;
+    }
+
     private static async Task SeedAsync(NpgsqlDataSource postgres, DateTime day0, DateTime start, CancellationToken ct, bool extra = false, bool recent = false, bool planCounts = false)
     {
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
@@ -448,7 +463,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
         /* The window starts at 06:00 yesterday, so at any hour of the day the baseline holds D-7 through D-2 whole, and its
            edges (D-8, D-1 up to 06:00) are partial days. day0 is D-8's midnight. */
-        var today = LiveClock.Now().Date;
+        var today = ScenarioToday();
         var start = today.AddDays(-1).AddHours(6);
         var baselineStart = start.AddDays(-DarlingQueryStoreRegressionReader.BaselineLookbackDays);
         var day0 = today.AddDays(-8);
@@ -563,7 +578,7 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 INSERT INTO servers (server_id, server_name, display_name, is_enabled, sql_major_version, created_date, modified_date)
 VALUES (@server_id, 'qsdaily', 'qsdaily', TRUE, 16, now(), now())
 ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
-        var today = LiveClock.Now().Date;
+        var today = ScenarioToday();
         var start = today.AddDays(-1).AddHours(6);
         var baselineStart = start.AddDays(-DarlingQueryStoreRegressionReader.BaselineLookbackDays);
         await SeedAsync(postgres, today.AddDays(-8), start, ct, extra, recent, planCounts);
@@ -991,5 +1006,60 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", null, ct);
 
         await ExecAsync(f.Connection, "DELETE FROM collect.query_store_self_keys", ct);
         Assert.Contains(50L, await ServedIdsAsync());
+    }
+
+    /// <summary>
+    /// #9606: the viewer's grid and the MCP read give the same rows over a store whose last recent day is a partial build.
+    /// Yesterday is built as the builder builds an open day, through 07:00, so the recent days are T-3 and T-2 whole and T-1
+    /// up to that watermark. T-1 holds rows on both sides of it: queries 10, 20 and 50 below, and query 10's 08:00 interval and
+    /// query 20's 09:00 one from it on, which only the live range reads. Both reads give the all-live rows, so each counts the
+    /// rows from the watermark on once. With T-1's totals poisoned both move, and by the same amount, so each reads the rows
+    /// below the watermark from the totals. A reader that bound no watermark would drop the rows from 07:00 on, and one that
+    /// bound a later one would count them twice.
+    /// </summary>
+    [Fact]
+    public async Task WithAPartialRecentDay_TheViewerAndTheMcpRead_GiveTheSameRows()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the #9606 live tests.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var f = await BuildFixtureAsync(extra: false, timescale: false, ct, recent: true);
+        var start = RecentStart(f.Today);
+        var baselineStart = f.Today.AddDays(-10).AddHours(12);
+        var partialDay = f.Today.AddDays(-1);
+        var through = partialDay.AddHours(7);
+        await QueryStoreRegressionsRecentPartialDayLiveTests.BuildPartialDayAsync(f.Connection, ServerId, partialDay, through, f.End, ct);
+
+        /* The gate takes the partial day, whatever the hour: T-1 is the day after the whole run. */
+        var plan = await ResolveAsync(f.Postgres, baselineStart, start, ct, f.End);
+        Assert.True(plan.RegularFromLatest);
+        Assert.Equal(new[] { -3, -2, -1 }.Select(o => DateOnly.FromDateTime(f.Today.AddDays(o))).ToArray(), plan.RecentDays);
+        Assert.Equal(through, plan.RecentPartialThrough);
+        Assert.Equal(2L, await ScalarAsync(f.Connection, $"SELECT count(*) FROM collect.query_store_interval_latest WHERE server_id = {ServerId} AND CAST(last_execution_time AS date) = DATE '{DayText(partialDay)}' AND first_execution_time >= TIMESTAMP '{through:yyyy-MM-dd HH:mm:ss}'", ct));
+
+        async Task<List<string>> McpRowsAsync() =>
+            (await DarlingQueryStoreRegressionReader.ReadQueryStoreRegressionsAsync(f.Postgres, ServerId, start, f.End, DatabaseFilter.One(Db), 50, baselineStart, ct)).Rows.Select(Describe).ToList();
+
+        async Task<List<string>> ViewerRowsAsync()
+        {
+            await using var viewer = new PerformanceMonitor.Darling.Viewer.ViewerDataService(f.Scratch.ConnectionString);
+            var rows = await viewer.TryGetQueryStoreRegressionsFromTableAsync(ServerId, start, f.End, null, [Db], baselineStart, null, ct);
+            Assert.NotNull(rows);
+            return rows.Select(r => string.Join("|",
+                r.DatabaseName, r.QueryId, Math.Round(r.BaselineDurationMs, 6), Math.Round(r.RecentDurationMs, 6), Math.Round(r.BaselineCpuMs, 6),
+                Math.Round(r.RecentCpuMs, 6), Math.Round(r.AdditionalDurationMs, 6), r.BaselineExecCount, r.RecentExecCount,
+                r.BaselinePlanCount, r.RecentPlanCount, r.Severity, r.QueryTextSample, r.LastExecutionTime)).ToList();
+        }
+
+        var allLive = await RunAsync(f.Connection, DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: false), start, f.End, baselineStart, QueryStoreRegressionBaseline.AllLive(start), ct);
+        Assert.NotEmpty(allLive);
+        var mcp = await McpRowsAsync();
+        Assert.Equal(allLive, mcp);
+        Assert.Equal(mcp, await ViewerRowsAsync());
+
+        /* The partial day's totals are what both read below the watermark: poisoned, both answers move, to the same rows. */
+        await ExecAsync(f.Connection, $"UPDATE collect.plan_regression_daily SET cpu_us_sum = cpu_us_sum * 5 WHERE server_id = {ServerId} AND day = DATE '{DayText(partialDay)}'", ct);
+        var poisoned = await McpRowsAsync();
+        Assert.NotEqual(allLive, poisoned);
+        Assert.Equal(poisoned, await ViewerRowsAsync());
     }
 }

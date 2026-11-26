@@ -274,29 +274,6 @@ public sealed class QueryStoreRegressionsTableReadTests
         Assert.Null(QueryStoreRegressionBaseline.WithRecentDays(plan, [new DateOnly(2026, 10, 26)]).RecentPartialThrough);
     }
 
-    /// <summary>#9606: the recent-days text keeps a row of the partial day live only from the watermark on, the test names the
-    /// watermark by <see cref="QueryStoreRegressionBaseline.RecentThroughToken"/>, and each reader binds it as its last
-    /// parameter. A NULL watermark makes the test the whole days' one.</summary>
-    [Fact]
-    public void TheRecentDaysText_BindsTheWatermark_AndKeepsThePartialDaysLaterRowsLive()
-    {
-        var mcp = DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: true, regularFromLatest: true, recentFromDaily: true);
-        var viewer = ViewerDataService.BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: true, regularFromLatest: true, recentFromDaily: true);
-        const string Test = "NOT (CAST(last_execution_time AS date) = ANY(($N::date[]))"
-            + " AND (CAST(last_execution_time AS date) IS DISTINCT FROM CAST(($W::timestamp) AS date) OR first_execution_time < ($W::timestamp)))";
-        foreach (var (sql, days, watermark) in new[] { (mcp, "$14", "$17"), (viewer, "$13", "$16") })
-        {
-            Assert.DoesNotContain("@@", sql, StringComparison.Ordinal);
-            var test = Test.Replace("$N", days, StringComparison.Ordinal).Replace("$W", watermark, StringComparison.Ordinal);
-            /* Once in each live range of the recent arm. */
-            Assert.Equal(2, sql.Split(test).Length - 1);
-        }
-
-        /* The forms without recent days name no watermark. */
-        Assert.DoesNotContain("$17", DarlingQueryStoreRegressionReader.BuildSql(wide: true, useDailyTotals: true, regularFromLatest: true), StringComparison.Ordinal);
-        Assert.DoesNotContain("$16", ViewerDataService.BuildQueryStoreRegressionsSql(wide: true, useDailyTotals: true, regularFromLatest: true), StringComparison.Ordinal);
-    }
-
     /// <summary>#5506: the latest form's high range starts at the next midnight minus the measured margin, never below the
     /// last run day's midnight, and the wide form and the all-live plan keep their bounds.</summary>
     [Fact]
