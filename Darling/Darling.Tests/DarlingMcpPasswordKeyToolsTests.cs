@@ -307,7 +307,9 @@ public sealed class DarlingMcpPasswordKeyToolsTests
             Assert.Null(untouched.OldState);
 
             // Confirmed with the right fingerprint: the key is replaced and the answer says how many passwords are left to re-enter, in the verb's words.
-            var answer = await DarlingMcpPasswordKeyTools.ResetPasswordKeyAsync(true, fingerprint, source, fromSetting: false, logger, ct);
+            var resetLogger = new CapturingTestLogger();
+            var answer = await DarlingMcpPasswordKeyTools.ResetPasswordKeyAsync(true, fingerprint, source, fromSetting: false, resetLogger, ct);
+            Assert.Equal(1, resetLogger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
             using var document = JsonDocument.Parse(answer);
             Assert.Equal("reset", document.RootElement.GetProperty("status").GetString());
             Assert.Equal(1, document.RootElement.GetProperty("saved_passwords_to_re_enter").GetInt32());
@@ -315,6 +317,12 @@ public sealed class DarlingMcpPasswordKeyToolsTests
             var after = await ReadStateAsync(source, ct);
             Assert.Null(after.CurrentKeyId);
             Assert.Equal(("replaced", "reset"), (after.OldState, after.OldReason));
+
+            // A confirmed reset with no current key to replace is answered nothing_to_reset and is not logged as a reset.
+            var noopLogger = new CapturingTestLogger();
+            var noop = await DarlingMcpPasswordKeyTools.ResetPasswordKeyAsync(true, fingerprint, source, fromSetting: false, noopLogger, ct);
+            Assert.Equal("nothing_to_reset", Status(noop));
+            Assert.Equal(0, noopLogger.CountAtLevel(Microsoft.Extensions.Logging.LogLevel.Warning));
 
             // A second reset finds no current key.
             var again = await DarlingMcpPasswordKeyTools.ResetPasswordKeyAsync(false, null, source, fromSetting: false, logger, ct);
