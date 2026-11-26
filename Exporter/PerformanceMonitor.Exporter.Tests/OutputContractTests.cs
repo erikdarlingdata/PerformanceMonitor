@@ -191,8 +191,10 @@ public sealed class OutputContractTests
         var (exit, output, _) = RunTool("describe-tables", "--json");
         Assert.Equal(0, exit);
         var tables = JsonNode.Parse(output)!.AsArray().ToDictionary(t => t!["table"]!.GetValue<string>(), t => t!["blocked"]!.GetValue<bool>());
-        Assert.True(tables["waiting_tasks"]);
-        Assert.True(tables["query_snapshots"]);
+        Assert.True(tables["incident_occurrences"]);
+        Assert.True(tables["column_stats"]);
+        Assert.False(tables["waiting_tasks"]);
+        Assert.False(tables["query_snapshots"]);
         Assert.False(tables["perfmon_stats"]);
         Assert.False(tables["pg_statement_stats"]);
     }
