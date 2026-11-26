@@ -247,6 +247,20 @@ public class TeamsAdaptiveCardTests
         Assert.DoesNotContain(card.Facts, f => f.Title == "Threshold");
     }
 
+    [Fact]
+    public void AnExternalDetailLineThatOpensWithAMarker_KeepsTheMarkerAsTextInTheDetailsBlock()
+    {
+        var card = TeamsCard.Parse(WebhookAlertService.BuildTeamsPayload(
+            "External:billing:queue-depth", "SQL01", "7", "", Lite,
+            context: External(), detailText: "Notes\n- retry queue is 14\n  + 2 added\n# of failed rows: 3\n1. rerun the job", displayName: "Report", nowUtc: Now));
+
+        /* #9607: a TextBlock reads a line that opens with "- ", "+ ", "# " or "1. " as a list item or a heading, so the marker
+           is escaped, after any indentation, and the line shows as the source wrote it. */
+        Assert.Equal(
+            ["Notes\n\n\\- retry queue is 14\n\n  \\+ 2 added\n\n\\# of failed rows: 3\n\n1\\. rerun the job"],
+            card.Section("Details").Texts);
+    }
+
     /* ---------------- incident sections and records ---------------- */
 
     [Fact]
