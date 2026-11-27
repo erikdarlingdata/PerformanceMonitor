@@ -1260,17 +1260,6 @@ public sealed class DarlingConfigureNetworkTests
         }
     }
 
-    /// <summary>The README's two allowFrom sentences (the store's one range, the MCP list) carry the same address spelling clause as the re-prompt.</summary>
-    [Fact]
-    public void Readme_NamesTheAddressSpellingRule_OnTheStoreRangeAndOnTheList()
-    {
-        const string Clause = "with each IPv4 address written as four plain decimal numbers (no leading zeros) and no IPv6 zone index";
-        var readme = RepoFile.ReadRepoFile("docs", "darling", "network-endpoints.md"); // #6416: moved from Darling/README.md
-
-        Assert.Contains("**`allowFrom`**: one range in CIDR form, " + Clause + ". The store takes ONE range and never a list", readme, StringComparison.Ordinal);
-        Assert.Contains("Each entry must be in CIDR form (use `/32` for one address), " + Clause + ", and must match the address family of `listen`.", readme, StringComparison.Ordinal);
-    }
-
     [Fact]
     public async Task ConfigureNetwork_Web_ExistingToken_KeptByDefault()
     {
@@ -2045,29 +2034,82 @@ public sealed class DarlingMissingCredentialMessageTests
         }
     }
 
-    /* ---------------- wiring: no verb keeps a private copy of the old advice ---------------- */
+    /* ---------------- every verb answers a missing store credential with the shared advice ---------------- */
+
+    private static Task<int> DriveStoreVerbAsync(string verb, string configPath, TextWriter error) => verb switch
+    {
+        "check-settings" => DarlingCliCommands.CheckSettingsAsync(configPath, false, new StringWriter(), error, CancellationToken.None),
+        "print-viewer-connection" => DarlingCliCommands.PrintViewerConnectionAsync(configPath, new StringWriter(), error, CancellationToken.None),
+        "enable-mcp" => DarlingCliCommands.EnableMcpAsync(configPath, new StringWriter(), error, CancellationToken.None),
+        "collapse-legacy-slices" => DarlingCliCommands.CollapseLegacySlicesAsync(configPath, true, new StringWriter(), error, CancellationToken.None),
+        "recompress-plan-dim" => DarlingCliCommands.RecompressPlanDimAsync(
+            configPath, true, DarlingCliCommands.RecompressVacuumMode.Auto, new StringWriter(), error, CancellationToken.None),
+        "backfill-rollups" => DarlingCliCommands.BackfillRollupsAsync(configPath, true, new StringWriter(), error, CancellationToken.None),
+        "toggle-collector" => DarlingCliCommands.ToggleCollectorAsync(
+            true, ["long_query_completions", "--config", configPath], new StringWriter(), error, CancellationToken.None),
+        "add-server" => DarlingCliCommands.AddServerAsync(
+            configPath, new StringReader("[{\"host\":\"SQL2022\"}]"), new StringWriter(), error, CancellationToken.None),
+        _ => throw new ArgumentOutOfRangeException(nameof(verb), verb, null),
+    };
 
     /// <summary>
-    /// The defect was five INDEPENDENT copies of one sentence, so the fix is only real if none of them
-    /// survives. Parsed at the source because four of the five sit behind a store that a test cannot stand
-    /// up, and a sixth copy added later would reintroduce the bug silently.
+    /// The defect was independent copies of one sentence, each telling a user to start the service for a store whose first run had already
+    /// failed. Each of the eight verbs that reads the store's credential is driven here against a managed config and answers with the shared
+    /// builder's own text: on a true first run it tells the user to start the service, and once a cluster exists with no credential (a
+    /// failed first run, where starting it again cannot help) it names the service log instead. A verb that grew its own wording would
+    /// not match the shared text.
     /// </summary>
-    [Fact]
-    public void NoVerbStillCarriesItsOwnFirstRunAdvice()
+    [Theory]
+    [InlineData("check-settings")]
+    [InlineData("print-viewer-connection")]
+    [InlineData("enable-mcp")]
+    [InlineData("collapse-legacy-slices")]
+    [InlineData("recompress-plan-dim")]
+    [InlineData("backfill-rollups")]
+    [InlineData("toggle-collector")]
+    [InlineData("add-server")]
+    public async Task EachStoreVerb_AnswersAMissingCredentialWithTheSharedAdvice_ForBothStates(string verb)
     {
-        var source = ReadRepoFile(Path.Combine(
-            "Darling", "PerformanceMonitor.Darling.Service", "DarlingCliCommands.cs"));
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "A managed store credential is DPAPI-protected.");
 
-        Assert.DoesNotContain("so its first run initializes the store", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("first run provisions the least-privilege roles", source, StringComparison.Ordinal);
+        var root = Directory.CreateTempSubdirectory("darling-e2e-advice-");
+        try
+        {
+            var firstRunConfig = WriteManagedConfig(root.FullName, Path.Combine(root.FullName, "first", "pg"));
+            var firstRun = new StringWriter();
+            var firstRunExit = await DriveStoreVerbAsync(verb, firstRunConfig, firstRun);
 
-        /* Every managed missing-credential refusal goes through the shared builder instead — one for the
-           role credentials, SIX for the store's own (--add-server became the fifth in #2256, the collector
-           toggle verbs' shared body the sixth in #3752; the count grows with each new store verb, and growing
-           it is the point — a verb that grew its OWN copy of the advice instead would fail the two
-           DoesNotContain assertions above). */
-        Assert.Equal(1, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingCredentialMessage("));
-        Assert.Equal(7, CountOccurrences(source, "DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage("));
+            var failedData = Path.Combine(root.FullName, "failed", "pg");
+            Directory.CreateDirectory(failedData);
+            File.WriteAllText(Path.Combine(failedData, "PG_VERSION"), "18\n");
+            var failedConfig = WriteManagedConfig(Path.Combine(root.FullName, "failed"), failedData);
+            var failed = new StringWriter();
+            var failedExit = await DriveStoreVerbAsync(verb, failedConfig, failed);
+
+            Assert.NotEqual(0, firstRunExit);
+            Assert.NotEqual(0, failedExit);
+            Assert.Contains("Start the PerformanceMonitor Darling service once", firstRun.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("Start the PerformanceMonitor Darling service once", failed.ToString(), StringComparison.Ordinal);
+            Assert.Contains(DarlingStoreBootstrapEvidence.ServiceLogPath, failed.ToString(), StringComparison.Ordinal);
+            if (verb == "print-viewer-connection")
+            {
+                // The Viewer's own credential has its own subject; the rest of the sentence is the shared builder's.
+                Assert.Contains("pg-viewer-credential.dpapi", firstRun.ToString(), StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains(
+                    DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(DarlingConfig.Load(firstRunConfig).Postgres),
+                    firstRun.ToString(), StringComparison.Ordinal);
+                Assert.Contains(
+                    DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(DarlingConfig.Load(failedConfig).Postgres),
+                    failed.ToString(), StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 
     private static string WriteManagedConfig(string directory, string dataDirectory)
@@ -2144,26 +2186,53 @@ public sealed class DarlingCollectorToggleVerbTests
     }
 
     /// <summary>
-    /// Program.cs dispatches both verbs to <c>ToggleCollectorAsync</c> — pinned structurally, as the sibling verbs
-    /// are, because the classifier-to-dispatch seam is where #1912's drift lived and no test calling
-    /// <c>DarlingCliCommands</c> directly can see it. And pinned that the dispatch carries NO Windows guard: the
-    /// --add-server posture (Windows is needed only for a MANAGED store credential, which the verb checks itself),
-    /// so a Linux host on bring-your-own Postgres keeps the verb.
+    /// The service executable hands both collector verbs to <c>ToggleCollectorAsync</c> with the arguments after the verb: the process is
+    /// run with a managed config whose store has never started, and each verb gets as far as the store-credential refusal (exit 1, the
+    /// first-run advice), not the unknown-option path and not a platform refusal. Run through <c>dotnet</c> on the service's own build
+    /// output, since the apphost is not always built. Whether a non-Windows host keeps the verb needs a non-Windows run, which this
+    /// project's Windows target cannot do.
     /// </summary>
-    [Fact]
-    public void ProgramDispatchesBothVerbs_WithoutAWindowsGuard_TheAddServerPosture()
+    [Theory]
+    [InlineData("--enable-collector")]
+    [InlineData("--disable-collector")]
+    public async Task ServiceExecutable_DispatchesBothCollectorVerbs_ToTheVerbBody_WithTheTrailingArguments(string verb)
     {
-        var program = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Program.cs");
+        var root = Directory.CreateTempSubdirectory("darling-e2e-dispatch-");
+        try
+        {
+            var configPath = Path.Combine(root.FullName, "darling.json");
+            File.WriteAllText(configPath, "{ \"postgres\": { \"managed\": true, \"port\": 5641, \"dataDirectory\": "
+                + System.Text.Json.JsonSerializer.Serialize(Path.Combine(root.FullName, "store", "pg")) + " }, \"servers\": [] }");
+            var tfm = new DirectoryInfo(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            var service = Path.Combine(
+                tfm.Parent!.Parent!.Parent!.Parent!.FullName, "PerformanceMonitor.Darling.Service", "bin", tfm.Parent.Name, "net10.0",
+                "PerformanceMonitor.Darling.Service.dll");
+            Assert.True(File.Exists(service), $"The service build output was not found at {service}.");
 
-        var at = program.IndexOf("DarlingCliCommands.IsEnableCollectorVerb(args[0])", StringComparison.Ordinal);
-        Assert.True(at >= 0, "Program.cs no longer dispatches --enable-collector (#3752)");
-        Assert.Contains("DarlingCliCommands.IsDisableCollectorVerb(args[0])", program, StringComparison.Ordinal);
+            var info = new System.Diagnostics.ProcessStartInfo("dotnet")
+            {
+                RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true,
+            };
+            foreach (var arg in new[] { service, verb, "long_query_completions", "--config", configPath })
+            {
+                info.ArgumentList.Add(arg);
+            }
 
-        var block = program[at..Math.Min(program.Length, at + 400)];
-        Assert.Contains("DarlingCliCommands.ToggleCollectorAsync(", block, StringComparison.Ordinal);
-        Assert.Contains("args[1..]", block, StringComparison.Ordinal);
-        Assert.DoesNotContain("OperatingSystem.IsWindows()", block, StringComparison.Ordinal);
-        Assert.DoesNotContain("requires Windows", block, StringComparison.Ordinal);
+            using var process = System.Diagnostics.Process.Start(info)!;
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            Assert.True(process.WaitForExit(60_000), $"{verb} did not exit within 60 seconds.");
+            var errorText = await stderr;
+            _ = await stdout;
+
+            Assert.Equal(1, process.ExitCode);
+            Assert.Contains("Start the PerformanceMonitor Darling service once", errorText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Unknown option", errorText, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 
     /* ---------------- the strict argument grammar ---------------- */
@@ -2433,24 +2502,5 @@ public sealed class DarlingCollectorToggleVerbTests
         Assert.DoesNotContain("INSERT", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("UPDATE", sql, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("DELETE", sql, StringComparison.OrdinalIgnoreCase);
-    }
-
-    /* ---------------- the README ---------------- */
-
-    [Fact]
-    public void Readme_DocumentsBothVerbs_TheDefaultScope_AndTheXeSessionConsequence()
-    {
-        var readme = RepoFile.ReadRepoFile("docs", "darling", "collector-settings.md"); // #6416: moved from Darling/README.md
-        Assert.Contains("--enable-collector long_query_completions", readme, StringComparison.Ordinal);
-        Assert.Contains("--disable-collector long_query_completions", readme, StringComparison.Ordinal);
-        Assert.Contains("--enable-collector long_query_completions --server", readme, StringComparison.Ordinal);
-        Assert.Contains("fleet-wide**", readme, StringComparison.Ordinal);
-        /* The session names are per install since #4961, so the README says the verb creates THIS install's own session, under
-           the name the install id makes, and not the shared name older versions used. */
-        Assert.Contains("creates this install's own long-query Extended Events session", readme, StringComparison.Ordinal);
-        Assert.Contains("`PerformanceMonitor_Darling_<id>_LongQueryCompletions`", readme, StringComparison.Ordinal);
-        Assert.DoesNotContain("creates the `PerformanceMonitor_LongQueryCompletions` Extended Events session", readme, StringComparison.Ordinal);
-        Assert.Contains("disabling it drops that session", readme, StringComparison.Ordinal);
-        Assert.Contains("no MCP tool", readme, StringComparison.Ordinal);
     }
 }

@@ -239,7 +239,7 @@ DECLARE
 
 SELECT
     @sql += N'
-SELECT ' + QUOTENAME(name, '''') + N' AS database_name
+SELECT N' + QUOTENAME(name, '''') + N' AS database_name
 FROM ' + QUOTENAME(name) + N'.sys.dm_db_persisted_sku_features
 WHERE feature_name = N''TransparentDataEncryption''
 UNION ALL'

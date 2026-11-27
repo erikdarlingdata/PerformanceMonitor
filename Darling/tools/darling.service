@@ -1,0 +1,41 @@
+# PerformanceMonitor Darling under systemd (#9688). install-darling.sh copies this file to
+# /etc/systemd/system/darling.service. The paths are the ones docs/darling/linux.md uses.
+[Unit]
+Description=PerformanceMonitor Darling
+Documentation=https://github.com/erikdarlingdata/PerformanceMonitor/blob/main/docs/darling/linux.md
+# postgresql.service is the unit name of a local PostgreSQL on Debian and Ubuntu. With another name, or
+# with the store on another host, the entry does nothing, and the service retries the store by itself.
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll
+Environment=DARLING_CONFIG=/etc/darling/darling.json
+# The service keeps this file present while a startup failure has stopped collection for good. The process
+# stays up in that state, so install-darling.sh and upgrade-darling.sh read the file as their health check.
+# RuntimeDirectory= makes /run/darling for it at each start and removes it at each stop.
+Environment=DARLING_STOPPED_MARKER=/run/darling/stopped
+RuntimeDirectory=darling
+User=darling
+Restart=on-failure
+RestartSec=10
+
+# The service writes its keys, its log and /run/darling. Of the rest of the host it can write only its own
+# private /tmp and /var/tmp, and what every account can write and no setting here closes: /dev/shm, /dev/mqueue
+# and a folder under /run that is open to all (/run/lock on Ubuntu). A leading "-" lets the unit start when a
+# folder is missing, so the service's own message names the folder. A path that darling.json adds for the
+# service to write (an export folder, for example) goes on a ReadWritePaths= line in a drop-in.
+ProtectSystem=strict
+ReadWritePaths=-/etc/darling/darling-keys -/usr/share/PerformanceMonitorDarling/logs
+NoNewPrivileges=yes
+PrivateTmp=yes
+# The service opens no device, and reads nothing under /home, /root or /run/user: its user has no home folder.
+PrivateDevices=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

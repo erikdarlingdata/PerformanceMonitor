@@ -585,6 +585,12 @@ GROUP BY s.server_id";
     {
         ArgumentNullException.ThrowIfNull(row);
 
+        /* #9787: the save holds the same four-field rule the web and MCP writers apply, ahead of any connection. */
+        if (ServerFieldText.FirstRefusal(row.Name, row.Host, row.Database, row.Username) is { } fieldRefusal)
+        {
+            throw new MonitoredServerFieldRefusedException(fieldRefusal);
+        }
+
         await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -884,6 +890,10 @@ WHERE server_id = $1";
     /// <para>An edit does not come through here: it keeps its row's id when the address changes (#2158) and still
     /// updates in place through <see cref="UpsertMonitoredServerAsync"/>.</para>
     ///
+    /// <para>A display name, host, database or login holding a control character throws
+    /// <see cref="MonitoredServerFieldRefusedException"/> before anything connects (#9787). A caller that imports older
+    /// definitions catches it per entry.</para>
+    ///
     /// <para><b>One transaction, behind the identity lock (#5240).</b> The id check above only sees a row that holds
     /// THIS id, and an edit keeps its row's old id, so an edit that moved another server onto this address a moment
     /// ago is invisible to it: the insert would land and two servers would hold one address. The add therefore takes
@@ -895,6 +905,13 @@ WHERE server_id = $1";
     public async Task<MonitoredServerAddResult> AddMonitoredServerAsync(MonitoredServerRow row, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(row);
+
+        /* #9787: a new server holds the same four-field rule as an edit, ahead of any connection. The Add dialog, the bulk add and
+           the two registry imports all write here, so none of them can store a control character. */
+        if (ServerFieldText.FirstRefusal(row.Name, row.Host, row.Database, row.Username) is { } fieldRefusal)
+        {
+            throw new MonitoredServerFieldRefusedException(fieldRefusal);
+        }
 
         await using var connection = await _dataSource.OpenConnectionAsync(ViewerReadScope.Effective(cancellationToken));
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -1298,6 +1315,13 @@ public sealed class MonitoredServerPasswordNeededException : InvalidOperationExc
 /// save handler shows the message as it is. Nothing was written.
 /// </summary>
 public sealed class MonitoredServerHostRefusedException(string message) : InvalidOperationException(message);
+
+/// <summary>
+/// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> or <see cref="ViewerDataService.AddMonitoredServerAsync"/> refused a
+/// display name, host, database or login that holds a control character (#9787, <see cref="ServerFieldText.Refusal"/>). The dialog's
+/// save handler shows the message as it is. Nothing was written.
+/// </summary>
+public sealed class MonitoredServerFieldRefusedException(string message) : InvalidOperationException(message);
 
 /// <summary>
 /// <see cref="ViewerDataService.UpsertMonitoredServerAsync"/> refused an edit (#5240): under the identity lock,

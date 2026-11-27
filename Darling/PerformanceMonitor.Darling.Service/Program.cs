@@ -340,6 +340,15 @@ if (args.Length > 0 && DarlingCliCommands.IsAddServerVerb(args[0]))
         passwordInput: addServerFlags.Any ? Console.OpenStandardInput() : null);
 }
 
+/* CLI verb: --edit-server <server name> --set <field>=<value> [--set ...] [--config <path>] (#9693) - change a registered
+   server's settings in the store, through the MCP edit_server path, so a headless host with the web dashboard and MCP off can
+   change one. A password is never an argument. Same platform posture as --add-server (Windows only for a MANAGED store
+   credential, which the verb checks). */
+if (args.Length > 0 && DarlingCliCommands.IsEditServerVerb(args[0]))
+{
+    return await DarlingCliCommands.EditServerAsync(args[1..], Console.OpenStandardInput(), Console.Out, Console.Error, CancellationToken.None);
+}
+
 /* CLI verbs: --add-alert-source / --rotate-alert-source / --remove-alert-source <name> and --list-alert-sources, each with an
    optional --config <path> (#5654) - the logins external systems use to send alerts. Each runs as the store owner, like
    --add-server, and owns no grant SQL of its own: the grants are the ones the service re-asserts on every start. Same

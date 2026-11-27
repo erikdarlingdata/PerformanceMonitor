@@ -1584,10 +1584,11 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// <summary>
     /// The read-latency flush, with its own catch so a failed flush costs only this window's histogram rows (#4442 scope 2).
     /// Shared by the hourly tick and the stop-time flush (#7153). A cancellation the caller's budget caused is not a flush
-    /// failure and passes through.
+    /// failure and passes through. The stop-time flush passes <paramref name="stopNotice"/> (#9794): a store going down with the
+    /// service gets the unwritten samples added to it instead of the Warning.
     /// </summary>
     private static async Task FlushReadLatencyAsync(
-        ReadLatencyAccumulator readLatency, NpgsqlConnection connection, ILogger logger, CancellationToken budget)
+        ReadLatencyAccumulator readLatency, NpgsqlConnection connection, ILogger logger, CancellationToken budget, StoreStopNotice? stopNotice = null)
     {
         try
         {
@@ -1595,6 +1596,12 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !budget.IsCancellationRequested)
         {
+            if (stopNotice is not null && StoreStopNotice.IsStoreUnavailable(ex))
+            {
+                stopNotice.NotWritten(ReadLatencySamplesNotWritten);
+                return;
+            }
+
             logger.LogWarning("Read-latency flush failed; this hour's histogram rows are dropped: {Message}", ex.Message);
         }
     }
@@ -1603,6 +1610,10 @@ AND   j.hypertable_name = '{relation}'", connection))
        loop reaches this the sweeps (up to s_shutdownDrainBudget) and the other drains have already run, so this stays small:
        it opens one connection and writes a handful of rows, and a store that cannot answer in this long is not going to. */
     internal static readonly TimeSpan ShutdownSampleFlushBudget = TimeSpan.FromSeconds(5);
+
+    /* #9794: what the stop's one line calls each accumulator's samples when the store went down before taking them. */
+    private const string CollectorCostSamplesNotWritten = "the collector-cost samples since the last hourly flush";
+    private const string ReadLatencySamplesNotWritten = "the read-latency samples since the last hourly flush";
 
     /// <summary>
     /// #7153: flushes the collector-cost and read-latency samples recorded since the last hourly tick, once, at stop, on a new
@@ -1614,16 +1625,24 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// on its own source.
     /// A second flush inside an hour adds rows rather than replacing them: every flush stamps its own microsecond metric_time, so
     /// the stop flush and the next hourly flush are separate rows in both tables, and the readers sum them.
+    /// <para>#9794: with <paramref name="stopNotice"/>, a store that is going down with the service
+    /// (<see cref="StoreStopNotice.IsStoreUnavailable"/>) is not a failure of this flush. The samples it did not take are added to
+    /// the notice, which the worker reports as one Information line for the whole stop, and no Warning is logged for them. The
+    /// flush is tried once. Any other failure, and a budget that ran out, logs its Warning as above.</para>
     /// </summary>
     internal static async Task FlushSamplesOnStopAsync(
         NpgsqlDataSource postgres, CollectorCostAccumulator collectorCost, ReadLatencyAccumulator readLatency,
-        TimeSpan budgetLimit, ILogger logger)
+        TimeSpan budgetLimit, ILogger logger, StoreStopNotice? stopNotice = null)
     {
         if (!collectorCost.HasSamples && !readLatency.HasSamples)
         {
             return;
         }
 
+        /* False until the collector-cost flush has run: a failure before that left both accumulators unwritten. */
+        var collectorCostTried = false;
+        var hadCollectorCost = collectorCost.HasSamples;
+        var hadReadLatency = readLatency.HasSamples;
         using var budget = new CancellationTokenSource(budgetLimit);
         try
         {
@@ -1635,20 +1654,41 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
             catch (Exception ex) when (ex is not OperationCanceledException || !budget.IsCancellationRequested)
             {
-                logger.LogWarning("Collector-cost flush at stop failed; the samples since the last hourly flush are dropped: {Message}", ex.Message);
+                if (stopNotice is not null && StoreStopNotice.IsStoreUnavailable(ex))
+                {
+                    stopNotice.NotWritten(CollectorCostSamplesNotWritten);
+                }
+                else
+                {
+                    logger.LogWarning("Collector-cost flush at stop failed; the samples since the last hourly flush are dropped: {Message}", ex.Message);
+                }
             }
 
+            collectorCostTried = true;
             if (connection.State != ConnectionState.Open)
             {
                 await connection.CloseAsync();
                 await connection.OpenAsync(budget.Token);
             }
 
-            await FlushReadLatencyAsync(readLatency, connection, logger, budget.Token);
+            await FlushReadLatencyAsync(readLatency, connection, logger, budget.Token, stopNotice);
         }
         catch (Exception ex)
         {
-            if (budget.IsCancellationRequested)
+            if (!budget.IsCancellationRequested && stopNotice is not null && StoreStopNotice.IsStoreUnavailable(ex))
+            {
+                /* The connection could not be opened (or opened again after the collector-cost flush lost it), so whatever had not been tried stays unwritten. */
+                if (!collectorCostTried && hadCollectorCost)
+                {
+                    stopNotice.NotWritten(CollectorCostSamplesNotWritten);
+                }
+
+                if (hadReadLatency)
+                {
+                    stopNotice.NotWritten(ReadLatencySamplesNotWritten);
+                }
+            }
+            else if (budget.IsCancellationRequested)
             {
                 logger.LogWarning(
                     "Flushing the collector-cost and read-latency samples at stop did not finish within {Seconds:N0}s, so the samples since the last hourly flush are dropped: {Message}",

@@ -49,7 +49,7 @@ public sealed class DarlingMcpCollectionStateTools
     private const string TakesEffect = "The running service re-reads this on its next config poll; no restart is needed.";
     private const string TakesEffectWithReconnect = "The running service reconnects this server on its next config poll to apply it; no service restart is needed.";
 
-    private sealed record ServerRow(int ServerId, string Name, string StorageName, string Engine, bool Enabled, IReadOnlyList<string> Excluded, decimal MonthlyCostUsd);
+    internal sealed record ServerRow(int ServerId, string Name, string StorageName, string Engine, bool Enabled, IReadOnlyList<string> Excluded, decimal MonthlyCostUsd);
 
     [DarlingToolAccess(ToolAccess.Write)]
     [McpServerTool(Name = "pause_collection"), Description(
@@ -425,45 +425,94 @@ public sealed class DarlingMcpCollectionStateTools
         try
         {
             var (server, error) = await ResolveAsync(postgres, tool, serverName, cancellationToken);
-            if (server is null)
-            {
-                return error!;
-            }
-
-            var plan = DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(0, enable ? "enable_server" : "disable_server", server.ServerId, null, "mcp"));
-            if (plan.Kind != CommandKind.StoreWrite)
-            {
-                return Refuse(tool, "invalid", (plan.FailReason ?? "The request was refused.") + " Nothing was changed.");
-            }
-
-            var changed = server.Enabled != enable;
-            if (changed)
-            {
-                await DarlingCommandExecutor.ExecuteStoreWriteAsync(postgres, plan, cancellationToken);
-                LogWrite(logger, tool, server);
-            }
-
-            var after = (await ReadServersAsync(postgres, cancellationToken)).FirstOrDefault(s => s.ServerId == server.ServerId);
-            return new JsonObject
-            {
-                ["status"] = changed ? "changed" : "unchanged",
-                ["tool"] = tool,
-                ["server"] = server.Name,
-                ["storage_name"] = server.StorageName,
-                ["what_changed"] = changed
-                    ? $"{server.Name} is now {(enable ? "enabled: collection includes it again" : "disabled: collection skips it")}."
-                    : $"{server.Name} was already {(enable ? "enabled" : "disabled")}. Nothing changed.",
-                ["previous"] = new JsonObject { ["enabled"] = server.Enabled },
-                ["current"] = new JsonObject { ["enabled"] = after?.Enabled },
-                ["undo"] = Undo(server.Enabled ? "enable_server" : "disable_server", new JsonObject { ["server_name"] = server.StorageName }),
-                ["check"] = "get_collection_state",
-                ["takes_effect"] = TakesEffect,
-            }.ToJsonString();
+            return server is null ? error! : await ApplyEnabledToAsync(postgres, tool, server, enable, logger, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError(tool, ex);
         }
+    }
+
+    /// <summary>
+    /// enable_server or disable_server for the server with this id, and no name lookup (#9693): the <c>--edit-server</c> verb finds
+    /// its server once, by its exact name, so a rename or a removal between that and the enabled step cannot move the step to
+    /// another server whose name holds the first one's. A server that no longer exists answers <c>not_found</c>.
+    /// </summary>
+    internal static async Task<string> SetServerEnabledByIdAsync(
+        NpgsqlDataSource postgres, int serverId, bool enable, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var tool = enable ? "enable_server" : "disable_server";
+        try
+        {
+            var server = (await ReadServersAsync(postgres, cancellationToken)).FirstOrDefault(s => s.ServerId == serverId);
+            return server is null
+                ? Refuse(tool, "not_found", "That server's definition no longer exists. Nothing was changed.")
+                : await ApplyEnabledToAsync(postgres, tool, server, enable, logger, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return McpHelpers.FormatError(tool, ex);
+        }
+    }
+
+    /// <summary>
+    /// The enable or disable write for <paramref name="server"/>, a row already read, by its id. A row removed since that read
+    /// answers <c>not_found</c> (#9693): the write that changes no row, or the read after it that finds none, never answers
+    /// that the server is now enabled or disabled.
+    /// </summary>
+    internal static async Task<string> ApplyEnabledToAsync(
+        NpgsqlDataSource postgres, string tool, ServerRow server, bool enable, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var plan = DarlingCommandExecutor.ResolvePlan(new ClaimedCommand(0, enable ? "enable_server" : "disable_server", server.ServerId, null, "mcp"));
+        if (plan.Kind != CommandKind.StoreWrite)
+        {
+            return Refuse(tool, "invalid", (plan.FailReason ?? "The request was refused.") + " Nothing was changed.");
+        }
+
+        var changed = server.Enabled != enable;
+        var rowsWritten = 0;
+        if (changed)
+        {
+            rowsWritten = await DarlingCommandExecutor.ExecuteStoreWriteAsync(postgres, plan, cancellationToken);
+            if (rowsWritten > 0)
+            {
+                LogWrite(logger, tool, server);
+            }
+        }
+
+        var after = (await ReadServersAsync(postgres, cancellationToken)).FirstOrDefault(s => s.ServerId == server.ServerId);
+        return EnabledAnswer(tool, server, enable, changed ? rowsWritten : null, after?.Enabled);
+    }
+
+    /// <summary>
+    /// The enable_server or disable_server answer. <paramref name="rowsWritten"/> is the row count of the write, or null when
+    /// the server already had the state and nothing was written; <paramref name="enabledAfter"/> is the state read back, or null
+    /// when the row is gone. A write that changed no row and a row that is gone both answer <c>not_found</c>. Pure, so a test
+    /// reads the answer for each case without a store.
+    /// </summary>
+    internal static string EnabledAnswer(string tool, ServerRow server, bool enable, int? rowsWritten, bool? enabledAfter)
+    {
+        if (rowsWritten == 0 || enabledAfter is null)
+        {
+            return Refuse(tool, "not_found", "That server's definition no longer exists (removed since it was looked up), so no server was " + (enable ? "enabled" : "disabled") + ".");
+        }
+
+        var changed = rowsWritten is not null;
+        return new JsonObject
+        {
+            ["status"] = changed ? "changed" : "unchanged",
+            ["tool"] = tool,
+            ["server"] = server.Name,
+            ["storage_name"] = server.StorageName,
+            ["what_changed"] = changed
+                ? $"{server.Name} is now {(enable ? "enabled: collection includes it again" : "disabled: collection skips it")}."
+                : $"{server.Name} was already {(enable ? "enabled" : "disabled")}. Nothing changed.",
+            ["previous"] = new JsonObject { ["enabled"] = server.Enabled },
+            ["current"] = new JsonObject { ["enabled"] = enabledAfter },
+            ["undo"] = Undo(server.Enabled ? "enable_server" : "disable_server", new JsonObject { ["server_name"] = server.StorageName }),
+            ["check"] = "get_collection_state",
+            ["takes_effect"] = TakesEffect,
+        }.ToJsonString();
     }
 
     /// <summary>Finds one server among ALL definitions (a disabled server must be found to be enabled), with the matching rule
@@ -498,7 +547,7 @@ public sealed class DarlingMcpCollectionStateTools
             + ". Send one storage name from this list as server_name. Nothing was changed."));
     }
 
-    private static async Task<List<ServerRow>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    internal static async Task<List<ServerRow>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         var rows = new List<ServerRow>();
         await using var command = postgres.CreateCommand(

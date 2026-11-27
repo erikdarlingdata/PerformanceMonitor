@@ -39,8 +39,9 @@ namespace PerformanceMonitor.Darling.Storage;
 /// An hour is built again only when the ledger no longer equals the <c>ledger_rows</c> of its last build, which is what a late row does,
 /// since the collector adds its batch to the ledger in the same transaction as the row. A build whose <c>raw_rows</c> equals its
 /// <c>ledger_rows</c> is final until the ledger moves (#9457). Only a build that counted a different number of raw rows than the ledger
-/// held, which is rows an older writer stored without counting them, is built once more (<see cref="SettleAfter"/>). One transaction builds one hour for every server that is due in it, so the scan of the hour is shared
-/// instead of repeated for each server. A tick builds the newest hours first, at most <see cref="MaxHoursPerTick"/> of them and not past
+/// held, which is rows an older writer stored without counting them, is built once more (<see cref="SettleAfter"/>). One transaction builds one hour for every server that is due in it, so the read of the hour is shared
+/// instead of repeated for each server, and that read takes the hour's heap pages in physical order and groups them with a hash aggregate
+/// (<see cref="BuildHourSql"/>). A tick builds the newest hours first, at most <see cref="MaxHoursPerTick"/> of them and not past
 /// <see cref="MaxTickDuration"/>, and the next tick takes the rest.</para>
 ///
 /// <para><b>Coverage.</b> <see cref="IncompleteHoursAsync"/> says which hours of a range the table does not hold whole for a server: the
@@ -93,6 +94,16 @@ public static class QueryStatsHostHourly
     private const int CommandTimeoutSeconds = BuildStatementTimeoutSeconds + 30;
 
     private static readonly string StatementTimeoutSql = $"SET LOCAL statement_timeout = '{BuildStatementTimeoutSeconds}s'";
+
+    /// <summary>
+    /// The <c>work_mem</c> an hour's build transaction runs under (#9799). The build groups the hour's raw rows by key and text digest, and
+    /// the planner makes that a hash aggregate only when it expects the hash table to fit in <c>work_mem</c> times
+    /// <c>hash_mem_multiplier</c>. Below that it sorts the hour's rows first, and a sort of that size goes to disk. The setting is local to
+    /// the transaction, and a hash aggregate that outgrows the limit spills in batches instead of taking more memory.
+    /// </summary>
+    private const string BuildWorkMem = "256MB";
+
+    private static readonly string BuildWorkMemSql = $"SET LOCAL work_mem = '{BuildWorkMem}'";
 
     /// <summary>The rows the statement's two passes read for their measures.</summary>
     private const string Honest = "sample_interval_seconds IS DISTINCT FROM 0";
@@ -149,10 +160,7 @@ public static class QueryStatsHostHourly
         ("plan_generation_num", "bigint", Max("plan_generation_num")),
         ("worker_time_per_second", "double precision", "MAX(CAST(delta_worker_time AS double precision) / NULLIF(sample_interval_seconds, 0) / 1000.0)"),
         ("digests", "bytea[]", $"array_agg(DISTINCT query_text_digest) FILTER (WHERE {Honest} AND query_text_digest IS NOT NULL)"),
-        ("latest_text_key", "bytea",
-            @"MAX(timestamp_send(collection_time) || int8send(collection_id)
-        || CASE WHEN query_text IS NOT NULL THEN '\x00'::bytea || convert_to(query_text, 'UTF8') ELSE '\x01'::bytea || query_text_digest END)
-        FILTER (WHERE query_text IS NOT NULL OR query_text_digest IS NOT NULL)"),
+        ("latest_text_key", "bytea", ByteaMaxSql.LatestTextKey("")),
     ];
 
     private static string Lines(IEnumerable<string> parts) => string.Join(",\n    ", parts);
@@ -201,19 +209,60 @@ WHERE server_id = ANY($1::integer[])
   AND bucket = $2::timestamp;";
 
     /// <summary>
-    /// Fills one hour of the rollup for a set of servers from raw, in one scan of the hour. $1 server ids, $2 hour. The rows of the hour
+    /// How the build folds a value column of its per-text partial rows (<c>p</c>, one row per key and <c>query_text_digest</c>) into the
+    /// key's row. Every aggregate of <see cref="ValueColumns"/> splits this way: a count or a sum is the sum of the partials, a minimum or a
+    /// maximum is the minimum or maximum of the partials, and <c>digests</c> is the partial rows' own digest, kept where the partial counted
+    /// an interval-honest row and listed in the order <c>array_agg(DISTINCT ...)</c> gives. The maximum of a <c>bytea</c> column
+    /// (<c>latest_text_key</c>) is written in the array form of <see cref="ByteaMaxSql"/> (#9802), and its fold is that same form over the
+    /// partials, because PostgreSQL 16 and 17 have no <c>max(bytea)</c> for the partial column either. The form skips a NULL partial, the
+    /// partial of a text none of whose rows carries a text or a digest, as <c>MAX</c> does. An aggregate of any other shape has no fold
+    /// here and stops the type from loading, so a new column cannot be built wrong in silence.
+    /// </summary>
+    private static string Fold((string Name, string Type, string Aggregate) column) => column switch
+    {
+        { Name: "digests" } => "array_agg(p.query_text_digest ORDER BY p.query_text_digest) FILTER (WHERE p.raw_rows > 0 AND p.query_text_digest IS NOT NULL)",
+        _ when column.Aggregate.StartsWith("COUNT(", StringComparison.Ordinal) || column.Aggregate.StartsWith("CAST(SUM(", StringComparison.Ordinal) => $"CAST(SUM(p.{column.Name}) AS bigint)",
+        _ when column.Aggregate.StartsWith("MIN(", StringComparison.Ordinal) => $"MIN(p.{column.Name})",
+        _ when column.Aggregate.StartsWith("MAX(", StringComparison.Ordinal) => $"MAX(p.{column.Name})",
+        _ when column.Aggregate.StartsWith(ByteaMaxSql.Before, StringComparison.Ordinal) => ByteaMaxSql.Of($"p.{column.Name}"),
+        _ => throw new InvalidOperationException($"The host hourly build has no fold for the aggregate of {column.Name}."),
+    };
+
+    /// <summary>
+    /// Fills one hour of the rollup for a set of servers from raw, in one read of the hour. $1 server ids, $2 hour. The rows of the hour
     /// are those whose <c>collection_time</c> is in it, the hour the ledger counts them under.
+    ///
+    /// <para>The statement has three levels so that no level needs the hour's raw rows in order. The innermost reads the hour and nothing
+    /// else, behind <c>OFFSET 0</c>, so its scan is planned for the cheapest read of those rows and not for a sort order the grouping
+    /// above could use: on a large store that is a bitmap heap scan, which reads the hour's heap pages in physical order and in combined
+    /// requests, where an index scan in (server, time) order reads them one page at a time. The middle level groups by the key and
+    /// <c>query_text_digest</c> with plain aggregates only, so it can be a hash aggregate. The outer level folds those partial rows, a
+    /// small fraction of the raw rows, into one row per key (<see cref="Fold"/>). A single level cannot do this: its
+    /// <c>array_agg(DISTINCT query_text_digest)</c> rules out a hash aggregate, so every raw row of the hour is sorted by the key, and the
+    /// planner then prefers the index scan because it arrives sorted by server.</para>
     /// </summary>
     public static readonly string BuildHourSql = $@"
 INSERT INTO collect.query_stats_host_hourly (server_id, bucket, database_name, query_hash, host_object_name, {string.Join(", ", ValueColumns.Select(c => c.Name))})
 SELECT
-    server_id, $2::timestamp, database_name, query_hash, host_object_name,
-    {Lines(ValueColumns.Select(c => c.Aggregate))}
-FROM collect.query_stats
-WHERE server_id = ANY($1::integer[])
-  AND collection_time >= $2::timestamp
-  AND collection_time < $2::timestamp + interval '1 hour'
-GROUP BY server_id, database_name, query_hash, host_object_name;";
+    p.server_id, $2::timestamp, p.database_name, p.query_hash, p.host_object_name,
+    {Lines(ValueColumns.Select(Fold))}
+FROM
+(
+    SELECT
+        server_id, database_name, query_hash, host_object_name, query_text_digest,
+        {string.Join(",\n        ", ValueColumns.Where(c => c.Name != "digests").Select(c => $"{c.Aggregate} AS {c.Name}"))}
+    FROM
+    (
+        SELECT *
+        FROM collect.query_stats
+        WHERE server_id = ANY($1::integer[])
+          AND collection_time >= $2::timestamp
+          AND collection_time < $2::timestamp + interval '1 hour'
+        OFFSET 0
+    ) AS r
+    GROUP BY server_id, database_name, query_hash, host_object_name, query_text_digest
+) AS p
+GROUP BY p.server_id, p.database_name, p.query_hash, p.host_object_name;";
 
     /// <summary>
     /// Records the build of one hour for a set of servers, in the build's own snapshot: the raw rows it counted and what the ledger held. A
@@ -588,6 +637,11 @@ ORDER BY h.bucket;";
         await using (var timeout = new NpgsqlCommand(StatementTimeoutSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
         {
             await timeout.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using (var workMem = new NpgsqlCommand(BuildWorkMemSql, connection, transaction) { CommandTimeout = CommandTimeoutSeconds })
+        {
+            await workMem.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await RunHourStatementAsync(connection, transaction, DeleteHourSql, serverIds, bucket, null, cancellationToken);

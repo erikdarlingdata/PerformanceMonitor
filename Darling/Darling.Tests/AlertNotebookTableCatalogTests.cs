@@ -64,7 +64,7 @@ public sealed class AlertNotebookTableCatalogTests
     /// (never a silent pass) when Node is not on the machine. The CI runners are windows-latest images, which carry Node.</summary>
     internal static JsonElement RunNode(string script, params string[] args)
     {
-        var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        var psi = new ProcessStartInfo("node") { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false }.InLocalFolder();
         psi.ArgumentList.Add(PathTo("Darling", "Darling.Tests", script));
         foreach (var arg in args) psi.ArgumentList.Add(arg);
 

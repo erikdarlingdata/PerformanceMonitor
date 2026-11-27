@@ -523,6 +523,95 @@ public sealed partial class ServerEditLiveTests : IDisposable
         }
     }
 
+    /// <summary>#9693: the <c>--edit-server</c> verb runs the edit as the store owner. The refusal of a change to how a row with a
+    /// remediation login connects is in the store's edit function, not in a role's trigger, so the owner meets it too: the verb
+    /// answers with the same sentence the other surfaces give, exits 1 and writes nothing, whether or not the row keeps a password.</summary>
+    [Fact]
+    public async Task AsTheStoreOwner_TheEditServerVerb_RefusesAnAddressEditOnARowWithARemediationLogin_WithTheSameSentence_AndWritesNothing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5194, "alpha-94", "alpha-94.example.test", "integrated", null, null, ct, remediationBlob: "rem-blob");
+            var before = await RowSignatureAsync(rig.Owner, 5194, ct);
+            var hostBefore = await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5194", ct);
+            var versionBefore = await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct);
+
+            Task<string> OwnerEdit(string changesJson) =>
+                Edit.EditServerByNameAsync(rig.Owner, "alpha-94.example.test", changesJson, Reachable, TestKeyRings.Healthy, null, ct);
+            Task<string> NeverEnabled(int serverId, bool enable) => throw new InvalidOperationException("enabled must not be touched when the edit is refused.");
+            /* The verb's target: the row as it is read once before the first send, with its modified_at as the expected value. */
+            async Task<DarlingCliCommands.EditServerTarget> TargetAsync()
+            {
+                var row = (await new Edit.PostgresServerEditStore(rig.Owner).ReadRowAsync(5194, ct))!;
+                return new DarlingCliCommands.EditServerTarget(
+                    row.ServerId, "alpha-94.example.test", row.Name, row.Host, row.Port, Edit.AuthWord(row.Auth), row.Username, Edit.ModifiedAtToken(row.ModifiedAt));
+            }
+
+            Assert.True(DarlingCliCommands.TryParseEditServerArgs(["alpha-94.example.test", "--set", "host=alpha-99.example.test"], out var moveRequest, out _));
+            var (moveLines, moveExit) = await DarlingCliCommands.RunEditServerAsync(moveRequest!, OwnerEdit, NeverEnabled, _ => null, await TargetAsync());
+            Assert.Equal(1, moveExit);
+            Assert.Contains(Edit.EditRemediationKeptText, string.Join('\n', moveLines), StringComparison.Ordinal);
+            Assert.Equal(hostBefore, await ScalarAsync<string>(rig.Owner, "SELECT host FROM config_monitored_servers WHERE server_id = 5194", ct));
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5194, ct));
+            Assert.Equal(versionBefore, await ScalarAsync<long>(rig.Owner, "SELECT config_version FROM config_service", ct));
+
+            Assert.True(DarlingCliCommands.TryParseEditServerArgs(["alpha-94.example.test", "--set", "name=Renamed-94"], out var renameRequest, out _));
+            var (renameLines, renameExit) = await DarlingCliCommands.RunEditServerAsync(renameRequest!, OwnerEdit, NeverEnabled, _ => null, await TargetAsync());
+            Assert.Equal(0, renameExit);
+            Assert.Contains("Changed Renamed-94", string.Join('\n', renameLines), StringComparison.Ordinal);
+            Assert.Equal("Renamed-94", await ScalarAsync<string>(rig.Owner, "SELECT name FROM config_monitored_servers WHERE server_id = 5194", ct));
+            Assert.Equal(before, await RowSignatureAsync(rig.Owner, 5194, ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
+    [Fact]
+    public async Task AsTheStoreOwner_ThePasswordKeyIsCheckedInTheWriteTransaction_AKeyThatIsNoLongerCurrentSavesNothing()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await OpenAsync(ct);
+        var ok = false;
+        try
+        {
+            await SeedServerAsync(rig.Owner, 5195, "alpha-95", "alpha-95.example.test", "sql", "monitor", "old-sealed-value", ct);
+            var privateKey = PasswordPrivateKey.Generate();
+            var ring = DarlingPasswordKey.FromPrivateKey(privateKey);
+            var keyId = ring.Status.KeyId!;
+            await ExecAsync(rig.Owner,
+                "INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('afb6cecb558a0858', decode(repeat('01', 400), 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
+            var before = await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', trust_server_certificate, encrypted_password, modified_at) FROM config_monitored_servers WHERE server_id = 5195", ct);
+            var changes = $"{{\"trust_server_certificate\":true,\"password\":\"{RetypedPassword}\"}}";
+
+            /* The ring was chosen for a key the store no longer calls current: the write is refused in its own transaction. */
+            var refused = Parse(await Edit.EditServerCoreAsync(
+                new DarlingCliCommands.KeyCheckedEditStore(new Edit.PostgresServerEditStore(rig.Owner), ring), 5195, changes, Reachable, ring, null, ct));
+            Assert.Equal("refused", refused["status"]!.GetValue<string>());
+            Assert.Contains("password key", refused["message"]!.GetValue<string>(), StringComparison.Ordinal);
+            Assert.Equal(before, await ScalarAsync<string>(rig.Owner, "SELECT concat_ws('|', trust_server_certificate, encrypted_password, modified_at) FROM config_monitored_servers WHERE server_id = 5195", ct));
+
+            /* The same edit with the store's current key saves and seals the password to it. */
+            await ExecAsync(rig.Owner, "DELETE FROM config.password_key", ct);
+            await ExecAsync(rig.Owner,
+                $"INSERT INTO config.password_key (key_id, public_key, algorithm, state) VALUES ('{keyId}', decode('{Convert.ToHexString(privateKey.PublicKey.Spki)}', 'hex'), 'RSA3072-OAEP-SHA256/A256GCM', 'current')", ct);
+            var saved = Parse(await Edit.EditServerCoreAsync(
+                new DarlingCliCommands.KeyCheckedEditStore(new Edit.PostgresServerEditStore(rig.Owner), ring), 5195, changes, Reachable, ring, null, ct));
+            Assert.Equal("updated", saved["status"]!.GetValue<string>());
+            Assert.NotEqual("old-sealed-value", await ScalarAsync<string>(rig.Owner, "SELECT encrypted_password FROM config_monitored_servers WHERE server_id = 5195", ct));
+            ok = true;
+        }
+        finally
+        {
+            await DropRoleAsync(rig, ok);
+        }
+    }
+
     [Fact]
     public async Task AsTheMcpRole_RoleAndExternalIdEditsGoThroughTheEditFunction_AndEveryOtherColumnStaysUpdatable()
     {

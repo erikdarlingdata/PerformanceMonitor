@@ -191,8 +191,15 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
     /// <summary>
     /// Writes the start row and the rungs held so far. Returns true when the row was written. A store without the tables is not a failure: false,
     /// and everything is kept for the next flush. Any other failure logs one warning for the run and debug lines after, and keeps everything.
+    ///
+    /// <para>Two callers know why a store that is not there (<see cref="StoreStopNotice.IsStoreUnavailable"/>) is no news (#9794), and for them
+    /// that one failure logs no Warning. The last flush at stop passes <paramref name="stopNotice"/>: a store going down with the service gets the
+    /// unwritten update added to the notice, which the worker reports as one Information line for the whole stop. The start's store-retry arms
+    /// pass <paramref name="startIsRetrying"/>: they have just logged that the store cannot be reached and flush again after every attempt and once
+    /// more when the store is ready, so the row is written inside the start's own wait for the store. Every other failure warns as above.</para>
     /// </summary>
-    internal async Task<bool> FlushAsync(NpgsqlDataSource postgres, ILogger logger, CancellationToken cancellationToken)
+    internal async Task<bool> FlushAsync(
+        NpgsqlDataSource postgres, ILogger logger, CancellationToken cancellationToken, StoreStopNotice? stopNotice = null, bool startIsRetrying = false)
     {
         await _flushGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -248,6 +255,18 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
             catch (Exception ex) when (ex is not OperationCanceledException)
 #pragma warning restore CA1031
             {
+                if (stopNotice is not null && StoreStopNotice.IsStoreUnavailable(ex))
+                {
+                    stopNotice.NotWritten("the last update of this start's row in the service start history");
+                    return false;
+                }
+
+                if (startIsRetrying && StoreStopNotice.IsStoreUnavailable(ex))
+                {
+                    logger.LogDebug(ex, "The service start history waits for the store with the rest of the start");
+                    return false;
+                }
+
                 if (_flushFailed)
                 {
                     logger.LogDebug(ex, "The service start history still could not be written");
@@ -270,8 +289,9 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
     }
 
     /// <summary>Starts <see cref="RunAsync"/> and returns the handle that owns it: stopping or disposing the handle ends the loop, runs its last flush and waits for it.</summary>
-    internal FlushLoop StartFlushLoop(NpgsqlDataSource postgres, ILogger logger, CancellationToken stoppingToken, TimeSpan? interval = null) =>
-        new(this, postgres, logger, interval, stoppingToken);
+    internal FlushLoop StartFlushLoop(
+        NpgsqlDataSource postgres, ILogger logger, CancellationToken stoppingToken, TimeSpan? interval = null, StoreStopNotice? stopNotice = null) =>
+        new(this, postgres, logger, interval, stoppingToken, stopNotice);
 
     /// <summary>
     /// A running flush loop and the means to end it. Declare it with <c>await using</c> AFTER the recorder and the data source the loop uses: every way out
@@ -283,10 +303,12 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
         private readonly CancellationTokenSource _stop;
         private int _disposed;
 
-        internal FlushLoop(ServiceStartRecorder recorder, NpgsqlDataSource postgres, ILogger logger, TimeSpan? interval, CancellationToken stoppingToken)
+        internal FlushLoop(
+            ServiceStartRecorder recorder, NpgsqlDataSource postgres, ILogger logger, TimeSpan? interval, CancellationToken stoppingToken,
+            StoreStopNotice? stopNotice = null)
         {
             _stop = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            Completion = recorder.RunAsync(postgres, logger, _stop.Token, interval);
+            Completion = recorder.RunAsync(postgres, logger, _stop.Token, interval, stopNotice);
         }
 
         /// <summary>The loop's task. It ends after the last flush and never throws.</summary>
@@ -314,9 +336,11 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
 
     /// <summary>
     /// The flush loop: every <paramref name="interval"/> until <paramref name="stoppingToken"/> is cancelled, then one last flush bounded by
-    /// <see cref="FinalFlushBudget"/>. Never throws.
+    /// <see cref="FinalFlushBudget"/>. Never throws. The last flush is tried once, and a store going down with the service gets it added to
+    /// <paramref name="stopNotice"/> instead of a Warning (#9794).
     /// </summary>
-    internal async Task RunAsync(NpgsqlDataSource postgres, ILogger logger, CancellationToken stoppingToken, TimeSpan? interval = null)
+    internal async Task RunAsync(
+        NpgsqlDataSource postgres, ILogger logger, CancellationToken stoppingToken, TimeSpan? interval = null, StoreStopNotice? stopNotice = null)
     {
         var wait = interval ?? FlushInterval;
         try
@@ -335,7 +359,7 @@ internal sealed class ServiceStartRecorder : IMigrationRungObserver, IDisposable
         using var budget = new CancellationTokenSource(FinalFlushBudget);
         try
         {
-            await FlushAsync(postgres, logger, budget.Token).ConfigureAwait(false);
+            await FlushAsync(postgres, logger, budget.Token, stopNotice).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

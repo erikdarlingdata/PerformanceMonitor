@@ -33,7 +33,7 @@ This catches people most on the MCP and web blocks. The two halves of one JSON o
 | `mcp.network` and `web.network` (`listen`, `allowFrom`, `encryptedToken`) | the file, always. No store equivalent exists | editing `darling.json`, then restarting the service |
 | `postgres.*` (including `postgres.network`) | the file, always | editing `darling.json`, then restarting the service |
 | SQL-auth secrets (`encryptedPassword`) | the file, always. The service never writes them to the store | editing `darling.json` |
-| `servers` | seeded once, then the store | the Viewer's Add Server, the `add_servers` MCP tool, or `--add-server` |
+| `servers` | seeded once, then the store | the Viewer's Add Server, the `add_servers` MCP tool, or `--add-server`. A registered server is changed with the Viewer's Manage Servers, the `edit_server` MCP tool or `--edit-server` |
 
 For example, if you change `mcp.port` in the Viewer, that changes where MCP binds. A different `mcp.port` in the file does not override it. When the two disagree, the service says so once per start, and the message names both sides:
 

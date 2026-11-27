@@ -109,7 +109,7 @@ The compose file sets no TLS on the store, so this connection is not encrypted. 
 
 **The store keeps its own log files** ([#9333](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9333)). PostgreSQL's own log is in the `log` folder of the store volume, one file for each weekday, and `docker compose logs` for the PostgreSQL container shows only its startup lines.
 
-**systemd + bring-your-own PostgreSQL.** The full procedure for this shape is on its own page: [Install Darling on Linux with systemd](darling/linux.md). It has the store setup, a `darling.json` example for Linux, the proof lines, the Linux form of each service verb, the upgrade and the uninstall. The rest of this section is the short form. The tarball is framework-dependent, not self-contained. The host needs the ASP.NET Core 10 runtime and the .NET 10 runtime, from <https://dotnet.microsoft.com/download/dotnet/10.0>. On Ubuntu 24.04, `sudo apt-get install -y dotnet-runtime-10.0 aspnetcore-runtime-10.0` installs both from Ubuntu's own repositories. The container image carries both already.
+**systemd + bring-your-own PostgreSQL.** The full procedure for this shape is on its own page: [Install Darling on Linux with systemd](darling/linux.md). It has the store setup, a `darling.json` example for Linux, the proof lines, the Linux form of each service verb, the upgrade and the uninstall. The tarball's `install-darling.sh` and `upgrade-darling.sh` do the install and the upgrade below and check them: see [Install and upgrade with the scripts](darling/linux.md#install-and-upgrade-with-the-scripts). The rest of this section is the short form, by hand. The tarball is framework-dependent, not self-contained. The host needs the ASP.NET Core 10 runtime and the .NET 10 runtime, from <https://dotnet.microsoft.com/download/dotnet/10.0>. On Ubuntu 24.04, `sudo apt-get install -y dotnet-runtime-10.0 aspnetcore-runtime-10.0` installs both from Ubuntu's own repositories. The container image carries both already.
 
 Download `PerformanceMonitorDarling-linux-x64-<version>.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL, at or above the minimum version in [Prerequisites](darling/install.md#prerequisites), with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under the unit below. Create the service user and the folders it writes first, because the unit runs as that user and it cannot create them under `/usr/share` or `/etc` itself:
 
@@ -118,7 +118,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin darling
 sudo mkdir -p /etc/darling/darling-keys
 sudo mkdir -p /usr/share/PerformanceMonitorDarling/logs
 sudo chown darling:darling /etc/darling/darling-keys
-sudo chown -R darling:darling /usr/share/PerformanceMonitorDarling
+sudo chown darling:darling /usr/share/PerformanceMonitorDarling/logs
 sudo chmod 700 /etc/darling/darling-keys
 sudo chmod 700 /usr/share/PerformanceMonitorDarling/logs
 ```

@@ -54,8 +54,13 @@ public sealed class ConnectionTestReplyTests : IDisposable
 
     private static readonly DateTime Stamp = new(2026, 10, 5, 12, 0, 0, 123, DateTimeKind.Unspecified);
 
+    /* A driver text that does not repeat the typed password: it is passed on as the driver wrote it. */
     private static readonly Core.ServerProbe Failing = (_, _) => Task.FromResult(
-        new ConnectionProbeResult(false, 0, 0, null, false, false, false, false, DriverText + " password=" + Password));
+        new ConnectionProbeResult(false, 0, 0, null, false, false, false, false, DriverText));
+
+    /* A driver text that repeats the typed password: it is withheld whole, and only its kind is given. */
+    private static readonly Core.ServerProbe FailingWithThePassword = (_, _) => Task.FromResult(
+        new ConnectionProbeResult(false, 0, 0, null, false, false, false, false, DriverText + " password=" + Password, ErrorKind: "SQL Server error 18456"));
 
     private static string AddBody() =>
         /* #6583: a SQL Server port rides in the host; a separate port is refused. */
@@ -122,7 +127,45 @@ public sealed class ConnectionTestReplyTests : IDisposable
         Assert.Contains(log.Lines, l => l.Contains("Distinctive-Driver-Text", StringComparison.Ordinal)
             && l.Contains("sql-test-01,1444", StringComparison.Ordinal));
         Assert.DoesNotContain(Password, log.Joined, StringComparison.Ordinal);
-        Assert.Contains("[redacted]", log.Joined, StringComparison.Ordinal);
+    }
+
+    /* #9693: a driver text that repeats the typed password is never rewritten around it. The whole text is withheld, in the
+       log and in the reply the host's own command line gets, and the failure is named by its kind. */
+    [Fact]
+    public async Task ADriverTextThatRepeatsTheTypedPassword_IsWithheldWhole_InTheLogAndInTheHostCommandLineReply()
+    {
+        var log = new CapturingLogger();
+        var answer = await Core.AddServersAsync(
+            new EmptyDefinitions(), AddBody(), FailingWithThePassword, CancellationToken.None, allowSecretReferences: true, ring: TestKeyRings.Healthy, revealConnectError: true, logger: log);
+
+        var detail = DetailOf(answer);
+        Assert.DoesNotContain(Password, answer, StringComparison.Ordinal);
+        Assert.DoesNotContain("Distinctive-Driver-Text", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain("svc_probe", detail, StringComparison.Ordinal);
+        Assert.Contains("SQL Server error 18456", detail, StringComparison.Ordinal);
+        Assert.DoesNotContain(Password, log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("Distinctive-Driver-Text", log.Joined, StringComparison.Ordinal);
+        Assert.Contains(log.Lines, l => l.Contains("sql-test-01,1444", StringComparison.Ordinal) && l.Contains("SQL Server error 18456", StringComparison.Ordinal));
+    }
+
+    /* #9693: the edit's log line, which the --edit-server verb prints. A password equal to the login name is the case a
+       rewritten text gives away: the login would print as the missing word. */
+    [Fact]
+    public async Task McpEdit_ADriverTextThatRepeatsTheTypedPassword_IsWithheldWhole_AndATextThatDoesNotIsPassedOn()
+    {
+        var repeats = (Core.ServerProbe)((_, _) => Task.FromResult(
+            new ConnectionProbeResult(false, 0, 0, null, false, false, false, false, "Login failed for user 'sa'.", ErrorKind: "SQL Server error 18456")));
+
+        var log = new CapturingLogger();
+        var answer = await Core.EditServerCoreAsync(new OneRowStore(), 41, "{\"host\":\"beta-02.example.test\",\"password\":\"sa\"}", repeats, TestKeyRings.Healthy, log, CancellationToken.None);
+        Assert.Equal("connection_failed", JsonNode.Parse(answer)!["status"]!.GetValue<string>());
+        Assert.DoesNotContain("Login failed for user", log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("[redacted]", log.Joined, StringComparison.Ordinal);
+        Assert.Contains(log.Lines, l => l.Contains("beta-02.example.test", StringComparison.Ordinal) && l.Contains("SQL Server error 18456", StringComparison.Ordinal));
+
+        var other = new CapturingLogger();
+        await Core.EditServerCoreAsync(new OneRowStore(), 41, "{\"host\":\"beta-02.example.test\",\"password\":\"another-secret\"}", repeats, TestKeyRings.Healthy, other, CancellationToken.None);
+        Assert.Contains(other.Lines, l => l.Contains("Login failed for user 'sa'.", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -156,7 +199,9 @@ public sealed class ConnectionTestReplyTests : IDisposable
             awsRoleAllowlist: PerformanceMonitor.Darling.Service.Targets.AwsRoleAllowlist.From(["123456789012"]));
 
         Assert.Equal("connection_failed", JsonNode.Parse(answer)!["results"]![0]!["status"]!.GetValue<string>());
-        Assert.Contains("Distinctive-Driver-Text", log.Joined, StringComparison.Ordinal);
+        /* The driver's text repeats both typed secrets, so the log line names the target and withholds the whole text (#9693). */
+        Assert.Contains(log.Lines, l => l.Contains("sql-test-01,1444", StringComparison.Ordinal));
+        Assert.DoesNotContain("Distinctive-Driver-Text", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain(Password, log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain(externalId, log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain(externalId, answer, StringComparison.Ordinal);

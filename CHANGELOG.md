@@ -36,7 +36,7 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Upgrading runs Darling store migration V298 on the service's first start, and collection pauses while it runs** ([#9306], [#9304])
 - **Upgrading runs Darling store migrations V304 through V314 and V316 through V318 on the service's first start** ([#9410], [#9419], [#9411], [#9415], [#9413], [#9414], [#9452], [#9438], [#9432], [#9427], [#9437], [#9439], [#9433], [#9485])
 - **Upgrading runs Darling store migration V315 on the service's first start, and rolling back past it needs one statement** ([#9434], [#9504])
-- **Upgrading builds three more Darling store indexes at the next service start** ([#9229], [#9288], [#9385])
+- **Upgrading builds three more Darling store indexes over the first service starts** ([#9229], [#9288], [#9385])
 - **Upgrading runs Darling store migration V319 on the service's first start** ([#9667])
 - **Lite's DuckDB schema moves to version 85 on its first start, and an older Lite build then refuses the file** ([#8784], [#8886], [#8887], [#9243], [#9241])
 - **Upgrading to 3.14.0 from 3.12 or earlier: a compose install needs the ownership change from the 3.13.0 notes** ([#8141])
@@ -99,6 +99,8 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **The exporter's `run` command uploads to S3-compatible stores and Azure Blob Storage** ([#9647])
 - **A Linux systemd install page** ([#9712], [#9719])
 - **`--set-login-password` saves one login's password again for every server that uses it** ([#9748])
+- **The linux-x64 tarball ships a systemd unit, install and upgrade scripts and a Linux config sample** ([#9741])
+- **Darling `--edit-server` changes a registered server, and the start-up warning gives the command** ([#9765])
 
 ### Changed
 
@@ -247,6 +249,9 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **Lite's and the Darling Viewer's log files indent continuation lines and write control characters as dots** ([#9781])
 - **Lite says in its log why a server is left out of FinOps and which servers the Scheduler skips** ([#9782])
 - **`add_servers` and `--add-server` name each key they do not read, with the key that was likely meant** ([#9785])
+- **Darling and Lite refuse control characters in a server's name, host, database and login** ([#9791])
+- **The upgrade start builds every missing large Darling index when the builds fit in 300 seconds** ([#9804])
+- **The hourly host rollup behind top queries builds each hour with a hash aggregate** ([#9807])
 
 ### Fixed
 
@@ -328,6 +333,11 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **The Lite guide covers upgrading, rolling back and checking the build of a headless portable install** ([#9771])
 - **The Darling install pages say to download each release into its own folder** ([#9774])
 - **`--add-server` reads a piped password with the strict reader `--set-login-password` uses** ([#9784])
+- **The Docker Compose docs cover the upgrade and rollback, MCP after the first start, the compose plugin and the signed-in /api/ping check** ([#9798])
+- **A token file that cannot be read gets the file and account in the log, not DPAPI advice** ([#9801])
+- **`kill_session` on SQL Server checks the server view grant first, and its dry run returns the KILL statement** ([#9803])
+- **A store going down with the service at stop is one Information line, not three warnings** ([#9805])
+- **Top queries, the FinOps optimization read and the host hourly rollup run on PostgreSQL 16 and 17** ([#9806])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8563,6 +8573,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9737]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9737
 [#9738]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9738
 [#9739]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9739
+[#9741]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9741
 [#9748]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9748
 [#9754]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9754
 [#9755]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9755
@@ -8572,6 +8583,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9759]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9759
 [#9763]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9763
 [#9764]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9764
+[#9765]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9765
 [#9767]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9767
 [#9770]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9770
 [#9771]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9771
@@ -8582,3 +8594,11 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9782]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9782
 [#9784]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9784
 [#9785]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9785
+[#9791]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9791
+[#9798]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9798
+[#9801]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9801
+[#9803]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9803
+[#9804]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9804
+[#9805]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9805
+[#9806]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9806
+[#9807]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9807

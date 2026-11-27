@@ -315,11 +315,74 @@ public sealed class BlockedProcessThresholdBootstrapTests
     [Fact]
     public void The_refusal_message_names_the_server_detail_and_differs_by_platform()
     {
-        var rds = BlockedProcessThresholdBootstrap.RefusalMessage(new CollectorTargetInfo { IsAwsRds = true }, "the server said no");
-        var other = BlockedProcessThresholdBootstrap.RefusalMessage(new CollectorTargetInfo(), "the server said no");
+        var rds = BlockedProcessThresholdBootstrap.RefusalMessage(new CollectorTargetInfo { IsAwsRds = true }, new[] { "the server said no" });
+        var other = BlockedProcessThresholdBootstrap.RefusalMessage(new CollectorTargetInfo(), new[] { "the server said no" });
 
         Assert.Contains("the server said no", rds);
         Assert.Contains("the server said no", other);
         Assert.NotEqual(rds, other);
+    }
+
+    private const string PermissionDenied = "User does not have permission to perform this action.";
+
+    private const string ReconfigureDenied = "You do not have permission to run the RECONFIGURE statement.";
+
+    /// <summary>
+    /// #9818: the batch runs sp_configure and RECONFIGURE and AWS RDS refuses each twice, so the SqlException carries 15247, 5812, 15247
+    /// and 5812 and its Message joins the same two messages twice with line breaks. The refusal line names each message once, in the
+    /// order the server sent them, on one line, for the RDS wording and for the other.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_refusal_that_repeats_its_errors_names_each_message_once_on_one_line(bool awsRds)
+    {
+        var bootstrap = new BlockedProcessThresholdBootstrap();
+        var answer = SqlExceptionFactory.CreateMany(
+            14, (15247, PermissionDenied), (5812, ReconfigureDenied), (15247, PermissionDenied), (5812, ReconfigureDenied));
+        var batch = Throws(answer);
+
+        var result = await bootstrap.RunAsync(1, Settings, batch.SendAsync, Numbers);
+        var line = BlockedProcessThresholdBootstrap.RefusalMessage(new CollectorTargetInfo { IsAwsRds = awsRds }, RemoteCollectorService.ErrorMessagesOf(result.Refusal));
+
+        Assert.Contains('\n', answer.Message);
+        Assert.Equal(BlockedProcessThresholdOutcome.Refused, result.Outcome);
+        Assert.DoesNotContain('\n', line);
+        Assert.DoesNotContain('\r', line);
+        Assert.EndsWith($" {PermissionDenied} {ReconfigureDenied}", line, StringComparison.Ordinal);
+        Assert.Equal(1, CountOf(line, PermissionDenied));
+        Assert.Equal(1, CountOf(line, ReconfigureDenied));
+    }
+
+    /// <summary>The errors are already a list at the shared function: repeats, interleaving, line breaks inside a message and blank entries.</summary>
+    [Fact]
+    public void The_refusal_detail_names_each_distinct_message_once_in_the_order_sent()
+    {
+        var line = BlockedProcessThresholdBootstrap.RefusalMessage(
+            new CollectorTargetInfo(), new[] { "first", "second", "first", "", "  ", "third\r\nwith a break", "second", "third\nwith a break" });
+
+        Assert.EndsWith(" Detail: first second third with a break", line, StringComparison.Ordinal);
+        Assert.DoesNotContain('\n', line);
+        Assert.DoesNotContain('\r', line);
+    }
+
+    /// <summary>A server that answers with one error keeps its message as sent.</summary>
+    [Fact]
+    public void A_single_message_is_the_detail_as_sent()
+    {
+        var line = BlockedProcessThresholdBootstrap.RefusalMessage(new CollectorTargetInfo(), new[] { PermissionDenied });
+
+        Assert.EndsWith($" Detail: {PermissionDenied}", line, StringComparison.Ordinal);
+    }
+
+    private static int CountOf(string text, string part)
+    {
+        var count = 0;
+        for (var at = text.IndexOf(part, StringComparison.Ordinal); at >= 0; at = text.IndexOf(part, at + part.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 }

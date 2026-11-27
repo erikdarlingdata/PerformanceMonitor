@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -240,6 +241,9 @@ WHERE (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
     /// the write: the rest are dropped with it (a sighting lost is a key tagged a minute later, and a store that is down is not
     /// retried row group by row group). A cancellation is not a failure of the rows: it escapes, and
     /// <paramref name="progress"/> says how many rows had landed, so the caller can keep the rest.
+    /// <para>The shutdown flush passes <paramref name="stopNotice"/> (#9794): a statement that fails because the store is going
+    /// down (<see cref="StoreStopNotice.IsStoreUnavailable"/>) then adds its unwritten rows to the notice, which the worker
+    /// reports as one Information line for the whole stop, instead of logging the Warning here. Any other failure still logs it.</para>
     /// </summary>
     /// <returns>How many rows were written.</returns>
     internal static async Task<int> WriteAsync(
@@ -247,7 +251,8 @@ WHERE (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
         IReadOnlyList<CollapsedSighting> rows,
         ILogger? logger,
         CancellationToken cancellationToken,
-        WriteProgress? progress = null)
+        WriteProgress? progress = null,
+        StoreStopNotice? stopNotice = null)
     {
         int written = 0;
         for (int start = 0; start < rows.Count; start += RowsPerStatement)
@@ -286,6 +291,12 @@ WHERE (t.object_name IS NULL AND EXCLUDED.object_name IS NOT NULL)
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                if (stopNotice is not null && StoreStopNotice.IsStoreUnavailable(ex))
+                {
+                    stopNotice.NotWritten(string.Create(CultureInfo.InvariantCulture, $"{rows.Count - start} query-tag sighting(s)"));
+                    return written;
+                }
+
                 logger?.LogWarning(
                     "Query-tag sightings: writing {Count} sighting(s) failed; they and the {Rest} after them are dropped and tagged when next sighted: {Message}",
                     length, rows.Count - start - length, ex.Message);

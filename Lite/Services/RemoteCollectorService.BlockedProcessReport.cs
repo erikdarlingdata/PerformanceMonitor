@@ -151,7 +151,7 @@ SELECT @threshold;", connection);
         else if (bootstrap.Refusal is { } refusal)
         {
             var target = new CollectorTargetInfo { IsAwsRds = _serverManager.GetConnectionStatus(server.Id).IsAwsRds };
-            AppLogger.Info("XeSession", $"[{server.DisplayName}] {BlockedProcessThresholdBootstrap.RefusalMessage(target, refusal.Message)}");
+            AppLogger.Info("XeSession", $"[{server.DisplayName}] {BlockedProcessThresholdBootstrap.RefusalMessage(target, ErrorMessagesOf(refusal))}");
         }
 
         /* #5098: server_config is an on-load collector and runs before this one on a tab-open run, so its snapshot read the
