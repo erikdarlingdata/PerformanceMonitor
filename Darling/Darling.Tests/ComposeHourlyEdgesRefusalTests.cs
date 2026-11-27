@@ -138,7 +138,7 @@ public sealed class ComposeHourlyEdgesRefusalTests
     {
         Assert.Equal("hourly_edges_rollup_floor", Decide(Plan(), coverage: Coverage(Now.AddHours(-3), Now.AddMinutes(-20))).Refusal);
         Assert.Equal("hourly_edges_rollup_ceiling", Decide(Plan(), coverage: Coverage(Now.AddDays(-3), null)).Refusal);
-        Assert.Equal("hourly_edges_middle_short", Decide(Plan(), coverage: Coverage(Now.AddDays(-3), Now.AddHours(-23).AddMinutes(30))).Refusal);
+        Assert.Equal("hourly_edges_middle_short", Decide(Plan(), coverage: Coverage(Now.AddDays(-3), Now.AddHours(-23).AddMinutes(-30))).Refusal);
     }
 
     [Fact]
