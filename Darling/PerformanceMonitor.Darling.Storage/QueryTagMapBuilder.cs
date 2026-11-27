@@ -25,13 +25,49 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <para><b>A pass flushes, then rebuilds or extends.</b> The pass first flushes the sightings buffer
 /// (<see cref="QueryTagSightingBuffer"/>) in one upsert, so it tags what the last minute sighted. Then, when
 /// <c>rules_version</c> is ahead of <c>built_version</c> (any write to the tags, assignments or rules bumps it) it
-/// rebuilds every listed server's map from all of its sightings, one transaction per server
+/// rebuilds every listed server's map from all of its sightings, each map written in one transaction per server
 /// (<see cref="QueryTagMapStore.ReplaceMapAsync"/>: a read sees the old map or the new one, never half), then stamps
 /// <c>built_version</c> with the <c>rules_version</c> it read at the start, so a rule written mid-rebuild leaves the map
 /// stale and the next pass rebuilds again. Otherwise the pass extends: it resolves only the keys whose sightings changed
 /// since this server's cursor, at most <see cref="MapKeysPerServerPerPass"/> a pass, and the remainder waits for the
-/// next one. A key with no sightings left (retention removed them) leaves the map at the next rebuild; the extend path
-/// never deletes.</para>
+/// next one. A rebuild also reads <c>collect.query_tag_sightings_slim</c> (#9705), where the retention purge keeps a sighting's key and
+/// short match fields until the key's usage rows age out. A key with no sighting left is resolved from its slim rows, so it
+/// leaves the map at the first rebuild after both are gone. A rebuild resolves a key that has a sighting from its sightings
+/// alone. An extend reads no slim row and never deletes: it writes the tag a changed key's sightings resolve to, and a key
+/// whose sightings resolve to no tag keeps the map row it had. So a key tagged from its slim rows that is sighted again under
+/// no rule keeps that tag until its server's next rebuild, which any write to the tags, assignments or rules starts, and the
+/// staggered rebuild otherwise once the server's map is <see cref="MaxRebuildAge"/> old. A slim row has no text sample, so a
+/// text rule tags a key only while it has a sighting.</para>
+///
+/// <para><b>A rebuild reads both tables front to back, in one snapshot (#9705).</b> It reads each table in pages of
+/// <see cref="QueryTagMapStore.RebuildPageBlocks"/> heap blocks (<see cref="QueryTagMapStore.ReadRebuildRowsAsync"/>), so no
+/// statement of the read grows with the server and no row is fetched through an index. The rows arrive in no key order, so
+/// each goes to its server's <see cref="QueryTagRebuildMerge"/> as it is read, the slim rows first: it keeps one small state
+/// per tagged key, drops a key's slim state at the key's first sighting, and names the few keys whose tag depends on which of
+/// their sightings comes first. Those are read in order, as the extend reads its keys
+/// (<see cref="QueryTagMapStore.ReadSightingsOfKeysAsync"/>), at most <see cref="MapKeysPerServerPerPass"/> a statement. Every
+/// page and the ordered read share one REPEATABLE READ, read only transaction, so a purge that moves a sighting to the slim
+/// table between two pages cannot hide the row from both, and each map is written once, after the read commits, in one
+/// transaction of batched inserts (<see cref="QueryTagMapStore.MapWriteBatchRows"/> rows a statement), each row made as its
+/// batch is filled.</para>
+///
+/// <para><b>A pass that rebuilds several servers reads each table once per group of servers, not once per server
+/// (#9705).</b> A rebuild-all and a start with no cursor to adopt rebuild every listed server in one pass, and a table read
+/// front to back once per server is every block of it as many times as there are servers. So the servers that rebuild for
+/// any reason but age are split into groups (<see cref="QueryTagRebuildGroups"/>), each within
+/// <see cref="QueryTagMapStore.RebuildGroupRows"/> estimated rows of both tables, and a group is one read transaction:
+/// each table's pages once, for every server of the group, each row routed to its own server's merge, then each server's
+/// ordered read. A pass whose servers fit one group reads each table once, and a pass of G groups reads each G times. The
+/// estimate is the planner's: the rows a block of the table held at its last vacuum or analyze, times the blocks it has
+/// now, shared among the servers by the statistics of the server column. A table with no count to scale is taken at the
+/// most its blocks can hold, and a server the statistics cannot place at all the table's rows. A server whose estimate is
+/// over the budget, and every server when the estimates cannot be read, is a group of one, which is one read of each
+/// table for that server. A group of several servers whose read fails is read again a server at a time in the same pass,
+/// so only the server whose own read fails goes without. The clock is read before the group's
+/// read and every server of the group gets the cursor built from it. After the read commits each server's map is written
+/// in its own transaction: a write that fails leaves that server's old map and cursor and the other servers of the group
+/// are still written. The server the staggered
+/// rebuild picks for age is always read alone.</para>
 ///
 /// <para><b>The cursor is in memory, and a copy is stored (#9308).</b> A server with no in-memory cursor (a fresh process,
 /// a newly listed server) first looks for the cursor the last process stored, and extends from it when the map it
@@ -71,7 +107,7 @@ public sealed class QueryTagMapBuilder
     /// runs every enabled rule over them, which at 5000 keys is tens of milliseconds to a couple of seconds and one
     /// bounded upsert, well inside a pass interval. The cap pages the extend, which reads only what changed after the
     /// cursor (the last two minutes, or the tail of a burst), never the whole history: a server's whole history is read
-    /// by a rebuild, in one transaction. It stays at half of <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>, the ceiling
+    /// by a rebuild, in block-range pages, and written in one transaction, <see cref="QueryTagMapStore.MapWriteBatchRows"/> rows a statement. It stays at half of <see cref="QueryTagLimits.MaxKeysPerServerPerPass"/>, the ceiling
     /// both stores share, so neither store's pass can outgrow the other's. The value is threaded into the SQL as a
     /// parameter (#3684), never written there.
     /// </summary>
@@ -107,14 +143,24 @@ public sealed class QueryTagMapBuilder
     private readonly Dictionary<int, DateTime> _ageBackoffUntil = new();
     private readonly Stopwatch _sinceConstruction = Stopwatch.StartNew();
     private readonly int _keysPerServerPerPass;
+    private readonly int _rebuildPageBlocks;
+    private readonly int _rebuildGroupRows;
+    private readonly int _mapWriteBatchRows;
     private readonly QueryTagSightingBuffer? _sightings;
     private readonly Dictionary<int, Cursor> _cursors = new();
 
     /// <param name="sightings">The buffer the collectors append to; each pass flushes it first. Null for a builder that only
     /// reads sightings other code wrote.</param>
+    /// <param name="rebuildPageBlocks">The heap blocks one page of a rebuild's read covers (<see cref="QueryTagMapStore.RebuildPageBlocks"/>).</param>
+    /// <param name="mapWriteBatchRows">The map rows one statement of a rebuild's write carries (<see cref="QueryTagMapStore.MapWriteBatchRows"/>).</param>
+    /// <param name="rebuildGroupRows">The most estimated rows of both sightings tables the servers of one rebuild group have together (<see cref="QueryTagMapStore.RebuildGroupRows"/>).</param>
     public QueryTagMapBuilder(NpgsqlDataSource postgres, ILogger? logger = null, int keysPerServerPerPass = MapKeysPerServerPerPass, QueryTagSightingBuffer? sightings = null,
-        TimeSpan? maxRebuildAge = null, TimeSpan? rebuildStartupGrace = null, TimeSpan? ageRebuildBackoff = null)
+        TimeSpan? maxRebuildAge = null, TimeSpan? rebuildStartupGrace = null, TimeSpan? ageRebuildBackoff = null, int rebuildPageBlocks = QueryTagMapStore.RebuildPageBlocks,
+        int mapWriteBatchRows = QueryTagMapStore.MapWriteBatchRows, int rebuildGroupRows = QueryTagMapStore.RebuildGroupRows)
     {
+        _rebuildPageBlocks = rebuildPageBlocks > 0 ? rebuildPageBlocks : QueryTagMapStore.RebuildPageBlocks;
+        _rebuildGroupRows = rebuildGroupRows > 0 ? rebuildGroupRows : QueryTagMapStore.RebuildGroupRows;
+        _mapWriteBatchRows = mapWriteBatchRows > 0 ? mapWriteBatchRows : QueryTagMapStore.MapWriteBatchRows;
         _maxRebuildAge = maxRebuildAge ?? MaxRebuildAge;
         _rebuildStartupGrace = rebuildStartupGrace ?? RebuildStartupGrace;
         _ageRebuildBackoff = ageRebuildBackoff ?? AgeRebuildBackoff;
@@ -205,50 +251,57 @@ public sealed class QueryTagMapBuilder
             }
         }
 
+        /* The servers that rebuild for any reason but age, read a group at a time: one read of each table per group (#9705). */
+        var groupRebuilds = serverIds
+            .Where(id => !failedAdopt.Contains(id) && (rebuildAll || rebuilds.Contains(id)) && ageRebuild != id)
+            .Distinct()
+            .ToList();
+        foreach (var group in await FormRebuildGroupsAsync(groupRebuilds, cancellationToken).ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if ((await RebuildGroupAsync(group, snapshot, cancellationToken).ConfigureAwait(false)).Count > 0)
+            {
+                allSucceeded = false;
+            }
+        }
+
+        var rebuiltInGroups = new HashSet<int>(groupRebuilds);
         foreach (int serverId in serverIds)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (failedAdopt.Contains(serverId))
+            if (failedAdopt.Contains(serverId) || rebuiltInGroups.Contains(serverId))
             {
                 continue;
             }
 
-            bool rebuild = rebuildAll || rebuilds.Contains(serverId);
-            bool agePicked = rebuild && !rebuildAll && ageRebuild == serverId;
+            /* The server picked for age is a group of one, and the others extend. */
+            if (ageRebuild == serverId
+                && (await RebuildGroupAsync(new[] { serverId }, snapshot, cancellationToken).ConfigureAwait(false)).Count == 0)
+            {
+                continue;
+            }
+
+            if (ageRebuild == serverId)
+            {
+                /* The cursor is intact (a rebuild moves it only after its map write commits), so extend from it now and keep
+                   this server out of the age pick for a while: the next pass hands the slot to the next due server. */
+                allSucceeded = false;
+                _ageBackoffUntil[serverId] = ageClock + _ageRebuildBackoff;
+            }
+
             try
             {
                 await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
-                if (rebuild)
-                {
-                    await RebuildServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    await ExtendServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
-                }
+                await ExtendServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && ageRebuild == serverId)
+            {
+                _logger?.LogWarning("Query-tag map: the extend for server {ServerId} after its failed rebuild also failed and its previous map stays: {Message}", serverId, ex.Message);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 allSucceeded = false;
-                _logger?.LogWarning(
-                    "Query-tag map: the {Step} for server {ServerId} failed and its previous map stays: {Message}",
-                    rebuild ? "rebuild" : "extend", serverId, ex.Message);
-
-                if (agePicked)
-                {
-                    /* The cursor is intact (a rebuild moves it only after its map write commits), so extend from it now and keep
-                       this server out of the age pick for a while: the next pass hands the slot to the next due server. */
-                    _ageBackoffUntil[serverId] = ageClock + _ageRebuildBackoff;
-                    try
-                    {
-                        await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
-                        await ExtendServerAsync(connection, serverId, snapshot, cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (Exception extendEx) when (extendEx is not OperationCanceledException)
-                    {
-                        _logger?.LogWarning("Query-tag map: the extend for server {ServerId} after its failed rebuild also failed and its previous map stays: {Message}", serverId, extendEx.Message);
-                    }
-                }
+                _logger?.LogWarning("Query-tag map: the extend for server {ServerId} failed and its previous map stays: {Message}", serverId, ex.Message);
             }
         }
 
@@ -328,21 +381,141 @@ public sealed class QueryTagMapBuilder
         return oldest is { } picked ? (picked, clock) : null;
     }
 
-    private async Task RebuildServerAsync(NpgsqlConnection connection, int serverId, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
+    /// <summary>
+    /// The groups the servers of one pass are rebuilt in (#9705), from the store's row estimates. One server needs no
+    /// estimate. When the estimates cannot be read every server is a group of one, which is one read of each table per server.
+    /// </summary>
+    private async Task<List<List<int>>> FormRebuildGroupsAsync(List<int> serverIds, CancellationToken cancellationToken)
     {
-        /* The clock is read before the sightings, so a sighting written while the rebuild runs is at or after the cursor. */
-        DateTime clock = await QueryTagMapStore.ClockAsync(connection, cancellationToken).ConfigureAwait(false);
-
-        var rows = new List<QueryTagMapRow>();
-        await foreach (var sightings in QueryTagMapStore.ReadAllSightingsByKeyAsync(connection, serverId, cancellationToken).ConfigureAwait(false))
+        Dictionary<int, double>? estimates = null;
+        if (serverIds.Count > 1)
         {
-            AddResolved(rows, serverId, sightings, snapshot);
+            try
+            {
+                await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
+                estimates = await QueryTagMapStore.ReadRebuildRowEstimatesAsync(connection, serverIds, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.LogWarning("Query-tag map: reading the row estimates for the rebuild failed; each server is read alone: {Message}", ex.Message);
+            }
         }
 
+        return QueryTagRebuildGroups.Form(serverIds, estimates, _rebuildGroupRows);
+    }
+
+    /// <summary>
+    /// Rebuilds the servers of one group (#9705): one read transaction for the group, each table's pages once, each row to
+    /// its own server's merge, then each server's ordered read, then each server's map write in its own transaction on its
+    /// own connection. A failed write fails only its own server. A failed read of a group of several servers rebuilds each
+    /// of them alone in the same pass, with its own read and its own failure, so a server whose read fails every pass (its
+    /// ordered read runs into the command timeout, say) does not keep the servers grouped with it from their maps. A failed
+    /// read of one server fails that server. A server that failed keeps its map and its cursor.
+    /// </summary>
+    /// <returns>The servers whose rebuild failed.</returns>
+    private async Task<List<int>> RebuildGroupAsync(IReadOnlyList<int> group, QueryTagMapSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        var merges = new Dictionary<int, QueryTagRebuildMerge>();
+        foreach (int serverId in group)
+        {
+            merges[serverId] = new QueryTagRebuildMerge(serverId, snapshot.Assignments, snapshot.Rules, snapshot.TagIdsByName);
+        }
+
+        DateTime clock;
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
+
+            /* The clock is read before the sightings, so a sighting written while the rebuild runs is at or after the cursor. */
+            clock = await QueryTagMapStore.ClockAsync(connection, cancellationToken).ConfigureAwait(false);
+            await using var read = await QueryTagMapStore.BeginRebuildReadAsync(connection, cancellationToken).ConfigureAwait(false);
+
+            /* The slim rows first, then the sightings: a key's first sighting drops what its slim rows resolved to (#9705). */
+            await foreach (var (serverId, row) in QueryTagMapStore.ReadRebuildRowsAsync(connection, group, QueryTagMapStore.RebuildSlimSightings, _rebuildPageBlocks, cancellationToken).ConfigureAwait(false))
+            {
+                merges[serverId].AddSlim(row);
+            }
+
+            await foreach (var (serverId, row) in QueryTagMapStore.ReadRebuildRowsAsync(connection, group, QueryTagMapStore.RebuildSightings, _rebuildPageBlocks, cancellationToken).ConfigureAwait(false))
+            {
+                merges[serverId].Add(row);
+            }
+
+            /* The keys whose winning sightings disagree: the first one in order decides, so they are read back through the unique
+               index, in the same snapshot, and each answer goes back into its server's merge. */
+            bool orderedPlans = false;
+            foreach (int serverId in group)
+            {
+                var merge = merges[serverId];
+                var needOrder = merge.KeysNeedingOrder();
+                if (needOrder.Count > 0 && !orderedPlans)
+                {
+                    await QueryTagMapStore.UseOrderedReadPlansAsync(connection, cancellationToken).ConfigureAwait(false);
+                    orderedPlans = true;
+                }
+
+                for (int at = 0; at < needOrder.Count; at += _keysPerServerPerPass)
+                {
+                    var batch = needOrder.GetRange(at, Math.Min(_keysPerServerPerPass, needOrder.Count - at));
+                    var sightingsByKey = await QueryTagMapStore.ReadSightingsOfKeysAsync(connection, serverId, batch, cancellationToken).ConfigureAwait(false);
+                    foreach (var key in batch)
+                    {
+                        merge.SetOrdered(
+                            QueryTagMapStore.KindOf(key.KeyKind),
+                            key.Key,
+                            sightingsByKey.TryGetValue((key.KeyKind, key.Key), out var sightings)
+                                ? QueryTagResolver.Resolve(serverId, sightings, snapshot.Assignments, snapshot.Rules, snapshot.TagIdsByName)
+                                : QueryTagResolution.None);
+                    }
+                }
+            }
+
+            await read.CommitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException && group.Count == 1)
+        {
+            _logger?.LogWarning("Query-tag map: the rebuild for server {ServerId} failed and its previous map stays: {Message}", group[0], ex.Message);
+            return group.ToList();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The group's merges are let go before any server is read again, so the pass never holds more than one group. */
+            merges.Clear();
+            _logger?.LogWarning("Query-tag map: the rebuild read for a group of {Servers} servers failed; each of them is read alone: {Message}", group.Count, ex.Message);
+            var failedAlone = new List<int>();
+            foreach (int serverId in group)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                failedAlone.AddRange(await RebuildGroupAsync(new[] { serverId }, snapshot, cancellationToken).ConfigureAwait(false));
+            }
+
+            return failedAlone;
+        }
+
+        /* Each merge makes its map rows as the write takes them, a batch at a time: no list of a server's map rows is built
+           (#9705). A merge is let go as soon as its map is written, so the group's state shrinks with each write. */
+        var failed = new List<int>();
         var next = new Cursor(clock - ExtendOverlap, string.Empty, string.Empty, clock);
-        await QueryTagMapStore.ReplaceMapAsync(connection, serverId, rows, cancellationToken, Stored(next, snapshot)).ConfigureAwait(false);
-        _cursors[serverId] = next;
-        _ageBackoffUntil.Remove(serverId);
+        foreach (int serverId in group)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                await using var connection = await _postgres.OpenConnectionAsync(StoreSessionNames.QueryTags, cancellationToken).ConfigureAwait(false);
+                await QueryTagMapStore.ReplaceMapAsync(connection, serverId, merges[serverId].MapRows(), cancellationToken, Stored(next, snapshot), _mapWriteBatchRows).ConfigureAwait(false);
+                _cursors[serverId] = next;
+                _ageBackoffUntil.Remove(serverId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                failed.Add(serverId);
+                _logger?.LogWarning("Query-tag map: the rebuild for server {ServerId} failed and its previous map stays: {Message}", serverId, ex.Message);
+            }
+
+            merges.Remove(serverId);
+        }
+
+        return failed;
     }
 
     /// <summary>
@@ -412,15 +585,7 @@ public sealed class QueryTagMapBuilder
             return;
         }
 
-        var first = sightings[0];
-        rows.Add(new QueryTagMapRow(
-            QueryTagSightingWriter.KindText(first.KeyKind),
-            first.Key,
-            checked((int)resolution.TagId!.Value),
-            QueryTagMapStore.SourceText(resolution.Source),
-            resolution.RuleId is { } ruleId ? checked((int)ruleId) : null,
-            resolution.MatchedField is { } field ? QueryTagMapStore.FieldText(field) : null,
-            resolution.MatchedValue));
+        rows.Add(QueryTagMapStore.MapRow(sightings[0].KeyKind, sightings[0].Key, resolution));
     }
 
     private readonly record struct Cursor(DateTime Since, string AfterKind, string AfterKey, DateTime RebuiltAt);
