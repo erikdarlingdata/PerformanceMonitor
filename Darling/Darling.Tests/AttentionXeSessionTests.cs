@@ -98,8 +98,9 @@ public sealed class AttentionXeSessionTests
             Assert.DoesNotContain("max_memory = 4096", sql, StringComparison.Ordinal);
         }
 
-        Assert.Contains("STARTUP_STATE = ON", shared, StringComparison.Ordinal);
-        Assert.Contains("STARTUP_STATE = OFF", own, StringComparison.Ordinal);
+        /* #9895: the client-timeout session is always own and is the install's only one, so it starts with the database. */
+        Assert.Contains("STARTUP_STATE = ON", other, StringComparison.Ordinal);
+        Assert.Contains("STARTUP_STATE = ON", own, StringComparison.Ordinal);
     }
 
     [Fact]
