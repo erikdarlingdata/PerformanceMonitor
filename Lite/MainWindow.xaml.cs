@@ -355,12 +355,11 @@ public partial class MainWindow : Window
     /// </summary>
     public void RestoreFromTray()
     {
-        Show();
-        ShowInTaskbar = true;
         /* #9735: a minimized window goes back to the state it had before it was minimized (Maximized by default),
            because forcing Normal brings a maximized window back at its declared 1200x700, past the edge of a small
-           screen. A window that is not minimized keeps its state. */
-        WindowState = _windowState.RestoreTarget(WindowState);
+           screen. A window that is not minimized keeps its state. #9886: the window is shown first and the state is
+           applied after it, with the handle restored when it is still minimized. */
+        _windowState.ShowRestored(this);
         Activate();
     }
 

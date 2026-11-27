@@ -136,8 +136,8 @@ The collector verbs differ in one case. A managed credential that was never stor
 
 `--add-server` and `--add-servers` are the same verb. There are two ways to give it servers.
 
-1. Pipe a JSON array to standard input. The shape is the one the `add_servers` MCP tool takes.
-2. Give one server in flags: `--host`, `--name`, `--auth`, `--username`, `--engine`, `--database`, `--port`. A SQL login is asked for its password, and the password is hidden.
+1. Pipe a JSON array to standard input. The shape is the one the `add_servers` MCP tool takes. [The JSON keys](#the-json-keys) lists every key.
+2. Give one server in flags: `--host`, `--name`, `--auth`, `--username`, `--engine`, `--database`, `--port`, `--encrypt-mode`, `--trust-server-certificate`, `--read-only-intent`, `--multi-subnet-failover`. A SQL login is asked for its password, and the password is hidden.
 
 In the flags form the password is read the way `--set-login-password` reads it. At a terminal it is typed at the prompt, where it is not shown. From a pipe or a file it is one line of UTF-8 text, read as bytes, so the characters saved are the ones sent. A trailing newline is fine. Stdin that holds more than one non-empty line, starts with a byte order mark, holds a NUL byte (UTF-16 does) or a lone carriage return, is not UTF-8, or is longer than a password can be is refused with exit code `1`, and no server is added. A password that starts with `env:` or `file:` is refused the same way, whether it is piped or typed, because the flags form saves a password and does not take a reference. The JSON form still accepts an `env:` or `file:` reference as a server's password.
 
@@ -145,12 +145,67 @@ In the flags form the password is read the way `--set-login-password` reads it. 
 
 `--port` takes a whole number from 1 to 65535 and is for a PostgreSQL server that listens on a port other than 5432. It is the `port` of the JSON form, so the same rules apply: a SQL Server target takes its port in the host as `host,port` and refuses `--port`. A value that is not a whole number from 1 to 65535 is refused before anything is added.
 
+`--trust-server-certificate` is a switch. Alone it means `true`, and it sets the `trust_server_certificate` of the JSON form. Without it the server is added with `false`, so the connection checks the SQL Server's certificate. With `true`, any certificate is accepted, a self-signed one included, and the connection is still encrypted. The switch also takes a value, as `--trust-server-certificate=false` or `--trust-server-certificate false`. Any other value is refused before anything is added. Use it for a lab server or an internal one whose certificate your machine does not trust. Keep verification on for anything else.
+
+`--encrypt-mode` takes `optional`, `mandatory` or `strict`, in any letter case, and sets the `encrypt_mode` of the JSON form. Without it the mode is `Mandatory`. Any other word is refused before anything is added. `--read-only-intent` and `--multi-subnet-failover` are switches like `--trust-server-certificate`. Alone each means `true`, and each takes `true` or `false`. They set `read_only_intent` and `multi_subnet_failover` of the JSON form. `read_only_intent` connects to a readable availability group secondary. Both are `false` without the flag.
+
+### The JSON keys
+
+Each entry of the array is an object. Only `host` is required. The names below are exact. `--add-server` does not read the `darling.json` spellings (`name`, `trustServerCertificate`), and it does not read a key in any other letter case. The `darling.json` column shows the spelling the same setting has in [the server entry of `darling.json`](configuration.md), where it differs.
+
+| Key | Type | Default | `darling.json` | Notes |
+|---|---|---|---|---|
+| `host` | text | *(required)* | `host` | The server's address. A SQL Server target takes a port as `host,port`. |
+| `display_name` | text | the `host` | `name` | The name shown everywhere. |
+| `database` | text | *(none)* | `database` | The database to connect to. |
+| `engine` | text | `sqlserver` | `engine` | `sqlserver` or `postgres`. A PostgreSQL target needs `auth` of `SQL`. |
+| `auth` | text | `Windows` | `auth` | `Windows`, `SQL`, `ServicePrincipal` or `ManagedIdentity`, in any letter case. The word `integrated` is for the flags form only. |
+| `username` | text | *(none)* | `username` | Required for `SQL` (the login) and `ServicePrincipal` (the client id). For `ManagedIdentity` it is the client id of a user-assigned identity, and a system-assigned one leaves it out. |
+| `password` | text | *(none)* | `password` | Required for `SQL` and `ServicePrincipal`. A literal, or an `env:NAME` or `file:/path` reference, which this verb accepts and the `add_servers` tool does not. It is tested against the server before it is saved. |
+| `port` | number | `0`, the driver's default | `port` | PostgreSQL only. A whole number from 1 to 65535. A SQL Server target refuses it. |
+| `encrypt_mode` | text | `Mandatory` | `encryptMode` | `Optional`, `Mandatory` or `Strict`. |
+| `trust_server_certificate` | `true` or `false` | `false` | `trustServerCertificate` | `true` accepts any certificate the server presents. |
+| `read_only_intent` | `true` or `false` | `false` | `readOnlyIntent` | Connect to a readable availability group secondary. |
+| `multi_subnet_failover` | `true` or `false` | `false` | `multiSubnetFailover` | |
+| `aws_role_arn` | text | *(none)* | `awsRoleArn` | PostgreSQL on Amazon RDS or Aurora only. |
+| `aws_external_id` | text | *(none)* | `awsExternalId` | Needs `aws_role_arn`. |
+| `query_store_replica` | text | *(none)* | `queryStoreReplica` | SQL Server only. |
+| `capture_plans` | `true`, `false` or `null` | `null`, which follows the service setting | `capturePlans` | |
+| `alert_delivery_mode_override` | `"Summary"`, `"PerEvent"` or `null` | `null`, which inherits the global mode | `alertDeliveryModeOverride` | |
+
+A worked entry for a SQL Server with a self-signed certificate, and one for a PostgreSQL server:
+
+```json
+[
+  { "host": "sql01", "display_name": "Orders", "auth": "SQL", "username": "darling_monitor",
+    "password": "file:/etc/darling/sql01.pw", "trust_server_certificate": true },
+  { "host": "pg01", "engine": "postgres", "port": 5433, "auth": "SQL",
+    "username": "darling_monitor", "password": "env:PG01_PASSWORD" }
+]
+```
+
+This verb does not read any other key of the `darling.json` server entry, for example `excludedDatabases` or `monthlyCostUsd`. The next paragraph says how the verb reports such a key.
+
 A key in an entry that the verb does not read is dropped, and the entry is still added. Right after the entry's line, the verb prints `Not read, so not applied:` and each key name. When a key looks like one the verb reads, the line says which: `name (did you mean display_name?)`, or `trustServerCertifcate (did you mean trust_server_certificate?)`. A key that starts with `// ` is a note and is never listed. Only key names are printed, never a value, so a password in the entry stays out of the output. The `add_servers` MCP tool and the web dashboard's add route answer the same way, with an `ignored_keys` list of `{ "key", "did_you_mean" }` on the entry's result. An entry with no such key has no `ignored_keys`, and the answer's counters and status words are unchanged.
 
 Re-running the same file is safe. Servers that are already registered do not count as a failure. A server that collides with another one, a batch where nothing was added, and an entry that was rejected all exit `1`.
 
 ```
 PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --name sql01 --auth integrated
+```
+
+A SQL login on a server with a self-signed certificate, on Windows and on Linux. The Linux command is the one from [Service verbs on Linux](linux.md#service-verbs-on-linux):
+
+```
+PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth sql --username darling_monitor --trust-server-certificate
+sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --add-server --host sql01 --auth sql --username darling_monitor --trust-server-certificate
+```
+
+A listener of an availability group, read on a readable secondary, with strict encryption. The first line is for Windows and the second for Linux:
+
+```
+PerformanceMonitor.Darling.Service.exe --add-server --host aglistener --auth sql --username darling_monitor --encrypt-mode strict --read-only-intent --multi-subnet-failover
+sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --add-server --host aglistener --auth sql --username darling_monitor --encrypt-mode strict --read-only-intent --multi-subnet-failover
 ```
 
 ### `--set-login-password`

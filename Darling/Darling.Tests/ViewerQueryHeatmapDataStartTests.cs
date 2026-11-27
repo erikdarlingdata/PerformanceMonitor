@@ -85,7 +85,7 @@ public sealed class ViewerQueryHeatmapDataStartTests : IDisposable
     {
         var read = MethodBody(ViewerFile("ViewerServerTab.QueryHeatmap.cs"), @"private async Task ReadAndDrawQueryHeatmapAsync\(");
 
-        Assert.Equal(1, Matches(read, @"var dataStartTask = _dataService\.GetQueryHeatmapDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\);"));
+        Assert.Equal(1, Matches(read, @"var dataStartTask = Timed\(timer,\s*""data start"",\s*QueriesReadsOverride\?\.HeatmapDataStart\?\.Invoke\(startUtc,\s*endUtc\)\s*\?\?\s*_dataService\.GetQueryHeatmapDataStartAsync\(_server\.ServerId,\s*startUtc,\s*endUtc\)\);"));
         Assert.Equal(1, Matches(read,
             @"await ShowEventDataStartAsync\(QueryHeatmapTruncationBanner,\s*dataStartTask,\s*""Query Heatmap"",\s*startUtc,\s*result\.TimeBuckets\.Select\(t => \(DateTime\?\)t\)\);"));
     }
