@@ -166,6 +166,10 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
             Assert.NotEmpty(statements);
             Assert.All(statements, s => Assert.True((double)s!["ms"]! >= 0));
             Assert.True((int)read["statement_count"]! >= statements.Count);
+            /* #9923: a physical connection open is counted on its own, and an open never takes a statement slot. */
+            Assert.All(statements, s => Assert.False(string.IsNullOrEmpty((string?)s!["label"])));
+            Assert.True((int)read["connection_opens"]! >= 0);
+            Assert.True((int)read["connection_open_ms"]! >= 0);
             var storedStatements = statements.ToJsonString();
             foreach (var leak in new[] { "Host=", "Username=", "Password=" })
             {
