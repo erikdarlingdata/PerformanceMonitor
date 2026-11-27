@@ -10,7 +10,7 @@
   <ItemGroup>
     <PackageVersion Include="AWSSDK.PI" Version="4.1.0.2" />
     <PackageVersion Include="AWSSDK.RDS" Version="4.1.1.1" />
-    <PackageVersion Include="AWSSDK.S3" Version="4.1.2" />
+    <PackageVersion Include="AWSSDK.S3" Version="4.1.2.1" />
     <PackageVersion Include="AWSSDK.SecurityToken" Version="4.1.1.1" />
     <PackageVersion Include="BlackwellSystems.Gcf" Version="1.1.0" />
     <PackageVersion Include="Azure.Storage.Blobs" Version="12.30.2" />
