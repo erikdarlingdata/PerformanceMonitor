@@ -76,6 +76,32 @@ internal sealed class ReadScope
 
     private readonly ReadScope? _parent;
 
+    /// <summary>True for a scope opened outside every other scope (#9882): it shares no connection wait and no in-flight count
+    /// with another read.</summary>
+    internal bool IsOutermost => _parent is null;
+
+    /* #9882: where this scope's recorder offers a slow read, on which surface and for which caller. Set once by the recorder
+       before the read runs, and copied to the scope of a read this one starts and leaves running (OpenStartedBy). */
+    private SlowReadLog? _slowReads;
+    private ReadSurface _surface;
+    private string? _caller;
+
+    /// <summary>Names the slow-read log this scope's recorder offers to, with its surface and the finished caller string (#9882), so a
+    /// read this one starts and leaves running can offer its own row to the same log (<see cref="OpenStartedBy"/>). A scope whose
+    /// recorder names none starts reads that record nothing.</summary>
+    internal void RecordsTo(SlowReadLog? slowReads, ReadSurface surface, string? caller)
+    {
+        _slowReads = slowReads;
+        _surface = surface;
+        _caller = caller;
+    }
+
+    /// <summary>Offers this scope's read to the slow-read log named in <see cref="RecordsTo"/> under <paramref name="route"/> (#9882),
+    /// the way a recorder offers a tool read: the log decides by the outcome and the time whether it is worth a row, and the row
+    /// carries this scope's statements, connection wait and window. Never throws; with no log named it does nothing.</summary>
+    internal void OfferSlow(string route, ReadOutcome outcome, long totalMs, System.Text.Json.Nodes.JsonObject? arguments, string? errorClass) =>
+        _slowReads?.Offer(this, _surface, route, outcome, totalMs, arguments, errorClass, Logger, _caller);
+
     /* 1 while this outermost scope is counted in s_inFlight; 0 for a nested scope, and while the read waits for an
        admission slot (#5506 part 3). Exchanged, so a scope is uncounted exactly once. */
     private int _counting;
@@ -368,6 +394,29 @@ internal sealed class ReadScope
 
     /// <summary>The scope the calling async flow runs inside, or null outside any recorder.</summary>
     internal static ReadScope? Current => s_current.Value;
+
+    /// <summary>Takes the calling async flow out of every scope (#9882). For work started with <c>Task.Run</c> that goes on after
+    /// the read that started it has answered: called first inside the started task, it keeps that work's statements, connection
+    /// waits and notes out of a scope whose record may already be written. The started task then opens a scope of its own
+    /// (<see cref="OpenStartedBy"/>). The assignment stays in the started task's flow and never reaches the caller.</summary>
+    internal static void Detach() => s_current.Value = null;
+
+    /// <summary>Opens the scope of a read that the read in <paramref name="starter"/> started with <c>Task.Run</c> and that goes on
+    /// after it has answered (#9882). Called in the started task after <see cref="Detach"/>, it is an outermost scope: it counts in
+    /// <see cref="InFlight"/> and keeps its own statements, connection waits and notes, so the read stays visible on its own. It
+    /// takes the starter's logger, statement capture, slow-read log, surface and caller, so <see cref="OfferSlow"/> writes where the
+    /// starter's recorder writes. With no starter it uses <paramref name="logger"/> and records no row.</summary>
+    internal static Opened OpenStartedBy(ReadScope? starter, ILogger? logger)
+    {
+        var opened = Open(starter?.Logger ?? logger);
+        if (starter is not null)
+        {
+            opened.Scope.CaptureStatements = starter.CaptureStatements;
+            opened.Scope.RecordsTo(starter._slowReads, starter._surface, starter._caller);
+        }
+
+        return opened;
+    }
 
     /* #6390 S2c: the composed-panel run lives in Storage and cannot name this class; it notes through ComposeReadNotes, which is
        pointed at this scope here, before any service type is used. */

@@ -191,4 +191,102 @@ FROM
         Assert.NotNull(fromFull.PlansPerQueryP95);
         Assert.Equal(fromFull, fromNarrow);
     }
+
+    /// <summary>
+    /// #9882: the fleet read runs the narrow statement once per server on the route the fleet shares. On a fleet of more servers than
+    /// run at once it returns the rows of one statement over the whole fleet, and so the same fleet median, on the raw route, the day
+    /// route and the hour route. The statement seam holds each statement until <see cref="DarlingQueryStoreClutterReader.FleetChurnParallelism"/>
+    /// are in flight, so the read is shown to run that many at once, with each server read once on its own, and no more were seen in flight together.
+    /// </summary>
+    [Fact]
+    public async Task ThePerServerRead_GivesTheRowsAndTheMedianOfOneStatementOverTheFleet_AndRunsItsStatementsABoundedNumberAtATime()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(QueryStoreClosedDayRollupLiveTests.BaseConnectionString), Skip);
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = await QueryStoreClosedDayRollupLiveTests.SeedAsync(ct);
+        await SeedAsync(store, ct);
+        var servers = new[] { A, B, -9882001, -9882002, -9882003, -9882004 };
+        foreach (var extra in servers.Skip(2))
+        {
+            await QueryStoreClutterRollupLiveTests.SeedServerAsync(store, extra, E.AddDays(-6), 6, 24, 8, true, ct, oddRows: true);
+        }
+
+        /* one statement at a time still fills the gate when it is the last server's turn, so the fleet is larger than the bound */
+        var atOnce = DarlingQueryStoreClutterReader.FleetChurnParallelism;
+        Assert.True(servers.Length > atOnce);
+
+        async Task CompareAsync(Window w, string label)
+        {
+            var route = await DarlingQueryStoreClutterReader.ResolveClutterRouteAsync(store.Postgres, servers, w.Start, w.End, ct);
+            var single = await DarlingQueryStoreClutterReader.ReadPlanChurnP95StatementAsync(store.Postgres, servers, w.Start, w.End, route, ct);
+
+            var gate = new object();
+            var seen = new List<int[]>();
+            int inFlight = 0, most = 0;
+            var full = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            DarlingQueryStoreClutterReader.FleetChurnStatementSeam.Value = async (ids, token) =>
+            {
+                lock (gate)
+                {
+                    seen.Add(ids);
+                    inFlight++;
+                    most = Math.Max(most, inFlight);
+                    if (inFlight == atOnce) full.TrySetResult();
+                }
+
+                try
+                {
+                    /* held until the bound is reached: a read that ran fewer at once would stop here */
+                    await full.Task.WaitAsync(TimeSpan.FromSeconds(60), token);
+                }
+                finally
+                {
+                    lock (gate) inFlight--;
+                }
+            };
+            List<DarlingQueryStoreClutterReader.PlanChurnP95Row> perServer;
+            try
+            {
+                perServer = await DarlingQueryStoreClutterReader.GetPlanChurnP95Async(store.Postgres, servers, w.Start, w.End, asOfUtc: null, cancellationToken: ct);
+            }
+            finally
+            {
+                DarlingQueryStoreClutterReader.FleetChurnStatementSeam.Value = null;
+            }
+
+            Assert.True(single.Count > 0, $"{label} / {w.Label}: the single statement returned no rows");
+            Assert.Equal(servers.Order().ToArray(), single.Select(r => r.ServerId).Distinct().Order().ToArray());
+            Assert.Equal(
+                Lines(single.Select(r => (r.ServerId, r.DatabaseName, r.PlansPerQueryP95)).ToList()),
+                Lines(perServer.Select(r => (r.ServerId, r.DatabaseName, r.PlansPerQueryP95)).ToList()));
+            var fromSingle = QueryStoreClutter.ComputeFleetMedian(servers, [], single, [], []);
+            Assert.NotNull(fromSingle.PlansPerQueryP95);
+            Assert.Equal(fromSingle, QueryStoreClutter.ComputeFleetMedian(servers, [], perServer, [], []));
+
+            Assert.Equal(servers.Order().ToArray(), seen.Select(ids => Assert.Single(ids)).Order().ToArray());
+            Assert.Equal(atOnce, most);
+        }
+
+        foreach (var w in Windows)
+        {
+            Assert.Null(await DarlingQueryStoreClutterReader.ResolveClutterRouteAsync(store.Postgres, servers, w.Start, w.End, ct));
+            await CompareAsync(w, "raw");
+        }
+
+        var tick = await QueryStoreClosedDayRollupLiveTests.TickAsync(store, DayRetention, ct, TickNow, RawRetention);
+        Assert.True(tick.HoursBuilt > 0, "the tick built no hour");
+        var hoursSeen = false;
+        var daysSeen = false;
+        foreach (var w in Windows)
+        {
+            var route = await DarlingQueryStoreClutterReader.ResolveClutterRouteAsync(store.Postgres, servers, w.Start, w.End, ct);
+            Assert.True(route is not null, $"{w.Label}: nothing is served from the rollups, so the comparison would prove nothing");
+            hoursSeen |= route!.Value.Hours;
+            daysSeen |= route.Value.DayStart < route.Value.DayEnd;
+            await CompareAsync(w, "routed");
+        }
+
+        Assert.True(hoursSeen, "no window took the hour route");
+        Assert.True(daysSeen, "no window took whole days from the daily rollups");
+    }
 }
