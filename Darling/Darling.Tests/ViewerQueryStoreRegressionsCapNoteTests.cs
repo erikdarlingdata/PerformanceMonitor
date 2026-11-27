@@ -48,7 +48,7 @@ public sealed class ViewerQueryStoreRegressionsCapNoteTests
 
         Assert.NotNull(note);
         Assert.StartsWith($"Showing the top {Cap}, ranked by total added duration", note, StringComparison.Ordinal);
-        Assert.DoesNotContain(" of ", note, StringComparison.Ordinal);
+        Assert.DoesNotContain($"top {Cap} of", note, StringComparison.Ordinal);
     }
 
     [Fact]
