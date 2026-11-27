@@ -276,6 +276,8 @@ public partial class RemoteCollectorService
             PerfmonCounterOverride = GetPerfmonCounterOverride(),
             /* #4961: the long-query definition reads this install's own session, so its context carries the name. */
             LongQuerySessionName = definition is LongQueryCompletionsCollector ? LongQuerySessionName() : null,
+            /* #9895: the client-timeout read names this install's own session on every engine; the Azure per-database loop sets it again, to the same name. */
+            AlwaysOnSessionName = definition is AttentionCollector ? AlwaysOnOwnSessionName(AlwaysOnXeSessionKind.Attention) : null,
             /* #9529: only query_snapshots reads it. The scheduled run reuses the plans it holds. The live snapshot
                button builds its own command with no context, so it holds nothing and fetches under the cap. */
             SnapshotPlanCache = _snapshotPlanCache,

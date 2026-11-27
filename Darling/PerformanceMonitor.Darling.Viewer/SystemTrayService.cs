@@ -58,6 +58,9 @@ public sealed class SystemTrayService : IDisposable
         ThemeManager.ThemeChanged += OnThemeChanged;
     }
 
+    /// <summary>The tray icon this service built, for tests that read what the shell is given (#9892). Null before <see cref="Initialize"/>.</summary>
+    internal TaskbarIcon? TrayIcon => _trayIcon;
+
     /// <summary>
     /// Initializes the system tray icon with its context menu. Safe to call again: it disposes the old icon and
     /// re-subscribes the StateChanged handler exactly once. A theme change does not come through here; it restyles
@@ -132,6 +135,11 @@ public sealed class SystemTrayService : IDisposable
             CornerRadius = new CornerRadius(4),
             Child = _tooltipText
         };
+
+        /* #9892: the shell takes the icon's name, which a screen reader announces and UI Automation finds the icon by, from
+           ToolTipText, and never from the TrayToolTip popup. Hardcodet sends the standard tip only when TrayToolTip is null,
+           so with both set, hover still shows only the popup. The two carry the same sentence. */
+        _trayIcon.ToolTipText = TooltipText;
 
         /* Build context menu — Show Window / Exit. The viewer has no in-process collection to pause. */
         var contextMenu = new ContextMenu();
