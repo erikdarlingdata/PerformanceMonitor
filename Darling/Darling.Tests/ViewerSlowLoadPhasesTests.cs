@@ -871,13 +871,23 @@ public sealed class ViewerSlowLoadPhasesTests
         };
     }
 
-    /// <summary>Loads one Queries sub-tab whose store reads <paramref name="reads"/> hands in, on <paramref name="timer"/>, and returns the lines the load wrote.</summary>
+    /// <summary>#9919: a slow-load threshold no load reaches, so a test that does not hold a read to make a line reads no wall clock. The clock a test
+    /// creates before the helper builds and shows a tab counts the build, and the tab's own first-open clock counts the tab's construction, so on a
+    /// loaded machine either passes the real 2,000 ms with no read held.</summary>
+    private const int OutOfReachMs = int.MaxValue;
+
+    /// <summary>Loads one Queries sub-tab whose store reads <paramref name="reads"/> hands in, on <paramref name="timer"/>, and returns the lines the load wrote.
+    /// #9919: the tab's first-open clock, which the sub-tab pick below starts, has its threshold out of reach, so the only line a load writes is the one
+    /// <paramref name="timer"/> decides: the test sets that clock's threshold.</summary>
     private static List<string> LoadQueriesSubTab(int subTabIndex, ViewerServerTab.QueriesSubTabReads reads, ViewerLoadTimer timer, Func<Task>? whileLoading = null)
     {
         var lines = new List<string>();
         RunThemed(async () =>
         {
-            var tab = new ViewerServerTab(new ViewerDataService(FailsAtOnceStore()), new DarlingServer(1, "queries-subtab", "queries-subtab", true, null));
+            var tab = new ViewerServerTab(new ViewerDataService(FailsAtOnceStore()), new DarlingServer(1, "queries-subtab", "queries-subtab", true, null))
+            {
+                FirstOpenSlowThresholdMs = OutOfReachMs,
+            };
             var window = new Window { Content = tab, Width = 1600, Height = 900 };
             StaTestThread.ShowOffScreen(window);
             try
@@ -950,9 +960,11 @@ public sealed class ViewerSlowLoadPhasesTests
     [InlineData("Query Heatmap", "data start,heatmap read")]
     public void QueriesSubTab_EachStoreCall_BooksOneTimedRead_AndAFastLoadWritesNoLine(string subTab, string expectedPhases)
     {
+        /* #9919: the load's clock has its threshold out of reach, so the line is absent whatever the machine's speed and a sub-tab load that writes a
+           line whatever its threshold fails this test. ALoadUnderTheThreshold_WritesNoLine holds the threshold rule on its own. */
         var expected = expectedPhases.Split(',');
         var (index, _, _, reads) = QueriesSubTab(subTab);
-        var timer = new ViewerLoadTimer();
+        var timer = new ViewerLoadTimer(OutOfReachMs);
         List<string> booked = new();
 
         var lines = LoadQueriesSubTab(index, reads(() => Task.CompletedTask), timer, async () =>
