@@ -23,9 +23,10 @@ namespace Darling.Tests;
 /// <summary>
 /// The Client Timeouts reads count the samples from each row's own columns and then correct the groups that hold a matched sample (#9881).
 /// These tests plant a week on a real PostgreSQL store and hold the three reads (sample groups, baseline minutes, matched calls) to two
-/// things: the numbers worked out by hand for each named case, and a reference read that judges every sample on its own with a correlated
-/// look at the calls. The reference is slow and plain on purpose: it states the match rule once per sample, so any regrouping of the product
-/// read that changes a matched pair, a count or a rate shows up as a differing row. Gated on DARLING_TEST_PG.
+/// things: the numbers worked out by hand for each named case, and a reference read that judges every sample on its own. The reference is plain
+/// on purpose: it states the match rule once, as a join of the calls to each sample, and counts per sample id, so any regrouping of the product
+/// read that changes a matched pair, a count or a rate shows up as a differing row. Its cost is the planted week once,
+/// not the planted week once per sample, so it finishes well inside the command timeout on a fresh store. Gated on DARLING_TEST_PG.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class ClientTimeoutsMatchedReadLiveTests
@@ -34,15 +35,25 @@ public sealed class ClientTimeoutsMatchedReadLiveTests
     private const string Dbatools = AttentionWindowSql.DbatoolsClientApp;
     private const string Ssms = AttentionWindowSql.SsmsIntelliSensePrefix + " - Transact-SQL " + AttentionWindowSql.SsmsIntelliSenseSuffix;
 
-    /* The match rule, stated for one sample s and one call c. The floors and the tolerance are written out here, not taken from the product, so the reference stands on its own. */
-    private const string CallOfSample = """
-c.server_id = $1 AND c.collection_time >= $2 AND c.collection_time {0} $3 AND c.event_kind = 'aborted' AND c.interrupt_duration_us >= 900000
-        AND c.session_id = s.session_id AND c.database_name IS NOT DISTINCT FROM s.database_name
-        AND c.event_time >= s.event_time - INTERVAL '100000 microseconds' AND c.event_time <= s.event_time + INTERVAL '100000 microseconds'
-""";
-
-    /* Every sample judged alone. An unqualified column in a product predicate names the row of the query level it is written in: s outside the subqueries, c inside them. */
+    /* Every sample judged alone. The calls are read once, as a derived relation joined to the samples and grouped per sample id, so the read costs the planted week
+       once and not once per sample (#9881). The match rule is written out here, not taken from the product: a call is an aborted event at or over the floor in the
+       same run range, in the same session, in the same database (NULL matching NULL), within 100000 microseconds either side of the sample's event_time.
+       An unqualified column in a product predicate names the row of the query level it is written in: c inside the calls relation, s in the outer sample level. */
     private static string Judged(string end) => $"""
+sample_calls AS (
+    SELECT s.attention_event_id AS sample_id, COUNT(*) AS calls, COUNT(*) FILTER (WHERE cc.az) AS az_calls, COUNT(*) FILTER (WHERE cc.dt) AS dt_calls
+    FROM attention_events AS s
+    JOIN (
+        SELECT c.session_id AS call_session, c.database_name AS call_database, c.event_time AS call_time,
+            COALESCE({AttentionWindowSql.AzdataMetadataPredicate}, FALSE) AS az, COALESCE({AttentionWindowSql.DbatoolsSmoMetadataPredicate}, FALSE) AS dt
+        FROM attention_events AS c
+        WHERE c.server_id = $1 AND c.collection_time >= $2 AND c.collection_time {end} $3 AND c.event_kind = 'aborted' AND c.interrupt_duration_us >= 900000
+    ) AS cc
+        ON cc.call_session = s.session_id AND cc.call_database IS NOT DISTINCT FROM s.database_name
+        AND cc.call_time >= s.event_time - INTERVAL '100000 microseconds' AND cc.call_time <= s.event_time + INTERVAL '100000 microseconds'
+    WHERE s.server_id = $1 AND s.collection_time >= $2 AND s.collection_time {end} $3 AND s.event_kind = 'sample'
+    GROUP BY s.attention_event_id
+),
 judged AS (
     SELECT
         s.collection_time, s.database_name, s.client_app_name,
@@ -50,10 +61,9 @@ judged AS (
         COALESCE({AttentionWindowSql.AzdataMetadataPredicate}, FALSE) AS az_own,
         COALESCE({AttentionWindowSql.DbatoolsSmoMetadataPredicate}, FALSE) AS dt_own,
         COALESCE({AttentionWindowSql.ExcludedAppPredicate}, FALSE) AS excluded,
-        (SELECT COUNT(*) FROM attention_events AS c WHERE {string.Format(CultureInfo.InvariantCulture, CallOfSample, end)}) AS calls,
-        (SELECT COUNT(*) FROM attention_events AS c WHERE {string.Format(CultureInfo.InvariantCulture, CallOfSample, end)} AND COALESCE({AttentionWindowSql.AzdataMetadataPredicate}, FALSE)) AS az_calls,
-        (SELECT COUNT(*) FROM attention_events AS c WHERE {string.Format(CultureInfo.InvariantCulture, CallOfSample, end)} AND COALESCE({AttentionWindowSql.DbatoolsSmoMetadataPredicate}, FALSE)) AS dt_calls
+        COALESCE(sc.calls, 0) AS calls, COALESCE(sc.az_calls, 0) AS az_calls, COALESCE(sc.dt_calls, 0) AS dt_calls
     FROM attention_events AS s
+    LEFT JOIN sample_calls AS sc ON sc.sample_id = s.attention_event_id
     WHERE s.server_id = $1 AND s.collection_time >= $2 AND s.collection_time {end} $3 AND s.event_kind = 'sample'
 )
 """;
