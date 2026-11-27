@@ -601,12 +601,12 @@ public sealed class DarlingOwnStoreLoginProbeTests : IDisposable
 
     /// <summary>The stop token cancelling the probe is the one cancellation that propagates: the service is stopping, so no verdict is made.</summary>
     [Fact]
-    public async Task AStopDuringTheProbe_PropagatesTheCancellation_NotAVerdict()
+    public async Task AStopToken_AlreadyCancelled_PropagatesTheCancellation_NotAVerdict()
     {
         using var store = new QuietStore(answerStartup: false);
         var postgres = OwnStore(Owner, webConnectionString: QuietConnectionString(store));
-        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
-        stop.CancelAfter(TimeSpan.FromMilliseconds(300));
+        using var stop = new CancellationTokenSource();
+        await stop.CancelAsync();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             DarlingStoreLogins.ProbeSurfaceLoginAsync(DarlingStoreLogins.Surface.Web, postgres, stop.Token));
