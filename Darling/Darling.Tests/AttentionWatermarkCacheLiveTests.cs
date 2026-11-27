@@ -63,6 +63,8 @@ public sealed class AttentionWatermarkCacheLiveTests
 
     private static CollectorContext MakeContext(ServerRuntime server, DateTime collectionTime, DateTime? watermark = null) => new()
     {
+        /* #9895: the read names this install's own client-timeout session. */
+        AlwaysOnSessionName = AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, "0a1b2c3d", AlwaysOnXeSessionKind.Attention),
         ServerId = server.ServerId,
         ServerName = server.StorageName,
         CollectionTime = collectionTime,
