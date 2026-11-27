@@ -36,7 +36,9 @@ internal sealed record QueryTagRebuildMergeResult(IReadOnlyList<QueryTagMapRow> 
 /// <para>What is held (#9705), per tagged key: one dictionary entry (the key's kind, the rank, three small numbers and two
 /// references, 48 bytes and 4 for its bucket) and the key's text once. Measured on a lab store whose rebuild tags 8.36
 /// million keys of 18 characters: 138.6 bytes a tagged key, 74.6 for the dictionary at its capacity of 12.0 million entries
-/// and 64.0 for the key's text, 1,105 MiB in all. Nothing else grows with the keys. Equal resolutions are one object
+/// and 64.0 for the key's text, 1,105 MiB in all. The whole rebuild process on that store, reads and a map write of
+/// 10,000 rows a statement into an empty map included, peaks at 1.38 GiB resident: 177.5 bytes a tagged key. Nothing else
+/// grows with the keys. Equal resolutions are one object
 /// (<see cref="_resolutions"/>: a rule that tags a million keys by one application name holds one resolution, and that
 /// store's 8.36 million keys held 301). Of the slim row that won a key the state keeps three numbers, its database, its
 /// caller and its object, each the number of one shared entry: <see cref="_texts"/> holds one string per distinct
