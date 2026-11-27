@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Formats.Asn1;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -29,8 +30,10 @@ namespace PerformanceMonitor.Darling.Service;
 /// presents in the TLS handshake, through Npgsql's validation callback (<c>tls_handshake</c>). The handshake needs no password: the
 /// certificate arrives before sign-in. When the store's <c>ssl</c> setting is off, the answer is <c>off</c> and nothing else is read.</para>
 ///
-/// <para>The root is the self-signed certificate that is not the server's own: the one in the chain file or among the certificates the
-/// store sends in the handshake, else (managed) the <c>root.crt</c> beside it. A certificate that is its own root has none to report.</para>
+/// <para>The root is the self-signed certificate the server certificate chains to (#9908). The chain is followed only through the
+/// certificates in the chain file and the <c>root.crt</c> beside it (managed), or the certificates the store sends in the handshake, and
+/// each link's signature is checked here. A self-signed certificate that did not issue the chain is not reported, and a certificate that
+/// is its own root has none to report.</para>
 /// </summary>
 internal static class StoreServerCertificate
 {
@@ -111,19 +114,47 @@ internal static class StoreServerCertificate
     /// <summary>Whole days from <paramref name="nowUtc"/> to <paramref name="notAfterUtc"/>, rounded down. Negative once the certificate has expired.</summary>
     internal static int DaysToExpiry(DateTime notAfterUtc, DateTime nowUtc) => (int)Math.Floor((notAfterUtc - nowUtc).TotalDays);
 
-    /// <summary>The self-signed certificate in <paramref name="certificates"/> that is not <paramref name="server"/>, or null.</summary>
-    private static X509Certificate2? FindRoot(IEnumerable<X509Certificate2> certificates, X509Certificate2 server)
+    /// <summary>
+    /// #9908: the self-signed certificate <paramref name="server"/> chains to through <paramref name="candidates"/>, or null. Each link is
+    /// checked here, by issuer name and by verifying the signature with the issuer's public key. No chain engine, certificate store,
+    /// download or revocation check takes part, so the answer is the same on every machine. The candidates are tried in fingerprint order,
+    /// so the order they arrive in does not change the answer, and the nearest root wins. A self-signed candidate that did not issue the
+    /// chain is not reported, and a server certificate that is its own root has none to report.
+    /// </summary>
+    internal static X509Certificate2? FindIssuingRoot(X509Certificate2 server, IEnumerable<X509Certificate2> candidates)
     {
-        foreach (var candidate in certificates)
+        if (IsIssuedBy(server, server))
         {
-            if (candidate.RawData.AsSpan().SequenceEqual(server.RawData))
-            {
-                continue;
-            }
+            return null;
+        }
 
-            if (candidate.SubjectName.RawData.AsSpan().SequenceEqual(candidate.IssuerName.RawData))
+        var ordered = candidates
+            .Select(candidate => (Certificate: candidate, Fingerprint: Fingerprint(candidate)))
+            .DistinctBy(candidate => candidate.Fingerprint)
+            .OrderBy(candidate => candidate.Fingerprint, StringComparer.Ordinal)
+            .ToList();
+
+        /* Breadth first from the server certificate. A certificate is followed once, so the walk ends however the candidates are signed. */
+        var reached = new HashSet<string>(StringComparer.Ordinal) { Fingerprint(server) };
+        var pending = new Queue<X509Certificate2>();
+        pending.Enqueue(server);
+        while (pending.Count > 0)
+        {
+            var current = pending.Dequeue();
+            foreach (var candidate in ordered)
             {
-                return candidate;
+                if (reached.Contains(candidate.Fingerprint) || !IsIssuedBy(current, candidate.Certificate))
+                {
+                    continue;
+                }
+
+                if (IsIssuedBy(candidate.Certificate, candidate.Certificate))
+                {
+                    return candidate.Certificate;
+                }
+
+                reached.Add(candidate.Fingerprint);
+                pending.Enqueue(candidate.Certificate);
             }
         }
 
@@ -131,8 +162,64 @@ internal static class StoreServerCertificate
     }
 
     /// <summary>
+    /// True when <paramref name="issuer"/> issued <paramref name="certificate"/>: the certificate's issuer name is the issuer's subject name
+    /// and its signature verifies with the issuer's public key. RSA (PKCS #1 v1.5) and ECDSA signatures over SHA-256, SHA-384 or SHA-512
+    /// are checked. A link signed any other way is not checked, so it does not count and that chain reports no root.
+    /// </summary>
+    private static bool IsIssuedBy(X509Certificate2 certificate, X509Certificate2 issuer)
+    {
+        if (!certificate.IssuerName.RawData.AsSpan().SequenceEqual(issuer.SubjectName.RawData))
+        {
+            return false;
+        }
+
+        try
+        {
+            /* Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue BIT STRING }. The signature is over the encoded
+               tbsCertificate. */
+            var body = new AsnReader(certificate.RawDataMemory, AsnEncodingRules.DER).ReadSequence();
+            var signed = body.ReadEncodedValue();
+            var algorithm = body.ReadSequence().ReadObjectIdentifier();
+            var signature = body.ReadBitString(out var unusedBits);
+            if (unusedBits != 0)
+            {
+                return false;
+            }
+
+            var (hash, rsa) = algorithm switch
+            {
+                "1.2.840.113549.1.1.11" => (HashAlgorithmName.SHA256, true),
+                "1.2.840.113549.1.1.12" => (HashAlgorithmName.SHA384, true),
+                "1.2.840.113549.1.1.13" => (HashAlgorithmName.SHA512, true),
+                "1.2.840.10045.4.3.2" => (HashAlgorithmName.SHA256, false),
+                "1.2.840.10045.4.3.3" => (HashAlgorithmName.SHA384, false),
+                "1.2.840.10045.4.3.4" => (HashAlgorithmName.SHA512, false),
+                _ => (default(HashAlgorithmName), false),
+            };
+            if (hash.Name is null)
+            {
+                return false;
+            }
+
+            if (rsa)
+            {
+                using var rsaKey = issuer.GetRSAPublicKey();
+                return rsaKey is not null && rsaKey.VerifyData(signed.Span, signature, hash, RSASignaturePadding.Pkcs1);
+            }
+
+            using var ecdsaKey = issuer.GetECDsaPublicKey();
+            return ecdsaKey is not null && ecdsaKey.VerifyData(signed.Span, signature, hash, DSASignatureFormat.Rfc3279DerSequence);
+        }
+        catch (Exception ex) when (ex is AsnContentException or CryptographicException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// A managed store's certificate, read from the files the service wrote. <paramref name="certPath"/> holds the leaf first, then the CA
-    /// when there is one. <paramref name="rootPath"/> is the distributable root beside it, used when the chain file carries no root. A file
+    /// when there is one. <paramref name="rootPath"/> is the distributable root beside it, read when the chain file does not hold the root
+    /// that issued the chain. The root is the one <see cref="FindIssuingRoot"/> reaches from the leaf through both files' certificates. A file
     /// that is missing or is not a certificate answers <c>unavailable</c> with a sentence that names the file, never its contents.
     /// </summary>
     internal static Report FromManagedFiles(string certPath, string rootPath)
@@ -153,12 +240,12 @@ internal static class StoreServerCertificate
             }
 
             var server = chain[0];
-            var root = FindRoot(chain, server);
+            var root = FindIssuingRoot(server, chain);
             if (root is null && File.Exists(rootPath))
             {
                 var rootFile = new X509Certificate2Collection();
                 rootFile.ImportFromPem(File.ReadAllText(rootPath));
-                root = FindRoot(rootFile, server);
+                root = FindIssuingRoot(server, chain.Concat(rootFile));
             }
 
             return new Report(TlsOn, ManagedFileSource, Describe(server), root is null ? null : Describe(root), null);
@@ -175,7 +262,16 @@ internal static class StoreServerCertificate
     /// returns false, so the handshake ends there: no startup message (user name, database) and no password is ever sent, and the store sees
     /// a failed TLS handshake, not a failed sign-in. It is reading what the store presents, not deciding whether to trust it.
     /// </summary>
-    internal static async Task<Report> FromHandshakeAsync(string connectionString, CancellationToken cancellationToken)
+    internal static Task<Report> FromHandshakeAsync(string connectionString, CancellationToken cancellationToken) =>
+        FromHandshakeAsync(connectionString, FromPresented, cancellationToken);
+
+    /// <summary>
+    /// <see cref="FromHandshakeAsync(string, CancellationToken)"/> with <paramref name="present"/> turning what the validation callback
+    /// receives (the server certificate and the chain whose policy carries what the store sent) into the answer. The service passes
+    /// <see cref="FromPresented"/>. A test passes its own to see what a real handshake hands the callback.
+    /// </summary>
+    internal static async Task<Report> FromHandshakeAsync(
+        string connectionString, Func<X509Certificate?, X509Chain?, Report?> present, CancellationToken cancellationToken)
     {
         Report? presented = null;
         try
@@ -199,11 +295,17 @@ internal static class StoreServerCertificate
             var dataSourceBuilder = new NpgsqlDataSourceBuilder(PerformanceMonitor.Darling.Storage.DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
             dataSourceBuilder.UseSslClientAuthenticationOptionsCallback(options =>
             {
-                /* With no chain policy of the caller's, SslStream makes its own, whose ExtraStore then holds only what the store sent. */
-                options.CertificateChainPolicy = null;
+                /* A policy made for this connection alone. SslStream copies it, adds the certificates the store sent to the copy's
+                   ExtraStore, and builds this machine's chain with it before the callback runs. Nothing here reads that chain. With
+                   downloads off and no revocation check, building it fetches no URL that the store's certificate names (#9908). */
+                options.CertificateChainPolicy = new X509ChainPolicy
+                {
+                    DisableCertificateDownloads = true,
+                    RevocationMode = X509RevocationMode.NoCheck,
+                };
                 options.RemoteCertificateValidationCallback = (_, certificate, presentedChain, _) =>
                 {
-                    presented = FromPresented(certificate, presentedChain) ?? presented;
+                    presented = present(certificate, presentedChain) ?? presented;
                     return false;
                 };
             });
@@ -234,12 +336,13 @@ internal static class StoreServerCertificate
 
     /// <summary>
     /// #9908: the answer for what a store sent in its handshake. <paramref name="certificate"/> is its server certificate and
-    /// <paramref name="presentedChain"/> is the chain SslStream hands the validation callback. The root is looked for in that chain's
-    /// <c>ChainPolicy.ExtraStore</c>, which SslStream fills with the certificates the store sent, on Windows and on Linux. It is not looked
-    /// for in <c>ChainElements</c>: that is the chain this machine's chain engine built, which can end in a root from this machine's
-    /// certificate stores that the store never sent, and can differ from one read of the same store to the next. So a store that sends
-    /// only its own certificate, or that and its intermediates, has no root in the answer, whatever this machine holds. Null when the store
-    /// presented no certificate.
+    /// <paramref name="presentedChain"/> is the chain SslStream hands the validation callback. The root is the one
+    /// <see cref="FindIssuingRoot"/> reaches from the server certificate through that chain's <c>ChainPolicy.ExtraStore</c>, which SslStream
+    /// fills with the certificates the store sent, on Windows and on Linux. <c>ChainElements</c> is not read: that is the chain this
+    /// machine's chain engine built, which can end in a root from this machine's certificate stores that the store never sent, and can
+    /// differ from one read of the same store to the next. So a store that sends only its own certificate, or that and its intermediates,
+    /// has no root in the answer, whatever this machine holds, and a self-signed certificate it sends that did not issue the chain is not
+    /// reported. Null when the store presented no certificate.
     /// </summary>
     internal static Report? FromPresented(X509Certificate? certificate, X509Chain? presentedChain)
     {
@@ -249,7 +352,7 @@ internal static class StoreServerCertificate
         }
 
         using var server = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
-        var root = presentedChain is null ? null : FindRoot(presentedChain.ChainPolicy.ExtraStore, server);
+        var root = presentedChain is null ? null : FindIssuingRoot(server, presentedChain.ChainPolicy.ExtraStore);
         return new Report(TlsOn, HandshakeSource, Describe(server), root is null ? null : Describe(root), null);
     }
 
