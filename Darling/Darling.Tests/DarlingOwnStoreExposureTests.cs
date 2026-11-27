@@ -29,6 +29,7 @@ public sealed class DarlingOwnStoreExposureTests : IDisposable
     private const string Owner = "Host=pg.example;Database=darling;Username=postgres;Password=owner-secret";
     private const string WebRole = "Host=pg.example;Database=darling;Username=web;Password=web-secret";
     private const string McpRole = "Host=pg.example;Database=darling;Username=mcp;Password=mcp-secret";
+    private const string Dedicated = "Host=pg.example;Database=darling;Username=dashboard;Password=d-secret";
     private const string Token = "a-long-token-value-0123456789";
 
     public DarlingOwnStoreExposureTests() => DarlingStoreLogins.ResetContainerExposureLogForTests();
@@ -307,7 +308,7 @@ public sealed class DarlingOwnStoreExposureTests : IDisposable
         var logger = new CapturingTestLogger();
 
         var login = await ResolveInContainerAsync(
-            DarlingStoreLogins.Surface.Web, OwnStore(webConnectionString: WebRole), logger, exposed: true, Provisioned());
+            DarlingStoreLogins.Surface.Web, OwnStore(webConnectionString: Dedicated), logger, exposed: true, Provisioned());
 
         Assert.Equal(WebRole, login);
         Assert.Empty(logger.Lines);
