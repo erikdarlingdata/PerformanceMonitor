@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -557,6 +558,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             var parties = deadlock["parties"]!.AsArray();
             Assert.Equal(InvestigationEvidenceCapture.DeadlockPartiesMax, parties.Count);
             Assert.Equal(25 - InvestigationEvidenceCapture.DeadlockPartiesMax, deadlock["parties_dropped"]!.GetValue<int>());
+            Assert.Null(deadlock["graph_withheld"]);
             Assert.True(parties[0]!["is_victim"]!.GetValue<bool>());
             Assert.Equal("process25", parties[0]!["process_id"]!.GetValue<string>());
             Assert.Equal("tempdb.dbo.#t_____________0001", Assert.Single(deadlock["objects"]!.AsArray())!["object_name"]!.GetValue<string>());
@@ -580,8 +582,122 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             Assert.Equal("ready", section.State);
             Assert.DoesNotContain("dbo.Vault", section.ContentJson!, StringComparison.Ordinal);
             Assert.DoesNotContain("hunter2", section.ContentJson!, StringComparison.Ordinal);
-            Assert.Equal(2, Assert.Single(JsonNode.Parse(section.ContentJson!)!["rows"]!.AsArray())!["parties"]!.AsArray().Count);
+            var row = Assert.Single(JsonNode.Parse(section.ContentJson!)!["rows"]!.AsArray())!;
+            Assert.Equal(2, row["parties"]!.AsArray().Count);
+            /* A statement withheld inside the graph is not the whole graph withheld (#9873). */
+            Assert.Null(row["graph_withheld"]);
         });
+    }
+
+    [Fact]
+    public async Task ADeadlockGraphTheFilterWithholdsWhole_SaysSo_AndKeepsItsTimeDatabaseAndVictim()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            /* #9873: the filter's budget is spent before it reads the graph, so it returns the withheld marker for the whole document. */
+            var statement = "UPDATE dbo.Orders SET qty = qty + 1 WHERE note = '" + new string('n', 1_100) + "'";
+            await PlantDeadlockGraphAsync(setup.Connection, ct, AlertAt.AddMinutes(-1), ManyPartyGraph(25, victim: 25, statement));
+            var requestId = (await setup.Requests.OpenOrJoinAsync(
+                Alert(InvestigationFamily.Blocking, InvestigationEvidenceCapture.DeadlockMetric, AlertAt), ct)).RequestId!.Value;
+            await PlantRunAsync(setup.Connection, ct, "deadlocks", WindowEnd.AddSeconds(5));
+            await setup.Capture.CaptureOnceAsync(ct);
+
+            var deadlock = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "deadlocks"));
+            Assert.Equal(InvestigationEvidenceCapture.GraphWithheldReason, deadlock["graph_withheld"]!.GetValue<string>());
+            Assert.Empty(deadlock["parties"]!.AsArray());
+            Assert.Empty(deadlock["objects"]!.AsArray());
+            Assert.Null(deadlock["parties_dropped"]);
+            Assert.Null(deadlock["is_parallel"]);
+            /* The row's own columns are still read. */
+            Assert.Equal("tempdb", deadlock["database_name"]!.GetValue<string>());
+            Assert.Equal("process1", deadlock["victim_process_id"]!.GetValue<string>());
+            Assert.Equal(AlertAt.AddMinutes(-1), DateTime.Parse(deadlock["deadlock_time"]!.GetValue<string>(), CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal));
+        }, judgeBudget: SpentBudget);
+    }
+
+    [Fact]
+    public async Task AHeadBlockerWhoseReportTheFilterWithholdsWhole_SaysSo_AndKeepsTheChainsOwnColumns()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            var report = BlockedProcessReport(blockingFrame: "<frame line=\"3\" stmtstart=\"10\" stmtend=\"90\" sqlhandle=\"0x0200ab\"/>");
+            await PlantBlockedReportAsync(setup.Connection, ct, AlertAt.AddMinutes(-1), report);
+            var requestId = await OpenBlockingAndCaptureAsync(setup, ct);
+
+            var head = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "head_blocker"));
+            Assert.Equal(InvestigationEvidenceCapture.ReportWithheldReason, head["report_withheld"]!.GetValue<string>());
+            Assert.Equal(62, head["spid"]!.GetValue<int>());
+            Assert.Equal("inferred", head["statement_source"]!.GetValue<string>());
+            Assert.Null(head["input_buffer"]);
+        }, judgeBudget: SpentBudget);
+    }
+
+    [Fact]
+    public async Task ARegressionPlanTheFilterWithholdsWhole_SaysSo_InsteadOfReadingAsAMissingPlan()
+    {
+        await RunAsync(async (setup, ct) =>
+        {
+            await PlantQueryStoreAsync(setup.Connection, ct, 504, 7, 1, cpuUs: 1_000, lastExec: AlertAt.AddMinutes(-4));
+            await PlantQueryStoreAsync(setup.Connection, ct, 504, 8, 2, cpuUs: 8_000, lastExec: AlertAt.AddMinutes(-1));
+            await PlantPlanAsync(setup.Connection, ct, 7, "N'Lisbon'");
+            await PlantPlanAsync(setup.Connection, ct, 8, "N'Oslo'");
+            var requestId = await OpenQueryPerformanceAndCaptureAsync(setup, ct);
+
+            var target = Assert.Single(Rows(await setup.Requests.ReadEvidenceAsync(requestId, ct), "regression_targets"));
+            Assert.Equal(InvestigationEvidenceCapture.PlanWithheldReason, target["good_plan_withheld"]!.GetValue<string>());
+            Assert.Equal(InvestigationEvidenceCapture.PlanWithheldReason, target["bad_plan_withheld"]!.GetValue<string>());
+            Assert.Null(target["good_compiled"]);
+            Assert.Null(target["bad_compiled"]);
+            Assert.Equal(8_000, target["bad_cpu_per_exec_us"]!.GetValue<long>());
+        }, judgeBudget: SpentBudget);
+    }
+
+    [Fact]
+    public void ADeadlockGraphTheFilterWithholdsWhole_GivesARowWithNoPartiesAndTheReason()
+    {
+        var graph = ManyPartyGraph(25, victim: 25, "UPDATE dbo.Orders SET qty = 1");
+        var filtered = SensitiveStatements.Xml(graph, SpentBudget());
+        Assert.Equal(SensitiveStatements.PlaceholderText, filtered);
+
+        var row = InvestigationEvidenceCapture.DeadlockRow(AlertAt, "tempdb", "process25", filtered!);
+
+        Assert.Equal(InvestigationEvidenceCapture.GraphWithheldReason, row["graph_withheld"]!.GetValue<string>());
+        Assert.Empty(row["parties"]!.AsArray());
+        Assert.Empty(row["objects"]!.AsArray());
+        Assert.Null(row["parties_dropped"]);
+        Assert.Equal("tempdb", row["database_name"]!.GetValue<string>());
+        Assert.Equal("process25", row["victim_process_id"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ADeadlockGraphWithOneValueTheFilterCouldNotJudgeInTime_KeepsItsPartiesAndIsNotWithheld()
+    {
+        /* #9873: a value whose match timed out (the 250 ms per-value limit) counts as named, so only that value is withheld. The
+           graph stays a graph, so the row keeps its victim and its parties up to the cap. Here the long statements time out. */
+        var graph = ManyPartyGraph(25, victim: 25, "UPDATE dbo.Orders SET qty = 1 WHERE note = '" + new string('n', 1_100) + "'");
+        var budget = new SensitiveStatements.JudgeBudget(
+            SensitiveStatements.ReadBudget,
+            judge: value => value.Length > 1_000 ? SensitiveStatements.Verdict.TimedOut : SensitiveStatements.Verdict.Clean,
+            clock: static () => TimeSpan.Zero);
+        var filtered = SensitiveStatements.Xml(graph, budget);
+        Assert.NotEqual(SensitiveStatements.PlaceholderText, filtered);
+        Assert.True(budget.TimedOut > 0);
+
+        var row = InvestigationEvidenceCapture.DeadlockRow(AlertAt, "tempdb", "process25", filtered!);
+
+        Assert.Null(row["graph_withheld"]);
+        Assert.Equal(InvestigationEvidenceCapture.DeadlockPartiesMax, row["parties"]!.AsArray().Count);
+        Assert.Equal(25 - InvestigationEvidenceCapture.DeadlockPartiesMax, row["parties_dropped"]!.GetValue<int>());
+        Assert.Equal("process25", row["parties"]!.AsArray()[0]!["process_id"]!.GetValue<string>());
+        Assert.Equal(SensitiveStatements.PlaceholderText, row["parties"]!.AsArray()[0]!["sql_text"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ADeadlockWithNoGraphOrOneThatDoesNotParse_IsNotSaidToBeWithheld()
+    {
+        Assert.Null(InvestigationEvidenceCapture.DeadlockRow(AlertAt, "tempdb", null, "")["graph_withheld"]);
+        Assert.Null(InvestigationEvidenceCapture.DeadlockRow(AlertAt, "tempdb", null, "<deadlock><process-list>")["graph_withheld"]);
     }
 
     [Fact]
@@ -899,7 +1015,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $9, $10, '0xQH' || 
         NpgsqlDataSource DataSource, NpgsqlConnection Connection, InvestigationRequestStore Requests,
         InvestigationEvidenceCapture Capture, TestClock Clock);
 
-    private static async Task RunAsync(Func<Setup, CancellationToken, Task> body, TimeSpan? sectionDeadline = null)
+    /// <summary>A statement-filter budget that is already spent (#9873): the filter withholds every document it is asked to judge
+    /// whole, whatever the runner's speed.</summary>
+    private static SensitiveStatements.JudgeBudget SpentBudget()
+    {
+        var budget = new SensitiveStatements.JudgeBudget(TimeSpan.Zero);
+        budget.AddElapsed(TimeSpan.FromHours(1));
+        Assert.True(budget.Spent);
+        return budget;
+    }
+
+    /* #9873: the capture's statement filter runs on a budget whose clock never moves unless a test hands in another, so a loaded
+       runner cannot spend the 1.5 second read budget and have the filter withhold a graph, report or plan whole under a test
+       that asserts what the row keeps. A test of the withheld path hands in a budget that is already spent. */
+    private static async Task RunAsync(
+        Func<Setup, CancellationToken, Task> body, TimeSpan? sectionDeadline = null, Func<SensitiveStatements.JudgeBudget>? judgeBudget = null)
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -915,7 +1045,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, 'Regular', NULL, $8, $9, $9, $10, '0xQH' || 
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var clock = new TestClock();
         var requests = new InvestigationRequestStore(dataSource, 30, () => clock.Now);
-        var capture = new InvestigationEvidenceCapture(dataSource, requests, NullLogger.Instance, () => clock.Now, (_, _) => 5, sectionDeadline);
+        var capture = new InvestigationEvidenceCapture(dataSource, requests, NullLogger.Instance, () => clock.Now, (_, _) => 5, sectionDeadline, judgeBudget ?? FrozenClockBudget.Create);
         await body(new Setup(dataSource, connection, requests, capture, clock), ct);
     }
 }
