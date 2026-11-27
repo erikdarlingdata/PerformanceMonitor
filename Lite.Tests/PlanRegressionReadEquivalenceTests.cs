@@ -337,8 +337,11 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
         var writes = 0;
         collector.AfterPlanRegressionDatabaseReadForTests = () =>
         {
-            /* The 5 s budget the housekeeping writers use. The store holds two databases with regressions, so there is one gap. */
-            using var write = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(5));
+            /* A long wait, as ArchiveSpanReadTests uses (#9564, #9810): the write lock is one lock for the whole test process, so another
+               class's InitializeAsync on a busy runner can hold it for more than 5 s. A read lock kept across batches still fails
+               this test: the same thread throws LockRecursionException, and another thread waits out the whole timeout.
+               The store holds two databases with regressions, so there is one gap. */
+            using var write = _duckDb.AcquireWriteLock(TimeSpan.FromMinutes(2));
             writes++;
         };
 
@@ -518,7 +521,10 @@ VALUES ({_nextId++}, {Ts(collected)}, {ServerId}, 'TestSrv', {Lit(database)}, {q
             RegressedQueriesHoldTargetForTests = TimeSpan.Zero,
             AfterRegressedQueriesDatabaseReadForTests = () =>
             {
-                using var write = _duckDb.AcquireWriteLock(TimeSpan.FromSeconds(5));
+                /* A long wait, as ArchiveSpanReadTests uses (#9564, #9810): the write lock is one lock for the whole test process, so another
+                   class's InitializeAsync on a busy runner can hold it for more than 5 s. A read lock kept across batches still fails
+                   this test: the same thread throws LockRecursionException, and another thread waits out the whole timeout. */
+                using var write = _duckDb.AcquireWriteLock(TimeSpan.FromMinutes(2));
                 writes++;
             },
         };
