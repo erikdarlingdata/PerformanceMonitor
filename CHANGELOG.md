@@ -345,6 +345,9 @@ Full entries: [docs/changelog/3.14.md](docs/changelog/3.14.md)
 - **The Linux docs show the sha256 origin check, keep the store dump readable only by its owner and root, and say what `--rollback` uses up** ([#9828])
 - **`upgrade-darling.sh --check` shows the warnings the upgrade will print and the checks that passed, and the Linux page gives `sudo journalctl`** ([#9830])
 - **`setup.sh` prints no broken pipe message, and the Compose docs give the Compose form of `--grant-script`, the override file and the expected attention Warning** ([#9831])
+- **A Linux `--rollback` is recorded as its own row in the upgrade history, and its closing message says the rollback copy is used up** ([#9832])
+- **Darling logs each large index the start builds, and a timed-out bounded Query Store index build is now recorded** ([#9833])
+- **`install-darling.sh` and `upgrade-darling.sh` no longer refuse for a process in a container that runs from the container's own `/opt/darling`** ([#9836])
 
 ## [3.13.0] - 2026-11-12
 
@@ -8616,3 +8619,6 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#9828]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9828
 [#9830]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9830
 [#9831]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9831
+[#9832]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9832
+[#9833]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9833
+[#9836]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/9836
