@@ -923,7 +923,7 @@ internal static class DarlingStoreLogins
                 Timeout = LoginProbeSeconds,
                 CommandTimeout = LoginProbeSeconds,
             };
-            await using var connection = new NpgsqlConnection(builder.ConnectionString);
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
             await connection.OpenAsync(cancellationToken);
             await using var command = new NpgsqlCommand(LoginProbeSql, connection)
             {
@@ -941,7 +941,7 @@ internal static class DarlingStoreLogins
         {
             throw;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return new LoginProbeResult(LoginProbeVerdict.Failed, DescribeProbeFailure(ex));
         }
