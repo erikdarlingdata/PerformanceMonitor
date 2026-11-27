@@ -561,6 +561,26 @@ public static class AlwaysOnXeSessions
     public static string BuildAttentionServerDropSql(string sessionName) =>
         "DROP EVENT SESSION [" + RequireOwnAttention(sessionName) + "] ON SERVER;";
 
+    /// <summary>
+    /// The drop of this install's own server-scoped client-timeout session when a server is removed (#9895): a no-op where the
+    /// session is not there, so a server that never had one is not a failure. Own name only, as <see cref="BuildAttentionServerDropSql"/>.
+    /// </summary>
+    public static string BuildAttentionServerDropIfExistsSql(string sessionName)
+    {
+        var name = RequireOwnAttention(sessionName);
+        return $@"
+IF EXISTS
+(
+    SELECT
+        1/0
+    FROM sys.server_event_sessions
+    WHERE name = N'{name}'
+)
+BEGIN
+    DROP EVENT SESSION [{name}] ON SERVER;
+END;";
+    }
+
     private static string RequireOwnAttention(string sessionName)
     {
         if (!IsOwnName(sessionName, AlwaysOnXeSessionKind.Attention))

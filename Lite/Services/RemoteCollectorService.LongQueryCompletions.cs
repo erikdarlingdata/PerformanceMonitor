@@ -1258,7 +1258,7 @@ END;", connection);
                 other.ServerName,
                 other.DatabaseName,
                 other.IsEnabled,
-                TraceOn: _scheduleManager.GetScheduleForServer(other.Id, "long_query_completions")?.Enabled ?? false,
+                TraceOn: _scheduleManager.GetScheduleForServer(other.Id, collectorName)?.Enabled ?? false,
                 other.ExcludedDatabases.ToList(),
                 DatabaseScope: null))
             .ToList();
@@ -1387,6 +1387,61 @@ END;", connection);
 
         await DropLongQuerySessionOfRemovedServerAsync(server, cancellationToken);
         await DropAlwaysOnOwnSessionsOfRemovedServerAsync(server, cancellationToken);
+        await DropAttentionSessionOfRemovedServerAsync(server, cancellationToken);
+    }
+
+    /// <summary>
+    /// Replaces the connection a removal opens to drop this install's own client-timeout session on a server-scoped server (#9895):
+    /// called with the server and the session name. Null in production.
+    /// </summary>
+    internal Func<ServerConnection, string, CancellationToken, Task>? AttentionSessionDropOverrideForTests { get; set; }
+
+    /// <summary>
+    /// This install's own client-timeout session (#9895) on a server-scoped server: on premises, Managed Instance and RDS. Dropped by
+    /// its own per-install name only, never the shared <c>PerformanceMonitor_Attention</c> an older install may read. The drop does
+    /// nothing where the session is not there. The session is per install, so it stays where another registration of this install
+    /// with the collector on may keep it on the same instance. An Azure SQL Database server's own sessions are dropped with the
+    /// fallbacks. Nothing is opened for an install with no id. One attempt, every failure logged: it never stops the removal.
+    /// </summary>
+    internal async Task DropAttentionSessionOfRemovedServerAsync(ServerConnection server, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var sessionName = AlwaysOnOwnSessionName(AlwaysOnXeSessionKind.Attention);
+            if (sessionName is null || _engineEditions.IsAzureSqlDatabase(server, _serverManager.GetConnectionStatus(server.Id).SqlEngineEdition))
+            {
+                return;
+            }
+
+            var skipReason = (await LongQueryTraceInstanceGuardFor(server, cancellationToken, "attention")).RemovalSkipReason();
+            if (skipReason is not null)
+            {
+                AppLogger.Info("XeSession", $"[{server.DisplayName}] The client timeout XE session was left in place on removal: {skipReason}.");
+                return;
+            }
+
+            if (AttentionSessionDropOverrideForTests is { } drop)
+            {
+                await drop(server, sessionName, cancellationToken);
+            }
+            else
+            {
+                using var connection = await CreateConnectionAsync(server, cancellationToken);
+                using var command = new SqlCommand(AlwaysOnXeSessions.BuildAttentionServerDropIfExistsSql(sessionName), connection);
+                command.CommandTimeout = CommandTimeoutSeconds;
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            AppLogger.Info("XeSession", $"[{server.DisplayName}] Dropped this install's client timeout XE session of the removed server");
+        }
+        catch (OperationCanceledException)
+        {
+            AppLogger.Warn("XeSession", $"[{server.DisplayName}] The client timeout XE session of the removed server was not dropped within {LongQueryTraceRemovalTimeout.TotalSeconds:0} seconds; it may remain on the server");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("XeSession", $"[{server.DisplayName}] Could not drop this install's client timeout XE session of the removed server; it may remain on the server: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -1514,14 +1569,16 @@ END;", connection);
     /// <c>@@SERVERNAME</c> beside the other registrations of this install that are monitored with their trace on
     /// (<see cref="LongQueryTraceInstanceGuard"/>). Their trace setting is the effective one, their own override or else the
     /// install's default. The names come from the identity row a wait_stats or cpu_utilization run persisted, and are read
-    /// only when another registration could keep the session, so an install with no other trace on reads none.
+    /// only when another registration could keep the session, so an install with no other trace on reads none. The same guard
+    /// serves the client-timeout session on removal (#9895), with that collector's schedule in <paramref name="collectorName"/>.
     /// </summary>
-    private async Task<LongQueryTraceInstanceGuard> LongQueryTraceInstanceGuardFor(ServerConnection server, CancellationToken cancellationToken)
+    private async Task<LongQueryTraceInstanceGuard> LongQueryTraceInstanceGuardFor(
+        ServerConnection server, CancellationToken cancellationToken, string collectorName = "long_query_completions")
     {
         var candidates = _serverManager.GetAllServers()
             .Where(other => other.Id != server.Id
                 && other.IsEnabled
-                && (_scheduleManager.GetScheduleForServer(other.Id, "long_query_completions")?.Enabled ?? false))
+                && (_scheduleManager.GetScheduleForServer(other.Id, collectorName)?.Enabled ?? false))
             .ToList();
         if (candidates.Count == 0)
         {

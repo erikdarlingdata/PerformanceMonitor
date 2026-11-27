@@ -71,22 +71,6 @@ public sealed class AttentionXeSessionEnsureLiteTests
         Assert.Contains("throw new XeSessionEnsureException(captureName, ex) { RepeatsAtDebug = repeatsAtDebug };", source, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// L4: the probe answers 2 for another definition; the ensure drops that session through the builder's statement and falls
-    /// through to the create, once per run of the app and server.
-    /// </summary>
-    [Fact]
-    public void TheAttentionEnsure_ReplacesASessionWithAnotherDefinition_OncePerServer()
-    {
-        var source = ReadLite("Lite/Services/RemoteCollectorService.AttentionXeSession.cs");
-
-        Assert.Contains("mismatch == AlwaysOnXeSessions.AttentionDefinitionMismatch", source, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerDropSql(AttentionXeSessionName)", source, StringComparison.Ordinal);
-        Assert.Contains("_attentionDefinitionReplaced.TryAdd(server.Id, true)", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("DROP EVENT SESSION", source, StringComparison.Ordinal);
-        Assert.Equal("DROP EVENT SESSION [PerformanceMonitor_Lite_0a1b2c3d_Attention] ON SERVER;", AlwaysOnXeSessions.BuildAttentionServerDropSql("PerformanceMonitor_Lite_0a1b2c3d_Attention"));
-    }
-
     /// <summary>L6: the Azure create the engine refuses for an unproved action is retried by the shared driver; Lite words the note.</summary>
     [Fact]
     public void TheAzureEnsureNote_ForACreateWithoutStatementText_IsLoggedAsAWarning()

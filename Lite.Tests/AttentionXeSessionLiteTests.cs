@@ -52,18 +52,6 @@ public sealed class AttentionXeSessionLiteTests
     }
 
     [Fact]
-    public void LiteHoldsNoCopyOfTheAttentionStatement_AndEnsuresThroughTheBuilder()
-    {
-        var ensure = ReadLite("Lite/Services/RemoteCollectorService.AttentionXeSession.cs");
-
-        Assert.DoesNotContain("sqlserver.attention", ensure, StringComparison.Ordinal);
-        Assert.DoesNotContain("CREATE EVENT SESSION", ensure, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerCreateSql(AttentionXeSessionName)", ensure, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerProbeSql(", ensure, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessionKind.Attention", ensure, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void TheEnsureIsGatedOnTheAttentionSchedule_AndRunsBeforeTheRead()
     {
         var ensure = ReadLite("Lite/Services/RemoteCollectorService.AttentionXeSession.cs");

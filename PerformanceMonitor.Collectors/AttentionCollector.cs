@@ -19,7 +19,7 @@ namespace PerformanceMonitor.Collectors;
 
 /// <summary>
 /// Client attentions (#5640): a query a client cancelled or timed out, from the app-managed
-/// <c>PerformanceMonitor_Attention</c> session. The session carries two targets, and the collector uses each for
+/// <c>PerformanceMonitor_{product}_{id}_Attention</c> session of the install (#9895). The session carries two targets, and the collector uses each for
 /// what it is good at:
 ///
 /// <para><b>event_counter is the count, and only the count.</b> It is exact however many events the session saw. Each run

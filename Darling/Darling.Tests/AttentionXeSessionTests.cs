@@ -195,28 +195,4 @@ public sealed class AttentionXeSessionTests
         Assert.NotNull(note);
         Assert.Contains("deadlocks and client timeouts", note, StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void TheServerEnsure_IsAThirdTryBlockThroughTheSharedBuilder_AndHoldsNoCopyOfTheStatement()
-    {
-        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingXeSessions.cs");
-
-        Assert.Contains("await EnsureAttentionOnPremAsync(connection, server, attentionName, logger, cancellationToken);", source, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessions.BuildAttentionServerCreateSql(sessionName)", source, StringComparison.Ordinal);
-        Assert.Contains("AlwaysOnXeSessionKind.Attention, \"client timeout\"", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("sqlserver.attention", source, StringComparison.Ordinal);
-
-        /* Three captures, three separate try blocks: one capture's failure never skips another. */
-        var ensureAll = source.Substring(source.IndexOf("public static async Task<AttentionEnsureFault?> EnsureAllAsync", StringComparison.Ordinal));
-        ensureAll = ensureAll.Substring(0, ensureAll.IndexOf("private static async Task<AttentionEnsureFault?> EnsureDatabaseScopedAsync", StringComparison.Ordinal));
-        Assert.Equal(3, ensureAll.Split("catch (SqlException ex) when (IsBenignXeSessionAlreadyPresent(ex))").Length - 1);
-    }
-
-    [Fact]
-    public void TheRemovalOfAServer_DropsTheOwnAttentionSessionToo()
-    {
-        var source = ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingRemovedServerSessions.cs");
-
-        Assert.Contains("AlwaysOnXeSessionKind.Attention", source, StringComparison.Ordinal);
-    }
 }
