@@ -543,6 +543,49 @@ public sealed partial class DarlingWorker : BackgroundService
         public List<string> Changed { get; } = new();
 
         public List<string> Failed { get; } = new();
+
+        /// <summary>The steps that returned without throwing (#9858). The start-path pass hands these to the first hourly pass,
+        /// which skips them: they ran moments earlier in the same start.</summary>
+        public List<string> Completed { get; } = new();
+    }
+
+    /// <summary>
+    /// The steps the start-path convergence pass ran to completion in this start, held for the FIRST hourly pass only (#9858).
+    /// That pass fires within seconds of the start (the tick's stamp seeds at MinValue) and used to run every step again,
+    /// 21 steps and the same tuning lines twice in one start. A step that threw at start is not in the set, so the hourly
+    /// pass still retries it, and so does a step the start never reached (the TimescaleDB steps on a store that was plain
+    /// PostgreSQL at start). Taken (and cleared) by <see cref="ConvergeStoreObjectsAsync"/>, so every later pass runs the
+    /// whole list on its own schedule.
+    /// </summary>
+    private HashSet<string>? _convergedAtStartup;
+
+    /// <summary>
+    /// The steps one hourly pass runs (#3913's TimescaleDB filter, and #9858's skip of what this start's own pass already ran).
+    /// <paramref name="ranAtStartup"/> is null on every pass but the first after a start.
+    /// </summary>
+    internal static List<StoreObjectConvergenceStep> SelectHourlyConvergenceSteps(
+        IEnumerable<StoreObjectConvergenceStep> steps, bool timescaleAvailable, ISet<string>? ranAtStartup, out int skippedAsRanAtStartup)
+    {
+        var selected = new List<StoreObjectConvergenceStep>();
+        skippedAsRanAtStartup = 0;
+        foreach (var step in steps)
+        {
+            /* #3913: on a store without TimescaleDB, a step that needs it is skipped rather than run to fail. */
+            if (!timescaleAvailable && NeedsTimescale(step.Stage))
+            {
+                continue;
+            }
+
+            if (ranAtStartup is not null && ranAtStartup.Contains(step.Name))
+            {
+                skippedAsRanAtStartup++;
+                continue;
+            }
+
+            selected.Add(step);
+        }
+
+        return selected;
     }
 
     /* The whole-pass budget for the hourly store-object convergence (#3817), the #2327 shape and the same
