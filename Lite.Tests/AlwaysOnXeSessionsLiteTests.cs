@@ -167,7 +167,6 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
-    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task NoSessionAnywhere_CreatesTheSharedSession_StartedWithTheDatabase(AlwaysOnXeSessionKind kind)
     {
         var database = new ScriptedDatabase();
@@ -204,7 +203,6 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
-    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task SharedSessionTheLoginCannotSee_IsStartedByName_ThenNeverDropped_AndTheInstallFallsBack(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
@@ -225,7 +223,6 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
-    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task StoppedSharedSession_GetsAStartByName_AndNoFallback(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
@@ -244,7 +241,6 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
-    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task InstallOnItsOwnSession_DropsItAndSwitchesBack_WhenTheSharedSessionReadsBackUsable(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);
@@ -483,7 +479,6 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task TheXeSessionDatabaseList_NarrowsTheEnsure_AndEmptyMeansEveryDatabase(AlwaysOnXeSessionKind kind)
     {
-        var shared = AlwaysOnXeSessions.SharedNameFor(kind);
         Task EnsureAsync(Rig rig) => kind switch
         {
             AlwaysOnXeSessionKind.Deadlock => rig.Service.EnsureDeadlockXeSessionAsync(rig.Server, engineEdition: 5, CancellationToken.None),
@@ -492,6 +487,10 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
         };
 
         var listed = await BuildRigAsync();
+        /* #9895: a client timeout ensure creates only this install's own session. */
+        var shared = kind == AlwaysOnXeSessionKind.Attention
+            ? AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.LiteProduct, listed.Service.GetInstallId(), kind)
+            : AlwaysOnXeSessions.SharedNameFor(kind);
         listed.Server.XeSessionDatabases = new List<string> { "ALPHA" };
         await EnsureAsync(listed);
         Assert.True(listed.Alpha.Started[shared]);
@@ -577,7 +576,6 @@ public sealed class AlwaysOnXeSessionsLiteTests : IDisposable
     [Theory]
     [InlineData(AlwaysOnXeSessionKind.Deadlock)]
     [InlineData(AlwaysOnXeSessionKind.BlockedProcess)]
-    [InlineData(AlwaysOnXeSessionKind.Attention)]
     public async Task ASharedSessionThatCannotBeUsed_WithNoId_SaysWhyThereIsNone_AndThatTheNextCycleTriesAgain(AlwaysOnXeSessionKind kind)
     {
         var shared = AlwaysOnXeSessions.SharedNameFor(kind);

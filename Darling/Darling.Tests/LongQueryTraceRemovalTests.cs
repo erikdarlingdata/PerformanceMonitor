@@ -89,6 +89,9 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
         public HashSet<int> TraceOn { get; } = new();
         public LongQueryTraceInstanceGuard Guard { get; set; } = LongQueryTraceInstanceGuard.NoKeepers;
 
+        /* #9895: the client-timeout session names this install's own drop ran with, on a server-scoped server. */
+        public List<string> AttentionDrops { get; } = new();
+
         public RemovedLongQueryServer Removed => new(Config, Runtime, TraceApplied);
 
         public IEnumerable<string> Dropped => Calls.Where(c => !c.Create).Select(c => c.Database);
@@ -144,6 +147,12 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
             {
                 throw new InvalidOperationException($"The drop was refused in {database}.");
             }
+        };
+
+        runner.AttentionSessionDropForTests = (_, sessionName, _) =>
+        {
+            rig.AttentionDrops.Add(sessionName);
+            return Task.CompletedTask;
         };
 
         runner.AlwaysOnXeDatabaseForTests = (_, database, _) =>
@@ -222,6 +231,83 @@ public sealed class LongQueryTraceRemovalTests : IAsyncDisposable
         Assert.Equal(OwnSession, Assert.Single(rig.Names));
         Assert.Empty(rig.LegacyCalls);
         Assert.Equal(0, rig.Records.Reads);
+    }
+
+    private static readonly string OwnAttentionSession = AlwaysOnXeSessions.OwnNameFor(LongQueryCompletionsCollector.DarlingProduct, InstallIdValue, AlwaysOnXeSessionKind.Attention);
+
+    /* #9895: removing a server-scoped server drops this install's own client-timeout session, and never the shared one an older install may read. */
+    [Fact]
+    public async Task Removal_OnPremises_DropsThisInstallsOwnAttentionSession_NeverTheSharedOne()
+    {
+        var rig = BuildRig(azureSqlDatabase: false);
+
+        await rig.RemoveAsync();
+
+        Assert.Equal(OwnAttentionSession, Assert.Single(rig.AttentionDrops));
+        Assert.DoesNotContain(AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention), rig.AttentionDrops);
+        Assert.DoesNotContain(AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention), rig.Names);
+    }
+
+    /* #9895: the drop that reaches the server is the guarded one, so a server that never had the session is not a failure, and the
+       own name is the only one the builder takes. */
+    [Fact]
+    public void TheAttentionDropOnRemoval_IsGuardedByExistence_AndTakesAnOwnNameOnly()
+    {
+        var sql = AlwaysOnXeSessions.BuildAttentionServerDropIfExistsSql(OwnAttentionSession);
+
+        Assert.Contains("[" + OwnAttentionSession + "]", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain(AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention) + "]", sql, StringComparison.Ordinal);
+        Assert.Throws<ArgumentException>(() => AlwaysOnXeSessions.BuildAttentionServerDropIfExistsSql(AlwaysOnXeSessions.SharedNameFor(AlwaysOnXeSessionKind.Attention)));
+    }
+
+    /* #9895: an Azure SQL Database server's own attention session goes with the fallbacks, so the server-scoped drop is not sent. */
+    [Fact]
+    public async Task Removal_Azure_SendsNoServerScopedAttentionDrop()
+    {
+        var rig = BuildRig();
+
+        await rig.RemoveAsync();
+
+        Assert.Empty(rig.AttentionDrops);
+    }
+
+    [Fact]
+    public async Task Removal_OnPremises_WithNoInstallId_SendsNoAttentionDrop()
+    {
+        var rig = BuildRig(azureSqlDatabase: false, installId: null);
+
+        await rig.RemoveAsync();
+
+        Assert.Empty(rig.AttentionDrops);
+    }
+
+    /* #9895: the session is per install, so another registration of this install with the collector on, on the same instance, keeps it. */
+    [Fact]
+    public async Task Removal_OnPremises_LeavesTheOwnAttentionSession_WhileAnotherRegistrationOfTheSameInstanceKeepsIt_AndSaysSo()
+    {
+        var rig = BuildRig(azureSqlDatabase: false);
+        var keepers = new LongQueryTraceInstanceGuard("sql01", new[] { Instance(traceOn: true, "SQL01") });
+
+        await DarlingRemovedServerSessions.DropAsync(
+            rig.Removed, rig.Runner, rig.Remaining, _ => false, _ => Task.FromResult(LongQueryTraceInstanceGuard.NoKeepers), rig.Logger, CancellationToken.None,
+            attentionInstanceGuard: _ => Task.FromResult(keepers));
+
+        Assert.Empty(rig.AttentionDrops);
+        Assert.Contains(rig.Logger.Entries, e =>
+            e.Level == LogLevel.Information
+            && e.Message.Contains("client timeout", StringComparison.Ordinal)
+            && e.Message.Contains("keeps it on the same instance", StringComparison.Ordinal));
+    }
+
+    /* #9895: nothing records an attention session, so a server-scoped server is captured even with its trace confirmed dropped. */
+    [Fact]
+    public void Capture_TakesAServerScopedServerWhoseTraceWasConfirmedDropped_ForItsAttentionSession()
+    {
+        var rig = BuildRig(azureSqlDatabase: false);
+
+        var removed = Assert.Single(DarlingRemovedServerSessions.Capture(new[] { StateOf(rig, applied: false) }, Array.Empty<MonitoredServer>(), rig.Runner));
+
+        Assert.False(removed.LongQueryTraceApplied);
     }
 
     [Fact]

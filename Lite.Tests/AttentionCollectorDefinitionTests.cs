@@ -28,10 +28,14 @@ public sealed class AttentionCollectorDefinitionTests
 {
     private static readonly DateTime Now = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
 
+    /* #9895: the read names this install's own session, so a context that builds the query carries it. */
+    private const string OwnSession = "PerformanceMonitor_Lite_0a1b2c3d_Attention";
+
     private static CollectorContext MakeContext(
         bool isAzureSqlDb = false, IReadOnlyDictionary<string, string>? state = null, string? currentDatabaseName = null, DateTime? watermark = null)
         => new()
         {
+            AlwaysOnSessionName = OwnSession,
             ServerId = 42,
             ServerName = "test-server",
             CollectionTime = Now,
