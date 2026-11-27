@@ -454,10 +454,21 @@ public static class ComposeSourceRouter
     /// </summary>
     public static ComposeHourlyEdgesCandidate? HourlyRawEdgesCandidate(
         PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, DateTime windowEndUtc,
-        RollupAvailability rollups, RollupCoverage coverage)
+        RollupAvailability rollups, RollupCoverage coverage) =>
+        HourlyRawEdgesCandidate(plan, nowUtc, windowStartUtc, windowEndUtc, rollups, coverage, out _);
+
+    /// <summary><see cref="HourlyRawEdgesCandidate(PanelPlan, DateTime, DateTime, DateTime, RollupAvailability, RollupCoverage)"/>,
+    /// and when it answers null for a panel on an enabled source that the router sent to raw, <paramref name="refusal"/> names
+    /// the first gate that failed (a <c>hourly_edges_*</c> word of at most 40 characters, noted with the read so a slow
+    /// fleet cell shows why it read raw, #9883). It is null when a candidate is returned, when the source is not enabled and
+    /// when the router did not choose raw (a rollup tier answers, so no hourly-edges decision applies).</summary>
+    public static ComposeHourlyEdgesCandidate? HourlyRawEdgesCandidate(
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, DateTime windowEndUtc,
+        RollupAvailability rollups, RollupCoverage coverage, out string? refusal)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(coverage);
+        refusal = null;
 
         if (Resolve(plan, nowUtc, windowStartUtc, rollups, coverage).Tier != ComposeSourceTier.Raw)
         {
@@ -470,14 +481,22 @@ public static class ComposeSourceRouter
             return null;
         }
 
-        if (!IsHourlyEdgesMeasure(plan.Measure) || plan.Aggregate is not (ComposeAggregate.Sum or ComposeAggregate.Max or ComposeAggregate.Min))
+        if (!IsHourlyEdgesMeasure(plan.Measure))
         {
+            refusal = "hourly_edges_measure";
+            return null;
+        }
+
+        if (plan.Aggregate is not (ComposeAggregate.Sum or ComposeAggregate.Max or ComposeAggregate.Min))
+        {
+            refusal = "hourly_edges_aggregate";
             return null;
         }
 
         if (plan.Overlay is ComposeOverlay overlay
             && (overlay.Measure.SourceTable != source || overlay.Aggregate != plan.Aggregate || !IsHourlyEdgesMeasure(overlay.Measure)))
         {
+            refusal = "hourly_edges_overlay";
             return null;
         }
 
@@ -486,6 +505,9 @@ public static class ComposeSourceRouter
             var bucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, (windowEndUtc - windowStartUtc).TotalSeconds);
             if (bucket is not (ComposeTimeBucket.Hour or ComposeTimeBucket.Day))
             {
+                /* An Auto bucket resolves to minute up to 2 days, so a time series left on Auto at the default 24 hours needs
+                   minute rows the hourly rollup cannot give. */
+                refusal = "hourly_edges_bucket";
                 return null;
             }
         }
@@ -497,6 +519,7 @@ public static class ComposeSourceRouter
                 : Array.IndexOf(groupColumns, dimension.Column) >= 0;
             if (!readsMapped)
             {
+                refusal = "hourly_edges_dimension";
                 return null;
             }
         }
@@ -504,39 +527,46 @@ public static class ComposeSourceRouter
         var cagg = ComposeCaggCatalog.For(source);
         if (cagg is null)
         {
+            refusal = "hourly_edges_no_rollup";
             return null;
         }
 
         var successor = TimescaleSupport.SuccessorOf(cagg.HourlyView);
         if (successor is null || !rollups.Has(successor))
         {
+            refusal = "hourly_edges_no_rollup";
             return null;
         }
 
         var hStart = CeilHour(windowStartUtc);
         if (coverage.FloorOf(successor) is not DateTime floor || floor > hStart)
         {
+            refusal = "hourly_edges_rollup_floor";
             return null;
         }
 
         if (coverage.CeilingOf(successor) is not DateTime ceiling)
         {
+            refusal = "hourly_edges_rollup_ceiling";
             return null;
         }
 
         var hEnd = Min(FloorHour(windowEndUtc), FloorHour(ceiling));
         if (hEnd - hStart < TimeSpan.FromHours(1))
         {
+            refusal = "hourly_edges_middle_short";
             return null;
         }
 
         if (nowUtc - windowEndUtc > HourlyRawEdgesEndSlack)
         {
+            refusal = "hourly_edges_window_end";
             return null;
         }
 
         if (windowEndUtc - windowStartUtc < HourlyRawEdgesMinWindow)
         {
+            refusal = "hourly_edges_window_short";
             return null;
         }
 

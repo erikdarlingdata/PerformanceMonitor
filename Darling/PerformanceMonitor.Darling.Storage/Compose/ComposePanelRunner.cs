@@ -74,6 +74,12 @@ internal enum ReadFallback
     /// <c>fallback_raw</c> in <c>get_read_latency</c>. Ranks below <see cref="GateFailed"/> and <see cref="FallbackRaw"/>,
     /// which are the bigger facts when noted in the same call.</summary>
     LedgerUncovered,
+
+    /// <summary>The hourly-edges count guard ran over a covered window and found at least one (server, hour) whose ledger count and rollup
+    /// count differ (#9883), so the route was not taken and raw answered. It is not a fault and logs nothing: it shows as
+    /// <c>fallback_raw</c> in <c>get_read_latency</c>, where it was invisible before. Ranks with <see cref="LedgerUncovered"/>, below
+    /// <see cref="GateFailed"/> and <see cref="FallbackRaw"/>.</summary>
+    LedgerMismatch,
 }
 
 /// <summary>The fixed vocabulary of <see cref="ComposeRunHost.NoteSource"/>.</summary>
@@ -542,7 +548,7 @@ internal static class ComposePanelRunner
            connection, in a REPEATABLE READ READ ONLY transaction the panel statement shares, so a collector batch that
            commits after the guard cannot add a row the guard never saw. Every other panel opens its own connection
            inside RunComposedQueryAsync, exactly as before. */
-        var hourlyEdgesCandidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan!, now, start, end, rollups, coverage);
+        var hourlyEdgesCandidate = ComposeSourceRouter.HourlyRawEdgesCandidate(plan!, now, start, end, rollups, coverage, out var hourlyEdgesRefusal);
         /* The candidate path resolves the compose deadline FIRST, so the run never holds the snapshot's connection while it asks the
            pool for a second one (at the pool's size, every panel would hold one and wait for another). The same value is the panel's
            client deadline and bounds the guard. The other path resolves it inside the try below, as it always has. */
@@ -589,9 +595,8 @@ internal static class ComposePanelRunner
             return ComposeRunOutcome.BadRequest(rawTooBig);
         }
 
-        ComposeReadNotes.NoteSource(
-            queryStoreWideEligible ? ComposeReadSources.IntervalTable : snapshot?.Verdict is not null ? ComposeReadSources.HourlyEdges : ComposeReadSources.Raw,
-            queryStoreWideEligible && rawServerIds is { Count: > 0 } ? "split_raw_servers" : null);
+        var readSource = queryStoreWideEligible ? ComposeReadSources.IntervalTable : snapshot?.Verdict is not null ? ComposeReadSources.HourlyEdges : ComposeReadSources.Raw;
+        ComposeReadNotes.NoteSource(readSource, ReadSourceReason(readSource, queryStoreWideEligible && rawServerIds is { Count: > 0 }, hourlyEdgesCandidate is not null, hourlyEdgesRefusal));
 
         try
         {
@@ -1334,6 +1339,12 @@ internal static class ComposePanelRunner
                 return null;
             }
 
+            /* #9883: a covered window whose ledger and rollup counts differ is noted, so the fallback to raw shows in get_read_latency. */
+            if (mismatches != 0)
+            {
+                ComposeReadNotes.Note(ReadFallback.LedgerMismatch);
+            }
+
             return mismatches == 0
                 ? new ComposeHourlyEdgesVerdict(candidate.SourceTable, candidate.HourStartUtc, candidate.HourEndUtc, scope)
                 : null;
@@ -1358,6 +1369,26 @@ internal static class ComposePanelRunner
 
             return null;
         }
+    }
+
+    /// <summary>#9883: the short reason noted with the read's source. A split Query Store read says <c>split_raw_servers</c>. A raw read of a
+    /// source the hourly-edges route serves says why that route was not taken: the router's first failed gate
+    /// (<paramref name="hourlyEdgesRefusal"/>), or <c>hourly_edges_guard_not_passed</c> when the cell was a candidate and its count guard did
+    /// not pass (the fallback note says whether the ledger did not cover the window, the counts differed or the guard faulted).
+    /// Null for a read that took the interval table or the hourly route and for a source the route does not serve.</summary>
+    internal static string? ReadSourceReason(string readSource, bool splitRawServers, bool hourlyEdgesCandidate, string? hourlyEdgesRefusal)
+    {
+        if (splitRawServers)
+        {
+            return "split_raw_servers";
+        }
+
+        if (readSource != ComposeReadSources.Raw)
+        {
+            return null;
+        }
+
+        return hourlyEdgesCandidate ? "hourly_edges_guard_not_passed" : hourlyEdgesRefusal;
     }
 
     /// <summary>#7729: the earliest <c>bucket</c> of a time-series answer (UTC, written as <c>yyyy-MM-ddTHH:mm:ss</c> by <see cref="DbValueToJson"/>), or null when no row
