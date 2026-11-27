@@ -1156,6 +1156,8 @@ public sealed class DarlingMcpHostService : BackgroundService
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             EnvironmentName = Environments.Production,
+            /* #9837: not the working folder, which the builder would watch with every folder under it. */
+            ContentRootPath = DarlingHostBinding.ContentRoot,
         });
         PinForwardedHeadersOff(builder.Services);
         return builder;
