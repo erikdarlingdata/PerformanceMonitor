@@ -178,7 +178,7 @@ fi
 systemctl enable "${UNIT_NAME}" >/dev/null 2>&1 || die "systemctl enable ${UNIT_NAME} failed."
 note "Starting ${UNIT_NAME} and watching it for ${health_seconds} seconds..."
 if ! start_and_check "${health_seconds}"; then
-    die "The service is installed, and its health check failed: ${HEALTH_REASON}. Read 'journalctl -u darling' and the file log in ${LOG_DIR}, fix the cause, then run 'systemctl restart darling'."
+    die "The service is installed, and its health check failed: ${HEALTH_REASON}. Read 'sudo journalctl -u darling' and the file log in ${LOG_DIR}, fix the cause, then run 'systemctl restart darling'."
 fi
 note "Darling ${STAGED_VERSION} is installed, and ${UNIT_NAME} is active."
 print_next_checks

@@ -348,6 +348,34 @@ unit_stopped_marker() {
     systemctl show -p Environment --value "${UNIT_NAME}" 2>/dev/null | tr ' ' '\n' | sed -n 's/^DARLING_STOPPED_MARKER=//p' | head -n 1
 }
 
+# The warnings that a real upgrade prints about the unit and about the log folder. Each has a test and a text, so --check
+# prints the same warnings ahead of the run from the same conditions (#9823).
+# True when the installed unit is not the one in the tarball.
+unit_differs() {
+    [ -n "${SHIPPED_UNIT}" ] && ! cmp -s "${SHIPPED_UNIT}" "${UNIT_PATH}"
+}
+unit_differs_text() {
+    printf '%s' "${UNIT_PATH} is not the unit in the tarball, and it was left as it is. --replace-unit installs the tarball's unit, with its sandbox and its stopped marker."
+}
+# True when the installed unit sets no DARLING_STOPPED_MARKER.
+unit_marker_missing() {
+    [ -z "$(unit_stopped_marker)" ]
+}
+unit_marker_text() {
+    printf '%s' "The unit sets no DARLING_STOPPED_MARKER, so the health check sees only whether the process stays up. The darling.service in the tarball sets it (--replace-unit installs that unit)."
+}
+# True when ${LOG_ROOT} is there and is not root's, or a group or other user can write it. An install by hand from an
+# older docs/darling/linux.md gave it to the service user. install-darling.sh takes it back to root, and the upgrade
+# only names it: a chown by root on a folder that the service user owns follows whatever link that account swaps in.
+log_root_open() {
+    [ -e "${LOG_ROOT}" ] && ! root_only_writable "${LOG_ROOT}"
+}
+log_root_text() {
+    local owner
+    owner="$(stat -L -c '%U:%G, mode %a' -- "${LOG_ROOT}" 2>/dev/null | printable || true)"
+    printf '%s' "${LOG_ROOT} is owned by ${owner:-an account other than root}, and it should be root's own: an account that owns a parent folder can swap the folder inside it for a link. The upgrade does not change it. To fix it, run 'sudo chown root:root ${LOG_ROOT} && sudo chmod 755 ${LOG_ROOT}'. install-darling.sh does the same."
+}
+
 # The health check after a start. The web dashboard is off by default, so there is no port to ask. What the service
 # gives instead: systemd's own state (Type=notify: active means the host started), the main PID (a new one means the
 # process exited and Restart= started another), and the stopped marker (the process stays up after a startup failure
@@ -356,7 +384,7 @@ unit_stopped_marker() {
 health_check() {
     local seconds="$1" marker first_pid pid state elapsed
     marker="$(unit_stopped_marker)"
-    [ -n "${marker}" ] || warn "The unit sets no DARLING_STOPPED_MARKER, so the health check sees only whether the process stays up. The darling.service in the tarball sets it (--replace-unit installs that unit)."
+    [ -n "${marker}" ] || warn "$(unit_marker_text)"
     first_pid="$(systemctl show -p MainPID --value "${UNIT_NAME}")"
     for ((elapsed = 0; elapsed <= seconds; elapsed++)); do
         state="$(systemctl is-active "${UNIT_NAME}" 2>/dev/null || true)"
@@ -401,5 +429,5 @@ print_next_checks() {
     note "The start is healthy: the process is up and has reported no startup failure. That is not proof that it collects."
     note "In about 10 to 15 minutes, check the store for SUCCESS rows from every server (docs/darling/linux.md, step 9):"
     note "  SELECT server_id, status, count(*) FROM collect.collection_log WHERE collection_time > (now() AT TIME ZONE 'UTC') - interval '15 minutes' GROUP BY server_id, status ORDER BY server_id, status"
-    note "The file log is in ${LOG_DIR}, and 'journalctl -u darling' has what systemd reports."
+    note "The file log is in ${LOG_DIR}, and 'sudo journalctl -u darling' has what systemd reports."
 }
