@@ -217,7 +217,7 @@ This page lists every Darling MCP tool and the store objects that its SQL uses. 
 | `get_read_latency` | `collect.read_latency` |
 | `get_server_actions` | `config.config_monitored_servers`<br>`config.config_server_actions`<br>`collect.servers` |
 | `get_server_settings` | `config.config_monitored_servers` |
-| `get_service_starts` | `collect.service_starts`<br>`collect.service_start_rungs`<br>`collect.service_start_rung_objects` |
+| `get_service_starts` | `collect.service_starts`<br>`collect.service_start_rungs`<br>`collect.service_start_rung_objects`<br>`collect.upgrade_runs` |
 | `get_slow_reads` | `collect.slow_reads` |
 | `get_store_compression_health` | TimescaleDB's `timescaledb_information.chunks`, `timescaledb_information.jobs`, `timescaledb_information.job_stats` and `timescaledb_information.job_errors` |
 | `get_store_connections` | `collect.store_connection_samples`<br>`collect.store_connection_slots` |
