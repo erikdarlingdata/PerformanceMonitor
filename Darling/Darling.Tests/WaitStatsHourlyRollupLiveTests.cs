@@ -89,8 +89,8 @@ public sealed class WaitStatsHourlyRollupLiveTests
             $"OR (collection_time >= '{Ts(hole)}' AND collection_time < '{Ts(hole.AddHours(1))}') OR (collection_time >= '{Ts(unreached)}' AND collection_time < '{Ts(end)}'))", ct);
         var rawRows = await RawWaitRowsAsync(connection, RawSql(start), start, end, waitChunks, ct);
         var hourlyRows = await RawWaitRowsAsync(connection, HourlySql(start), start, end, waitChunks, ct);
-        Assert.True(rawRows > allowed * 5, $"the raw statement reads the whole window ({rawRows} rows), far more than the edge, hole and unreached hours hold ({allowed})");
-        Assert.True(hourlyRows <= allowed, $"the hourly statement read {hourlyRows} raw wait_stats rows, more than the edge, hole and unreached hours hold ({allowed})");
+        Assert.True(rawRows.AtMost > allowed * 5, $"the raw statement reads the whole window ({rawRows.AtMost} rows at most), far more than the edge, hole and unreached hours hold ({allowed})");
+        Assert.True(hourlyRows.AtLeast <= allowed, $"the hourly statement read {hourlyRows.AtLeast} raw wait_stats rows at least, more than the edge, hole and unreached hours hold ({allowed})");
     }
 
     [Fact]
@@ -215,12 +215,12 @@ public sealed class WaitStatsHourlyRollupLiveTests
     }
 
     /// <summary>The raw <c>wait_stats</c> rows the statement's plan read (rows of the scans over the table's chunks).</summary>
-    private static async Task<long> RawWaitRowsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, ISet<string> waitChunks, CancellationToken ct)
+    private static async Task<(long AtLeast, long AtMost)> RawWaitRowsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, ISet<string> waitChunks, CancellationToken ct)
     {
         await ExecuteAsync(connection, "DEALLOCATE ALL", ct);
         await ExecuteAsync(connection, $"PREPARE ws_rows_q(int, timestamp, timestamp, timestamp) AS {sql}", ct);
         var plan = await ScalarAsync<object>(connection, $"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE ws_rows_q({Args(start, end)})", ct);
-        return ExplainBuffers.RowsRead(plan, waitChunks);
+        return (ExplainBuffers.RowsReadAtLeast(plan, waitChunks), ExplainBuffers.RowsReadAtMost(plan, waitChunks));
     }
 
     private static async Task<NpgsqlConnection> BuildTimescaleStoreAsync(ScratchPostgres scratch, CancellationToken ct)

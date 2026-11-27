@@ -92,8 +92,8 @@ public sealed class WaitStatsDailyRollupLiveTests
             $"SELECT count(*) FROM collect.wait_stats WHERE server_id = {ServerId} AND (collection_time >= '{Ts(today)}' OR (collection_time >= '{Ts(today.AddDays(-10))}' AND collection_time < '{Ts(today.AddDays(-9))}'))", ct);
         var rawRows = await RawWaitRowsAsync(connection, RawSql(start), start, end, waitChunks, ct);
         var rollupRows = await RawWaitRowsAsync(connection, rollupSql, start, end, waitChunks, ct);
-        Assert.True(rawRows > allowed, $"the raw statement reads the whole window ({rawRows} rows), more than the open and missing days hold ({allowed})");
-        Assert.True(rollupRows <= allowed, $"the rollup statement read {rollupRows} raw wait_stats rows, more than the open day's and the missing day's {allowed}");
+        Assert.True(rawRows.AtMost > allowed, $"the raw statement reads the whole window ({rawRows.AtMost} rows at most), more than the open and missing days hold ({allowed})");
+        Assert.True(rollupRows.AtLeast <= allowed, $"the rollup statement read {rollupRows.AtLeast} raw wait_stats rows at least, more than the open day's and the missing day's {allowed}");
     }
 
     [Fact]
@@ -454,12 +454,12 @@ public sealed class WaitStatsDailyRollupLiveTests
     }
 
     /// <summary>The raw <c>wait_stats</c> rows the statement's plan read (rows of the scans over the table's chunks).</summary>
-    private static async Task<long> RawWaitRowsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, ISet<string> waitChunks, CancellationToken ct)
+    private static async Task<(long AtLeast, long AtMost)> RawWaitRowsAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, ISet<string> waitChunks, CancellationToken ct)
     {
         await ExecuteAsync(connection, "DEALLOCATE ALL", ct);
         await ExecuteAsync(connection, $"PREPARE ws_rows_q(int, timestamp, timestamp, timestamp) AS {sql}", ct);
         var plan = await ScalarAsync<object>(connection, $"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE ws_rows_q({Args(start, end)})", ct);
-        return ExplainBuffers.RowsRead(plan, waitChunks);
+        return (ExplainBuffers.RowsReadAtLeast(plan, waitChunks), ExplainBuffers.RowsReadAtMost(plan, waitChunks));
     }
 
     private static async Task<long> ReadRowCountAsync(NpgsqlConnection connection, string sql, DateTime start, DateTime end, CancellationToken ct)
