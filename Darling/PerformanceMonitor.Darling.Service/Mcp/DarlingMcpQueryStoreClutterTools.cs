@@ -95,8 +95,13 @@ public sealed class DarlingMcpQueryStoreClutterTools
     /// spare. The reads before the fleet arm answer in a few seconds.</summary>
     internal const int FleetBudgetSeconds = 15;
 
+    /// <summary>#9882: the fleet reference is not in this answer and its computation goes on (<see cref="QueryStoreClutterFleetReference"/>).</summary>
     internal const string FleetOverrunNote =
-        "The fleet reference ran over its time budget and was not computed. The per-server figures above are complete. Try a shorter hours_back, or leave include_fleet_median off.";
+        "The fleet reference ran over its time budget and is not in this answer. The per-server figures above are complete. It is still being computed and, once done, is kept for the rest of the clock hour: ask again in about a minute, try a shorter hours_back, or leave include_fleet_median off.";
+
+    /// <summary>#9882: the computation for this window ended without a reference, and calls for it answer this at once until the clock hour ends.</summary>
+    internal const string FleetUnfinishedNote =
+        "The fleet reference for this window did not finish inside its time cap and is not tried again this clock hour. The per-server figures above are complete. Try a shorter hours_back, or leave include_fleet_median off.";
 
     /// <summary>Test seam (#9478): runs at the start of the fleet arm and is handed the fleet budget's source, so a test can fire the
     /// bound without waiting for it. Unset in production.</summary>
@@ -189,7 +194,7 @@ public sealed class DarlingMcpQueryStoreClutterTools
 
     [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_query_store_clutter"), Description(
-        "The Query Store CLUTTER view for one server, composed from already-collected rows: no new query runs. Clutter (read_cost/plan_churn/config) is per DATABASE; qs_overhead (waits/memory clerk) is per SERVER, never attributed to a database. No rows answers unavailable, never a clean bill. Verdict Unknown means unmeasured, never quietly Healthy. REPLICAS: excluded, verdict Unknown, never a defect. query_capture_mode null means never asked, never NONE. window_truncated is a retention floor, not a page cut: no limit fixes it. fleet_median is null unless include_fleet_median=true. <<GUIDE>> The Query Store CLUTTER view for one server, composed from rows already collected: no new query runs against the monitored server. Clutter is per DATABASE and overhead is per SERVER, and the payload keeps the two apart. Each database row carries three decomposed arms with raw numbers, never a bare composite. (a) read_cost, from the query_store collector's fan-out rollup on collection_log: runs_observed (fan-out runs on the server in the window), runs_slowest (runs on which THIS database was the slowest item) and runs_slowest_pct, slowest_item_ms_p50/p95 when it was, run_duration_ms_p50 for scale, slowest_share_pct (median of slowest_item_ms / duration_ms over those runs, the slowest item's share of the whole pass, get_collection_health's verdict figure), and dominance_ratio (this database's median slowest cost over the pooled median of every OTHER database's slowest cost on the same server, null when no other database was ever slowest). dominance_ratio is NOT get_collection_health's dominance (slowest x items / run): it names a different quantity. The store keeps only the slowest item of each run, so this arm ranks databases by how often and by how much they were the slowest, not by a per-database series. (b) plan_churn, from the clutter rollups plus raw query_store_stats at the edges: distinct_queries, distinct_plans (plan_id, the identity MAX_PLANS_PER_QUERY caps and the plan map keys on), plans_per_query_p95 and _max, new_plans_per_day (plans first seen after the database's first collection in the window, per day of the span its collections cover; a plan idle before the window and run again inside it counts as new, the store keeps no first-seen stamp), never_seen_twice_fraction (plans seen under exactly one collection over all plans observed; null under two collections) and collections_observed. (c) config, the newest query_store_health capture per database INSIDE the window, with its own captured_at: actual_state, desired_state, readonly_reason (decoded), storage used vs cap and pct_of_cap, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, and query_capture_mode (the DMV's query_capture_mode_desc spelling verbatim: ALL / AUTO / CUSTOM / NONE) with capture_mode_known beside it, null means the newest capture predates the column, which is NEVER ASKED and never NONE. The mode is the one option on that row that names a plan-churn factory, so the churn recommendations name it: ALL beside high churn is the 'switch to AUTO' case, AUTO beside it points at the workload. Per database, verdict is the band canon (Healthy / Warning / Critical / Unknown) with verdict_reasons naming the arm and bar that raised it; the bars are published under thresholds so you can disagree with them on the evidence, and Unknown means unmeasured, never quietly Healthy. recommendations is prose per reason and next_tools names the reads that carry the detail. Rows are ordered worst-first (band, then the read-cost share, then plans per query) and cut at limit, observed off a fetch one past it: truncated is the page cut, databases_returned the page, database_count the whole. READ-ONLY: verdict_reasons qs_read_only (Critical) means readonly_reason carries a capacity bit (65536, 131072, 262144 or 524288), the store filled up and stopped, and a capacity bit decides when a state bit is set too. qs_read_only_state means Query Store is READ_ONLY with no capacity bit and no operator choice: either the database itself is in a state Query Store cannot record in (readonly_reason 1 read-only, 2 single-user, 4 emergency), or readonly_reason is 0 with desired_state READ_WRITE, or it holds only bits this build does not recognise, where the cause is not recorded and get_query_store_health and the error log are the next read. qs_read_only_operator means readonly_reason 0 with desired_state READ_ONLY, an operator's own OPERATION_MODE. Both are reasons with no band and are not clutter; the row stays Unknown unless another arm grades it, and recommendations name the decoded reason. REPLICAS: a database whose readonly_reason carries bit 8 (the engine's readable-secondary flag) reads excluded: true, excluded_reason: qs_read_only_replica, verdict Unknown, Query Store on a readable secondary is READ_ONLY by design, its clutter and configuration are its primary's, and it is never a defect here. qs_overhead is the ONE per-server block: wait_stats lists every non-sleep QDS_* wait type in the window with wait_ms_total, waiting_tasks_total and wait_ms_per_hour (rated milliseconds over the measured seconds they accrued over, never over a cadence; null when no interval was knowable), and excluded_wait_types NAMES the four QDS_* sleep waits IgnoredWaitDefaults drops at collection (QDS_ASYNC_QUEUE, QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP, QDS_PERSIST_TASK_MAIN_LOOP_SLEEP, QDS_SHUTDOWN_QUEUE) so the proxy is not mistaken for the whole; memory_clerk is MEMORYCLERK_QUERYDISKSTORE latest and window max, with clerk_in_latest_capture saying whether it is in the collector's current top 25 (its absence is a rank, not a zero); the block ends with the window's baseline discontinuities, the same markers the trend tools publish. The window block carries the requested start and end beside the raw tier's reach. fleet_median is opt-in (include_fleet_median): discrete medians of slowest_share_pct and plans_per_query_p95 over every database on every enabled SQL Server target that is not a replica, and of the QDS wait rate over those servers, each with the population it was drawn from, off by default because it walks two raw hypertables fleet-wide over the window. When that walk runs over its own time budget, fleet_median is null and fleet_median_note says so, and every per-server figure is still complete. include_fleet_median's own original wording, unabbreviated: If true, also compute fleet_median: the discrete median of each headline arm over every enabled SQL Server target that is not a replica, so a per-server figure has a reference. Default false: it walks query_store_stats and wait_stats fleet-wide over the window, which on a large store is the read deadline's whole budget. The wait arm has its own floor, and window gives each arm's reach." + McpHelpers.WindowTruncatedDescription)]
+        "The Query Store CLUTTER view for one server, composed from already-collected rows: no new query runs. Clutter (read_cost/plan_churn/config) is per DATABASE; qs_overhead (waits/memory clerk) is per SERVER, never attributed to a database. No rows answers unavailable, never a clean bill. Verdict Unknown means unmeasured, never quietly Healthy. REPLICAS: excluded, verdict Unknown, never a defect. query_capture_mode null means never asked, never NONE. window_truncated is a retention floor, not a page cut: no limit fixes it. fleet_median is null unless include_fleet_median=true. A fleet_median that took over 5 s to compute is kept for the rest of its clock hour. <<GUIDE>> The Query Store CLUTTER view for one server, composed from rows already collected: no new query runs against the monitored server. Clutter is per DATABASE and overhead is per SERVER, and the payload keeps the two apart. Each database row carries three decomposed arms with raw numbers, never a bare composite. (a) read_cost, from the query_store collector's fan-out rollup on collection_log: runs_observed (fan-out runs on the server in the window), runs_slowest (runs on which THIS database was the slowest item) and runs_slowest_pct, slowest_item_ms_p50/p95 when it was, run_duration_ms_p50 for scale, slowest_share_pct (median of slowest_item_ms / duration_ms over those runs, the slowest item's share of the whole pass, get_collection_health's verdict figure), and dominance_ratio (this database's median slowest cost over the pooled median of every OTHER database's slowest cost on the same server, null when no other database was ever slowest). dominance_ratio is NOT get_collection_health's dominance (slowest x items / run): it names a different quantity. The store keeps only the slowest item of each run, so this arm ranks databases by how often and by how much they were the slowest, not by a per-database series. (b) plan_churn, from the clutter rollups plus raw query_store_stats at the edges: distinct_queries, distinct_plans (plan_id, the identity MAX_PLANS_PER_QUERY caps and the plan map keys on), plans_per_query_p95 and _max, new_plans_per_day (plans first seen after the database's first collection in the window, per day of the span its collections cover; a plan idle before the window and run again inside it counts as new, the store keeps no first-seen stamp), never_seen_twice_fraction (plans seen under exactly one collection over all plans observed; null under two collections) and collections_observed. (c) config, the newest query_store_health capture per database INSIDE the window, with its own captured_at: actual_state, desired_state, readonly_reason (decoded), storage used vs cap and pct_of_cap, size_based_cleanup_mode, stale_query_threshold_days, max_plans_per_query, interval_length_minutes, and query_capture_mode (the DMV's query_capture_mode_desc spelling verbatim: ALL / AUTO / CUSTOM / NONE) with capture_mode_known beside it, null means the newest capture predates the column, which is NEVER ASKED and never NONE. The mode is the one option on that row that names a plan-churn factory, so the churn recommendations name it: ALL beside high churn is the 'switch to AUTO' case, AUTO beside it points at the workload. Per database, verdict is the band canon (Healthy / Warning / Critical / Unknown) with verdict_reasons naming the arm and bar that raised it; the bars are published under thresholds so you can disagree with them on the evidence, and Unknown means unmeasured, never quietly Healthy. recommendations is prose per reason and next_tools names the reads that carry the detail. Rows are ordered worst-first (band, then the read-cost share, then plans per query) and cut at limit, observed off a fetch one past it: truncated is the page cut, databases_returned the page, database_count the whole. READ-ONLY: verdict_reasons qs_read_only (Critical) means readonly_reason carries a capacity bit (65536, 131072, 262144 or 524288), the store filled up and stopped, and a capacity bit decides when a state bit is set too. qs_read_only_state means Query Store is READ_ONLY with no capacity bit and no operator choice: either the database itself is in a state Query Store cannot record in (readonly_reason 1 read-only, 2 single-user, 4 emergency), or readonly_reason is 0 with desired_state READ_WRITE, or it holds only bits this build does not recognise, where the cause is not recorded and get_query_store_health and the error log are the next read. qs_read_only_operator means readonly_reason 0 with desired_state READ_ONLY, an operator's own OPERATION_MODE. Both are reasons with no band and are not clutter; the row stays Unknown unless another arm grades it, and recommendations name the decoded reason. REPLICAS: a database whose readonly_reason carries bit 8 (the engine's readable-secondary flag) reads excluded: true, excluded_reason: qs_read_only_replica, verdict Unknown, Query Store on a readable secondary is READ_ONLY by design, its clutter and configuration are its primary's, and it is never a defect here. qs_overhead is the ONE per-server block: wait_stats lists every non-sleep QDS_* wait type in the window with wait_ms_total, waiting_tasks_total and wait_ms_per_hour (rated milliseconds over the measured seconds they accrued over, never over a cadence; null when no interval was knowable), and excluded_wait_types NAMES the four QDS_* sleep waits IgnoredWaitDefaults drops at collection (QDS_ASYNC_QUEUE, QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP, QDS_PERSIST_TASK_MAIN_LOOP_SLEEP, QDS_SHUTDOWN_QUEUE) so the proxy is not mistaken for the whole; memory_clerk is MEMORYCLERK_QUERYDISKSTORE latest and window max, with clerk_in_latest_capture saying whether it is in the collector's current top 25 (its absence is a rank, not a zero); the block ends with the window's baseline discontinuities, the same markers the trend tools publish. The window block carries the requested start and end beside the raw tier's reach. fleet_median is opt-in (include_fleet_median): discrete medians of slowest_share_pct and plans_per_query_p95 over every database on every enabled SQL Server target that is not a replica, and of the QDS wait rate over those servers, each with the population it was drawn from, off by default because it walks two raw hypertables fleet-wide over the window. When that walk runs over its own time budget, fleet_median is null and fleet_median_note says so, and every per-server figure is still complete. The walk then goes on without the call for up to 120 s, a reference that took over 5 s is kept for the rest of its clock hour for that hours_back, and a later call in that hour answers at once: with the kept reference and when it was computed, or with a note that it is still being computed or did not finish. include_fleet_median's own original wording, unabbreviated: If true, also compute fleet_median: the discrete median of each headline arm over every enabled SQL Server target that is not a replica, so a per-server figure has a reference. Default false: it walks query_store_stats and wait_stats fleet-wide over the window, which on a large store is the read deadline's whole budget. The wait arm has its own floor, and window gives each arm's reach." + McpHelpers.WindowTruncatedDescription)]
     public static Task<string> GetQueryStoreClutter(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -337,41 +342,56 @@ public sealed class DarlingMcpQueryStoreClutterTools
             string? fleetMedianNote = null;
             if (include_fleet_median)
             {
-                /* #9478: the fleet arm has its own bound. On a large store its plan-churn read runs to the client deadline, and one
-                   overrun used to fail the whole call and throw away the per-server rows already read. The bound is cumulative over
-                   the arm's five reads and well under the 30 s per-command deadline, so the per-server answer always returns. */
+                /* #9478: the fleet arm has its own bound, well under the 30 s per-command deadline, so the per-server answer always
+                   returns. #9882: the wait is bounded and the computation is not. It goes on past the bound under its own cap, one per
+                   store, hours_back and clock hour, and a later call for the same key answers at once (QueryStoreClutterFleetReference). */
                 using var fleetBudget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 fleetBudget.CancelAfter(TimeSpan.FromSeconds(FleetBudgetSeconds));
                 try
                 {
                     if (FleetReadSeam.Value is { } seam) await seam(fleetBudget);
-                    var fleetToken = fleetBudget.Token;
-                    var fleetIds = await DarlingQueryStoreClutterReader.GetEnabledSqlServerTargetsAsync(postgres, MonitoredEngineKind.SqlServer, fleetToken);
-                    var fleetReadCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
-                    /* #9478: the median reads only each database's p95, so the fleet arm reads the narrow churn statement. */
-                    var fleetChurn = await DarlingQueryStoreClutterReader.GetPlanChurnP95Async(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
-                    var fleetConfig = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
-                    var fleetWaits = await DarlingQueryStoreClutterReader.GetQdsWaitsAsync(postgres, fleetIds, requestedStart, now, fleetToken);
-                    var median = QueryStoreClutter.ComputeFleetMedian(fleetIds, fleetReadCost, fleetChurn, fleetConfig, fleetWaits);
-                    fleetMedian = new
+                    var answer = await QueryStoreClutterFleetReference.GetAsync(
+                        postgres, hours_back, now, asOfUtc is not null,
+                        fleetToken => ComputeFleetReferenceAsync(postgres, requestedStart, now, asOfUtc, fleetToken),
+                        fleetBudget, TimeSpan.FromSeconds(FleetBudgetSeconds), logger);
+                    if (answer.Outcome is not { } outcome)
                     {
-                        slowest_share_pct = Round(median.SlowestSharePct, 1),
-                        databases_in_read_cost_median = median.DatabasesInReadCostMedian,
-                        plans_per_query_p95 = median.PlansPerQueryP95,
-                        databases_in_churn_median = median.DatabasesInChurnMedian,
-                        qds_wait_ms_per_hour = Round(median.QdsWaitMsPerHour, 1),
-                        servers_in_wait_median = median.ServersInWaitMedian,
-                        servers_in_median = median.ServersInMedian,
-                        replica_servers_excluded = median.ReplicaServersExcluded,
-                        enabled_sql_server_targets = fleetIds.Length,
-                    };
-                    fleetMedianNote =
-                        "Discrete medians (percentile_disc 0.5) over the same window and the same arithmetic as the rows above, "
-                        + "on every enabled SQL Server target whose newest query_store_health rows do not describe a readable secondary. "
-                        + "The read-cost and churn medians are over DATABASES (only databases whose server fanned out over at least "
-                        + QueryStoreClutter.MinFanoutItemsForReadCost.ToString(CultureInfo.InvariantCulture)
-                        + " databases enter the read-cost median); the wait median is over SERVERS (each server's sum of its included QDS_* rates). "
-                        + "A null median with a zero population means no server in the fleet contributed that arm in the window.";
+                        fleetMedianNote = FleetOverrunNote;
+                    }
+                    else if (outcome.Reference is not { } reference)
+                    {
+                        fleetMedianNote = FleetUnfinishedNote;
+                    }
+                    else
+                    {
+                        var median = reference.Median;
+                        fleetMedian = new
+                        {
+                            slowest_share_pct = Round(median.SlowestSharePct, 1),
+                            databases_in_read_cost_median = median.DatabasesInReadCostMedian,
+                            plans_per_query_p95 = median.PlansPerQueryP95,
+                            databases_in_churn_median = median.DatabasesInChurnMedian,
+                            qds_wait_ms_per_hour = Round(median.QdsWaitMsPerHour, 1),
+                            servers_in_wait_median = median.ServersInWaitMedian,
+                            servers_in_median = median.ServersInMedian,
+                            replica_servers_excluded = median.ReplicaServersExcluded,
+                            enabled_sql_server_targets = reference.EnabledSqlServerTargets,
+                        };
+                        fleetMedianNote =
+                            "Discrete medians (percentile_disc 0.5) over the same window and the same arithmetic as the rows above, "
+                            + "on every enabled SQL Server target whose newest query_store_health rows do not describe a readable secondary. "
+                            + "The read-cost and churn medians are over DATABASES (only databases whose server fanned out over at least "
+                            + QueryStoreClutter.MinFanoutItemsForReadCost.ToString(CultureInfo.InvariantCulture)
+                            + " databases enter the read-cost median); the wait median is over SERVERS (each server's sum of its included QDS_* rates). "
+                            + "A null median with a zero population means no server in the fleet contributed that arm in the window.";
+                        if (answer.Shared)
+                        {
+                            /* #9882: another call computed this reference, over its own window in the same clock hour. */
+                            fleetMedianNote += string.Create(
+                                CultureInfo.InvariantCulture,
+                                $" This reference was computed at {outcome.EndedUtc:yyyy-MM-dd HH:mm:ss} UTC over the {hours_back} hours ending {reference.WindowEndUtc:yyyy-MM-dd HH:mm:ss} UTC and took {outcome.Seconds:F1} s; one that takes over {QueryStoreClutterFleetReference.KeepAboveSeconds} s is kept for the rest of its clock hour.");
+                        }
+                    }
                 }
                 catch (Exception ex) when (IsFleetOverrun(ex, cancellationToken, fleetBudget.Token))
                 {
@@ -581,6 +601,22 @@ public sealed class DarlingMcpQueryStoreClutterTools
     private const string ToolCollectionLog = "get_collection_log";
     private const string ToolWaitStats = "get_wait_stats";
     private const string ToolMemoryClerks = "get_memory_clerks";
+
+    /// <summary>#9882: the fleet reference over one window, from the five fleet reads. Every read takes <paramref name="fleetToken"/>,
+    /// the computation's cap (<see cref="QueryStoreClutterFleetReference.CapSeconds"/>), so at the cap each statement is cancelled and
+    /// its connection goes back to the pool.</summary>
+    private static async Task<QueryStoreClutterFleetReference.Reference> ComputeFleetReferenceAsync(
+        NpgsqlDataSource postgres, DateTime requestedStart, DateTime now, DateTime? asOfUtc, CancellationToken fleetToken)
+    {
+        var fleetIds = await DarlingQueryStoreClutterReader.GetEnabledSqlServerTargetsAsync(postgres, MonitoredEngineKind.SqlServer, fleetToken);
+        var fleetReadCost = await DarlingQueryStoreClutterReader.GetReadCostAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
+        /* #9478: the median reads only each database's p95, so the fleet arm reads the narrow churn statement. */
+        var fleetChurn = await DarlingQueryStoreClutterReader.GetPlanChurnP95Async(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
+        var fleetConfig = await DarlingQueryStoreClutterReader.GetConfigAsync(postgres, fleetIds, requestedStart, now, asOfUtc: asOfUtc, cancellationToken: fleetToken);
+        var fleetWaits = await DarlingQueryStoreClutterReader.GetQdsWaitsAsync(postgres, fleetIds, requestedStart, now, fleetToken);
+        var median = QueryStoreClutter.ComputeFleetMedian(fleetIds, fleetReadCost, fleetChurn, fleetConfig, fleetWaits);
+        return new QueryStoreClutterFleetReference.Reference(median, fleetIds.Length, requestedStart, now);
+    }
 
     /// <summary>Every tool name <see cref="NextTools"/> can put in its payload (#3898 D7) — named constants
     /// rather than a second hand-typed list, so the <c>/core</c> profile's closure computation and the emitted
