@@ -315,6 +315,57 @@ public sealed class DarlingUpgradeRunRecordTests
         finally { Cleanup(folder); }
     }
 
+    /// <summary>
+    /// #9850: File.Replace threw and the old file is gone, so the temp file is moved into place, and that Move throws too. The returned reason must
+    /// name both failures. Replace's reason alone is what the outer catch used to lose. Windows will not give a Replace that fails after it removed the
+    /// old file without elevation, so the test shadows Test-Path for the run file: its first answer deletes the old file (Replace then throws on the
+    /// missing target) and its second answer recreates the file after saying it is missing (Move then throws, because the destination exists). The
+    /// expected messages come from the same two calls made in the same PowerShell, so the test follows the runtime's wording.
+    /// </summary>
+    [Fact]
+    public void WhenReplaceFailsAndTheMoveIntoPlaceFailsToo_TheReasonNamesBothFailures()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "File.Replace and share modes are Windows behaviour.");
+        var folder = NewFolder();
+        try
+        {
+            var output = Run(folder, """
+                $runFile = Join-Path $root 'upgrade-run.json'
+                $run = New-DarlingUpgradeRun 'a' 'old-target' ([datetime]::UtcNow); Write-DarlingUpgradeRunFile $root $run | Out-Null
+                $probe = Join-Path $root 'probe'; New-Item -ItemType Directory -Path $probe | Out-Null
+                $probeTemp = Join-Path $probe 'a.tmp'; Set-Content -LiteralPath $probeTemp -Value 'x'
+                $replaceMessage = ''; try { [System.IO.File]::Replace($probeTemp, (Join-Path $probe 'missing.json'), [NullString]::Value) } catch { $replaceMessage = $_.Exception.Message }
+                $moveDestination = Join-Path $probe 'there.json'; Set-Content -LiteralPath $moveDestination -Value 'y'
+                $moveMessage = ''; try { [System.IO.File]::Move($probeTemp, $moveDestination) } catch { $moveMessage = $_.Exception.Message }
+                $script:runFileChecks = 0
+                function Test-Path {
+                    [CmdletBinding()] param([string]$LiteralPath, [string]$PathType)
+                    $answer = Microsoft.PowerShell.Management\Test-Path @PSBoundParameters
+                    if ($PathType -eq 'Leaf' -and $LiteralPath -eq $runFile) {
+                        $script:runFileChecks++
+                        if ($script:runFileChecks -eq 1) { Remove-Item -LiteralPath $runFile -Force; return $true }
+                        if ($script:runFileChecks -eq 2) { Set-Content -LiteralPath $runFile -Value 'z'; return $false }
+                    }
+                    return $answer
+                }
+                $run2 = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow)
+                $w = Write-DarlingUpgradeRunFile $root $run2
+                'ok=' + $w.Ok
+                'distinct=' + (($replaceMessage -ne '') -and ($moveMessage -ne '') -and ($replaceMessage -ne $moveMessage))
+                'hasReplace=' + $w.Reason.Contains($replaceMessage)
+                'hasMove=' + $w.Reason.Contains($moveMessage)
+                'checks=' + $script:runFileChecks
+                """);
+            Assert.Contains("ok=False", output, StringComparison.Ordinal);
+            Assert.Contains("distinct=True", output, StringComparison.Ordinal);
+            Assert.Contains("checks=2", output, StringComparison.Ordinal);
+            Assert.Contains("hasMove=True", output, StringComparison.Ordinal);
+            Assert.Contains("hasReplace=True", output, StringComparison.Ordinal);
+            Assert.Empty(Directory.GetFiles(folder, "upgrade-run.json.*.tmp"));
+        }
+        finally { Cleanup(folder); }
+    }
+
     private static readonly string[] ServiceWrittenListFunctions =
     {
         "Get-DarlingServiceWrittenNames", "Test-DarlingServiceWrittenFileName", "Test-PathIsAtOrUnder", "Get-DarlingFileNameCount",

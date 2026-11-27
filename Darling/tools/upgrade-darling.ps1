@@ -4101,7 +4101,11 @@ function Write-DarlingUpgradeRunFile([string]$installRoot, $run, [string]$servic
                 # #9850: when Replace fails with ERROR_UNABLE_TO_MOVE_REPLACEMENT (1176) and no backup name was given, Windows has already
                 # removed the file it was to replace. The in-place write below opens it with FileMode.Open and would fail, and the finally
                 # would delete the temp file, leaving no record at all. The temp file is the record: move it into place, which keeps its grant.
-                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { [System.IO.File]::Move($temp, $path); return [pscustomobject]@{ Ok = $true; Reason = ''; Warning = $warning } }
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                    try { [System.IO.File]::Move($temp, $path) }
+                    catch { throw "$replaceReason Moving the new file into place failed too: $($_.Exception.Message)" }
+                    return [pscustomobject]@{ Ok = $true; Reason = ''; Warning = $warning }
+                }
                 try {
                     $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
                     $stream = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
@@ -4123,9 +4127,9 @@ function Write-DarlingUpgradeRunFile([string]$installRoot, $run, [string]$servic
 }
 
 # #9850: the warning for a run record write that failed. It names the record that is missing. Only the final record carries the run's
-# result, so only its failure leaves the store with nothing to show for how the run ended. $record is 'in_progress' (the start write: only
-# the end write follows it, because the run may stop before the copy), 'after_copy' (the write after the copy: only the end write follows)
-# or 'final'.
+# result, so only its failure leaves the store with nothing to show for how the run ended. $record is 'in_progress' (the start write: the
+# end write is the only one sure to follow it, because the run may stop before the copy, and a run that reaches the copy writes after it
+# too), 'after_copy' (the write after the copy: only the end write follows) or 'final'.
 function Get-DarlingUpgradeRunWriteWarning([string]$record, [string]$reason) {
     if ($record -eq 'final') {
         return "The final upgrade run record could not be written ($reason), so the store will not show this run's result."
