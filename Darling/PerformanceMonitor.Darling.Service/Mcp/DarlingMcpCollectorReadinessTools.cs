@@ -47,6 +47,18 @@ public sealed class DarlingMcpCollectorReadinessTools
     /// <summary>The waiting rows one answer lists. The counts at the top cover every waiting pair, listed or not.</summary>
     internal const int MaxWaitingRows = 200;
 
+    /// <summary>The characters of a failure's text one waiting row carries (#9880). A longer text is cut at a word boundary and the row says so.</summary>
+    internal const int RowErrorChars = 300;
+
+    /// <summary>The characters of a failure's text one precondition group carries (#9880). The group carries the text once for every server it covers, so it affords the whole remedy of the setup steps the service writes.</summary>
+    internal const int GroupErrorChars = 1000;
+
+    /// <summary>The characters the failure read fetches, so the cut lands in code at a word boundary and never inside a word in SQL (#9880).</summary>
+    internal const int ErrorReadChars = 4000;
+
+    /// <summary>Example servers a precondition group names. The count says how many the group covers.</summary>
+    internal const int ExampleServers = 5;
+
     [DarlingToolAccess(ToolAccess.Read)]
     [McpServerTool(Name = "get_collector_readiness"), Description(
         "Install check: since THIS service process started, which due collectors have not had a good cycle yet. One-line verdict first, then the waiting list, then done. "
@@ -59,16 +71,20 @@ public sealed class DarlingMcpCollectorReadinessTools
         + "done lists the collectors with a good cycle since the start: first_good_at, errors_since_start and skips_since_start for one server, one summary row per server (counts of collectors, no error counts) for the fleet. "
         + "first_full_cycle is the first moment every collector that was due at the start had a good cycle on every enrolled server: status reached with at, or not yet with at null. "
         + "A good cycle is a SUCCESS run. An error is ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING or ABANDONED. A skip is any other status, such as SKIPPED or YIELDED. "
-        + "The start is the process start, so a restart resets the read. waiting is cut at 200 rows, oldest wait first; waiting_count is the total.")]
+        + "A collector held by a setup step on the monitored server (a named skip: an extension not created or not preloaded, a grant refused, an Extended Events session not running) is not waiting on the service: precondition_count counts those, precondition_held lists each step once with the number of servers it holds and a few example servers (the full text of the step is kept whole there), and waiting_count does not include them, so it reaches zero on a finished install. "
+        + "The start is the process start, so a restart resets the read. waiting is cut at 200 rows, oldest wait first; waiting_count is the total. The reply is also held to the 32,768-byte response budget: budget_truncated = true says waiting rows were left off the end, and budget_note names the offset that reads on; over_budget = true says the per-server summaries alone are over it and server_name reads one server. "
+        + "A waiting row's last_error is cut at a word boundary when it is long, and last_error_cut says so: get_collection_log (server_name, collector_name) carries the whole text.")]
     public static Task<string> GetCollectorReadiness(
         NpgsqlDataSource postgres,
         [Description("Optional server name or display name. Omit for every enabled server.")] string? server_name = null,
+        [Description("Waiting rows to skip before the page, in the answer's order (a page start). Default 0; budget_note names the offset that reads on when budget_truncated is true.")] int offset = 0,
         CancellationToken cancellationToken = default) =>
-        GetCollectorReadiness(postgres, server_name, AlertReadFailureCounter.Shared.CountingSince, DateTime.UtcNow, cancellationToken);
+        GetCollectorReadiness(postgres, server_name, AlertReadFailureCounter.Shared.CountingSince, DateTime.UtcNow, cancellationToken, offset);
 
     /// <summary>The read with the start instant and the clock passed in, so a test sets the start without restarting a process.</summary>
     internal static async Task<string> GetCollectorReadiness(
-        NpgsqlDataSource postgres, string? server_name, DateTime startUtc, DateTime nowUtc, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string? server_name, DateTime startUtc, DateTime nowUtc, CancellationToken cancellationToken, int offset = 0,
+        int budgetBytes = McpResponseBudget.DefaultBytes)
     {
         int? onlyServerId = null;
         if (!string.IsNullOrWhiteSpace(server_name))
@@ -150,7 +166,9 @@ public sealed class DarlingMcpCollectorReadinessTools
 
             return await ComposeAsync(
                 servers, pairs, firstGood, before, startUtc, nowUtc, notCollected, disabled, onlyServerId is not null,
-                detailPairs => ReadDetailAsync(postgres, detailPairs, startUtc, nowUtc, cancellationToken));
+                detailPairs => ReadDetailAsync(postgres, detailPairs, startUtc, nowUtc, cancellationToken),
+                failurePairs => ReadFailuresAsync(postgres, failurePairs, startUtc, nowUtc, cancellationToken),
+                offset, budgetBytes);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -160,7 +178,10 @@ public sealed class DarlingMcpCollectorReadinessTools
 
     internal sealed record Pair(int ServerId, string Collector, int IntervalMinutes, bool RunsAtFixedTime);
 
-    internal sealed record Detail(long Errors, long Skips, string? LastError, DateTime? LastErrorAt);
+    internal sealed record Detail(long Errors, long Skips);
+
+    /// <summary>The newest failed run of a pair since the start: its <c>collection_log</c> status, when it ran and its text (read to <see cref="ErrorReadChars"/>).</summary>
+    internal sealed record Failure(string Status, DateTime At, string? Text);
 
     private static async Task<List<CollectorFleetLiveness.ServerFacts>> ReadServersAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
@@ -205,26 +226,45 @@ CROSS JOIN LATERAL (
 ) g";
 
     /// <summary>
-    /// The errors, the other non-success runs and the newest error with its text since the start, per pair, one keyed range read each. The caller
-    /// names only the pairs it will show (the waiting rows, or every pair of the one server asked about), so this never scans the fleet's rows
+    /// The errors and the other non-success runs since the start, per pair, one keyed range read each. The caller
+    /// names only the pairs it will show (the waiting rows on the page, or every pair of the one server asked about), so this never scans the fleet's rows
     /// since the start (#9417). An error is a failure status or a SUCCESS that abandoned its work.
     /// </summary>
     internal static readonly string DetailSql = $@"
-SELECT p.server_id, p.collector_name, d.errors, d.skips, d.last_error_at, d.last_error
+SELECT p.server_id, p.collector_name, d.errors, d.skips
 FROM unnest($1::int[], $2::text[]) AS p(server_id, collector_name)
 CROSS JOIN LATERAL (
     SELECT COUNT(*) FILTER (WHERE status IN ({CollectorFleetLiveness.FailureStatusSqlList})
                             OR (status = 'SUCCESS' AND COALESCE({EnumeratedCollectorDriver.AbandonedByNotePredicateSql}, false))) AS errors,
-           COUNT(*) FILTER (WHERE status IS NULL OR status NOT IN ('SUCCESS', {CollectorFleetLiveness.FailureStatusSqlList})) AS skips,
-           MAX(collection_time) FILTER (WHERE status IN ({CollectorFleetLiveness.FailureStatusSqlList})) AS last_error_at,
-           (array_agg(left(error_message, {CollectorFleetLiveness.MaxMessageChars}) ORDER BY collection_time DESC)
-                FILTER (WHERE status IN ({CollectorFleetLiveness.FailureStatusSqlList})))[1] AS last_error
+           COUNT(*) FILTER (WHERE status IS NULL OR status NOT IN ('SUCCESS', {CollectorFleetLiveness.FailureStatusSqlList})) AS skips
     FROM collection_log x
     WHERE x.server_id = p.server_id
     AND   x.collector_name = p.collector_name
     AND   x.collection_time >= $3
     AND   x.collection_time <= $4
 ) d";
+
+    /// <summary>
+    /// The newest failed run of each waiting pair since the start (#9880): its status, time and text, by one keyed descending probe per pair on
+    /// <c>idx_collection_log_watermark</c> that stops at the first failure, so the cost follows the number of waiting pairs and not how many rows each
+    /// has logged. The status is what tells a collector held by a setup step on the monitored server from one that has not had its first cycle:
+    /// <see cref="CollectorRuntimePrecondition.IsNamedSkip"/>, the classification the service already has. The text is read to
+    /// <see cref="ErrorReadChars"/> so the cut that follows lands on a word boundary in code, never inside a word in SQL. A pair with no failure has no row.
+    /// </summary>
+    internal static readonly string FailureSql = $@"
+SELECT p.server_id, p.collector_name, f.status, f.collection_time, left(f.error_message, {ErrorReadChars})
+FROM unnest($1::int[], $2::text[]) AS p(server_id, collector_name)
+CROSS JOIN LATERAL (
+    SELECT x.status, x.collection_time, x.error_message
+    FROM collection_log x
+    WHERE x.server_id = p.server_id
+    AND   x.collector_name = p.collector_name
+    AND   x.collection_time >= $3
+    AND   x.collection_time <= $4
+    AND   x.status IN ({CollectorFleetLiveness.FailureStatusSqlList})
+    ORDER BY x.collection_time DESC
+    LIMIT 1
+) f";
 
     internal static async Task<Dictionary<(int ServerId, string Collector), DateTime>> ReadFirstGoodAsync(
         NpgsqlDataSource postgres, List<Pair> pairs, DateTime startUtc, DateTime nowUtc, CancellationToken cancellationToken)
@@ -268,12 +308,65 @@ CROSS JOIN LATERAL (
         {
             rows[(reader.GetInt32(0), reader.GetString(1))] = new Detail(
                 reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(4) ? null : reader.GetDateTime(4));
+                reader.IsDBNull(3) ? 0 : reader.GetInt64(3));
         }
 
         return rows;
+    }
+
+    internal static async Task<Dictionary<(int ServerId, string Collector), Failure>> ReadFailuresAsync(
+        NpgsqlDataSource postgres, List<Pair> pairs, DateTime startUtc, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        var rows = new Dictionary<(int, string), Failure>();
+        if (pairs.Count == 0)
+        {
+            return rows;
+        }
+
+        await using var command = postgres.CreateCommand(FailureSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddPairParameters(command, pairs);
+        DarlingMcpReadParameters.AddTimestamp(command, startUtc);
+        DarlingMcpReadParameters.AddTimestamp(command, nowUtc);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows[(reader.GetInt32(0), reader.GetString(1))] = new Failure(
+                reader.GetString(2), reader.GetDateTime(3), reader.IsDBNull(4) ? null : reader.GetString(4));
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// <paramref name="text"/> cut to at most <paramref name="max"/> characters at a word boundary (#9880): the last whitespace at or before the
+    /// limit, dropping the trailing punctuation that separated the words, so a remedy never ends "listed in sha". A text with no whitespace in
+    /// range is cut at the limit on a whole text element. The cut carries no marker of its own: the caller's <c>*_cut</c> flag is the marker.
+    /// </summary>
+    internal static (string? Text, bool Cut) CutAtWord(string? text, int max)
+    {
+        if (text is null || text.Length <= max)
+        {
+            return (text, false);
+        }
+
+        var end = max;
+        /* A space right after the limit means the text up to it already ends on a word. */
+        if (!char.IsWhiteSpace(text[max]))
+        {
+            while (end > 0 && !char.IsWhiteSpace(text[end - 1]))
+            {
+                end--;
+            }
+
+            if (end == 0)
+            {
+                end = McpHelpers.TextElementCutLength(text, max);
+            }
+        }
+
+        var kept = text[..end].TrimEnd().TrimEnd(',', ';', ':', '-', '(');
+        return (kept.Length == 0 ? text[..McpHelpers.TextElementCutLength(text, max)] : kept, true);
     }
 
     private static void AddPairParameters(NpgsqlCommand command, List<Pair> pairs)
@@ -368,9 +461,12 @@ CROSS JOIN LATERAL (
     private static string Name(CollectorFleetLiveness.ServerFacts s) => string.IsNullOrEmpty(s.DisplayName) ? s.ServerName : s.DisplayName;
 
     /// <summary>
-    /// Builds the answer. <paramref name="readDetail"/> reads the errors, skips and newest error for the pairs it is given: the waiting rows that
-    /// will be shown, or every pair when one server was asked about. The fleet answer's per-server done rows carry no error counts, because those
-    /// would need every pair's rows since the start (#9417).
+    /// Builds the answer. <paramref name="readDetail"/> reads the errors and skips for the pairs it is given: the waiting rows on the page, or every
+    /// pair when one server was asked about. The fleet answer's per-server done rows carry no error counts, because those would need every pair's rows
+    /// since the start (#9417). <paramref name="readFailures"/> reads the newest failed run of every waiting pair (#9880): a pair whose newest failure
+    /// is a named skip (<see cref="CollectorRuntimePrecondition.IsNamedSkip"/>) is held by a setup step on the monitored server, not by the service, and
+    /// is counted apart from a pair that has not had its first cycle. Held pairs are listed as groups, each distinct step once with the servers it
+    /// holds. <paramref name="offset"/> starts the waiting page and <paramref name="budgetBytes"/> holds the whole reply to the response budget.
     /// </summary>
     internal static async Task<string> ComposeAsync(
         List<CollectorFleetLiveness.ServerFacts> servers,
@@ -378,10 +474,12 @@ CROSS JOIN LATERAL (
         Dictionary<(int ServerId, string Collector), DateTime> firstGood,
         Dictionary<(int ServerId, string Collector), DateTime> before,
         DateTime startUtc, DateTime nowUtc, int notCollected, int disabled, bool singleServer,
-        Func<List<Pair>, Task<Dictionary<(int ServerId, string Collector), Detail>>> readDetail)
+        Func<List<Pair>, Task<Dictionary<(int ServerId, string Collector), Detail>>> readDetail,
+        Func<List<Pair>, Task<Dictionary<(int ServerId, string Collector), Failure>>> readFailures,
+        int offset = 0, int budgetBytes = McpResponseBudget.DefaultBytes)
     {
         var byServer = servers.ToDictionary(s => s.ServerId);
-        var waiting = new List<(CollectorFleetLiveness.ServerFacts Server, Pair Pair, DateTime DueAt)>();
+        var waiting = new List<(CollectorFleetLiveness.ServerFacts Server, Pair Pair, DateTime DueAt, bool DueAtStart)>();
         var doneRows = new List<(CollectorFleetLiveness.ServerFacts Server, string Collector, DateTime FirstGood)>();
         var notYetDue = 0;
         var fixedTime = 0;
@@ -419,7 +517,7 @@ CROSS JOIN LATERAL (
 
                     break;
                 case PairState.Waiting:
-                    waiting.Add((server, pair, dueAt!.Value));
+                    waiting.Add((server, pair, dueAt!.Value, dueAtStart));
                     tally.Waiting++;
                     break;
                 case PairState.NotYetDue:
@@ -433,14 +531,40 @@ CROSS JOIN LATERAL (
             }
         }
 
-        var ordered = waiting
+        /* A waiting pair whose newest failure is a named skip is held by a setup step on the monitored server (#9880). It leaves the wait and the
+           first full cycle, which the service cannot finish for it, and is counted on its own. */
+        var failures = await readFailures(waiting.Select(w => w.Pair).ToList());
+        var heldRows = new List<(CollectorFleetLiveness.ServerFacts Server, Pair Pair, DateTime DueAt, Failure Failure)>();
+        var stillWaiting = new List<(CollectorFleetLiveness.ServerFacts Server, Pair Pair, DateTime DueAt)>();
+        foreach (var w in waiting)
+        {
+            if (failures.TryGetValue((w.Pair.ServerId, w.Pair.Collector), out var failure) && CollectorRuntimePrecondition.IsNamedSkip(failure.Status))
+            {
+                var tally = perServer[w.Pair.ServerId];
+                tally.Waiting--;
+                tally.Held++;
+                if (w.DueAtStart)
+                {
+                    dueAtStartTotal--;
+                    tally.DueAtStart--;
+                }
+
+                heldRows.Add((w.Server, w.Pair, w.DueAt, failure));
+            }
+            else
+            {
+                stillWaiting.Add((w.Server, w.Pair, w.DueAt));
+            }
+        }
+
+        var ordered = stillWaiting
             .OrderBy(w => w.DueAt)
             .ThenBy(w => Name(w.Server), StringComparer.OrdinalIgnoreCase)
             .ThenBy(w => w.Pair.Collector, StringComparer.Ordinal)
             .ToList();
         var waitingServers = ordered.Select(w => w.Server.ServerId).Distinct().Count();
 
-        /* The first full cycle is over the pairs that were due at the start, so a collector that only came due later, done or waiting, cannot move it. Once every due-at-start pair has a good cycle it stays reached. */
+        /* The first full cycle is over the pairs that were due at the start and are not held by a setup step, so a collector that only came due later, done or waiting, cannot move it. Once every such pair has a good cycle it stays reached. */
         var reached = dueAtStartTotal > 0 && dueAtStartDone == dueAtStartTotal;
         string fullCycleStatus;
         if (reached)
@@ -456,14 +580,20 @@ CROSS JOIN LATERAL (
             fullCycleStatus = "not yet";
         }
 
-        var dueTotal = doneRows.Count + ordered.Count;
+        var held = heldRows.Count;
+        var dueTotal = doneRows.Count + ordered.Count + held;
+        var heldClause = held == 0
+            ? ""
+            : $"{held} more collector(s) on {heldRows.Select(h => h.Server.ServerId).Distinct().Count()} server(s) are held by a setup step on the monitored server, which the service cannot do (precondition_held names each step and the servers it holds)";
+
         /* The all-done verdict names each count as the reply's own fields do: not_yet_due_count as "not due yet" and fixed_time_count as the set-time collectors with no good cycle since the start (#9585). The waiting verdict names neither, and the two fields and the note carry them. */
         string verdict;
         if (ordered.Count == 0)
         {
-            verdict = $"Every due collector has a good cycle since the service started at {Stamp(startUtc)}: {doneRows.Count} done on {servers.Count} server(s)"
+            verdict = $"Every due collector that a setup step is not holding has a good cycle since the service started at {Stamp(startUtc)}: {doneRows.Count} done on {servers.Count} server(s)"
                 + (notYetDue > 0 ? $", {notYetDue} not due yet" : "")
                 + (fixedTime > 0 ? $", {fixedTime} run at a set time and have no good cycle since the start" : "")
+                + (held > 0 ? $", {heldClause}" : "")
                 + (reached ? $". First full cycle at {Stamp(lastFirstGood!.Value)}." : ".");
         }
         else
@@ -471,27 +601,56 @@ CROSS JOIN LATERAL (
             var longest = ordered[0];
             verdict = $"{ordered.Count} of {dueTotal} due collector(s) on {waitingServers} server(s) have no good cycle since the service started at {Stamp(startUtc)}. "
                 + $"Longest wait: {longest.Pair.Collector} on {Name(longest.Server)} since {Stamp(longest.DueAt)}. "
+                + (held > 0 ? $"{char.ToUpperInvariant(heldClause[0])}{heldClause[1..]}. " : "")
                 + (reached ? $"First full cycle at {Stamp(lastFirstGood!.Value)}." : "First full cycle: not yet.");
         }
 
-        var shown = ordered.Take(MaxWaitingRows).ToList();
-        var detail = await readDetail(singleServer ? pairs : shown.Select(w => w.Pair).ToList());
+        var start = Math.Clamp(offset, 0, ordered.Count);
+        var page = ordered.Skip(start).Take(MaxWaitingRows).ToList();
+        var detail = await readDetail(singleServer ? pairs : page.Select(w => w.Pair).ToList());
         Detail? DetailOf(string collector, int serverId) => detail.TryGetValue((serverId, collector), out var d) ? d : null;
 
-        var shownWaiting = shown.Select(w =>
+        var waitingRows = page.Select(w =>
         {
             var d = DetailOf(w.Pair.Collector, w.Pair.ServerId);
-            return new
+            failures.TryGetValue((w.Pair.ServerId, w.Pair.Collector), out var failure);
+            var (text, cut) = CutAtWord(failure?.Text, RowErrorChars);
+            return (object)new
             {
                 server = Name(w.Server),
                 collector = w.Pair.Collector,
                 waiting_since = Stamp(w.DueAt),
                 errors_since_start = d?.Errors ?? 0,
                 skips_since_start = d?.Skips ?? 0,
-                last_error = d?.LastError,
-                last_error_at = d?.LastErrorAt is DateTime at ? Stamp(at) : null,
+                last_error = text,
+                last_error_cut = cut,
+                last_error_at = failure is null ? null : Stamp(failure.At),
             };
         }).ToList();
+
+        /* Each distinct step once: the text is the same on every server that lacks the step, so the group carries it with the count and a few example servers. */
+        var heldGroups = heldRows
+            .GroupBy(h => (h.Pair.Collector, h.Failure.Status, Text: h.Failure.Text ?? ""))
+            .Select(g =>
+            {
+                var (text, cut) = CutAtWord(string.IsNullOrEmpty(g.Key.Text) ? null : g.Key.Text, GroupErrorChars);
+                var names = g.Select(h => Name(h.Server)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+                return new
+                {
+                    collector = g.Key.Collector,
+                    status = g.Key.Status,
+                    servers = names.Count,
+                    example_servers = names.Take(ExampleServers).ToList(),
+                    waiting_since = Stamp(g.Min(h => h.DueAt)),
+                    last_error = text,
+                    last_error_cut = cut,
+                    last_error_at = Stamp(g.Max(h => h.Failure.At)),
+                };
+            })
+            .OrderBy(g => g.collector, StringComparer.Ordinal)
+            .ThenBy(g => g.status, StringComparer.Ordinal)
+            .ThenBy(g => g.last_error, StringComparer.Ordinal)
+            .ToList();
 
         object done = singleServer
             ? doneRows
@@ -514,38 +673,64 @@ CROSS JOIN LATERAL (
                         server = Name(s),
                         collectors_done = t.Done,
                         collectors_waiting = t.Waiting,
+                        collectors_held_by_precondition = t.Held,
                         collectors_not_yet_due = t.NotYetDue,
                         collectors_fixed_time = t.FixedTime,
                         first_full_cycle_at = t.DueAtStart > 0 && t.DueAtStartDone == t.DueAtStart && t.LastDueAtStartGood is DateTime g ? Stamp(g) : null,
                     };
                 }).ToList();
 
-        return JsonSerializer.Serialize(new
+        string Reply(int n, bool overBudget = false)
         {
-            status = "ok",
-            verdict,
-            service_started_at = Stamp(startUtc),
-            start_source = "process_start",
-            as_of = Stamp(nowUtc),
-            servers_enrolled = servers.Count,
-            first_full_cycle = new
+            var shown = waitingRows.Take(n).ToList();
+            var rowsAfter = start + n < ordered.Count;
+            var budgetCut = n < waitingRows.Count;
+            return JsonSerializer.Serialize(new
             {
-                status = fullCycleStatus,
-                at = reached ? Stamp(lastFirstGood!.Value) : null,
-            },
-            due_collectors = dueTotal,
-            done_count = doneRows.Count,
-            waiting_count = ordered.Count,
-            not_yet_due_count = notYetDue,
-            fixed_time_count = fixedTime,
-            not_collected_count = notCollected,
-            disabled_count = disabled,
-            truncated = ordered.Count > MaxWaitingRows,
-            waiting = shownWaiting,
-            done,
-            note = "A collector counts as waiting only when it is enabled, collected on the server's engine, not on a fixed run time, and due: it never ran, was overdue at the start, or has reached the end of the interval it was waiting out. "
-                + "not_yet_due_count and fixed_time_count are collectors that are not waiting.",
-        }, McpHelpers.JsonOptions);
+                status = "ok",
+                verdict,
+                service_started_at = Stamp(startUtc),
+                start_source = "process_start",
+                as_of = Stamp(nowUtc),
+                servers_enrolled = servers.Count,
+                first_full_cycle = new
+                {
+                    status = fullCycleStatus,
+                    at = reached ? Stamp(lastFirstGood!.Value) : null,
+                },
+                due_collectors = dueTotal,
+                done_count = doneRows.Count,
+                waiting_count = ordered.Count,
+                precondition_count = held,
+                not_yet_due_count = notYetDue,
+                fixed_time_count = fixedTime,
+                not_collected_count = notCollected,
+                disabled_count = disabled,
+                truncated = rowsAfter,
+                budget_truncated = budgetCut,
+                over_budget = overBudget,
+                budget_note = overBudget
+                    ? $"OVER BUDGET: the per-server summary and the precondition groups alone are over the {budgetBytes:#,0}-byte response budget at {n:#,0} waiting row(s), so no row can be left off to fit it. Ask one server at a time (server_name) for its collectors."
+                    + (budgetCut ? $" {waitingRows.Count - n:#,0} waiting row(s) were left off: call again with offset = {start + n} for the next rows." : "")
+                    : budgetCut
+                    ? McpResponseBudget.PageCutNote(
+                        ordered.Count - start, n, "oldest wait first", "waiting rows",
+                        $"Call again with offset = {start + n} for the next rows. waiting_count counts every waiting pair, listed or not.")
+                    : null,
+                waiting = shown,
+                precondition_held = heldGroups,
+                done,
+                note = "A collector counts as waiting only when it is enabled, collected on the server's engine, not on a fixed run time, and due: it never ran, was overdue at the start, or has reached the end of the interval it was waiting out, and no setup step on the monitored server is holding it. "
+                    + "not_yet_due_count and fixed_time_count are collectors that are not waiting. "
+                    + "precondition_count is the collectors whose newest failure since the start is a named skip (EXTENSION_MISSING, PERMISSIONS or SESSION_MISSING): a setup step on the monitored server, listed in precondition_held with the servers it holds, and not counted in waiting_count or in first_full_cycle. "
+                    + "A last_error with last_error_cut = true was cut at a word boundary: get_collection_log (server_name, collector_name) carries the whole text.",
+            }, McpHelpers.JsonOptions);
+        }
+
+        /* The waiting rows are what the budget cuts, oldest wait first, so the next page starts where this one ends. The reply is never below one row: when the summaries alone are over the budget the reply says so (over_budget) and names the per-server read. */
+        var fit = McpResponseBudget.RowsThatFit(waitingRows.Count, n => System.Text.Encoding.UTF8.GetByteCount(Reply(n)), budgetBytes);
+        var fitted = Reply(fit);
+        return System.Text.Encoding.UTF8.GetByteCount(fitted) > budgetBytes ? Reply(fit, overBudget: true) : fitted;
     }
 
     private sealed class ServerTally
@@ -554,6 +739,7 @@ CROSS JOIN LATERAL (
         public int Waiting;
         public int NotYetDue;
         public int FixedTime;
+        public int Held;
         public int DueAtStart;
         public int DueAtStartDone;
         public DateTime? LastDueAtStartGood;

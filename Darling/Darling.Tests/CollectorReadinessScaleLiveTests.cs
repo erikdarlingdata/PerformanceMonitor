@@ -121,14 +121,18 @@ GROUP BY server_id, collector_name";
                     oldWaiting.Select(p => (p.ServerId, p.Collector)).OrderBy(k => k).ToList(),
                     waiting.Select(p => (p.ServerId, p.Collector)).OrderBy(k => k).ToList());
                 var detail = await DarlingMcpCollectorReadinessTools.ReadDetailAsync(postgres, waiting, start, now, ct);
+                var failures = await DarlingMcpCollectorReadinessTools.ReadFailuresAsync(postgres, waiting, start, now, ct);
                 foreach (var pair in waiting)
                 {
                     var old = oldRows.GetValueOrDefault((pair.ServerId, pair.Collector));
                     var fresh = detail[(pair.ServerId, pair.Collector)];
                     Assert.Equal(old?.Errors ?? 0, fresh.Errors);
                     Assert.Equal(old?.Skips ?? 0, fresh.Skips);
-                    Assert.Equal(old?.LastError, fresh.LastError);
-                    Assert.Equal(old?.LastErrorAt, fresh.LastErrorAt);
+
+                    /* The newest failure keeps its time and text (#9880 reads it by its own probe, to a longer length than the old 300 characters). */
+                    failures.TryGetValue((pair.ServerId, pair.Collector), out var failure);
+                    Assert.Equal(old?.LastErrorAt, failure?.At);
+                    Assert.Equal(old?.LastError, failure?.Text is { } text ? text[..Math.Min(text.Length, CollectorFleetLiveness.MaxMessageChars)] : null);
                 }
 
                 if (explainOut is not null)
@@ -217,8 +221,10 @@ GROUP BY server_id, collector_name";
             var root = doc.RootElement;
             var shown = root.GetProperty("waiting").EnumerateArray().ToList();
             Assert.True(root.GetProperty("waiting_count").GetInt32() > DarlingMcpCollectorReadinessTools.MaxWaitingRows);
-            Assert.Equal(DarlingMcpCollectorReadinessTools.MaxWaitingRows, shown.Count);
+            /* The page is the 200-row cap or fewer, when the response budget cut it first (#9880). */
+            Assert.InRange(shown.Count, 1, DarlingMcpCollectorReadinessTools.MaxWaitingRows);
             Assert.True(root.GetProperty("truncated").GetBoolean());
+            Assert.True(shown.Count == DarlingMcpCollectorReadinessTools.MaxWaitingRows || root.GetProperty("budget_truncated").GetBoolean());
 
             /* Oldest wait first, and the youngest wait is the one that fell off the end. */
             var stamps = shown.Select(w => DateTime.Parse(w.GetProperty("waiting_since").GetString()!, null, System.Globalization.DateTimeStyles.RoundtripKind)).ToList();
