@@ -7341,11 +7341,13 @@ public static partial class DarlingCliCommands
     /// </summary>
     public sealed record AddServerFlags(
         string? Host = null, string? DisplayName = null, string? Auth = null, string? Username = null,
-        string? Engine = null, string? Database = null, int? Port = null, bool? TrustServerCertificate = null)
+        string? Engine = null, string? Database = null, int? Port = null, bool? TrustServerCertificate = null,
+        string? EncryptMode = null, bool? ReadOnlyIntent = null, bool? MultiSubnetFailover = null)
     {
         /// <summary>True when any flag was given, so the verb builds the one entry itself instead of reading JSON from stdin.</summary>
         public bool Any => Host is not null || DisplayName is not null || Auth is not null || Username is not null
-            || Engine is not null || Database is not null || Port is not null || TrustServerCertificate is not null;
+            || Engine is not null || Database is not null || Port is not null || TrustServerCertificate is not null
+            || EncryptMode is not null || ReadOnlyIntent is not null || MultiSubnetFailover is not null;
     }
 
     /// <summary>The <c>--auth</c> word <c>--add-server</c> hands on: "integrated" (the word <c>--grant-script</c> takes) is Windows authentication,
@@ -7356,8 +7358,9 @@ public static partial class DarlingCliCommands
     /// <summary>
     /// Parses the arguments after <c>--add-server</c> (#6476): at most one bare argument, the config path (as before), or
     /// <c>--config &lt;path&gt;</c>, and the flags <c>--host</c>, <c>--name</c>, <c>--auth</c>, <c>--username</c> (or <c>--login</c>),
-    /// <c>--engine</c>, <c>--database</c> and <c>--port</c> (a whole number from 1 to 65535, #9750), each as <c>--flag value</c> or
-    /// <c>--flag=value</c>, and the switch <c>--trust-server-certificate</c> (#9893), alone for true or with true or false as Lite's add reads it.
+    /// <c>--engine</c>, <c>--database</c>, <c>--port</c> (a whole number from 1 to 65535, #9750) and <c>--encrypt-mode</c> (optional, mandatory or
+    /// strict, #9893), each as <c>--flag value</c> or <c>--flag=value</c>, and the switches <c>--trust-server-certificate</c>,
+    /// <c>--read-only-intent</c> and <c>--multi-subnet-failover</c> (#9893), each alone for true or with true or false as Lite's add reads them.
     /// A password flag is refused with the reason.
     /// Anything else starting with '-' is refused rather than taken as a path. Pure so the grammar pins.
     /// </summary>
@@ -7367,7 +7370,8 @@ public static partial class DarlingCliCommands
         errorMessage = null;
         string? host = null, displayName = null, auth = null, username = null, engine = null, database = null;
         int? port = null;
-        bool? trustCertificate = null;
+        string? encryptMode = null;
+        bool? trustCertificate = null, readOnlyIntent = null, multiSubnetFailover = null;
 
         for (var i = 0; i < rest.Length; i++)
         {
@@ -7400,7 +7404,9 @@ public static partial class DarlingCliCommands
                 break;
             }
 
-            if (name.Equals("--trust-server-certificate", StringComparison.OrdinalIgnoreCase))
+            if (name.Equals("--trust-server-certificate", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--read-only-intent", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("--multi-subnet-failover", StringComparison.OrdinalIgnoreCase))
             {
                 /* #9893: a switch alone means true, as Lite's add reads it. The next argument is its value only when it is true or false,
                    so "--trust-server-certificate --auth sql" and "--trust-server-certificate sql01" are never swallowed. */
@@ -7412,11 +7418,17 @@ public static partial class DarlingCliCommands
                 var switchValue = value is null ? true : TrueOrFalseWord(value);
                 if (switchValue is null)
                 {
-                    errorMessage = "--trust-server-certificate takes true or false, or no value for true.";
+                    errorMessage = $"{name} takes true or false, or no value for true.";
                     break;
                 }
 
-                trustCertificate = switchValue;
+                switch (name.ToLowerInvariant())
+                {
+                    case "--trust-server-certificate": trustCertificate = switchValue; break;
+                    case "--read-only-intent": readOnlyIntent = switchValue; break;
+                    default: multiSubnetFailover = switchValue; break;
+                }
+
                 continue;
             }
 
@@ -7424,7 +7436,7 @@ public static partial class DarlingCliCommands
                 || name.Equals("--name", StringComparison.OrdinalIgnoreCase) || name.Equals("--auth", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("--username", StringComparison.OrdinalIgnoreCase) || name.Equals("--login", StringComparison.OrdinalIgnoreCase)
                 || name.Equals("--engine", StringComparison.OrdinalIgnoreCase) || name.Equals("--database", StringComparison.OrdinalIgnoreCase)
-                || name.Equals("--port", StringComparison.OrdinalIgnoreCase))
+                || name.Equals("--port", StringComparison.OrdinalIgnoreCase) || name.Equals("--encrypt-mode", StringComparison.OrdinalIgnoreCase))
             {
                 if (value is null)
                 {
@@ -7460,6 +7472,15 @@ public static partial class DarlingCliCommands
                         }
 
                         break;
+                    case "--encrypt-mode":
+                        /* #9893: the word the add core's encrypt_mode reads, in any letter case, refused here with the word that failed. */
+                        encryptMode = EncryptModeWord(value);
+                        if (encryptMode is null)
+                        {
+                            errorMessage = $"--encrypt-mode '{value.Trim()}' is not supported. Use optional, mandatory or strict.";
+                        }
+
+                        break;
                     default: database = value; break;
                 }
 
@@ -7471,13 +7492,22 @@ public static partial class DarlingCliCommands
                 continue;
             }
 
-            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database, --port, --trust-server-certificate and --config.";
+            errorMessage = $"Unknown option '{name}'. --add-server takes --host, --name, --auth, --username (--login), --engine, --database, --port, --encrypt-mode, --trust-server-certificate, --read-only-intent, --multi-subnet-failover and --config.";
             break;
         }
 
-        flags = new AddServerFlags(host, displayName, auth, username, engine, database, port, trustCertificate);
+        flags = new AddServerFlags(host, displayName, auth, username, engine, database, port, trustCertificate, encryptMode, readOnlyIntent, multiSubnetFailover);
         return errorMessage is null;
     }
+
+    /// <summary>The <c>encrypt_mode</c> word the add core reads ("Optional", "Mandatory" or "Strict") for a word given in any letter case, or null for any other word.</summary>
+    private static string? EncryptModeWord(string? text) => text?.Trim().ToUpperInvariant() switch
+    {
+        "OPTIONAL" => "Optional",
+        "MANDATORY" => "Mandatory",
+        "STRICT" => "Strict",
+        _ => null
+    };
 
     private static bool? TrueOrFalseWord(string? text) =>
         string.Equals(text?.Trim(), "true", StringComparison.OrdinalIgnoreCase) ? true
@@ -7519,6 +7549,23 @@ public static partial class DarlingCliCommands
         if (flags.TrustServerCertificate is { } trustCertificate)
         {
             entry["trust_server_certificate"] = trustCertificate;
+        }
+
+        /* #9893: the JSON form's encrypt_mode, read_only_intent and multi_subnet_failover, left out when not given so the entry keeps
+           its own defaults (Mandatory, false, false). */
+        if (flags.EncryptMode is not null)
+        {
+            entry["encrypt_mode"] = flags.EncryptMode;
+        }
+
+        if (flags.ReadOnlyIntent is { } readOnlyIntent)
+        {
+            entry["read_only_intent"] = readOnlyIntent;
+        }
+
+        if (flags.MultiSubnetFailover is { } multiSubnetFailover)
+        {
+            entry["multi_subnet_failover"] = multiSubnetFailover;
         }
 
         var auth = flags.Auth?.Trim();
@@ -7621,9 +7668,10 @@ public static partial class DarlingCliCommands
         Environment.NewLine +
         "For ONE server, no JSON is needed; give the non-secret fields as flags and a SQL login is asked for its password with nothing echoed:" + Environment.NewLine +
         "  " + entryPoint + " --add-server --host sql01 --auth windows      (integrated means the same)" + Environment.NewLine +
-        "  " + entryPoint + " --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres] [--port <1-65535>] [--trust-server-certificate]" + Environment.NewLine +
+        "  " + entryPoint + " --add-server --host sql01 --auth sql --username darling_monitor [--name <display name>] [--database <db>] [--engine postgres] [--port <1-65535>] [--encrypt-mode optional|mandatory|strict] [--trust-server-certificate] [--read-only-intent] [--multi-subnet-failover]" + Environment.NewLine +
         "--port is for a PostgreSQL server on a port other than 5432. A SQL Server target takes its port in the host as host,port." + Environment.NewLine +
         "--trust-server-certificate accepts any certificate the SQL Server presents (a self-signed one included). The connection is still encrypted." + Environment.NewLine +
+        "--encrypt-mode is optional, mandatory (the default) or strict. --read-only-intent connects to a readable availability group secondary. --multi-subnet-failover is for an availability group listener across subnets. Each switch alone means true, or takes true or false." + Environment.NewLine +
         "There is no password flag. A Windows-authentication server is tested by the running service, as the account it runs under." + Environment.NewLine +
         Environment.NewLine +
         "servers.json, SQL Server and PostgreSQL:" + Environment.NewLine +
@@ -7779,7 +7827,7 @@ public static partial class DarlingCliCommands
 
         if (fromFlags && string.IsNullOrWhiteSpace(flags!.Host))
         {
-            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>] [--engine postgres] [--port <1-65535>] [--trust-server-certificate]");
+            error.WriteLine("--host is required when a server is given as flags: --add-server --host <host> [--name <name>] [--auth windows|integrated|sql|serviceprincipal|managedidentity] [--username <login>] [--engine postgres] [--port <1-65535>] [--encrypt-mode optional|mandatory|strict] [--trust-server-certificate] [--read-only-intent] [--multi-subnet-failover]");
             return 1;
         }
 

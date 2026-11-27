@@ -137,7 +137,7 @@ The collector verbs differ in one case. A managed credential that was never stor
 `--add-server` and `--add-servers` are the same verb. There are two ways to give it servers.
 
 1. Pipe a JSON array to standard input. The shape is the one the `add_servers` MCP tool takes. [The JSON keys](#the-json-keys) lists every key.
-2. Give one server in flags: `--host`, `--name`, `--auth`, `--username`, `--engine`, `--database`, `--port`, `--trust-server-certificate`. A SQL login is asked for its password, and the password is hidden.
+2. Give one server in flags: `--host`, `--name`, `--auth`, `--username`, `--engine`, `--database`, `--port`, `--encrypt-mode`, `--trust-server-certificate`, `--read-only-intent`, `--multi-subnet-failover`. A SQL login is asked for its password, and the password is hidden.
 
 In the flags form the password is read the way `--set-login-password` reads it. At a terminal it is typed at the prompt, where it is not shown. From a pipe or a file it is one line of UTF-8 text, read as bytes, so the characters saved are the ones sent. A trailing newline is fine. Stdin that holds more than one non-empty line, starts with a byte order mark, holds a NUL byte (UTF-16 does) or a lone carriage return, is not UTF-8, or is longer than a password can be is refused with exit code `1`, and no server is added. A password that starts with `env:` or `file:` is refused the same way, whether it is piped or typed, because the flags form saves a password and does not take a reference. The JSON form still accepts an `env:` or `file:` reference as a server's password.
 
@@ -146,6 +146,8 @@ In the flags form the password is read the way `--set-login-password` reads it. 
 `--port` takes a whole number from 1 to 65535 and is for a PostgreSQL server that listens on a port other than 5432. It is the `port` of the JSON form, so the same rules apply: a SQL Server target takes its port in the host as `host,port` and refuses `--port`. A value that is not a whole number from 1 to 65535 is refused before anything is added.
 
 `--trust-server-certificate` is a switch. Alone it means `true`, and it sets the `trust_server_certificate` of the JSON form. Without it the server is added with `false`, so the connection checks the SQL Server's certificate. With `true`, any certificate is accepted, a self-signed one included, and the connection is still encrypted. The switch also takes a value, as `--trust-server-certificate=false` or `--trust-server-certificate false`. Any other value is refused before anything is added. Use it for a lab server or an internal one whose certificate your machine does not trust. Keep verification on for anything else.
+
+`--encrypt-mode` takes `optional`, `mandatory` or `strict`, in any letter case, and sets the `encrypt_mode` of the JSON form. Without it the mode is `Mandatory`. Any other word is refused before anything is added. `--read-only-intent` and `--multi-subnet-failover` are switches like `--trust-server-certificate`. Alone each means `true`, and each takes `true` or `false`. They set `read_only_intent` and `multi_subnet_failover` of the JSON form. `read_only_intent` connects to a readable availability group secondary. Both are `false` without the flag.
 
 ### The JSON keys
 
@@ -197,6 +199,13 @@ A SQL login on a server with a self-signed certificate, on Windows and on Linux.
 ```
 PerformanceMonitor.Darling.Service.exe --add-server --host sql01 --auth sql --username darling_monitor --trust-server-certificate
 sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --add-server --host sql01 --auth sql --username darling_monitor --trust-server-certificate
+```
+
+A listener of an availability group, read on a readable secondary, with strict encryption. The first line is for Windows and the second for Linux:
+
+```
+PerformanceMonitor.Darling.Service.exe --add-server --host aglistener --auth sql --username darling_monitor --encrypt-mode strict --read-only-intent --multi-subnet-failover
+sudo runuser -u darling -- env DARLING_CONFIG=/etc/darling/darling.json dotnet /opt/darling/PerformanceMonitor.Darling.Service.dll --add-server --host aglistener --auth sql --username darling_monitor --encrypt-mode strict --read-only-intent --multi-subnet-failover
 ```
 
 ### `--set-login-password`

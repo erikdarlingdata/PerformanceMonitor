@@ -430,7 +430,12 @@ sudo -u postgres psql -X -d darling -c "SELECT s.name AS server, l.server_id, l.
 
 **Proof:** `SUCCESS` rows for every server.
 
-The `server` column is the display name from the registry, so you can read the result by server. `server_id` is a signed number that the service derives from the host. `collect.collection_log.server_name` holds the host address, not the display name. A row with an empty `server` belongs to a server that is no longer registered.
+The `server` column is the display name from the registry, so you can read the result by server. `server_id` is a signed number that the service derives from the host. `collect.collection_log.server_name` holds the host address, not the display name. Two other kinds of row are normal. They are not a fault.
+
+- A row with the status `ANALYZED` is the scheduled analysis pass. There is one for each server. It is not a collector run, so its status is `ANALYZED` and not `SUCCESS`. On a new store it says it ran on too little data.
+- A row with an empty `server` and a `server_id` of 0 is the fleet-wide work the service does for itself. The log records it under the name `(fleet)`. Its status is `SUCCESS`.
+
+Any other row with an empty `server` belongs to a server that is no longer registered.
 
 For a check that your own monitoring can run, use the one-row query in [Watching the service from outside](operations.md#watching-the-service-from-outside). It returns `true` while collection is current. The `heartbeat` setting on the same page pings a URL of yours instead.
 
@@ -522,7 +527,6 @@ Both are off in the example. `--enable-web` and `--enable-mcp` are Windows only,
 - **After the first start**, the store holds the switch, in `config.config_service.web_enabled` and `mcp_enabled`, and the file's value is ignored. Change it there as the store owner, for example `UPDATE config.config_service SET web_enabled = true WHERE id = 1`. No restart is needed. The service reads the switch on each collection sweep, and it starts or stops the surface when the value changes. On the Docker Compose shape, run the statement through psql in the store container, as the [quick start](../darling-quick-start.md#run-on-linux-docker-compose-or-systemd-1804) shows for MCP.
 
 The `network` block of each surface (`listen`, `allowFrom`, `token`) is read from the file at every start. Give the token as a `file:` reference. The settings are in [Web dashboard configuration](configuration-web.md) and [MCP configuration](configuration-mcp.md), and the exposure rules are in [Opt-in Network Endpoints](network-endpoints.md). Run `provision-roles.sql` before you turn either surface on (see [The least-privilege roles](#the-least-privilege-roles-when-the-web-dashboard-or-mcp-is-on)).
-
 
 ## Upgrade by hand
 
