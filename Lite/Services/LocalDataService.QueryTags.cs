@@ -477,23 +477,94 @@ WHERE id = $1";
     }
 
     /// <summary>Retention for <c>query_tag_sightings</c>: removes rows not seen since <paramref name="retentionDays"/> ago
-    /// (by <c>last_seen</c>) and returns how many. Only this table is aged; tags, assignments and rules are configuration.
-    /// A background sweep, so it is not refused while a restore is pending (it touches no preserved table).</summary>
-    public async Task<int> PurgeOldQueryTagSightingsAsync(int retentionDays = QueryTagSightingRetentionDays, DateTime? utcNow = null)
+    /// (by <c>last_seen</c>) and returns how many, but never a row the oldest row still readable could need (#9862): the
+    /// cutoff is the EARLIER of that window and <see cref="OldestTaggableRowAsync"/> less <see cref="QueryTagSightingLag"/>.
+    /// The window counts from collection and assumes Lite ran the whole time. An archive file is named for the day it was
+    /// written, so after a shutdown a row collected before it lives until that later day's date ages out, past the window.
+    /// When the oldest row cannot be read the purge is skipped and one Warning is logged, never a purge on a guess.
+    /// Only this table is aged; tags, assignments and rules are configuration. A background sweep, so it is not refused
+    /// while a restore is pending (it touches no preserved table).</summary>
+    public async Task<int> PurgeOldQueryTagSightingsAsync(int? retentionDays = null, DateTime? utcNow = null)
     {
+        var cutoff = (utcNow ?? DateTime.UtcNow).AddDays(-(retentionDays ?? QueryTagSightingRetentionDays));
+        try
+        {
+            if (await OldestTaggableRowAsync() is DateTime oldest && oldest - QueryTagSightingLag < cutoff)
+            {
+                cutoff = oldest - QueryTagSightingLag;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn("QueryTags", $"Skipped the query tag sightings purge: the oldest stored or archived row could not be read ({ex.GetType().Name}: {ex.Message}). Every sighting is kept until a later run can read it");
+            return 0;
+        }
+
         using var connection = await OpenWriteConnectionAsync();
         using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM query_tag_sightings WHERE last_seen < $1";
-        command.Parameters.Add(new DuckDBParameter { Value = (utcNow ?? DateTime.UtcNow).AddDays(-retentionDays) });
+        command.Parameters.Add(new DuckDBParameter { Value = cutoff });
         return await command.ExecuteNonQueryAsync();
     }
 
     /// <summary>
-    /// How long a sighting is kept after it was last seen. Lite keeps collected rows hot for
-    /// <see cref="ArchiveService.HotDataDays"/> days and the archive for <see cref="RetentionService.ArchiveRetentionMonths"/>
-    /// months, so a sighting outlives the data that produced it by no more than that archive window.
+    /// The oldest collection time of any row a sighting can tag (#9862): the oldest of every hot table whose collector writes
+    /// sightings, then the oldest of their archive files. Null when none holds a row. The hot tables are read FIRST: a row the
+    /// archive run moves between the two reads is then seen by one of them (still hot at the first, already archived at the
+    /// second), where the other order could miss it in both. Any failure propagates, for the caller to keep every sighting.
     /// </summary>
-    internal const int QueryTagSightingRetentionDays = RetentionService.ArchiveRetentionMonths * 31;
+    private async Task<DateTime?> OldestTaggableRowAsync()
+    {
+        var feeders = DuckDbSchemaGenerator.StoredCollectors
+            .Where(c => c.WritesQueryTagSightings)
+            .Select(c => (Table: c.TargetTable, Column: c.PrefixTimeColumnName))
+            .ToList();
+
+        DateTime? oldest = null;
+        using (var connection = await OpenConnectionAsync())
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT MIN(t) FROM (" + string.Join(" UNION ALL ", feeders.Select(f => $"SELECT MIN({f.Column}) AS t FROM {f.Table}")) + ")";
+            var hot = await command.ExecuteScalarAsync();
+            if (hot is not null and not DBNull)
+            {
+                oldest = Convert.ToDateTime(hot, CultureInfo.InvariantCulture);
+            }
+        }
+
+        foreach (var (table, column) in feeders)
+        {
+            if (await _duckDb.GetOldestArchivedTimeAsync(table, column, System.Threading.CancellationToken.None) is DateTime archived && (oldest is null || archived < oldest))
+            {
+                oldest = archived;
+            }
+        }
+
+        return oldest;
+    }
+
+    /// <summary>
+    /// How far a sighting's <c>last_seen</c> can trail the newest row it tags (#9862), so a sighting for the oldest row can
+    /// carry a <c>last_seen</c> before that row's collection time. A re-sighting moves <c>last_seen</c> only once per
+    /// <see cref="QueryTagSightingBuffer.ReSightingRefreshWidth"/>, to a stamp <see cref="QueryTagSightingBuffer.ReSightingBackdate"/>
+    /// behind the flush clock. A day is added on top. A new row takes the flush clock, which is later than its collection, so it adds nothing.
+    /// </summary>
+    internal static readonly TimeSpan QueryTagSightingLag =
+        QueryTagSightingBuffer.ReSightingRefreshWidth + QueryTagSightingBuffer.ReSightingBackdate + TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// How long a sighting is kept after it was last seen (#9862). It must outlive the oldest archived row it tags, or the last
+    /// days of an archive file read with no tag. That row is collected, stays hot for <see cref="ArchiveService.HotDataDays"/>,
+    /// and is then written by the next hourly archive run (<see cref="CollectionBackgroundService.ArchiveInterval"/>) into a
+    /// file named for that day. <see cref="RetentionService.CleanupOldArchives"/> deletes the file once its name's date is
+    /// <see cref="RetentionService.ArchiveRetentionMonths"/> calendar months back (at most 31 days each), at its next daily run
+    /// (<see cref="CollectionBackgroundService.RetentionInterval"/>). So the window is the archive's months, plus the hot days,
+    /// plus the two run intervals rounded up to whole days.
+    /// </summary>
+    internal static readonly int QueryTagSightingRetentionDays =
+        RetentionService.ArchiveRetentionMonths * 31
+        + ArchiveService.HotDataDays
+        + (int)Math.Ceiling((CollectionBackgroundService.ArchiveInterval + CollectionBackgroundService.RetentionInterval).TotalDays);
 
     // ---- helpers --------------------------------------------------------------------------------
 

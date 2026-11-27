@@ -120,6 +120,29 @@ public partial class DuckDbInitializer
         }
     }
 
+    /// <summary>
+    /// The oldest value of <paramref name="timeColumn"/> across <paramref name="table"/>'s archive files, or null when the archive
+    /// holds no files or no rows (#9862). One <c>MIN</c> over the files, which DuckDB answers from the row-group statistics, not a scan.
+    /// Unlike <see cref="GetArchiveSpanAsync"/> it is not cached, it reads a table whose view removes copies too (a copy is a row
+    /// the file still holds), and a failed read THROWS, because its one caller keeps data on a failure and cannot tell "unknown"
+    /// from "empty" without it. The caller holds no database lock.
+    /// </summary>
+    internal async Task<DateTime?> GetOldestArchivedTimeAsync(string table, string timeColumn, CancellationToken cancellationToken)
+    {
+        var globs = ArchiveParquetGlobs(table);
+        if (globs.Count == 0)
+        {
+            return null;
+        }
+
+        using var slot = await ArchiveReadLimiter.Shared.EnterAsync(cancellationToken);
+        using var connection = await OpenSpanConnectionAsync(cancellationToken);
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT MIN({timeColumn}) FROM read_parquet({ParquetSourceSql(globs)}, union_by_name=true)";
+        var oldest = await command.ExecuteScalarAsync(cancellationToken);
+        return oldest is null or DBNull ? null : Convert.ToDateTime(oldest, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     /// <summary>How many archive files <paramref name="table"/> has right now, over the two name shapes <see cref="ArchiveParquetGlobs"/> reads.</summary>
     internal int ArchiveParquetFileCount(string table)
     {
