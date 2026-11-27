@@ -114,11 +114,16 @@ public sealed class UpgradeRunPickupTests
 
     private const string FailedRollbackError = "The build from /opt/darling.previous is back in /opt/darling, and its health check failed: the unit is not active.";
 
-    /* #9821: a rollback's own run is a second row. The upgrade it undid is verified, the furthest state a row reaches, and the rule
-       that a row never steps back is per run id, so it neither drops the rollback's row nor moves the upgrade's row. The newest row
-       then names the build that is back and the folder of the build it replaced. */
-    [Fact]
-    public async Task ARollbacksOwnRun_IsASecondRowBesideTheVerifiedUpgrade_AndTheNewestRowNamesTheBuildThatIsBack()
+    /* #9821: a rollback's own run is a second row. The upgrade it undid is in_progress (undone before its build's first pass) or
+       succeeded, the states upgrade-darling.sh writes, or verified, the furthest state a row reaches. The rule that a row never steps
+       back is per run id, so it neither drops the rollback's row nor moves the upgrade's row. The newest row then names the build that
+       is back and the folder of the build it replaced. */
+    [Theory]
+    [InlineData("in_progress", UpgradeRunPickupOutcome.Recorded)]
+    [InlineData("succeeded", UpgradeRunPickupOutcome.Recorded)]
+    [InlineData("verified", UpgradeRunPickupOutcome.RecordedAndRemoved)]
+    public async Task ARollbacksOwnRun_IsASecondRowBesideTheUndoneUpgrade_AndTheNewestRowNamesTheBuildThatIsBack(
+        string undoneState, UpgradeRunPickupOutcome undoneOutcome)
     {
         Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), SkipReason);
         var ct = TestContext.Current.CancellationToken;
@@ -136,8 +141,9 @@ public sealed class UpgradeRunPickupTests
             var rollback = Guid.NewGuid();
             var now = DateTime.UtcNow;
 
-            File.WriteAllText(file, RunJson(upgrade, "verified", started: now.AddMinutes(-30)));
-            Assert.Equal(UpgradeRunPickupOutcome.RecordedAndRemoved, (await pickup.PickUpAsync(connection, folder, now, ct)).Outcome);
+            File.WriteAllText(file, RunJson(upgrade, undoneState, started: now.AddMinutes(-30)));
+            Assert.Equal(undoneOutcome, (await pickup.PickUpAsync(connection, folder, now, ct)).Outcome);
+            Assert.Equal((1L, undoneState), await RowAsync(connection, upgrade));
 
             File.WriteAllText(file, RollbackRunJson(rollback, "in_progress", now.AddMinutes(-5)));
             Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now, ct)).Outcome);
@@ -146,7 +152,7 @@ public sealed class UpgradeRunPickupTests
             File.WriteAllText(file, RollbackRunJson(rollback, "succeeded", now.AddMinutes(-5)));
             Assert.Equal(UpgradeRunPickupOutcome.Recorded, (await pickup.PickUpAsync(connection, folder, now.AddMinutes(5), ct)).Outcome);
             Assert.Equal((2L, "succeeded"), await RowAsync(connection, rollback));
-            Assert.Equal((2L, "verified"), await RowAsync(connection, upgrade));
+            Assert.Equal((2L, undoneState), await RowAsync(connection, upgrade));
 
             await using var newest = new NpgsqlCommand(
                 "SELECT run_id, target_build, rollback_folder, exit_code FROM collect.upgrade_runs ORDER BY started_at DESC LIMIT 1", connection);
