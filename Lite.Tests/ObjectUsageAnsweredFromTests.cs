@@ -16,6 +16,7 @@ using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using ModelContextProtocol.Protocol;
 using PerformanceMonitor.Analysis.ObjectReferences;
+using PerformanceMonitor.Common;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -121,7 +122,7 @@ public sealed class ObjectUsageAnsweredFromTests : IClassFixture<SharedDuckDbFix
     /// <summary>The Information lines the slow reads of <c>get_object_usage</c> wrote since the last drain.</summary>
     private static List<string> SlowReadLines() =>
         AppLogger.DrainBufferedLines()
-            .Where(l => l.Contains("get_object_usage took", StringComparison.Ordinal) && l.Contains(ServerName, StringComparison.Ordinal))
+            .Where(l => l.Contains("get_object_usage took", StringComparison.Ordinal) && l.Contains($" ms for {ServerName} ", StringComparison.Ordinal))
             .ToList();
 
     /// <summary>No read of the call times an archive span, so the row's hot and archive split is not measured: NULL, never a zero that says an archive read took no time (#3682). The phases themselves are filled.</summary>
