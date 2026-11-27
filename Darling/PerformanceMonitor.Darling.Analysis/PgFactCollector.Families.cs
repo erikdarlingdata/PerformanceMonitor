@@ -36,21 +36,61 @@ public sealed partial class PgFactCollector
     /// which are merged in family order. If a family throws (only a stop from the pass's own token gets out of one), the
     /// pass waits for the families already running, then rethrows the failure of the earliest family in the list, as the
     /// serial loop would have, and starts no family it has not started yet.</para>
+    ///
+    /// <para>#9879: when the context carries a <see cref="AnalysisContext.FamilyDeadline"/>, a family
+    /// <paramref name="underDeadline"/> names (by default <see cref="RunsUnderTheFamilyDeadline"/>) reads through a token
+    /// that also ends at the deadline. One the deadline stops, or one not yet started when it fires, adds no fact and no
+    /// failure and is named in <see cref="AnalysisContext.FamiliesLeftOutForTime"/>, in family order. Every other family
+    /// runs to its end. A stop from the pass's own token is still rethrown.</para>
     /// </summary>
     internal static async Task RunFamiliesAsync(
         AnalysisContext context,
         List<Fact> facts,
-        IReadOnlyList<Func<AnalysisContext, List<Fact>, Task>> families)
+        IReadOnlyList<Func<AnalysisContext, List<Fact>, Task>> families,
+        Predicate<Func<AnalysisContext, List<Fact>, Task>>? underDeadline = null)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(facts);
         ArgumentNullException.ThrowIfNull(families);
 
+        var deadline = context.FamilyDeadline;
+        underDeadline ??= RunsUnderTheFamilyDeadline;
+        var leftOut = new bool[families.Count];
+
         var parallelism = Math.Clamp(context.FamilyParallelism, 1, MaxFamilyParallelism);
         if (parallelism == 1 || families.Count < 2)
         {
-            foreach (var family in families)
-                await family(context, facts);
+            for (var i = 0; i < families.Count; i++)
+            {
+                if (!deadline.CanBeCanceled || !underDeadline(families[i]))
+                {
+                    await families[i](context, facts);
+                    continue;
+                }
+
+                /* A family under the deadline keeps its facts and failures aside until it finishes, so one the deadline stops
+                   leaves neither behind. */
+                var own = new List<Fact>();
+                var ownFailures = context.BufferCollectionFailuresForThisFlow();
+                try
+                {
+                    await RunUnderDeadline(i, own);
+                }
+                finally
+                {
+                    context.StopBufferingCollectionFailuresForThisFlow();
+                }
+
+                if (leftOut[i])
+                {
+                    context.FamiliesLeftOutForTime.Add(FamilyName(families[i]));
+                    continue;
+                }
+
+                facts.AddRange(own);
+                context.CollectionFailures.AddRange(ownFailures);
+            }
+
             return;
         }
 
@@ -72,6 +112,12 @@ public sealed partial class PgFactCollector
         var merged = firstFailed < 0 ? families.Count : firstFailed;
         for (var i = 0; i < merged; i++)
         {
+            if (leftOut[i])
+            {
+                context.FamiliesLeftOutForTime.Add(FamilyName(families[i]));
+                continue;
+            }
+
             if (lists[i] is not { } familyFacts)
                 continue; /* never started: a family after the failing one that the gate had not yet released */
 
@@ -96,7 +142,10 @@ public sealed partial class PgFactCollector
 
                 lists[index] = [];
                 failures[index] = context.BufferCollectionFailuresForThisFlow();
-                await families[index](context, lists[index]!);
+                if (deadline.CanBeCanceled && underDeadline(families[index]))
+                    await RunUnderDeadline(index, lists[index]!);
+                else
+                    await families[index](context, lists[index]!);
                 finished = true;
             }
             finally
@@ -106,5 +155,50 @@ public sealed partial class PgFactCollector
                 gate.Release();
             }
         }
+
+        /* #9879: runs one family through a token that ends at the deadline as well as at the pass's own token. Only a stop
+           the deadline caused is taken here: the pass's token is checked first, so an abandoned pass still unwinds. */
+        async Task RunUnderDeadline(int index, List<Fact> familyFacts)
+        {
+            if (deadline.IsCancellationRequested)
+            {
+                leftOut[index] = true;
+                return;
+            }
+
+            var passToken = context.PassToken;
+            using var both = CancellationTokenSource.CreateLinkedTokenSource(passToken, deadline);
+            context.UseTokenForThisFlow(both.Token);
+            try
+            {
+                await families[index](context, familyFacts);
+            }
+            catch (Exception ex) when (deadline.IsCancellationRequested && !passToken.IsCancellationRequested
+                                       && AnalysisShutdown.IsShutdownResidue(ex))
+            {
+                /* The same shapes a family's own catch lets through once the token it reads is signalled, so nothing the
+                   deadline caused reaches the pass as a failure. */
+                leftOut[index] = true;
+            }
+            finally
+            {
+                context.UseTokenForThisFlow(null);
+            }
+        }
     }
+
+    /// <summary>
+    /// The families an on-demand pass runs under its time budget (#9879): the four that read every query-history or
+    /// procedure-history row of the window, which is what a long window on a busy server makes slow. Every other family
+    /// reads a bounded set of rows and always runs.
+    /// </summary>
+    internal static bool RunsUnderTheFamilyDeadline(Func<AnalysisContext, List<Fact>, Task> family) =>
+        family.Method.Name is nameof(CollectParameterSensitivityFactsAsync)
+            or nameof(CollectPlanAdvisoryFactsAsync)
+            or nameof(CollectBadActorFactsAsync)
+            or nameof(CollectProcedureStatsFactsAsync);
+
+    /// <summary>The family label a reply names a family by: the same one a collection failure of it carries.</summary>
+    private static string FamilyName(Func<AnalysisContext, List<Fact>, Task> family) =>
+        CollectionFailure.FamilyOf(family.Method.Name);
 }

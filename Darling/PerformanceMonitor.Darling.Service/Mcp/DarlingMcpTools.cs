@@ -151,7 +151,12 @@ public sealed class DarlingMcpTools
                the sentence joins the caveat and the structured block is appended to the payload, because
                "no finding from the write family" and "the write family was not read" must not look alike. */
             var collection = new CollectionCaveatState(analysisService.LastCollectionFailures, analysisService.LastCollectionFamilyCount);
-            var collectionCaveat = collection.Describe();
+            /* #9879: a family the pass's time budget stopped is not a failed read, so it is said beside the collection
+               caveat and listed in families_left_out, never counted in collection_caveats. Null and absent when every read
+               finished, so such a reply keeps its bytes. */
+            var familiesLeftOut = analysisService.LastFamiliesLeftOutForTime;
+            var familyBudget = analysisService.LastFamilyBudget;
+            var collectionCaveat = CollectionCaveats.Compose(collection.Describe(), FamilyTimeBudget.Describe(familiesLeftOut, familyBudget));
 
             if (findings.Count == 0)
             {
@@ -175,7 +180,7 @@ public sealed class DarlingMcpTools
                     "empty",
                     (collectionCaveat is null ? allClear : $"{allClear} COLLECTION CAVEAT: {collectionCaveat}")
                         + (secondaryReplicaNote is null ? string.Empty : " " + secondaryReplicaNote),
-                    collection.Attach(new
+                    FamilyTimeBudget.Attach(collection.Attach(new
                     {
                         analysis_time = analysisService.LastAnalysisTime?.ToString("o"),
                         persisted = anchor is null,
@@ -184,7 +189,7 @@ public sealed class DarlingMcpTools
                         coverage = coverage?.ToPayload(),
                         fact_count = analysisService.LastFactCount,
                         facts_scored = analysisService.LastFactsScored
-                    }, McpHelpers.JsonOptions));
+                    }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions));
             }
 
             // Correlate-and-focus slice 1 (review §1d): each finding's "what else fired this window".
@@ -299,7 +304,7 @@ public sealed class DarlingMcpTools
                the trimmed form does not fit), and the smaller findings behind it are still tried. truncated / findings_returned / findings_left_out /
                truncation_note say what was left off and where it is read. finding_count still counts every finding, and an
                unanchored run persisted them all before this cut. */
-            return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(collection.Attach(new
+            return AnalysisFindingsBudget.Pack(findingNodes, findingLabels, packed => JsonSerializer.Serialize(packed.Annotate(JsonSerializer.SerializeToNode(FamilyTimeBudget.Attach(collection.Attach(new
             {
                 server = resolved.DisplayName,
                 status = "findings",
@@ -323,7 +328,7 @@ public sealed class DarlingMcpTools
                     end = findings[0].TimeRangeEnd?.ToString("o")
                 },
                 findings = packed.FindingsArray()
-            }, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!.AsObject()), McpHelpers.JsonOptions)).Json;
+            }, McpHelpers.JsonOptions), familiesLeftOut, familyBudget, McpHelpers.JsonOptions), McpHelpers.JsonOptions)!.AsObject()), McpHelpers.JsonOptions)).Json;
         }
         catch (Exception ex)
         {

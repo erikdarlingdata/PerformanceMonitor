@@ -241,6 +241,19 @@ public sealed class DarlingAnalysisService
     /// </summary>
     public string? LastSecondaryReplicaNote { get; private set; }
 
+    /// <summary>The families the last pass left out because its time budget ended before their read did (#9879), in
+    /// family order. Empty for a pass with no budget (the scheduled pass) and for one whose reads all finished.</summary>
+    public IReadOnlyList<string> LastFamiliesLeftOutForTime { get; private set; } = [];
+
+    /// <summary>The budget the last pass gave its heavy family reads (#9879), null when it had none.</summary>
+    public TimeSpan? LastFamilyBudget { get; private set; }
+
+    /// <summary>
+    /// The time an on-demand pass gives its heavy family reads (#9879), from the start of the pass. Null runs them
+    /// without one. The scheduled pass never has one, whatever this holds.
+    /// </summary>
+    public TimeSpan? OnDemandFamilyBudget { get; set; } = FamilyTimeBudget.OnDemand;
+
     /// <summary>
     /// How the last pass ended EARLY, or null when it ran through (#2430). Set inside the pass's own
     /// catch, so <see cref="AnalysisAbandonKind.None"/> here means a genuine fault: the pass reached the
@@ -388,6 +401,14 @@ public sealed class DarlingAnalysisService
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
 
+        /* #9879: an on-demand pass gives its heavy family reads a stated time, counted from here so the reads ahead of the
+           family stage come out of it too. The scheduled pass (the one caller that persists caveats) has no budget: its
+           findings are what a reply points to for a family this one left out. */
+        var familyBudget = persistCollectionCaveats ? null : OnDemandFamilyBudget;
+        using var familyDeadline = new CancellationTokenSource();
+        if (familyBudget is { } budget)
+            familyDeadline.CancelAfter(budget);
+
         var context = new AnalysisContext
         {
             ServerId = serverId,
@@ -397,6 +418,8 @@ public sealed class DarlingAnalysisService
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
             AsOfUtc = asOfUtc,
+            FamilyDeadline = familyBudget is null ? CancellationToken.None : familyDeadline.Token,
+            FamilyBudget = familyBudget,
             /* #5812: an on-demand current pass may reuse PLAN_REGRESSION candidates younger than the reuse window; the
                scheduled pass (the one caller that persists caveats, #5633) always reads and refills them; a past as_of reads
                live. */
@@ -439,6 +462,8 @@ public sealed class DarlingAnalysisService
         LastFactsScored = null;
         EndedEarlyAs = null;
         LastSecondaryReplicaNote = AgReplicaScope.SkippedNote(context.SecondaryReplicaDatabases); /* #5558 */
+        LastFamiliesLeftOutForTime = context.FamiliesLeftOutForTime; /* #9879: the pass's own list, filled by the family stage */
+        LastFamilyBudget = context.FamilyBudget;
 
         try
         {
