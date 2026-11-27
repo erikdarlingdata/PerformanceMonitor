@@ -155,7 +155,8 @@ public readonly record struct UpgradeRunPickupResult(UpgradeRunPickupOutcome Out
 
 /// <summary>
 /// Reads the upgrade run file and records it (#9432). One instance per service, because it remembers which problems it has already
-/// warned about: a file that does not parse is warned about once per distinct content, not on every pass.
+/// warned about (a file that does not parse is warned about once per distinct content, not on every pass) and which run and state it
+/// last said it recorded (#9841).
 /// </summary>
 public sealed class UpgradeRunPickup
 {
@@ -173,6 +174,10 @@ public sealed class UpgradeRunPickup
 
     private readonly ILogger _logger;
     private readonly HashSet<string> _warned = new(StringComparer.Ordinal);
+
+    /* The run and state the last "recorded in the store" line named. A succeeded run keeps its file until it is verified, failed or a week
+       old, and a pass records it again every five minutes, so the line is logged when this changes and not on every pass (#9841). */
+    private (Guid RunId, string State)? _lastLoggedRecorded;
 
     /// <summary>Makes a pickup that logs through <paramref name="logger"/>.</summary>
     public UpgradeRunPickup(ILogger logger)
@@ -246,6 +251,29 @@ public sealed class UpgradeRunPickup
         }
 
         return new UpgradeRunPickupResult(UpgradeRunPickupOutcome.RecordedAndRemoved, run.RunId, run.State);
+    }
+
+    /// <summary>
+    /// Logs that a pickup recorded its run, once for each run id and state (#9841). A pass that records the same run in the same state
+    /// again, as it does every five minutes while a succeeded run's file waits to be verified, logs nothing. A new run id or a new state
+    /// logs again. Only a pickup that recorded the file logs: the other outcomes carry their own warnings.
+    /// </summary>
+    public void LogRecordedOnce(UpgradeRunPickupResult result)
+    {
+        if (result.Outcome is not (UpgradeRunPickupOutcome.Recorded or UpgradeRunPickupOutcome.RecordedAndRemoved)
+            || result.RunId is not { } runId
+            || result.State is not { } state)
+        {
+            return;
+        }
+
+        if (_lastLoggedRecorded == (runId, state))
+        {
+            return;
+        }
+
+        _lastLoggedRecorded = (runId, state);
+        _logger.LogInformation("Upgrade run {RunId} recorded in the store, state {State}", runId, state);
     }
 
     /// <summary>Parses a run file. False, with the reason, when it is not valid JSON or lacks a usable run id, state or start time.</summary>
