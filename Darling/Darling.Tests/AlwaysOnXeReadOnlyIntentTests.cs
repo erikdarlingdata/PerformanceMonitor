@@ -364,8 +364,10 @@ public sealed class AlwaysOnXeReadOnlyIntentTests : IAsyncDisposable
         var rig = BuildRig(readOnlyIntent: true);
         foreach (var kind in Kinds)
         {
-            rig.Alpha.Definitions.Add(Shared(kind));
-            rig.Alpha.RunningOnReplica.Add(Shared(kind));
+            /* #9895: the client-timeout session is this install's own, so a healthy database holds that one. */
+            var session = kind == AlwaysOnXeSessionKind.Attention ? Own(kind) : Shared(kind);
+            rig.Alpha.Definitions.Add(session);
+            rig.Alpha.RunningOnReplica.Add(session);
         }
 
         await rig.EnsureAsync();
