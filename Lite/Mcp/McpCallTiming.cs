@@ -262,7 +262,8 @@ public sealed class McpCallTimingRecorder
                 var reply = result is null ? null : ReplyOf(result);
                 _recorder.WriteInBackground(new McpSlowCall(
                     _startedUtc, _tool, outcome, totalMs, lockWaitMs, hotMs, archiveMs, archiveFiles, result is null ? 0 : BytesOf(result), _hoursBack,
-                    _memory.WorkingSetPeak, _memory.DuckDbPeak, MemorySourceText, reply?.Server ?? _serverArgument, reply?.Rows));
+                    _memory.WorkingSetPeak, _memory.DuckDbPeak, MemorySourceText, reply?.Server ?? _serverArgument, reply?.Rows,
+                    _tally.AnsweredFrom, _tally.PhaseSplit));
             }
             catch (Exception ex)
             {
