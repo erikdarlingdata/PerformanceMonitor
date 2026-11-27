@@ -96,4 +96,48 @@ public sealed class QueryTagSightingsHorizonTests
         Assert.Equal(60, DarlingRetention.QueryTagSightingsRetentionDays(60, resolver));
         Assert.Equal(75, DarlingRetention.QueryTagSightingsRetentionDays(75, resolver));
     }
+
+    /* #9705: the slim rows outlive every usage row a tag read joins a key to. The chunk interval is the margin a hypertable needs,
+       because a chunk is dropped only when all of it is past its horizon. */
+    private static int HourlyTierDays => (int)Math.Ceiling(PerformanceMonitor.Darling.Storage.TimescaleSupport.HourlyRetentionSpan.TotalDays);
+
+    private static int ChunkDays => PerformanceMonitor.Darling.Storage.TimescaleSupport.ChunkIntervalDays;
+
+    [Fact]
+    public void Defaults_KeepASlimRowPastTheHourlyTiers_WhichOutliveTheSightings()
+    {
+        var sightings = DarlingRetention.QueryTagSightingsRetentionDays(DarlingRetention.WidestDimensionFactRetentionDays(null), null);
+        var slim = DarlingRetention.QueryTagSlimSightingsRetentionDays(sightings);
+
+        Assert.True(HourlyTierDays > sightings, "the shipped hourly tiers keep rows longer than the sightings, which is the gap the slim table covers");
+        Assert.True(slim > HourlyTierDays + ChunkDays, $"slim {slim} days must outlive an hourly tier row of {HourlyTierDays} days and the chunk that holds it");
+    }
+
+    [Theory]
+    [InlineData("query_store")]
+    [InlineData("deadlocks")]
+    [InlineData("query_stats")]
+    public void RaisingAFeederPastTheHourlyTiers_MovesTheSlimHorizonWithIt(string feeder)
+    {
+        var raisedDays = HourlyTierDays + 60;
+        var resolver = Raised(feeder, raisedDays);
+        var sightings = DarlingRetention.QueryTagSightingsRetentionDays(DarlingRetention.WidestDimensionFactRetentionDays(resolver), resolver);
+        var slim = DarlingRetention.QueryTagSlimSightingsRetentionDays(sightings);
+
+        Assert.Equal(raisedDays, sightings);
+        Assert.True(slim > raisedDays + ChunkDays, $"slim {slim} days must outlive the raised feeder's rows of {raisedDays} days and the chunk that holds them");
+    }
+
+    [Theory]
+    [InlineData(7)]
+    [InlineData(30)]
+    [InlineData(90)]
+    [InlineData(400)]
+    public void TheSlimHorizon_IsNeverInsideTheSightingsHorizonOrTheHourlyTiers(int sightingsDays)
+    {
+        var slim = DarlingRetention.QueryTagSlimSightingsRetentionDays(sightingsDays);
+
+        Assert.True(slim > sightingsDays, $"slim {slim} days against sightings {sightingsDays} days");
+        Assert.True(slim > HourlyTierDays, $"slim {slim} days against the hourly tiers' {HourlyTierDays} days");
+    }
 }

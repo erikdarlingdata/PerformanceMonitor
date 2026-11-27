@@ -1,0 +1,143 @@
+using System;
+using System.Globalization;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Darling.Service;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/* #1776 own-store: every test mints its own scratch database through ScratchPostgres and touches nothing on the shared one. */
+/// <summary>
+/// #9796: the slice DELETE of the sightings purge (the #9705 move) on a real store. Every seeded time and the cutoff are fixed January dates,
+/// so no row, bound or plan moves with the hour the test runs.
+/// </summary>
+public sealed class RetentionPurgeBitmapSliceLiveTests
+{
+    private const string Table = "collect.query_tag_sightings";
+    private const string TimeColumn = "last_seen";
+    private const int RowsPerDay = 2000;
+    private const int Days = 10;
+    private static readonly DateTime FirstDay = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime Cutoff = FirstDay.AddDays(4);
+
+    private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    private static async Task WithSeededStoreAsync(Func<NpgsqlConnection, CancellationToken, Task> body)
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(ConnectionString), "Set DARLING_TEST_PG to a Postgres connection string to run the purge slice pins.");
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(ConnectionString!, ct, emptyStore: true);
+        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { SearchPath = PgSchemaGenerator.SearchPath }.ConnectionString;
+        await using var store = new NpgsqlConnection(connectionString);
+        await store.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(store, ct);
+        var bodySucceeded = false;
+        try
+        {
+            /* Ten days of rows written in time order, so the heap follows the time index and the planner's own choice for one day is the
+               plain Index Scan. The statistics are refreshed so both plans are costed from the seeded rows. */
+            await ExecAsync(store,
+                $"INSERT INTO {Table} (server_id, key_kind, key, first_seen, last_seen)"
+                + $" SELECT 7301, 'hash', 'k' || g, t.at, t.at"
+                + $" FROM generate_series(0, {(RowsPerDay * Days) - 1}) AS g"
+                + $" CROSS JOIN LATERAL (SELECT timestamptz '2026-01-01 00:00:00+00' + g * interval '{(86400.0 / RowsPerDay).ToString(CultureInfo.InvariantCulture)} seconds' AS at) AS t"
+                + $" ORDER BY g", ct);
+            await ExecAsync(store, $"ANALYZE {Table}", ct);
+            await body(store, ct);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, static (_, _) => Task.CompletedTask);
+        }
+    }
+
+    private static async Task ExecAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<(DateTime Start, DateTime End)> ReadBoundsAsync(NpgsqlConnection store, CancellationToken ct)
+    {
+        await using var probe = new NpgsqlCommand(QueryTagSlimSightings.FirstSliceProbeSql, store);
+        probe.Parameters.AddWithValue(Cutoff);
+        var bounds = await DarlingRetention.ReadSliceBoundsAsync(probe, ct);
+        Assert.NotNull(bounds);
+        return bounds.Value;
+    }
+
+    [Fact]
+    public async Task TheProbe_ReadsTheOldestExpiredDay_AndNothingOnceNoExpiredRowIsLeft()
+    {
+        await WithSeededStoreAsync(async (store, ct) =>
+        {
+            var slice = await ReadBoundsAsync(store, ct);
+            Assert.Equal(FirstDay, slice.Start.ToUniversalTime());
+            Assert.Equal(FirstDay.AddDays(1), slice.End.ToUniversalTime());
+
+            await ExecAsync(store, $"DELETE FROM {Table} WHERE {TimeColumn} < timestamptz '2026-01-05 00:00:00+00'", ct);
+            await using var probe = new NpgsqlCommand(QueryTagSlimSightings.FirstSliceProbeSql, store);
+            probe.Parameters.AddWithValue(Cutoff);
+            Assert.Null(await DarlingRetention.ReadSliceBoundsAsync(probe, ct));
+        });
+    }
+
+    /* The scan node of query_tag_sightings under the statement of the sightings move (#9705), planned (not run) with the slice's own
+       bounds as parameters. The DELETE is inside a CTE, so the node is found by walking the plan for the scan of that table. */
+    private static async Task<string?> MoveDeleteScanNodeAsync(
+        NpgsqlConnection store, NpgsqlTransaction? transaction, (DateTime Start, DateTime End) slice, CancellationToken ct)
+    {
+        await using var explain = new NpgsqlCommand("EXPLAIN (FORMAT JSON) " + QueryTagSlimSightings.MoveSliceSql, store, transaction);
+        explain.Parameters.AddWithValue(Cutoff);
+        explain.Parameters.AddWithValue(slice.Start);
+        explain.Parameters.AddWithValue(slice.End);
+        using var plan = JsonDocument.Parse((string)(await explain.ExecuteScalarAsync(ct))!);
+        return SightingsScanNode(plan.RootElement[0].GetProperty("Plan"));
+    }
+
+    private static string? SightingsScanNode(JsonElement node)
+    {
+        var type = node.GetProperty("Node Type").GetString()!;
+        if (type.EndsWith("Scan", StringComparison.Ordinal)
+            && node.TryGetProperty("Relation Name", out var relation)
+            && relation.GetString() == "query_tag_sightings")
+        {
+            return type;
+        }
+
+        if (node.TryGetProperty("Plans", out var children))
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                if (SightingsScanNode(child) is { } found)
+                {
+                    return found;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    [Fact]
+    public async Task TheSightingsMoveStatement_IsAnIndexScanOnItsOwn_AndABitmapHeapScanUnderThePurgesSetting_AndTheSettingEndsWithItsTransaction()
+    {
+        await WithSeededStoreAsync(async (store, ct) =>
+        {
+            var slice = await ReadBoundsAsync(store, ct);
+
+            Assert.Equal("Index Scan", await MoveDeleteScanNodeAsync(store, transaction: null, slice, ct));
+
+            var underTheSetting = await DarlingRetention.WithSliceDeleteScanSettingAsync(
+                store, (transaction, token) => MoveDeleteScanNodeAsync(store, transaction, slice, token), ct);
+            Assert.Equal("Bitmap Heap Scan", underTheSetting);
+
+            Assert.Equal("Index Scan", await MoveDeleteScanNodeAsync(store, transaction: null, slice, ct));
+        });
+    }
+}

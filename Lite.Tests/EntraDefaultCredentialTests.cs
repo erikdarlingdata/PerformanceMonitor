@@ -454,7 +454,10 @@ public class EntraDefaultCredentialTests
            back at the end of this mode's credential chain and reintroduce the #3196 failure it
            exists to route around. This is the exact Type.GetType call
            DefaultAzureCredentialFactory.TryCreateDevelopmentBrokerOptions makes, so the pin cannot
-           drift from the mechanism it guards: whatever this returns is what the chain will see. */
+           drift from the mechanism it guards: whatever this returns is what the chain will see.
+           Since Microsoft.Data.SqlClient 8.0.0 (#9869) the credential types ship inside Azure.Core (still in
+           the Azure.Identity namespace), and Azure.Core 1.65.0 carries the same broker probe string, so the
+           control below looks in Azure.Core and the broker probe is unchanged. */
 
         /* The POSITIVE CONTROL comes first, and without it this test is decoration. Type.GetType on
            a simple assembly name answers null both when the assembly is absent and when nothing can
@@ -464,7 +467,7 @@ public class EntraDefaultCredentialTests
            assembly at all, where both halves of this pin were green. Proving the probe CAN return a
            type is what makes the null below evidence of anything. */
         Assert.NotNull(Type.GetType(
-            "Azure.Identity.DefaultAzureCredential, Azure.Identity", throwOnError: false));
+            "Azure.Identity.DefaultAzureCredential, Azure.Core", throwOnError: false));
 
         var brokerOptions = Type.GetType(
             "Azure.Identity.Broker.DevelopmentBrokerOptions, Azure.Identity.Broker",
@@ -486,7 +489,7 @@ public class EntraDefaultCredentialTests
         /* Positive control, for the same reason as above: "no file matches Azure.Identity.Broker*"
            is also true of a directory holding no Azure assemblies whatsoever, which is not the claim
            and is not evidence for it. */
-        Assert.NotEmpty(Directory.GetFiles(beside!, "Azure.Identity.dll"));
+        Assert.NotEmpty(Directory.GetFiles(beside!, "Azure.Core.dll"));
 
         Assert.Empty(Directory.GetFiles(beside!, "Azure.Identity.Broker*"));
     }
