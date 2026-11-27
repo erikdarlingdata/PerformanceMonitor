@@ -320,8 +320,17 @@ unit_pids() {
 
 # Prints "pid command" for every process that runs from the folder, other than the PIDs listed in $2: its executable is
 # in the folder, an argument names a file in it (dotnet <folder>/<name>.dll), or it has a file of the folder mapped.
+# A hit counts only when the folder it names is the host's folder. The paths a process shows are in its own mount
+# namespace, so a process in a container that runs from the container's own copy of the folder reads the same as one
+# that runs from the host's. The folder seen through /proc/<pid>/root is compared with the host's folder by device and
+# inode: a unit with a sandbox (ProtectSystem=, PrivateTmp=) has a mount namespace of its own and still sees the host's
+# folder through a bind mount, which keeps both numbers, so it counts. A host with no such folder has nothing that runs
+# from it. A container can make its folder a link whose absolute target resolves against this script's root and so
+# matches the host's folder. That only makes the guard refuse, the safe direction, and is not defended against (#9834).
 processes_from() {
-    local folder="$1" skip entry pid exe hit arg
+    local folder="$1" skip entry pid exe hit arg folder_id
+    folder_id="$(stat -L -c '%d:%i' -- "${folder}" 2>/dev/null || true)"
+    [ -n "${folder_id}" ] || return 0
     # shellcheck disable=SC2086
     skip=" $(printf '%s ' $2) "
     for entry in /proc/[0-9]*; do
@@ -338,7 +347,9 @@ processes_from() {
         if [ "${hit}" = 0 ] && grep -q -F " ${folder}/" "${entry}/maps" 2>/dev/null; then
             hit=1
         fi
-        [ "${hit}" = 1 ] && printf '%s %s\n' "${pid}" "$(tr '\0\n' '  ' <"${entry}/cmdline" 2>/dev/null | cut -c1-160 | printable)"
+        [ "${hit}" = 1 ] || continue
+        [ "$(stat -L -c '%d:%i' -- "${entry}/root${folder}" 2>/dev/null || true)" = "${folder_id}" ] || continue
+        printf '%s %s\n' "${pid}" "$(tr '\0\n' '  ' <"${entry}/cmdline" 2>/dev/null | cut -c1-160 | printable)"
     done
     return 0
 }
