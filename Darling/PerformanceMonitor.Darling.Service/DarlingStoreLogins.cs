@@ -957,9 +957,13 @@ internal static class DarlingStoreLogins
         {
             throw;
         }
-        catch (Exception ex)
+        catch (OperationCanceledException ex)
         {
             /* A cancellation that is not the stop token (the first catch took that one) is a failed probe too, so it never escapes the host start. */
+            return new LoginProbeResult(LoginProbeVerdict.Failed, DescribeProbeFailure(ex));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
             return new LoginProbeResult(LoginProbeVerdict.Failed, DescribeProbeFailure(ex));
         }
     }
