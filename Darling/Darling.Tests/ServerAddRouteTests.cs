@@ -304,7 +304,7 @@ public sealed class ServerAddRouteTests
     }
 
     [Fact]
-    public async Task ASecretThatSomehowReachesTheCoresAnswer_IsRedactedBeforeItIsWritten()
+    public async Task ASecretThatSomehowReachesTheCoresAnswer_IsWithheldWithItsWholeDetail_BeforeItIsWritten()
     {
         var leaky = "{\"requested\":1,\"added\":0,\"skipped\":0,\"collided\":0,\"failed\":1,\"results\":["
             + "{\"server\":\"sql00\",\"status\":\"connection_failed\",\"detail\":\"login failed for password " + FakeSecret + "\"}]}";
@@ -313,8 +313,36 @@ public sealed class ServerAddRouteTests
         var (status, body) = await PostAsync(rig, Entries(1));
         Assert.Equal(HttpStatusCode.OK, status);
         AssertNoSecret(rig, body);
-        Assert.Equal("login failed for password [redacted]", DetailOf(body));
-        Assert.Contains("login failed for password [redacted]", rig.Log.Joined, StringComparison.Ordinal);
+        /* #9693: the detail is withheld whole. A detail with the secret cut out would show where in it the secret stood. */
+        Assert.Equal(WithheldDetail, DetailOf(body));
+        Assert.Contains("connection_failed: " + WithheldDetail, rig.Log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("login failed", body + rig.Log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("[redacted]", body + rig.Log.Joined, StringComparison.Ordinal);
+    }
+
+    private static readonly string WithheldDetail = DarlingMcpServerAdminTools.WithheldText("The detail", null);
+
+    /// <summary>#9693: a password that is a word of the core's own sentence, or a part of the server's name. Each text is
+    /// withheld whole in the reply and in the audit line, and a text that does not repeat the password is written as it was.</summary>
+    [Fact]
+    public async Task ARowWhoseOwnTextRepeatsThePassword_IsWithheldWhole_AndAnotherRowIsWrittenAsItWas()
+    {
+        const string password = "connect";
+        var answer = "{\"requested\":2,\"added\":0,\"skipped\":0,\"collided\":0,\"failed\":2,\"results\":["
+            + "{\"server\":\"sql00\",\"status\":\"connection_failed\",\"detail\":\"Could not connect to the server.\"},"
+            + "{\"server\":\"connect-sql01\",\"status\":\"connection_failed\",\"detail\":\"The server did not answer.\"}]}";
+        await using var rig = await StartAsync(_ => Task.FromResult(answer));
+
+        var (_, body) = await PostAsync(rig, Entries(2, password), principal: "dana");
+
+        var rows = JsonNode.Parse(body)!["results"]!.AsArray();
+        Assert.Equal("sql00", rows[0]!["server"]!.GetValue<string>());
+        Assert.Equal(WithheldDetail, rows[0]!["detail"]!.GetValue<string>());
+        Assert.Equal(DarlingMcpServerAdminTools.WithheldText("The server's name", null), rows[1]!["server"]!.GetValue<string>());
+        Assert.Equal("The server did not answer.", rows[1]!["detail"]!.GetValue<string>());
+        Assert.DoesNotContain("[redacted]", body + rig.Log.Joined, StringComparison.Ordinal);
+        Assert.Contains("Server add failed for dana: sql00, connection_failed: " + WithheldDetail, rig.Log.Joined, StringComparison.Ordinal);
+        Assert.Contains("connection_failed: The server did not answer.", rig.Log.Joined, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -329,13 +357,13 @@ public sealed class ServerAddRouteTests
     }
 
     [Fact]
-    public void RedactAddAnswer_KeepsTheEnvelopeShape_AndReplacesOnlyTheSecret()
+    public void RedactAddAnswer_KeepsTheEnvelopeShape_AndWithholdsOnlyTheTextThatRepeatsTheSecret()
     {
         var answer = DarlingWebEndpoints.RedactAddAnswer(
             "{\"requested\":1,\"results\":[{\"server\":\"a\",\"status\":\"invalid\",\"detail\":\"x " + FakeSecret + " y\"}]}",
             new[] { FakeSecret });
         var row = JsonNode.Parse(answer)!["results"]![0]!;
-        Assert.Equal("x [redacted] y", row["detail"]!.GetValue<string>());
+        Assert.Equal(WithheldDetail, row["detail"]!.GetValue<string>());
         Assert.Equal("a", row["server"]!.GetValue<string>());
         Assert.Equal("invalid", row["status"]!.GetValue<string>());
 
@@ -468,7 +496,7 @@ public sealed class ServerAddRouteTests
         var added = Assert.Single(rig.Log.Lines, l => l.Contains("Server added by", StringComparison.Ordinal));
         Assert.Contains("Server added by dana: sql00, auth SQL", added, StringComparison.Ordinal);
         var failed = Assert.Single(rig.Log.Lines, l => l.Contains("Server add failed for", StringComparison.Ordinal));
-        Assert.Contains("Server add failed for dana: sql01, connection_failed: login failed for password [redacted]", failed, StringComparison.Ordinal);
+        Assert.Contains("Server add failed for dana: sql01, connection_failed: " + WithheldDetail, failed, StringComparison.Ordinal);
         AssertNoSecret(rig, body);
     }
 

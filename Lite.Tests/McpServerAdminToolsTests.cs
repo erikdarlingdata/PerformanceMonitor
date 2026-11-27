@@ -280,6 +280,84 @@ public sealed class McpServerAdminToolsTests : IDisposable
         Assert.Equal(AuthenticationTypes.Windows, Reread("Billing").AuthenticationType);
     }
 
+    /// <summary>A manager holding the given Windows servers, each added and confirmed for this user as the window does.</summary>
+    private ServerManager SeededWith(params ServerConnection[] servers)
+    {
+        var manager = Manager();
+        foreach (var server in servers)
+        {
+            manager.AddServer(server);
+            manager.ConfirmHost(server);
+        }
+
+        return manager;
+    }
+
+    private static int IdOf(ServerConnection server) =>
+        RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(server));
+
+    /// <summary>#9693: an edit can change where a saved password is sent, so a storage name does not win over another server's
+    /// display name. The name both servers answer to is refused with each one's id, the id form picks one, and the undo of an
+    /// edit made that way names the server by its id too.</summary>
+    [Fact]
+    public async Task Edit_AStorageNameAnotherServerHasAsItsDisplayName_IsAmbiguousWithEachId_AndTheIdFormEditsOne()
+    {
+        var first = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "sql01", DisplayName = "Orders", Description = "first", AuthenticationType = AuthenticationTypes.Windows };
+        var second = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "sql02", DisplayName = "sql01", Description = "second", AuthenticationType = AuthenticationTypes.Windows };
+        var manager = SeededWith(first, second);
+
+        var refused = Parse(await Edit(manager, "sql01", "{\"description\":\"changed\"}", new Probe()));
+
+        Assert.Equal("ambiguous", refused["status"]!.GetValue<string>());
+        Assert.Equal(
+            new[] { IdOf(first), IdOf(second) }.Order(),
+            refused["candidates"]!.AsArray().Select(c => c!["server_id"]!.GetValue<int>()).Order());
+        Assert.All(Manager().GetAllServers(), s => Assert.NotEqual("changed", s.Description));
+
+        var byId = Parse(await Edit(manager, "id:" + IdOf(first).ToString(System.Globalization.CultureInfo.InvariantCulture), "{\"description\":\"changed\"}", new Probe()));
+
+        Assert.Equal("updated", byId["status"]!.GetValue<string>());
+        Assert.Equal("changed", Manager().GetAllServers().Single(s => s.ServerName == "sql01").Description);
+        Assert.Equal("second", Manager().GetAllServers().Single(s => s.ServerName == "sql02").Description);
+
+        /* The undo is the call as the answer gives it: it names the server so that it is not refused as ambiguous. */
+        var undo = byId["undo"]!["arguments"]!;
+        var undone = await Edit(manager, undo["server_name"]!.GetValue<string>(), undo["changes_json"]!.GetValue<string>(), new Probe());
+
+        Assert.Equal("updated", Status(undone));
+        Assert.Equal("first", Manager().GetAllServers().Single(s => s.ServerName == "sql01").Description);
+        Assert.Equal("second", Manager().GetAllServers().Single(s => s.ServerName == "sql02").Description);
+    }
+
+    /// <summary>#9693: Lite gives a server its host as the display name until one is typed, so a plain server and the read-only
+    /// registration of the same machine both answer to the host. The edit refuses the host, each one's own storage name or id
+    /// edits it, an id nothing has finds no server, and the excluded-databases write keeps taking the storage name.</summary>
+    [Fact]
+    public async Task Edit_AHostItsReadOnlyRegistrationShares_IsAmbiguous_AndAStorageNameNoOtherServerHasStillPicksOne()
+    {
+        var plain = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "sql01", DisplayName = "sql01", AuthenticationType = AuthenticationTypes.Windows };
+        var readOnly = new ServerConnection { Id = Guid.NewGuid().ToString(), ServerName = "sql01", DisplayName = "sql01", ReadOnlyIntent = true, AuthenticationType = AuthenticationTypes.Windows };
+        var manager = SeededWith(plain, readOnly);
+        var readOnlyStorage = RemoteCollectorService.GetServerNameForStorage(readOnly);
+        Assert.NotEqual("sql01", readOnlyStorage);
+
+        Assert.Equal("ambiguous", Status(await Edit(manager, "sql01", "{\"description\":\"changed\"}", new Probe())));
+        Assert.All(Manager().GetAllServers(), s => Assert.NotEqual("changed", s.Description));
+
+        Assert.Equal("updated", Status(await Edit(manager, readOnlyStorage, "{\"description\":\"replica\"}", new Probe())));
+        Assert.Equal("updated", Status(await Edit(manager, "ID:" + IdOf(plain).ToString(System.Globalization.CultureInfo.InvariantCulture), "{\"description\":\"primary\"}", new Probe())));
+        Assert.Equal("replica", Manager().GetAllServers().Single(s => s.ReadOnlyIntent).Description);
+        Assert.Equal("primary", Manager().GetAllServers().Single(s => !s.ReadOnlyIntent).Description);
+
+        var noSuchId = IdOf(plain) == int.MaxValue ? 1 : IdOf(plain) + 1;
+        Assert.NotEqual(noSuchId, IdOf(readOnly));
+        Assert.Equal("invalid", Status(await Edit(manager, "id:" + noSuchId.ToString(System.Globalization.CultureInfo.InvariantCulture), "{\"description\":\"x\"}", new Probe())));
+
+        Assert.Equal("changed", Status(McpServerAdminTools.SetExcluded(manager, "sql01", new[] { "db1" })));
+        Assert.Equal(new[] { "db1" }, Manager().GetAllServers().Single(s => !s.ReadOnlyIntent).ExcludedDatabases);
+        Assert.Empty(Manager().GetAllServers().Single(s => s.ReadOnlyIntent).ExcludedDatabases ?? []);
+    }
+
     [Fact]
     public async Task Edit_AServerThatWouldTakeAnotherServersId_IsRefusedAsCollides()
     {

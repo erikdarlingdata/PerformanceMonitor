@@ -251,7 +251,10 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
             var answer = await Edit(store, body, probe);
 
             Assert.Equal("invalid", Status(answer));
-            Assert.Equal(RefusalSentence, JsonNode.Parse(answer)!["message"]!.GetValue<string>());
+            /* #9693: an edit answers with its own sentence (what an edit does with a reference), not the one a new
+               registration gets. */
+            Assert.Equal(Core.EditReferenceRefusedText, JsonNode.Parse(answer)!["message"]!.GetValue<string>());
+            Assert.NotEqual(RefusalSentence, JsonNode.Parse(answer)!["message"]!.GetValue<string>());
             Assert.DoesNotContain(reference.Trim(), answer, StringComparison.Ordinal);
             Assert.Equal(0, probe.Calls);
             Assert.Equal(0, store.Writes);
@@ -407,7 +410,9 @@ public sealed class ServerPasswordFromRequestTests : IDisposable
 
         var (_, body) = await SendAsync(web, HttpMethod.Patch, "/api/servers/41", json);
 
-        Assert.Contains(RefusalSentence, body, StringComparison.Ordinal);
+        /* #9693: the web edit hands the body to the edit core, so it answers with the edit's own sentence for a reference. */
+        Assert.Contains(JsonNode.Parse(body)!.AsObject(), p => p.Value is JsonValue v && v.TryGetValue<string>(out var text) && text == Core.EditReferenceRefusedText);
+        Assert.DoesNotContain(RefusalSentence, body, StringComparison.Ordinal);
         Assert.DoesNotContain(reference.Trim(), body, StringComparison.Ordinal);
         Assert.Equal(0, web.Probe.Calls);
         Assert.Equal(0, web.Store.Writes);

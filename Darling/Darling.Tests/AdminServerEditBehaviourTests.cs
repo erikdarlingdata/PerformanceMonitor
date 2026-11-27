@@ -622,14 +622,16 @@ public sealed class AdminServerEditBehaviourTests
     }
 
     [Fact]
-    public void AConflict_ShowsTheExternalIdOnlyAsSetOrNotSet_AndRedactionTakesSeveralSecrets_Pure()
+    public void AConflict_ShowsTheExternalIdOnlyAsSetOrNotSet_AndEitherTypedSecretWithholdsATextWhole_Pure()
     {
         var current = PgWithRole(false);
         var changes = Pure("conflictChanges", PgWithRole(true), current, PgEdited(true, "{}"));
         var line = Assert.Single(changes.EnumerateArray(), c => c.GetProperty("key").GetString() == "aws_external_id_set");
         Assert.Equal("AWS external ID: was set, now not set", line.GetProperty("text").GetString());
 
-        Assert.Equal("a [redacted] b [redacted]", Pure("redactPassword", "a pw1 b ext1", "pw1", "ext1").GetString());
+        // Either typed secret is enough for the text to be withheld: the password, or the AWS external ID alone.
+        Assert.Equal(WithheldMessage, Pure("withheldIfSecretRepeated", "a pw1 b ext1", "The message", "pw1", "ext1").GetString());
+        Assert.Equal(WithheldMessage, Pure("withheldIfSecretRepeated", "only ext1 is here", "The message", "pw1", "ext1").GetString());
     }
 
     // ------------------------------------------------------------------ the rest of the exports
@@ -752,17 +754,29 @@ public sealed class AdminServerEditBehaviourTests
         Assert.Empty(Pure("conflictChanges", Base("sql"), sqlServerNow, Base("sql")).EnumerateArray());
     }
 
-    [Theory]
-    [InlineData("a bad password: hunter2 was refused", "hunter2", "a bad password: [redacted] was refused")]
-    [InlineData("hunter2hunter2", "hunter2", "[redacted][redacted]")]
-    [InlineData("a.b*c( is not a pattern: a.b*c(", "a.b*c(", "[redacted] is not a pattern: [redacted]")]
-    [InlineData("nothing to hide", "", "nothing to hide")]
-    [InlineData("nothing to hide", "hunter2", "nothing to hide")]
-    public void ThePasswordIsRedactedFromAServiceSentence_WithNoPatternMatching_Pure(string text, string password, string expected)
-    {
-        var redacted = Pure("redactPassword", text, password);
+    /// <summary>
+    /// The sentence the service writes in place of a text that repeats a typed secret (#9693). The page shows the same
+    /// one, so these are read from the service and not spelled here.
+    /// </summary>
+    private static readonly string WithheldMessage =
+        PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.WithheldText("The message", null);
 
-        Assert.Equal(expected, redacted.GetString());
+    private static readonly string WithheldChange =
+        PerformanceMonitor.Darling.Service.Mcp.DarlingMcpServerAdminTools.WithheldText("The change", null);
+
+    [Theory]
+    [InlineData("a bad password: hunter2 was refused", "hunter2", true)]
+    [InlineData("hunter2hunter2", "hunter2", true)]
+    [InlineData("a.b*c( is not a pattern: a.b*c(", "a.b*c(", true)]
+    [InlineData("the password without its end spaces, hunter2, is in here", "  hunter2 ", true)]
+    [InlineData("nothing to hide", "", false)]
+    [InlineData("nothing to hide", "hunter2", false)]
+    [InlineData("a pattern would match axbxc in here", "a.b.c", false)]
+    public void ASentenceThatRepeatsTheTypedPassword_IsWithheldWhole_AndAnyOtherIsShownAsItIs_Pure(string text, string password, bool withheld)
+    {
+        var shown = Pure("withheldIfSecretRepeated", text, "The message", password);
+
+        Assert.Equal(withheld ? WithheldMessage : text, shown.GetString());
     }
 
     // ------------------------------------------------------------------ the page: Edit column, notes, opening and closing the form
@@ -1266,19 +1280,19 @@ public sealed class AdminServerEditBehaviourTests
     }
 
     [Theory]
-    [InlineData("invalid", "The host 'charlie two' is not valid: [redacted] is not allowed here.")]
+    [InlineData("invalid", null)]
     [InlineData("limited", "Another server change is in progress. Try again in a moment.")]
     [InlineData("broken", "admin server edit failed (InvalidOperationException)")]
     [InlineData("collides", "Another server already uses the address alpha.")]
     [InlineData("network", "Could not reach the Darling service (connection refused). Check that the service is running and that you can open this address, then reload.")]
     [InlineData("conflict", "This server was changed since you opened it. Nothing was saved.")]
-    public void AnAnswerThatKeepsTheForm_ShowsItsSentenceInTheBanner_ClearsThePassword_AndEnablesSaveAgain(string kind, string sentence)
+    public void AnAnswerThatKeepsTheForm_ShowsItsSentenceInTheBanner_ClearsThePassword_AndEnablesSaveAgain(string kind, string? sentence)
     {
         var page = Run("save:" + kind);
         var after = page.GetProperty("after");
 
-        // The sentence has the typed password replaced by "[redacted]" when the service echoed it back.
-        Assert.Equal(new[] { sentence }, Lines(after, "banner"));
+        // The "invalid" answer echoes the typed password back, so the banner shows the withheld sentence in its place (#9693).
+        Assert.Equal(new[] { sentence ?? WithheldMessage }, Lines(after, "banner"));
         Assert.Equal(1, after.GetProperty("forms").GetInt32());
         Assert.Single(Patches(after));
         Assert.False(after.GetProperty("saveDisabled").GetBoolean());
@@ -1581,12 +1595,14 @@ public sealed class AdminServerEditBehaviourTests
         var view = page.GetProperty("view");
         if (path == "echo")
         {
-            Assert.Equal(new[] { "The host 'charlie two' is not valid: [redacted] is not allowed here." }, Lines(view, "banner"));
+            Assert.Equal(new[] { WithheldMessage }, Lines(view, "banner"));
         }
 
         if (path == "conflict")
         {
-            Assert.Contains("Display Name: was Charlie, now [redacted]", Strings(view.GetProperty("conflict").GetProperty("lines")));
+            var lines = Strings(view.GetProperty("conflict").GetProperty("lines"));
+            Assert.Contains(WithheldChange, lines);
+            Assert.DoesNotContain(lines, l => l.StartsWith("Display Name:", StringComparison.Ordinal));
         }
     }
 

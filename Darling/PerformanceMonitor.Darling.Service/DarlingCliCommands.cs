@@ -708,6 +708,7 @@ public static partial class DarlingCliCommands
         || IsCollapseLegacySlicesVerb(arg)
         || IsRecompressPlanDimVerb(arg)
         || IsAddServerVerb(arg)
+        || IsEditServerVerb(arg)
         || IsAddAlertSourceVerb(arg)
         || IsRotateAlertSourceVerb(arg)
         || IsRemoveAlertSourceVerb(arg)
@@ -815,6 +816,7 @@ public static partial class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups [--free-space <size>]  Materialize the retention rollups back over existing history, after a disk preflight. Runs on Linux against a bring-your-own store; only a managed store needs Windows. When the store is on another host, check the free space of its data volume there and pass it as --free-space, for example 41G." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --collapse-legacy-slices  Repair Query Store rows collected before the split-slice fix, then re-materialize the rollups they fed. Same platform rule as --backfill-rollups." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --recompress-plan-dim [--free-space <size>]  Convert the plan dimension's pre-V54 text rows to gzip in batches while the service runs, then VACUUM FULL to return the space to the volume (--no-vacuum-full to skip; --vacuum-full to compact an already-converted store; --free-space gives the free space you checked on the store host when the store is on another host)." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --edit-server <server name> --set <field>=<value> [--set ...] [--config <path>]   Change a registered server's settings in the store (connection, TLS, authentication, name, cost, enabled). A password is never an argument: the verb asks for it when the change needs it. Run it with no arguments for the fields." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape) or one server from flags (--host, --name, --auth, --username, --engine, --database; a SQL login is asked for its password, hidden); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --set-login-password --username <login> [--dry-run] [--config <path>]   Save one password, read from stdin, for every server that uses the login, disabled servers included (after a store move or a password key reset). --dry-run lists what would change." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --add-alert-source <name> [--config <path>]      Make a source for external alerts: a login that can send alerts and do nothing else. Prints its connection string ONCE; Darling keeps no copy. <name> is 2-31 characters: a letter, then lower-case letters, digits or underscores." + Environment.NewLine +
