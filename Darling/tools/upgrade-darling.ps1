@@ -4098,6 +4098,10 @@ function Write-DarlingUpgradeRunFile([string]$installRoot, $run, [string]$servic
             try { [System.IO.File]::Replace($temp, $path, [NullString]::Value) }
             catch {
                 $replaceReason = $_.Exception.Message
+                # #9850: when Replace fails with ERROR_UNABLE_TO_MOVE_REPLACEMENT (1176) and no backup name was given, Windows has already
+                # removed the file it was to replace. The in-place write below opens it with FileMode.Open and would fail, and the finally
+                # would delete the temp file, leaving no record at all. The temp file is the record: move it into place, which keeps its grant.
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { [System.IO.File]::Move($temp, $path); return [pscustomobject]@{ Ok = $true; Reason = ''; Warning = $warning } }
                 try {
                     $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
                     $stream = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
@@ -4119,13 +4123,17 @@ function Write-DarlingUpgradeRunFile([string]$installRoot, $run, [string]$servic
 }
 
 # #9850: the warning for a run record write that failed. It names the record that is missing. Only the final record carries the run's
-# result, so only its failure leaves the store with nothing to show for how the run ended: the in_progress record is written again
-# after the copy and the final one when the run ends. $record is 'in_progress' or 'final'.
+# result, so only its failure leaves the store with nothing to show for how the run ended. $record is 'in_progress' (the start write: only
+# the end write follows it, because the run may stop before the copy), 'after_copy' (the write after the copy: only the end write follows)
+# or 'final'.
 function Get-DarlingUpgradeRunWriteWarning([string]$record, [string]$reason) {
     if ($record -eq 'final') {
         return "The final upgrade run record could not be written ($reason), so the store will not show this run's result."
     }
-    return "The in_progress upgrade run record could not be written ($reason). The upgrade goes on, and the record is written again after the copy and when the run ends."
+    if ($record -eq 'after_copy') {
+        return "The in_progress upgrade run record could not be rewritten after the copy ($reason). The upgrade goes on, and the final record is written when the run ends."
+    }
+    return "The in_progress upgrade run record could not be written ($reason). The upgrade goes on, and the record is written again when the run ends."
 }
 
 # The run record on disk, as an ordered hashtable, or $null when there is no file or it is not a run record.
@@ -5018,7 +5026,7 @@ Good "New build in place."
 $installedBuild = Get-DarlingBuildVersion (Join-Path $InstallRoot $serviceExeName)
 if ($installedBuild) { $script:UpgradeRun['target_build'] = $installedBuild }
 $upgradeRunWrite = Write-DarlingUpgradeRunFile $InstallRoot $script:UpgradeRun $script:UpgradeRunAccount
-if (-not $upgradeRunWrite.Ok) { Warn (Get-DarlingUpgradeRunWriteWarning 'in_progress' $upgradeRunWrite.Reason) }
+if (-not $upgradeRunWrite.Ok) { Warn (Get-DarlingUpgradeRunWriteWarning 'after_copy' $upgradeRunWrite.Reason) }
 
 if ($configHashBefore) {
     $configHashAfter = if (Test-Path -LiteralPath $configPath) { (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash } else { $null }
