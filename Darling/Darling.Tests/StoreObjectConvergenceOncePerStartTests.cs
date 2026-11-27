@@ -223,6 +223,39 @@ public sealed class StoreObjectConvergenceOncePerStartTests
         Assert.Equal(allNames, selections[1]);
     }
 
+    /// <summary>
+    /// On a plain PostgreSQL store the only step whose start pass skips its hourly work, "rollup chunk visibility", is filtered out, so when every
+    /// step completed at start the first hourly pass selects none and writes the 0-step Information line (#9858). That line is the proof the hourly
+    /// path is wired on this store (#3812, #3817). The store is a data source on a closed port: a pass that opened a connection would fail on it
+    /// and log the "could not run" warning instead.
+    /// </summary>
+    [Fact]
+    public async Task OnAPlainStore_WhenEveryStepRanAtStartup_TheFirstHourlyPassLogsOneInformationLine_AndOpensNoConnection()
+    {
+        var logger = new WorkerLogger();
+        await using var closedStore = new NpgsqlDataSourceBuilder("Host=127.0.0.1;Port=1;Username=x;Database=x;Timeout=1;Pooling=false").Build();
+        var worker = new DarlingWorker(
+            logger,
+            NullLoggerFactory.Instance,
+            new McpRuntimeState(),
+            new WebRuntimeState(),
+            new MonitoredServerRegistryState(),
+            new CollectorRuntimeState(),
+            new WebTlsCertificateState(),
+            new BaselineCache(),
+            new ReadLatencyAccumulator())
+        {
+            StoreForTests = closedStore,
+        };
+
+        await worker.RunFirstHourlyConvergenceForTestsAsync(
+            DarlingWorker.StoreObjectConvergence.Select(s => s.Name), timescaleAvailable: false, TestContext.Current.CancellationToken);
+
+        var convergenceLines = logger.Captured.Lines.Where(l => l.Contains("Store object convergence", StringComparison.Ordinal)).ToList();
+        Assert.Single(convergenceLines, l => l.StartsWith("Information: Store object convergence:", StringComparison.Ordinal));
+        Assert.DoesNotContain(convergenceLines, l => l.Contains("could not run", StringComparison.Ordinal));
+    }
+
     private sealed class WorkerLogger : ILogger<DarlingWorker>
     {
         public CapturingTestLogger Captured { get; } = new();
