@@ -58,12 +58,12 @@ public sealed class ComposeSetupScriptTests : IDisposable
 
         Assert.Equal(0, run.ExitCode);
         var password = Read("secrets/store_password.txt");
-        Assert.Matches("^[A-Za-z0-9]{32,}$", password);
+        Assert.Matches("^[A-Za-z0-9]{32}$", password);
         Assert.Equal(
             $"Host=store;Port=5432;Username=darling;Password={password};Database=darling",
             Read("secrets/store_connection"));
-        Assert.Matches("^[A-Za-z0-9]{40,}$", Read("secrets/web_token.txt"));
-        Assert.Matches("^[A-Za-z0-9]{40,}$", Read("secrets/mcp_token.txt"));
+        Assert.Matches("^[A-Za-z0-9]{48}$", Read("secrets/web_token.txt"));
+        Assert.Matches("^[A-Za-z0-9]{48}$", Read("secrets/mcp_token.txt"));
         Assert.NotEqual(Read("secrets/web_token.txt"), Read("secrets/mcp_token.txt"));
         Assert.Equal(SqlPassword, Read("secrets/sql_password.txt"));
         Assert.Equal(
@@ -93,6 +93,33 @@ public sealed class ComposeSetupScriptTests : IDisposable
             Assert.Equal(
                 UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead,
                 File.GetUnixFileMode(Path.Combine(_folder, "darling.json")));
+        }
+    }
+
+    /// <summary>
+    /// #9826: <c>tr ... &lt; /dev/urandom | head -c N</c> printed <c>tr: write error: Broken pipe</c> on a clean first
+    /// run, which reads as a failure though the exit code is 0. A clean run says nothing on standard error, and every
+    /// random value has its exact length, so a short read cannot give a short value.
+    /// </summary>
+    [Fact]
+    public void FirstRun_WritesNothingToStandardError_AndEveryRandomValueHasItsExactLength()
+    {
+        var sh = RequireSh();
+
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var folder = Path.Combine(_folder, "attempt" + attempt);
+            Directory.CreateDirectory(folder);
+            File.Copy(Path.Combine(_folder, "setup.sh"), Path.Combine(folder, "setup.sh"));
+            File.Copy(Path.Combine(_folder, "darling.sample.json"), Path.Combine(folder, "darling.sample.json"));
+
+            var run = Run(sh, folder, new[] { "--no-prompt" }, SqlPassword);
+
+            Assert.Equal(0, run.ExitCode);
+            Assert.Equal("", run.Error);
+            Assert.Matches("^[A-Za-z0-9]{32}$", File.ReadAllText(Path.Combine(folder, "secrets", "store_password.txt")).TrimEnd('\r', '\n'));
+            Assert.Matches("^[A-Za-z0-9]{48}$", File.ReadAllText(Path.Combine(folder, "secrets", "web_token.txt")).TrimEnd('\r', '\n'));
+            Assert.Matches("^[A-Za-z0-9]{48}$", File.ReadAllText(Path.Combine(folder, "secrets", "mcp_token.txt")).TrimEnd('\r', '\n'));
         }
     }
 
@@ -229,7 +256,7 @@ public sealed class ComposeSetupScriptTests : IDisposable
         return "";
     }
 
-    private static (int ExitCode, string Output) Run(
+    private static (int ExitCode, string Output, string Error) Run(
         string sh, string workingDirectory, string[] args, string? sqlPassword, string scriptPath = "setup.sh")
     {
         var info = new ProcessStartInfo(sh)
@@ -264,7 +291,7 @@ public sealed class ComposeSetupScriptTests : IDisposable
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
         Assert.True(process.WaitForExit(60000), "setup.sh did not finish within a minute.");
-        return (process.ExitCode, stdout.Result + stderr.Result);
+        return (process.ExitCode, stdout.Result + stderr.Result, stderr.Result);
     }
 
     private string Read(string relative) =>
