@@ -288,7 +288,8 @@ public sealed class DarlingUpgradeRunRecordTests
             {
                 output = Run(folder,
                     "$run = New-DarlingUpgradeRun 'a' 'new-target' ([datetime]::UtcNow); $w = Write-DarlingUpgradeRunFile $root $run; 'ok=' + $w.Ok; "
-                    + "'start=[' + (Get-DarlingUpgradeRunWriteWarning 'in_progress' $w.Reason) + ']'; 'end=[' + (Get-DarlingUpgradeRunWriteWarning 'final' $w.Reason) + ']'",
+                    + "'start=[' + (Get-DarlingUpgradeRunWriteWarning 'in_progress' $w.Reason) + ']'; 'copy=[' + (Get-DarlingUpgradeRunWriteWarning 'after_copy' $w.Reason) + ']'; "
+                    + "'end=[' + (Get-DarlingUpgradeRunWriteWarning 'final' $w.Reason) + ']'",
                     "Get-DarlingUpgradeRunWriteWarning");
             }
 
@@ -296,11 +297,20 @@ public sealed class DarlingUpgradeRunRecordTests
             var lines = output.Split('\n').Select(l => l.Trim()).ToArray();
             var start = lines.Single(l => l.StartsWith("start=[", StringComparison.Ordinal));
             var end = lines.Single(l => l.StartsWith("end=[", StringComparison.Ordinal));
+            var afterCopy = lines.Single(l => l.StartsWith("copy=[", StringComparison.Ordinal));
             Assert.Contains("in_progress", start, StringComparison.Ordinal);
             Assert.DoesNotContain("will not show", start, StringComparison.Ordinal);
+            // The start write may precede a run that stops before the copy, so it must not promise a write after the copy.
+            Assert.DoesNotContain("after the copy", start, StringComparison.Ordinal);
+            Assert.Contains("when the run ends", start, StringComparison.Ordinal);
+            // The after-copy write comes after the copy, so only the end write follows it.
+            Assert.Contains("rewritten after the copy", afterCopy, StringComparison.Ordinal);
+            Assert.DoesNotContain("will not show", afterCopy, StringComparison.Ordinal);
+            Assert.DoesNotContain("written again after", afterCopy, StringComparison.Ordinal);
             Assert.Contains("final", end, StringComparison.Ordinal);
             Assert.Contains("will not show", end, StringComparison.Ordinal);
             Assert.Equal("old-target", ReadFile(folder).GetProperty("target_build").GetString());
+            Assert.Empty(Directory.GetFiles(folder, "*.tmp"));
         }
         finally { Cleanup(folder); }
     }
