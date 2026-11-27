@@ -189,11 +189,18 @@ ORDER BY s.key_kind, s.key, COALESCE(s.database_name, ''), COALESCE(s.applicatio
 
     /// <summary>
     /// The most map rows one statement of a rebuild's write carries (#9705). A rebuild writes a server's whole map in one
-    /// transaction, as batches of this many rows, so no statement and no parameter array grows with the server: one statement
-    /// carrying 8.4 million rows as arrays ended a lab store's backend at its 4 GB memory limit. The value is threaded into
-    /// the write as a parameter (#3684).
+    /// transaction, as batches of this many rows, so no statement and no parameter array grows with the server. Measured
+    /// cold on a lab store with a 4 GB memory limit, writing a map of 8.36 million rows, one run a size: the inserts take
+    /// 160 s at 1,000 rows a statement and 153 to 154 s at 10,000, 50,000, 200,000 and 1,000,000, and write 3,790 MiB of
+    /// WAL at every size (475 bytes a row, the table and its three indexes), so neither gains past 10,000. What grows with
+    /// the batch is memory and the time of one statement. The store's backend holds 5 MiB at 1,000 rows, 10 MiB at 10,000,
+    /// 35 MiB at 50,000, 127 MiB at 200,000 and 581 MiB at 1,000,000, the slowest statement takes 0.3 s at 10,000 and 19 s
+    /// at 1,000,000 against a command timeout of 60 s, and the writing process peaks 380 MB lower at 10,000 than at 50,000.
+    /// All 8.36 million rows in one statement take 167 s, 2.8 times that timeout, with 3.07 GiB in the backend, and sent
+    /// inside a rebuild, after its read, that statement ended the backend at the store's memory limit. The value is threaded
+    /// into the write as a parameter (#3684).
     /// </summary>
-    public const int MapWriteBatchRows = 50000;
+    public const int MapWriteBatchRows = 10000;
 
     /// <summary>Inserts the resolved rows. $1 server_id, $2..$8 the seven columns as parallel arrays.</summary>
     internal const string InsertMapSql = """
