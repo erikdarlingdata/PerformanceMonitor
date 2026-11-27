@@ -189,6 +189,7 @@ query_store_top_hourly,derived,derived,per-hour top Query Store statements
 query_store_watermarks,internal,no,Query Store read progress
 query_store_watermarks_coverage,internal,no,Query Store read coverage
 query_tag_sightings,derived,derived,tag map built from collected rows
+query_tag_sightings_slim,collected,yes,short form of an aged-out tag sighting kept until its usage ages out (nothing rebuilds it)
 query_text_dim,collected,yes,query text shared by the Query Store rows
 query_text_dim_seen,internal,no,liveness stamp of each stored query text
 raw_chunk_interval_reconcile_runs,internal,no,chunk interval migration history
