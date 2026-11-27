@@ -523,13 +523,6 @@ Both are off in the example. `--enable-web` and `--enable-mcp` are Windows only,
 
 The `network` block of each surface (`listen`, `allowFrom`, `token`) is read from the file at every start. Give the token as a `file:` reference. The settings are in [Web dashboard configuration](configuration-web.md) and [MCP configuration](configuration-mcp.md), and the exposure rules are in [Opt-in Network Endpoints](network-endpoints.md). Run `provision-roles.sql` before you turn either surface on (see [The least-privilege roles](#the-least-privilege-roles-when-the-web-dashboard-or-mcp-is-on)).
 
-**With your own PostgreSQL outside a container, the web dashboard and MCP listen on loopback only, whatever the `network` block says.** The service logs a warning that names the `network` settings it ignores, and it binds `127.0.0.1` and `::1` only. [#9894](https://github.com/erikdarlingdata/PerformanceMonitor/issues/9894) tracks changing that. From another machine, use an SSH tunnel. The web dashboard listens on port `5153` and MCP on port `5152` unless you set another `port`:
-
-```bash
-ssh -L 8080:127.0.0.1:5153 <user>@<host>
-```
-
-Then open `http://127.0.0.1:8080/` on your own machine. For MCP, forward `-L 8081:127.0.0.1:5152` the same way. For access that several people share, put a reverse proxy on the Linux host in front of the loopback port, and read the notes on a proxy on the same host in [Web dashboard configuration](configuration-web.md) and the reverse proxy notes in [Opt-in Network Endpoints](network-endpoints.md).
 
 ## Upgrade by hand
 
