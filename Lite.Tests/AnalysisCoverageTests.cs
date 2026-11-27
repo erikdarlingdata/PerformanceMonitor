@@ -255,6 +255,24 @@ public sealed class AnalysisCoverageTests : IClassFixture<SharedDuckDbFixture>, 
         Assert.DoesNotContain(WindowCoverage.FactKey, result, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #9888: a full window on a server with no plan regression candidate raises no PLAN_REGRESSION fact, so the cost read's scan time rides
+    /// its own field. The caveat stays null: a healthy reply is not a degraded collection.
+    /// </summary>
+    [Fact]
+    public async Task GetAnalysisFacts_CostReadFindsNoCandidate_NamesItsScanInItsOwnField_AndKeepsTheCaveatNull()
+    {
+        await PlantSeriesAsync(Wait, totalDeltaMs: 900_000, coveredMinutes: 240);
+
+        var result = await McpAnalysisTools.GetAnalysisFacts(CreateService(), _serverManager);
+
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+        Assert.Matches(@"^The plan regression cost read found no candidate and its scan of the archive window took \d+ ms", root.GetProperty("plan_regression_cost_note").GetString());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("caveat").ValueKind);
+        Assert.False(root.TryGetProperty("collection_caveats", out _));
+    }
+
     /* ── compare_analysis ── */
 
     /// <summary>
